@@ -1,0 +1,648 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+{% block title %}{{ r.symbol }} research · Stock Bot{% endblock %}
+
+{% macro lean(v) %}
+  <div class="lean"><span class="zero"></span>
+    {% if v >= 0 %}<i class="up" style="width:{{ (v * 50)|round(1) }}%"></i>
+    {% else %}<i class="dn" style="width:{{ (-v * 50)|round(1) }}%"></i>{% endif %}
+  </div>
+{% endmacro %}
+
+{% block content %}
+
+{% set f = r.fundamentals %}
+
+<div class="card" style="margin-bottom:var(--s3)">
+  <div class="instrument">
+    <div class="who">
+      <span class="sym">{{ r.symbol }}</span>
+      <span class="name">{{ a.bars.name }}</span>
+    </div>
+    <div class="price">
+      <span class="now">{{ r.price|price }}</span>
+      <span class="chg soft">{{ a.bars.currency }}</span>
+    </div>
+  </div>
+  <div class="factline">
+    {% if f and f.sector %}<span><b>{{ f.sector }}</b></span>
+      <span>{{ f.industry }}</span>{% endif %}
+    {% if f and f.employees %}<span>{{ "{:,}".format(f.employees) }} employees</span>{% endif %}
+    {% if f and f.country %}<span>{{ f.country }}</span>{% endif %}
+    <span>researched in {{ "%.1f"|format(r.elapsed) }}s</span>
+  </div>
+  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap">
+    <a class="btn quiet sm" data-working
+       href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval) }}">
+      Back to the trade view</a>
+    {% if watched %}
+      <form method="post" action="{{ url_for('watch', action='remove') }}">
+        <input type="hidden" name="symbol" value="{{ r.symbol }}">
+        <input type="hidden" name="back" value="{{ request.full_path }}">
+        <button class="btn quiet sm" type="submit">Stop watching</button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('watch', action='add') }}">
+        <input type="hidden" name="symbol" value="{{ r.symbol }}">
+        <input type="hidden" name="interval" value="{{ a.bars.interval }}">
+        <input type="hidden" name="back" value="{{ request.full_path }}">
+        <button class="btn quiet sm" type="submit">Add to watchlist</button>
+      </form>
+    {% endif %}
+    <form method="post" action="{{ url_for('save_thesis') }}">
+      <input type="hidden" name="symbol" value="{{ r.symbol }}">
+      <input type="hidden" name="interval" value="{{ a.bars.interval }}">
+      <button class="btn sm" type="submit">Save this thesis</button>
+    </form>
+  </div>
+</div>
+
+{% if r.unavailable %}
+  <div class="card" style="border-color:var(--hold)">
+    <span class="eyebrow">Not available for this instrument</span>
+    <ul class="list warn">{% for u in r.unavailable %}<li>{{ u }}</li>{% endfor %}</ul>
+  </div>
+{% endif %}
+
+{% if r.reasoning %}
+<section style="margin-top:0">
+  <div class="sechead">
+    <h2>What the evidence supports</h2>
+    <span class="tail">{{ "reasoned by " + r.reasoning.model if r.reasoning.available else "reasoning step" }}</span>
+  </div>
+  <div class="card">
+    {% if r.reasoning.available %}
+      <p class="prose" style="font-size:var(--t-base);color:var(--ink)">
+        {{ r.reasoning.summary }}</p>
+      {% if r.reasoning.key_question %}
+        <p class="prose" style="margin-top:var(--s3)">
+          <b>The question that decides it.</b> {{ r.reasoning.key_question }}</p>
+      {% endif %}
+      <div class="cols b" style="margin-top:var(--s3)">
+        <div>
+          <span class="eyebrow">Strongest case for</span>
+          <p class="prose">{{ r.reasoning.strongest_bull }}</p>
+        </div>
+        <div>
+          <span class="eyebrow">Strongest case against</span>
+          <p class="prose">{{ r.reasoning.strongest_bear }}</p>
+        </div>
+      </div>
+      {% if r.reasoning.what_would_change_it %}
+        <div style="margin-top:var(--s3)">
+          <span class="eyebrow">What would change this</span>
+          <ul class="list">{% for x in r.reasoning.what_would_change_it %}
+            <li>{{ x }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+      {% if r.reasoning.blind_spots %}
+        <div style="margin-top:var(--s3)">
+          <span class="eyebrow">What this cannot see</span>
+          <ul class="list warn">{% for x in r.reasoning.blind_spots %}
+            <li>{{ x }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+      <p class="prose" style="margin-top:var(--s3)">
+        Confidence: <b>{{ r.reasoning.confidence or "not stated" }}</b>. This
+        reasoning was given only the measured evidence on this page, not any
+        outside knowledge about the company.
+      </p>
+    {% else %}
+      <p class="prose">{{ r.reasoning.reason_unavailable }}</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if r.thesis %}
+{% set t = r.thesis %}
+<section>
+  <div class="sechead">
+    <h2>The case, both ways</h2>
+    <span class="tail">{{ t.evidence_count }} pieces of evidence</span>
+  </div>
+
+  <div class="card" style="margin-bottom:var(--s3)">
+    <div style="display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap">
+      <div style="min-width:150px">{{ lean(t.balance) }}</div>
+      <span class="fig" style="font-size:var(--t-md)">{{ t.balance|signed }}</span>
+      <span class="prose" style="flex:1 1 300px;margin:0">{{ t.verdict }}</span>
+    </div>
+  </div>
+
+  <div class="cols b">
+    <div class="card">
+      <span class="eyebrow" style="color:var(--gain)">The case for</span>
+      <p class="prose" style="margin-bottom:var(--s3)">{{ t.bull.summary }}</p>
+      {% for p in t.bull.points %}
+        <div style="padding:var(--s2) 0;border-top:1px solid var(--hairline)">
+          <div style="font-weight:600;font-size:var(--t-sm)">{{ p.headline }}</div>
+          <p class="prose" style="margin-top:4px">{{ p.detail }}</p>
+          {% for e in p.evidence %}
+            <div class="tiny faint" style="margin-top:6px;font-size:var(--t-xs)">
+              <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
+              {% else %}{{ e.cite() }}{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="blank">Nothing in the evidence supports owning this.</div>
+      {% endfor %}
+    </div>
+
+    <div class="card">
+      <span class="eyebrow" style="color:var(--loss)">The case against</span>
+      <p class="prose" style="margin-bottom:var(--s3)">{{ t.bear.summary }}</p>
+      {% for p in t.bear.points %}
+        <div style="padding:var(--s2) 0;border-top:1px solid var(--hairline)">
+          <div style="font-weight:600;font-size:var(--t-sm)">{{ p.headline }}</div>
+          <p class="prose" style="margin-top:4px">{{ p.detail }}</p>
+          {% for e in p.evidence %}
+            <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
+              <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
+              {% else %}{{ e.cite() }}{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="blank">Nothing in the evidence argues against it.</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="cols b" style="margin-top:var(--s3)">
+    <div class="card">
+      <span class="eyebrow">What would prove this wrong</span>
+      <ul class="list">{% for x in t.falsifiers %}<li>{{ x }}</li>{% endfor %}</ul>
+    </div>
+    <div class="card">
+      <span class="eyebrow">What could not be measured</span>
+      {% if t.unknowns %}
+        <ul class="list warn">{% for x in t.unknowns %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% else %}
+        <p class="prose">Every input was available for this instrument.</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if f and r.quality %}
+<section>
+  <div class="sechead">
+    <h2>The business</h2>
+    <span class="tail">{{ r.quality.known }} of {{ r.quality.total }} checks could be judged</span>
+  </div>
+  <div class="card">
+    <p class="prose" style="margin-bottom:var(--s3);color:var(--ink)">
+      {{ r.quality.verdict }}</p>
+    <div class="cols b">
+      <div>
+        <span class="eyebrow" style="color:var(--gain)">Passed</span>
+        <ul class="list ok">{% for p in r.quality.passed %}
+          <li>{{ p.label }} <span class="faint">— {{ p.why }}</span></li>{% endfor %}</ul>
+        {% if not r.quality.passed %}<p class="prose">None.</p>{% endif %}
+      </div>
+      <div>
+        <span class="eyebrow" style="color:var(--loss)">Failed</span>
+        <ul class="list">{% for p in r.quality.failed %}
+          <li>{{ p.label }} <span class="faint">— needs {{ p.why }}</span></li>{% endfor %}</ul>
+        {% if not r.quality.failed %}<p class="prose">None.</p>{% endif %}
+        {% if r.quality.unknown %}
+          <span class="eyebrow" style="margin-top:var(--s3);display:block">Not reported</span>
+          <p class="prose">{{ r.quality.unknown|map(attribute='label')|join(', ') }}</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="card pad0" style="margin-top:var(--s3)">
+    <div class="cardhead"><span class="eyebrow">Key figures</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Measure</th><th class="r">Value</th><th>Source</th></tr></thead>
+        <tbody>
+        {% for key in ['market_cap','pe','forward_pe','pb','ps','ev_ebitda',
+                       'gross_margin','operating_margin','net_margin','roe','roa',
+                       'revenue_growth','earnings_growth','revenue','free_cashflow',
+                       'fcf_yield','total_cash','total_debt','debt_to_equity',
+                       'current_ratio','beta','dividend_yield','short_pct_float'] %}
+          {% set m = f.metrics.get(key) %}
+          {% if m and m.known %}
+            <tr>
+              <td>{{ m.label }}</td>
+              <td class="r fig">{{ m.display() }}</td>
+              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+        {% for key in ['sec_revenue','sec_net_income','sec_assets','sec_liabilities',
+                       'sec_equity','sec_eps'] %}
+          {% set m = f.metrics.get(key) %}
+          {% if m and m.known %}
+            <tr>
+              <td>{{ m.label }}</td>
+              <td class="r fig">{{ m.display() }}</td>
+              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% if f.summary %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">What it does</span>
+      <p class="prose">{{ f.summary[:900] }}{% if f.summary|length > 900 %}…{% endif %}</p>
+    </div>
+  {% endif %}
+  {% if f.notes %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">Worth knowing about these figures</span>
+      <ul class="list warn">{% for n in f.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    </div>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if r.sec_history and r.sec_history.available %}
+{% set h = r.sec_history %}
+<section>
+  <div class="sechead">
+    <h2>As filed with the SEC</h2>
+    <span class="tail"><a href="{{ h.source_url }}" target="_blank" rel="noopener">{{ h.entity }}</a></span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Fiscal year</th>
+          {% for y in h.years %}<th class="r">{{ y }}</th>{% endfor %}
+          <th class="r">5y growth</th>
+        </tr></thead>
+        <tbody>
+        {% for key, label in [('revenue','Revenue'),('gross_profit','Gross profit'),
+                              ('operating_income','Operating income'),
+                              ('net_income','Net income'),
+                              ('operating_cashflow','Operating cash flow'),
+                              ('equity','Shareholder equity'),
+                              ('eps_diluted','Diluted EPS')] %}
+          {% if h.table.get(key) %}
+            {% set byyear = {} %}
+            {% for row in h.table[key] %}{% set _ = byyear.update({row.fy: row}) %}{% endfor %}
+            <tr>
+              <td>{{ label }}</td>
+              {% for y in h.years %}
+                <td class="r fig">
+                  {% if byyear.get(y) %}
+                    {% set v = byyear[y].value %}
+                    {% if key == 'eps_diluted' %}{{ "%.2f"|format(v) }}
+                    {% elif v|abs >= 1000000000 %}{{ "%.1fB"|format(v/1000000000) }}
+                    {% elif v|abs >= 1000000 %}{{ "%.0fM"|format(v/1000000) }}
+                    {% else %}{{ "{:,.0f}".format(v) }}{% endif %}
+                  {% else %}—{% endif %}
+                </td>
+              {% endfor %}
+              <td class="r fig {{ 'gain' if (h.cagr.get(key) or 0) > 0 else 'loss' if h.cagr.get(key) else '' }}">
+                {{ h.cagr.get(key)|pct(1) if h.cagr.get(key) is not none else '—' }}
+              </td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+        {% if h.derived %}
+          <tr><td colspan="{{ h.years|length + 2 }}"
+                  style="height:1px;padding:0;background:var(--rule)"></td></tr>
+          <tr>
+            <td>Net margin</td>
+            {% for y in h.years %}
+              <td class="r fig">{{ h.derived.get(y, {}).get('net_margin')|pct(1)
+                if h.derived.get(y, {}).get('net_margin') is not none else '—' }}</td>
+            {% endfor %}
+            <td></td>
+          </tr>
+          <tr>
+            <td>Free cash flow</td>
+            {% for y in h.years %}
+              {% set fcf = h.derived.get(y, {}).get('free_cashflow') %}
+              <td class="r fig">{{ "%.1fB"|format(fcf/1000000000) if fcf else '—' }}</td>
+            {% endfor %}
+            <td></td>
+          </tr>
+        {% endif %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      These are the numbers the company filed, not a data vendor's version of
+      them. Growth is compounded annually across the filed years.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% if r.valuation and r.valuation.usable %}
+{% set v = r.valuation %}
+<section>
+  <div class="sechead">
+    <h2>What it might be worth</h2>
+    <span class="tail">{{ v.agreement }} agreement between models</span>
+  </div>
+  <div class="card">
+    <div class="figs" style="margin-bottom:var(--s3)">
+      <div class="f"><div class="k">Modelled range</div>
+        <div class="v fig">{{ v.low|price }}–{{ v.high|price }}</div></div>
+      <div class="f"><div class="k">Midpoint</div>
+        <div class="v fig">{{ v.midpoint|price }}</div></div>
+      <div class="f"><div class="k">Price today</div>
+        <div class="v fig">{{ r.price|price }}</div></div>
+      <div class="f"><div class="k">Gap</div>
+        <div class="v fig {{ 'gain' if (v.upside or 0) > 0 else 'loss' }}">
+          {{ v.upside|pct }}</div></div>
+    </div>
+    {% for line in v.commentary %}
+      <p class="prose">{{ line }}</p>
+    {% endfor %}
+  </div>
+
+  {% for m in v.models %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">{{ m.method }}</span>
+      {% if m.usable %}
+        {% if m.fair_value %}
+          <p class="prose" style="color:var(--ink);font-size:var(--t-base)">
+            Fair value <span class="fig">{{ m.fair_value|price }}</span>
+            {% if m.upside is not none %}
+              <span class="{{ 'gain' if m.upside > 0 else 'loss' }}">
+                ({{ m.upside|pct }} against today)</span>
+            {% endif %}
+          </p>
+        {% endif %}
+        {% if m.assumptions %}
+          <div class="tablewrap" style="margin-top:var(--s2)">
+            <table>
+              <thead><tr><th>Assumption</th><th class="r">Value</th><th>Where from</th></tr></thead>
+              <tbody>
+              {% for a_ in m.assumptions %}
+                <tr>
+                  <td>{{ a_.label }}</td>
+                  <td class="r fig">
+                    {% if a_.key in ['growth','terminal_growth','discount','implied_growth'] %}
+                      {{ a_.value|pct(1) }}
+                    {% elif a_.value|abs >= 1000000 %}{{ "%.2fB"|format(a_.value/1000000000) }}
+                    {% else %}{{ "%.4g"|format(a_.value) }}{% endif %}
+                  </td>
+                  <td class="faint">{{ a_.source }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if m.workings and m.method.startswith('Multiples') %}
+          <div class="tablewrap" style="margin-top:var(--s2)">
+            <table>
+              <thead><tr><th>Ratio</th><th class="r">Value</th><th>Reading</th></tr></thead>
+              <tbody>
+              {% for row in m.workings %}
+                <tr>
+                  <td>{{ row.label }}</td>
+                  <td class="r fig">{{ row.value|pct(1) if row.unit == 'pct'
+                      else "%.1fx"|format(row.value) }}</td>
+                  <td class="{{ 'gain' if row.cheap else 'loss' }}">{{ row.comment }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if m.sensitivity %}
+          <div style="margin-top:var(--s3)">
+            <span class="eyebrow">If the assumptions were different</span>
+            <div class="tablewrap" style="margin-top:var(--s1)">
+              <table>
+                <thead><tr>
+                  <th>Growth \ discount</th>
+                  {% for adj in ['-2%','-1%','as set','+1%','+2%'] %}
+                    <th class="r">{{ adj }}</th>{% endfor %}
+                </tr></thead>
+                <tbody>
+                {% for row in m.sensitivity %}
+                  <tr>
+                    <td class="fig soft">{{ row.growth|pct(1) }}</td>
+                    {% for val in row['values'] %}
+                      <td class="r fig {{ 'gain' if val and val > r.price else 'loss' if val else '' }}">
+                        {{ val|price if val else '—' }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            <p class="prose" style="margin-top:var(--s2)">
+              Each cell is the same model with one assumption changed. The spread
+              across this grid is the honest output; the single number above is not.
+            </p>
+          </div>
+        {% endif %}
+        {% for n in m.notes %}<p class="prose" style="margin-top:var(--s2)">{{ n }}</p>{% endfor %}
+      {% else %}
+        <p class="prose">{{ m.reason }}</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+</section>
+{% elif r.fundamentals %}
+<section>
+  <div class="sechead"><h2>What it might be worth</h2></div>
+  <div class="card">
+    <p class="prose">{{ r.valuation.reason if r.valuation else
+      "No valuation model could run on the available data." }}</p>
+  </div>
+</section>
+{% endif %}
+
+{% if r.risk %}
+{% set k = r.risk %}
+<section>
+  <div class="sechead">
+    <h2>How much this can hurt</h2>
+    <span class="tail">{{ k.period }}{{ ", indicative only" if not k.reliable }}</span>
+  </div>
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Volatility</div>
+        <div class="v fig">{{ k.volatility|pct }}</div>
+        <div class="n">annualised</div></div>
+      <div class="f"><div class="k">Worst fall</div>
+        <div class="v fig loss">{{ k.max_drawdown|pct }}</div>
+        <div class="n">peak to trough</div></div>
+      <div class="f"><div class="k">Bad day</div>
+        <div class="v fig loss">{{ k.var_95|pct(1) }}</div>
+        <div class="n">worst 1 day in 20</div></div>
+      <div class="f"><div class="k">Worse day</div>
+        <div class="v fig loss">{{ k.var_99|pct(1) }}</div>
+        <div class="n">worst 1 in 100</div></div>
+      <div class="f"><div class="k">Beta</div>
+        <div class="v fig">{{ "%.2f"|format(k.beta) if k.beta is not none else '—' }}</div>
+        <div class="n">versus the market</div></div>
+      <div class="f"><div class="k">Sharpe</div>
+        <div class="v fig">{{ "%.2f"|format(k.sharpe) if k.sharpe is not none else '—' }}</div>
+        <div class="n">return per unit of risk</div></div>
+    </div>
+    {% if k.notes %}
+      <ul class="list warn" style="margin-top:var(--s3)">
+        {% for n in k.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if r.options %}
+{% set o = r.options %}
+<section>
+  <div class="sechead">
+    <h2>What options are pricing</h2>
+    <span class="tail">expiry {{ o.expiry_date }}, {{ o.days }} days out</span>
+  </div>
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Implied volatility</div>
+        <div class="v fig">{{ o.atm_iv|pct }}</div>
+        <div class="n">at the money</div></div>
+      {% if o.expected_move %}
+        <div class="f"><div class="k">Expected move</div>
+          <div class="v fig">{{ o.expected_move.percent|pct(1) }}</div>
+          <div class="n">{{ o.expected_move.lower|price }}–{{ o.expected_move.upper|price }}</div></div>
+      {% endif %}
+      <div class="f"><div class="k">Put/call</div>
+        <div class="v fig">{{ "%.2f"|format(o.put_call_oi) if o.put_call_oi else '—' }}</div>
+        <div class="n">open interest</div></div>
+      <div class="f"><div class="k">Skew</div>
+        <div class="v fig">{{ "%+.3f"|format(o.skew) if o.skew is not none else '—' }}</div>
+        <div class="n">put minus call IV</div></div>
+      <div class="f"><div class="k">Tradable now</div>
+        <div class="v fig">{{ o.tradable_count }}</div>
+        <div class="n">of {{ o.total_count }} contracts</div></div>
+    </div>
+    {% if o.reading %}
+      <ul class="list" style="margin-top:var(--s3)">
+        {% for line in o.reading %}<li>{{ line }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if o.notes %}
+      <ul class="list warn" style="margin-top:var(--s2)">
+        {% for n in o.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+
+  {% if r.option_ideas %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">Structures that fit this view</span>
+      {% for idea in r.option_ideas %}
+        <div style="padding:var(--s2) 0;border-top:1px solid var(--hairline)">
+          <div style="font-weight:600;font-size:var(--t-sm)">{{ idea.name }}</div>
+          <p class="prose" style="margin-top:4px">{{ idea.why }}</p>
+          {% if idea.cost %}
+            <p class="prose"><span class="fig">{{ "%.2f"|format(idea.cost|abs) }}</span>
+              {{ "received" if idea.cost < 0 else "to open" }}
+              {% if idea.delta %}· delta {{ "%.2f"|format(idea.delta) }}{% endif %}
+              {% if idea.theta %}· {{ "%.2f"|format(idea.theta|abs) }} a day in decay{% endif %}
+            </p>
+          {% endif %}
+          {% if idea.risk %}<p class="prose"><b>Risk.</b> {{ idea.risk }}</p>{% endif %}
+        </div>
+      {% endfor %}
+      <p class="prose" style="margin-top:var(--s2)">
+        These are structures, not recommendations. Options lose money in ways
+        shares do not, including being right about direction and still losing to
+        time decay.
+      </p>
+    </div>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if r.filings %}
+<section>
+  <div class="sechead">
+    <h2>Recent filings</h2>
+    <span class="tail">straight from EDGAR</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Form</th><th>Filed</th><th>What it is</th><th></th></tr></thead>
+        <tbody>
+        {% for fl in r.filings %}
+          <tr>
+            <td class="fig">{{ fl.form }}</td>
+            <td class="soft">{{ fl.filed }}</td>
+            <td class="soft">{{ fl.meaning }}</td>
+            <td class="r"><a href="{{ fl.index_url }}" target="_blank" rel="noopener">Read</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if saved %}
+<section>
+  <div class="sechead">
+    <h2>Theses you saved for {{ r.symbol }}</h2>
+    <span class="tail">judged against what happened</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Saved</th><th class="r">Price then</th><th class="r">Now</th>
+          <th class="r">Move</th><th>Called</th><th>Outcome</th><th></th></tr></thead>
+        <tbody>
+        {% for row, rev in saved %}
+          <tr>
+            <td class="soft">{{ row['created_ts']|ago }}</td>
+            <td class="r fig">{{ row['price']|price }}</td>
+            <td class="r fig">{{ r.price|price }}</td>
+            <td class="r fig {{ 'gain' if rev.move > 0 else 'loss' }}">{{ rev.move|pct(1) }}</td>
+            <td class="fig">{{ row['balance']|signed }}</td>
+            <td><span class="chip {{ 'long' if rev.outcome == 'right so far'
+                 else 'short' if rev.outcome == 'wrong so far' else 'mute' }}">
+              {{ rev.outcome }}</span></td>
+            <td class="r">
+              <form method="post" action="{{ url_for('delete_thesis') }}"
+                    onsubmit="return confirm('Delete this saved thesis?');">
+                <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
+                <input type="hidden" name="back" value="{{ request.full_path }}">
+                <button class="btn quiet sm" type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if r.thesis and r.thesis.all_sources %}
+<section>
+  <div class="sechead"><h2>Where all of this came from</h2></div>
+  <div class="card">
+    <ul class="list">
+      {% for s in r.thesis.all_sources %}
+        <li>{% if s.url %}<a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.name }}</a>
+            {% else %}{{ s.name }}{% endif %}
+            {% if s.detail %}<span class="faint"> — {{ s.detail }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

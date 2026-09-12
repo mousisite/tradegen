@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% set active = 'legal' %}
+{% block title %}{{ heading }} · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>{{ heading }}</h1>
+  <p>Last updated {{ updated }}.</p>
+</div>
+
+<div class="legalpage">
+{% if page == 'privacy' %}
+
+  <p class="prose">
+    This describes what Stock Bot actually does with data. It is written to be
+    checkable against the source rather than to be comprehensive, and where a
+    thing does not happen it says so plainly instead of staying silent.
+  </p>
+
+  <h2>What is collected</h2>
+  <p class="prose">If you sign in with Google, Stock Bot receives and stores:</p>
+  <ul class="list">
+    <li>Your email address, used as the identity of your account.</li>
+    <li>Your name and profile picture, used to show who is signed in.</li>
+    <li>A Google account identifier, so that the account still resolves if your
+      email address changes.</li>
+  </ul>
+  <p class="prose">
+    That is the whole of it. Stock Bot asks Google only for the
+    <span class="fig">openid</span>, <span class="fig">email</span> and
+    <span class="fig">profile</span> scopes. It cannot read your Gmail, Drive,
+    contacts or calendar, and it never sees your Google password.
+  </p>
+
+  <h2>What you create</h2>
+  <p class="prose">
+    Anything you enter is stored against your account: trades, watchlist,
+    alerts, saved theses, and the history of analyses you have run. Only you can
+    see it. Other people signed into the same installation cannot read it, and
+    that separation is enforced by the database query rather than by the
+    interface hiding things.
+  </p>
+  <p class="prose">
+    One thing is deliberately shared: the measured strategy record, which says
+    how a given strategy has behaved on a given instrument. It contains no
+    personal information, describes markets rather than people, and is what
+    makes the analysis better as more of it accumulates.
+  </p>
+
+  <h2>Where data goes</h2>
+  <p class="prose">
+    To produce an analysis, Stock Bot sends the instrument you asked about to
+    the sources it reads. It does not send your identity, your positions or your
+    journal to any of them.
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Sent to</th><th>What is sent</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Yahoo Finance</td><td>The ticker</td><td>Prices, fundamentals, options</td></tr>
+        <tr><td>SEC EDGAR</td><td>The ticker</td><td>Filings and filed financials</td></tr>
+        <tr><td>Google News</td><td>The company name</td><td>Headlines</td></tr>
+        <tr><td>StockTwits</td><td>The ticker</td><td>Retail posts</td></tr>
+        <tr><td>Anthropic</td><td>Headlines and gathered figures, only if an API key is configured</td>
+            <td>Sentiment and written reasoning</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>What does not happen</h2>
+  <ul class="list">
+    <li>No advertising, and no advertising identifiers.</li>
+    <li>No analytics or tracking scripts. The pages load no third-party
+      JavaScript at all.</li>
+    <li>No selling, renting or sharing of personal data with anyone.</li>
+    <li>No cookies except the one that keeps you signed in. It holds an opaque
+      session token and nothing else.</li>
+  </ul>
+
+  <h2>Keeping and deleting</h2>
+  <p class="prose">
+    Your data stays until you remove it. Every dataset can be downloaded as CSV
+    or JSON from the Account page at any time, without asking anyone. Deleting
+    your account removes your trades, watchlist, alerts, theses and analysis
+    history immediately and permanently; the shared strategy record stays,
+    because it was never yours alone and contains nothing about you.
+  </p>
+  <p class="prose">
+    Sessions expire after {{ session_days }} days. Signing out ends the session
+    on the server rather than only in the browser.
+  </p>
+
+  <h2>Security</h2>
+  <p class="prose">
+    Sign-in uses Google's authorization code flow with PKCE, exchanged between
+    servers. Session tokens are random, opaque and stored, so they can be
+    revoked. Credentials are read from the environment and are never written to
+    a configuration file.
+  </p>
+
+{% else %}
+
+  <h2>What this is</h2>
+  <p class="prose">
+    Stock Bot is analysis software. It reads public market data, filings, news
+    and social posts, applies a set of strategies to them, back-tests those
+    strategies against the instrument's own history, and reports what it found.
+  </p>
+
+  <h2>What it is not</h2>
+  <p class="prose">
+    <b>It is not financial advice, and nothing it produces is a recommendation
+    to buy or sell anything.</b> It does not know your circumstances, your tax
+    position, your other holdings or your obligations, and it is not regulated
+    to advise you about any of them. It has no connection to any broker and
+    never places an order.
+  </p>
+
+  <h2>What the numbers mean</h2>
+  <p class="prose">
+    Every probability, expectancy and confidence interval is measured from
+    historical price data. Past behaviour is not a promise about the future, and
+    a measured edge can stop existing without warning. The software says so in
+    its own output: when a setup has no demonstrated edge it reports that rather
+    than inventing confidence, and by its own measurements most short-horizon
+    trading loses money once costs are charged.
+  </p>
+  <p class="prose">
+    <b>Day trading loses money for the large majority of retail participants.</b>
+    This tool's own back-tests agree with that finding. Never risk money you
+    cannot afford to lose.
+  </p>
+
+  <h2>Data accuracy</h2>
+  <p class="prose">
+    Market data comes from third parties and may be delayed, incomplete or
+    wrong. Figures taken from filings are shown with a link to the filing so you
+    can check them. No warranty is given that any figure is correct, and
+    decisions made on them are yours.
+  </p>
+
+  <h2>Availability</h2>
+  <p class="prose">
+    The service may be unavailable, and scheduled checks do not run while it is.
+    Alerts are a convenience, not a guarantee: never rely on one to exit a
+    position.
+  </p>
+
+  <h2>Your account</h2>
+  <p class="prose">
+    You are responsible for what happens under your account. You may export your
+    data or delete your account at any time from the Account page. Access may be
+    withdrawn for abuse of the service or of the data sources it depends on.
+  </p>
+
+  <h2>Liability</h2>
+  <p class="prose">
+    The software is provided as is, without warranty of any kind. To the extent
+    the law allows, no liability is accepted for trading losses or for any loss
+    arising from use of, or inability to use, this software.
+  </p>
+
+{% endif %}
+
+  <p class="legal">
+    Questions about this page: {{ contact }}
+  </p>
+</div>
+
+{% endblock %}

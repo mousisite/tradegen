@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% set active = 'strategies' %}
+{% block title %}Strategies · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Which strategies actually work</h1>
+  <p>All 34 strategies, scored on real outcomes from every analysis you have
+    run. Nothing here is a claim from a textbook.</p>
+</div>
+
+<div class="card">
+  <form class="searchrow" method="get" action="{{ url_for('strategies') }}">
+    <label class="sr" for="f-sym">Instrument</label>
+    <select class="field" id="f-sym" name="symbol">
+      <option value="">Every instrument</option>
+      {% for s in seen %}
+        <option value="{{ s }}" {{ 'selected' if s == symbol }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <label class="sr" for="f-reg">Market conditions</label>
+    <select class="field" id="f-reg" name="regime">
+      {% for key, label in [('all','All conditions'), ('trending','Trending markets'),
+                            ('ranging','Ranging markets'), ('transitional','Transitional')] %}
+        <option value="{{ key }}" {{ 'selected' if key == regime }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <label class="sr" for="f-rank">Rank by</label>
+    <select class="field" id="f-rank" name="rank_by">
+      <option value="gross" {{ 'selected' if rank_by == 'gross' }}>Rank by raw skill</option>
+      <option value="net" {{ 'selected' if rank_by == 'net' }}>Rank by what you keep</option>
+    </select>
+    <button class="btn" type="submit">Apply</button>
+  </form>
+</div>
+
+<div class="card pad0" style="margin-top:var(--s3)">
+  {% if rows %}
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Strategy</th><th>Family</th><th class="r">Setups</th>
+        <th class="r">Hit rate</th><th class="r">Raw</th><th class="r">Kept</th>
+        <th class="r">Instruments</th><th style="width:18%"></th>
+      </tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row['strategy'].replace('_',' ')|capitalize }}</td>
+          <td class="soft">{{ row['family'].replace('_',' ') if row['family'] }}</td>
+          <td class="r fig soft">{{ "{:,}".format(row['n']) }}</td>
+          <td class="r fig">{{ row['hit_rate']|pct(1) }}</td>
+          <td class="r fig {{ 'gain' if row['gross_exp'] > 0 else 'loss' }}">
+            {{ row['gross_exp']|signed(3) }}</td>
+          <td class="r fig {{ 'gain' if row['net_exp'] > 0 else 'loss' }}">
+            {{ row['net_exp']|signed(3) }}</td>
+          <td class="r fig soft">{{ row['symbols'] }}</td>
+          <td>
+            {% set g = row['gross_exp'] %}
+            {% set w = [((g if g > 0 else -g) * 400), 50]|min %}
+            <div class="lean" style="min-width:100px"><span class="zero"></span>
+              {% if g >= 0 %}<i class="up" style="width:{{ w|round(1) }}%"></i>
+              {% else %}<i class="dn" style="width:{{ w|round(1) }}%"></i>{% endif %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="blank">
+      Nothing measured yet. Analyse a few instruments and this table fills in.
+    </div>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top:var(--s3)">
+  <span class="eyebrow">How to read this</span>
+  <p class="prose">
+    <b>Raw</b> is expectancy before trading costs, which answers one question:
+    does the strategy predict direction at all? <b>Kept</b> is what would
+    actually have ended up in your account once fees and spread came out.
+  </p>
+  <p class="prose">
+    A wide gap between the two columns means the strategy works but the
+    instrument or interval is too expensive to trade that way. That gap is the
+    most common reason retail day trading loses money. It is also why the
+    default ranking is raw skill: sorting by what you keep across many
+    instruments mostly sorts by which symbols are cheap, not by which
+    strategies are good.
+  </p>
+</div>
+
+{% endblock %}

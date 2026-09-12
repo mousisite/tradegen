@@ -1,0 +1,24 @@
+# The bundled runtime is rebuilt by setup.bat and is far too large to commit.
+.runtime/
+
+# Everything personal: the journal, the accumulated strategy record, and the
+# key that signs session cookies all live here.
+data/
+*.db
+*.db-wal
+*.db-shm
+secret.key
+
+# Credentials. .env.example is committed on purpose; .env never is.
+.env
+.env.*
+!.env.example
+
+# Local settings, so a public repo does not carry your account size around.
+config.json
+
+_clipboard.png
+*.json.out
+__pycache__/
+*.pyc
+backups/

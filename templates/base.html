@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}Stock Bot{% endblock %}</title>
+{# Preconnect first so the font request is not waiting on DNS and TLS.
+   Source Serif stands in for Tiempos, Inter for Styrene, JetBrains Mono for
+   the figures. All three have real fallback stacks in the CSS. #}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c96442' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16.5l5.5-6 4 3.5L21 5'/><path d='M15 5h6v6'/></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="inner">
+    <a class="wordmark" href="{{ url_for('index') }}">
+      <span class="glyph" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 16.5l5.5-6 4 3.5L21 5"/><path d="M15 5h6v6"/>
+        </svg>
+      </span>
+      Stock Bot
+    </a>
+    <nav class="nav">
+      <a href="{{ url_for('index') }}"
+         {% if active == 'home' %}aria-current="page"{% endif %}>Analyse</a>
+      <a href="{{ url_for('screener') }}"
+         {% if active == 'screener' %}aria-current="page"{% endif %}>Screener</a>
+      <a href="{{ url_for('portfolio') }}"
+         {% if active == 'portfolio' %}aria-current="page"{% endif %}>Portfolio</a>
+      <a href="{{ url_for('trades') }}"
+         {% if active == 'trades' %}aria-current="page"{% endif %}>Trades</a>
+      <a href="{{ url_for('monitor') }}"
+         {% if active == 'monitor' %}aria-current="page"{% endif %}>Monitor</a>
+      <a href="{{ url_for('strategies') }}"
+         {% if active == 'strategies' %}aria-current="page"{% endif %}>Strategies</a>
+      <a href="{{ url_for('settings') }}"
+         {% if active == 'settings' %}aria-current="page"{% endif %}>Settings</a>
+      {% if current_user %}
+        <a class="me" href="{{ url_for('account') }}" title="{{ current_user.email }}"
+           {% if active == 'account' %}aria-current="page"{% endif %}>
+          {% if current_user.picture %}
+            <img class="avatar sm" src="{{ current_user.picture }}" alt="" width="26" height="26">
+          {% else %}
+            <span class="avatar sm letter" aria-hidden="true">{{ current_user.initial }}</span>
+          {% endif %}
+          <span class="sr">Account: {{ current_user.display }}</span>
+        </a>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+{% block content %}{% endblock %}
+
+<p class="legal">
+  <b>Analysis software, not financial advice.</b>
+  Every figure here is measured from historical price data and can stop
+  describing the future at any moment. Day trading loses money for the large
+  majority of retail participants, and this tool's own measurements agree with
+  that. Never risk money you cannot afford to lose.
+  <br>
+  <a href="{{ url_for('terms') }}">Terms</a> ·
+  <a href="{{ url_for('privacy') }}">Privacy</a>
+</p>
+</div>
+
+{# An analysis back-tests 34 strategies over tens of thousands of bars. Without
+   feedback the page reads as frozen and people submit a second time. #}
+<div class="overlay" id="working" role="status" aria-live="polite">
+  <div class="spin" aria-hidden="true"></div>
+  <div class="a">Analysing</div>
+  <div class="b">Fetching data, running 34 strategies, and back-testing each one
+    against this instrument's own history.</div>
+</div>
+
+{# Alerts that fired while you were on another page. The server checks on a
+   timer; this is only how the result reaches you. #}
+<div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
+  <div class="inner">
+    <span class="what" id="firetext"></span>
+    <a href="{{ url_for('monitor') }}">Open Monitor</a>
+    <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var el = document.getElementById('working');
+    function show() { el.classList.add('on'); }
+    document.querySelectorAll('[data-working]').forEach(function (node) {
+      node.addEventListener(node.tagName === 'FORM' ? 'submit' : 'click', show);
+    });
+    // Coming back with the browser's back button must not leave this stuck on.
+    window.addEventListener('pageshow', function () { el.classList.remove('on'); });
+  })();
+
+  // Alerts fire on the server's timer. This asks what has fired since this tab
+  // last looked, so the same alert is announced once rather than every poll.
+  (function () {
+    var bar = document.getElementById('firebar');
+    var text = document.getElementById('firetext');
+    var dismiss = document.getElementById('firedismiss');
+    if (!bar || !window.fetch) { return; }
+
+    var KEY = 'stockbot-alerts-seen';
+    var since = 0;
+    try { since = parseFloat(window.localStorage.getItem(KEY)) || 0; } catch (e) {}
+
+    dismiss.addEventListener('click', function () { bar.hidden = true; });
+
+    function announce(fires) {
+      if (!fires.length) { return; }
+      var first = fires[0];
+      text.textContent = fires.length === 1
+        ? (first.message || (first.symbol + ' triggered an alert'))
+        : (fires.length + ' alerts triggered, including ' + first.symbol);
+      bar.hidden = false;
+      if (window.Notification && Notification.permission === 'granted') {
+        try {
+          new Notification('Stock Bot', { body: text.textContent });
+        } catch (e) {}
+      }
+    }
+
+    var failures = 0;
+    function poll() {
+      fetch('/api/alerts/status?since=' + encodeURIComponent(since), {
+        headers: { 'Accept': 'application/json' }
+      }).then(function (r) { return r.ok ? r.json() : null; }).then(function (data) {
+        if (!data) { return; }
+        failures = 0;
+        if (data.enabled === false) { return; }          // switched off: stop asking
+        var fires = data.new_fires || [];
+        if (fires.length) {
+          announce(fires);
+          since = data.now || (Date.now() / 1000);
+          try { window.localStorage.setItem(KEY, String(since)); } catch (e) {}
+        }
+      }).catch(function () {
+        // The server going away is the normal end of a session, not an error
+        // worth showing. Back off rather than retrying every few seconds.
+        failures += 1;
+      });
+    }
+
+    // Poll rarely. The check itself happens on the server; this only collects
+    // the result, so a slow poll costs nothing but a little delay.
+    window.setTimeout(poll, 4000);
+    window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% set active = 'portfolio' %}
+{% block title %}Portfolio · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>What you are exposed to</h1>
+  <p>Not how you are doing, which the journal already says. This is what would
+    happen to you if things went wrong at the same time.</p>
+</div>
+
+{% if not view.positions %}
+  <div class="card">
+    <div class="blank">
+      Nothing open. Positions logged in the <a href="{{ url_for('trades') }}">journal</a>
+      appear here with their exposure and correlation.
+    </div>
+  </div>
+{% else %}
+
+<div class="card">
+  <div class="figs">
+    <div class="f"><div class="k">Account</div>
+      <div class="v fig">{{ view.account|money }}</div></div>
+    <div class="f"><div class="k">Deployed</div>
+      <div class="v fig">{{ view.invested|money }}</div>
+      <div class="n">{{ (view.gross_exposure / view.account)|pct if view.account else '—' }} of the account</div></div>
+    <div class="f"><div class="k">Cash</div>
+      <div class="v fig">{{ view.cash|money }}</div></div>
+    <div class="f"><div class="k">Open P&amp;L</div>
+      <div class="v fig {{ 'gain' if view.open_pnl > 0 else 'loss' }}">
+        {{ view.open_pnl|money }}</div></div>
+    <div class="f"><div class="k">At risk</div>
+      <div class="v fig loss">{{ view.total_risk|money }}</div>
+      <div class="n">if every stop hit</div></div>
+    <div class="f"><div class="k">Concentration</div>
+      <div class="v fig">{{ "%.1f"|format(1 / view.concentration)
+          if view.concentration else '—' }}</div>
+      <div class="n">effective positions</div></div>
+    <div class="f"><div class="k">Weighted beta</div>
+      <div class="v fig">{{ "%.2f"|format(view.portfolio_beta)
+          if view.portfolio_beta is not none else '—' }}</div></div>
+  </div>
+</div>
+
+{% if view.warnings %}
+  <div class="card" style="margin-top:var(--s3);border-color:var(--hold)">
+    <span class="eyebrow" style="color:var(--hold)">Worth acting on</span>
+    <ul class="list warn">{% for w in view.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  </div>
+{% endif %}
+
+{% if view.observations %}
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">What this adds up to</span>
+    <ul class="list">{% for o in view.observations %}<li>{{ o }}</li>{% endfor %}</ul>
+  </div>
+{% endif %}
+
+<section>
+  <div class="sechead"><h2>Holdings</h2>
+    <span class="count">{{ view.positions|length }}</span></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th>Side</th><th class="r">Entry</th><th class="r">Now</th>
+          <th class="r">Value</th><th class="r">Open P&amp;L</th><th class="r">R</th>
+          <th class="r">Still at risk</th><th class="r">Weight</th>
+          <th class="r">Beta</th><th>Sector</th>
+        </tr></thead>
+        <tbody>
+        {% for p in view.positions %}
+          <tr>
+            <td><b>{{ p.symbol }}</b></td>
+            <td><span class="chip {{ 'long' if p.direction > 0 else 'short' }}">
+              {{ 'Long' if p.direction > 0 else 'Short' }}</span></td>
+            <td class="r fig">{{ p.entry|price }}</td>
+            <td class="r fig">{{ p.price|price if p.price else '—' }}</td>
+            <td class="r fig">{{ p.notional|money }}</td>
+            <td class="r fig {{ 'gain' if p.open_pnl > 0 else 'loss' }}">
+              {{ p.open_pnl|money }}</td>
+            <td class="r fig {{ 'gain' if (p.open_r or 0) > 0 else 'loss' }}">
+              {{ p.open_r|signed if p.open_r is not none else '—' }}</td>
+            <td class="r fig">{{ p.risk_remaining|money }}</td>
+            <td class="r fig soft">{{ (p.notional|abs / view.gross_exposure)|pct
+                if view.gross_exposure else '—' }}</td>
+            <td class="r fig soft">{{ "%.2f"|format(p.beta) if p.beta is not none else '—' }}</td>
+            <td class="soft">{{ p.sector or ('Crypto' if p.asset_class == 'crypto' else '—') }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+{% if view.by_sector and view.by_sector|length > 1 %}
+<section>
+  <div class="sechead"><h2>Where the money sits</h2></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Sector</th><th class="r">Value</th><th class="r">Share</th>
+          <th style="width:40%"></th></tr></thead>
+        <tbody>
+        {% for name, amount in view.by_sector.items()|sort(attribute='1', reverse=True) %}
+          {% set share = amount / view.gross_exposure %}
+          <tr>
+            <td>{{ name }}</td>
+            <td class="r fig">{{ amount|money }}</td>
+            <td class="r fig">{{ share|pct }}</td>
+            <td><div class="meter"><i style="width:{{ (share*100)|round(1) }}%;
+              background:{{ 'var(--hold)' if share > 0.5 else 'var(--accent)' }}"></i></div></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if view.correlation and view.correlation.usable %}
+{% set c = view.correlation %}
+<section>
+  <div class="sechead">
+    <h2>Do these move together?</h2>
+    <span class="tail">{{ c.samples }} shared daily returns</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th></th>
+          {% for s in c.symbols %}<th class="r">{{ s }}</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+        {% for i in range(c.symbols|length) %}
+          <tr>
+            <td><b>{{ c.symbols[i] }}</b></td>
+            {% for j in range(c.symbols|length) %}
+              {% set v = c.matrix[i][j] %}
+              <td class="r fig {{ 'loss' if v > 0.75 and i != j else
+                                  'gain' if v < 0.3 and i != j else 'soft' }}">
+                {{ "%.2f"|format(v) }}</td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:var(--s2) var(--s3) var(--s3)">
+      {% for n in c.notes %}<p class="prose">{{ n }}</p>{% endfor %}
+      <p class="prose">
+        Anything above about 0.75 is shown in red because those two are close to
+        the same position. Correlation also rises toward one in a sell-off, so
+        these numbers flatter a portfolio on exactly the day it matters most.
+      </p>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if shocks %}
+<section>
+  <div class="sechead">
+    <h2>If the market fell</h2>
+    <span class="tail">scaled by each holding's beta</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Market move</th><th class="r">Your change</th>
+          <th class="r">Of the account</th><th>Worst hit</th></tr></thead>
+        <tbody>
+        {% for pct, s in shocks.items() %}
+          <tr>
+            <td class="fig">{{ (pct)|pct }}</td>
+            <td class="r fig loss">{{ s.total_change|money }}</td>
+            <td class="r fig loss">{{ "%.1f%%"|format(s.pct_of_account)
+                if s.pct_of_account is not none else '—' }}</td>
+            <td class="soft">{{ s.rows[0].symbol if s.rows else '—' }}
+              {% if s.rows %}<span class="fig">{{ s.rows[0].change|money }}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      {{ shocks.values()|list|first|attr('caveat') if false else
+         "Correlations move toward one in a real sell-off, so a genuine crash would hurt more than this straight-line estimate." }}
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% endif %}
+
+{% if summary.trades %}
+<section>
+  <div class="sechead"><h2>Closed record</h2>
+    <span class="tail"><a href="{{ url_for('trades') }}">Full journal</a></span></div>
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Closed</div>
+        <div class="v fig">{{ summary.trades }}</div></div>
+      <div class="f"><div class="k">Hit rate</div>
+        <div class="v fig">{{ summary.hit_rate|pct }}</div></div>
+      <div class="f"><div class="k">Expectancy</div>
+        <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
+          {{ summary.expectancy_r|signed(3) }}R</div></div>
+      <div class="f"><div class="k">Total</div>
+        <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
+          {{ summary.total_r|signed(2) }}R</div></div>
+      <div class="f"><div class="k">Worst drawdown</div>
+        <div class="v fig">{{ "%.2f"|format(summary.max_drawdown_r) }}R</div></div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

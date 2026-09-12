@@ -1,0 +1,13 @@
+# Runtime dependencies, pinned to the versions this was actually tested
+# against rather than to whatever is newest. An unpinned deploy is one whose
+# behaviour can change without anyone changing anything.
+Flask==3.1.3
+Werkzeug==3.1.8  # Flask's own, pinned because ProxyFix is imported directly
+waitress==3.0.2
+requests==2.34.2
+numpy==2.4.6
+Pillow==12.3.0
+python-dotenv==1.2.3
+feedparser==6.0.14  # Google News RSS. Not optional: sentiment imports it at module level
+rich==15.0.0
+anthropic==1.4.0  # Optional features only, but the import must resolve when a key is set

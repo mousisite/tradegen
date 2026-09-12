@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+{% set active = 'monitor' %}
+{% block title %}Monitor · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>What to keep an eye on</h1>
+  <p>Alerts, a watchlist, saved theses, and routines that do the checking for
+    you. Nothing here runs while this window is closed, so it tells you when it
+    last actually looked.</p>
+</div>
+
+{% if request.args.get('checked') %}
+  <div class="saved">
+    Checked {{ request.args.get('checked') }} alert{{ '' if request.args.get('checked') == '1' else 's' }}.
+    {{ request.args.get('fired') }} triggered.
+  </div>
+{% endif %}
+
+<section style="margin-top:0">
+  <div class="sechead">
+    <h2>Routines</h2>
+    <span class="tail">run when you ask, not in the background</span>
+  </div>
+  <div class="cols b">
+    {% for key, w in workflows.items() %}
+      <div class="card">
+        <div style="font-weight:600;font-size:var(--t-base);font-family:var(--serif)">
+          {{ w.label }}</div>
+        <p class="prose" style="margin-top:6px">{{ w.why }}</p>
+        <form method="post" action="{{ url_for('run_workflow', name=key) }}"
+              data-working style="margin-top:var(--s2)">
+          <button class="btn quiet sm" type="submit">Run now</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+
+  {% if last_run %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">{{ last_run.name }} · {{ last_run.finished|ago }}
+        · took {{ "%.0f"|format(last_run.seconds) }}s</span>
+      <p class="prose" style="color:var(--ink);font-size:var(--t-base)">
+        {{ last_run.headline }}</p>
+      <div class="tablewrap" style="margin-top:var(--s2)">
+        <table>
+          <tbody>
+          {% for s in last_run.steps %}
+            <tr>
+              <td style="width:110px">
+                <span class="chip {{ 'short' if s.status == 'failed'
+                     else 'hold' if s.status == 'attention' else 'mute' }}">
+                  {{ 'needs you' if s.status == 'attention'
+                     else 'failed' if s.status == 'failed' else 'fine' }}</span>
+              </td>
+              <td>{{ s.detail }}</td>
+              <td class="r">
+                {% if s.data.get('symbol') %}
+                  <a data-working href="{{ url_for('analyse', symbol=s.data.symbol,
+                     interval=s.data.get('interval', '1d')) }}">Open</a>
+                {% elif s.data.get('trade_id') %}
+                  <a href="{{ url_for('trades') }}">Journal</a>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Alerts</h2>
+    <span class="count">{{ alerts|length }}</span>
+    <span class="tail">
+      <form method="post" action="{{ url_for('check_alerts') }}" style="display:inline">
+        <button class="btn quiet sm" type="submit">Check them all now</button>
+      </form>
+    </span>
+  </div>
+
+  <div class="card">
+    <form method="post" action="{{ url_for('add_alert') }}">
+      <div class="setgrid">
+        <div class="setfield">
+          <label for="a-symbol">Instrument</label>
+          <input class="field fig" id="a-symbol" name="symbol" type="text"
+                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+        </div>
+        <div class="setfield">
+          <label for="a-kind">Tell me when it</label>
+          <select class="field" id="a-kind" name="kind">
+            {% for key, spec in kinds.items() %}
+              <option value="{{ key }}">{{ spec.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="setfield">
+          <label for="a-threshold">Value</label>
+          <input class="field fig" id="a-threshold" name="threshold" type="number"
+                 step="any" placeholder="price, percent or level">
+          <div class="hint">Leave empty for the two moving-average conditions,
+            which need no value.</div>
+        </div>
+        <div class="setfield">
+          <label for="a-interval">Bars</label>
+          <select class="field" id="a-interval" name="interval">
+            {% for code, label in intervals %}
+              <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="setfield">
+          <label for="a-repeat">After it fires</label>
+          <select class="field" id="a-repeat" name="repeat">
+            <option value="0">Switch the alert off</option>
+            <option value="1">Keep watching</option>
+          </select>
+        </div>
+        <div class="setfield">
+          <label for="a-note">Note <span class="faint">optional</span></label>
+          <input class="field" id="a-note" name="note" type="text"
+                 placeholder="why this level matters">
+        </div>
+      </div>
+      <button class="btn quiet" type="submit" style="margin-top:var(--s3)">Add alert</button>
+    </form>
+  </div>
+
+  <div class="card pad0" style="margin-top:var(--s3)">
+    {% if alerts %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Condition</th><th>State</th><th>Last looked</th>
+          <th>What happened</th><th></th></tr></thead>
+        <tbody>
+        {% for row, text in alerts %}
+          <tr>
+            <td>{{ text }}
+              {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}</td>
+            <td>
+              {% if row['triggered_ts'] %}
+                <span class="chip hold">Triggered</span>
+              {% elif row['active'] %}
+                <span class="chip mute">Watching</span>
+              {% else %}
+                <span class="chip mute">Off</span>
+              {% endif %}
+            </td>
+            <td class="soft">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}</td>
+            <td class="soft">
+              {% if row['trigger_note'] %}
+                {{ row['trigger_note'] }}
+                <div class="faint" style="font-size:var(--t-xs)">{{ row['triggered_ts']|ago }}</div>
+              {% else %}—{% endif %}
+            </td>
+            <td class="r">
+              <div style="display:flex;gap:5px;justify-content:flex-end">
+                {% if row['triggered_ts'] %}
+                  <form method="post" action="{{ url_for('alert_action', action='reset') }}">
+                    <input type="hidden" name="alert_id" value="{{ row['id'] }}">
+                    <button class="btn quiet sm" type="submit">Re-arm</button>
+                  </form>
+                {% endif %}
+                <form method="post" action="{{ url_for('alert_action', action='delete') }}">
+                  <input type="hidden" name="alert_id" value="{{ row['id'] }}">
+                  <button class="btn quiet sm" type="submit">Delete</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">No alerts set.</div>
+    {% endif %}
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Watchlist</h2>
+    <span class="count">{{ watchlist|length }}</span>
+    <span class="tail">re-analysed by the watchlist routine</span>
+  </div>
+  <div class="card">
+    <form class="searchrow" method="post" action="{{ url_for('watch', action='add') }}">
+      <label class="sr" for="w-symbol">Instrument to watch</label>
+      <input class="field fig" id="w-symbol" name="symbol" type="text"
+             placeholder="AAPL" required autocomplete="off" spellcheck="false">
+      <label class="sr" for="w-interval">Interval</label>
+      <select class="field" id="w-interval" name="interval">
+        {% for code, label in intervals %}
+          <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn quiet" type="submit">Watch</button>
+    </form>
+  </div>
+
+  <div class="card pad0" style="margin-top:var(--s3)">
+    {% if watchlist %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Instrument</th><th>Bars</th><th>Added</th>
+          <th>Last analysed</th><th>Note</th><th></th></tr></thead>
+        <tbody>
+        {% for w in watchlist %}
+          <tr>
+            <td><b>{{ w['symbol'] }}</b></td>
+            <td class="fig soft">{{ w['interval'] }}</td>
+            <td class="soft">{{ w['added_ts']|ago }}</td>
+            <td class="soft">{{ w['last_run']|ago if w['last_run'] else 'not yet' }}</td>
+            <td class="soft">{{ w['note'] or '—' }}</td>
+            <td class="r">
+              <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">
+                <a data-working href="{{ url_for('analyse', symbol=w['symbol'],
+                   interval=w['interval']) }}">Analyse</a>
+                <form method="post" action="{{ url_for('watch', action='remove') }}">
+                  <input type="hidden" name="symbol" value="{{ w['symbol'] }}">
+                  <button class="btn quiet sm" type="submit">Remove</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing watched yet.</div>
+    {% endif %}
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Saved theses</h2>
+    <span class="count">{{ theses|length }}</span>
+    <span class="tail">written down so they can be judged later</span>
+  </div>
+
+  {% if board.closed or board.open %}
+    <div class="card" style="margin-bottom:var(--s3)">
+      <div class="figs">
+        <div class="f"><div class="k">Still open</div>
+          <div class="v fig">{{ board.open }}</div></div>
+        <div class="f"><div class="k">Closed out</div>
+          <div class="v fig">{{ board.closed }}</div></div>
+        <div class="f"><div class="k">Right for the stated reason</div>
+          <div class="v fig {{ 'gain' if board.counts.right else '' }}">{{ board.counts.right }}</div></div>
+        <div class="f"><div class="k">Wrong</div>
+          <div class="v fig {{ 'loss' if board.counts.wrong else '' }}">{{ board.counts.wrong }}</div></div>
+        <div class="f"><div class="k">Right by luck</div>
+          <div class="v fig {{ 'hold' if board.counts.luck else '' }}">{{ board.counts.luck }}</div></div>
+        <div class="f"><div class="k">Hit rate</div>
+          <div class="v fig">{{ board.hit_rate|pct if board.hit_rate is not none else '—' }}</div>
+          <div class="n">of {{ board.decided }} decided</div></div>
+      </div>
+      {% if board.note %}<p class="prose" style="margin-top:var(--s2)">{{ board.note }}</p>{% endif %}
+    </div>
+  {% endif %}
+
+  <div class="card pad0">
+    {% if theses %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Instrument</th><th>Saved</th><th class="r">Price then</th>
+          <th class="r">Now</th><th class="r">Move</th><th>Called</th>
+          <th>How it turned out</th><th></th></tr></thead>
+        <tbody>
+        {% for t in theses %}
+          {% set row = t.row %}
+          <tr>
+            <td><b>{{ row['symbol'] }}</b>
+              {% if row['user_note'] %}
+                <div class="faint" style="font-size:var(--t-xs)">{{ row['user_note'] }}</div>
+              {% endif %}</td>
+            <td class="soft">{{ row['created_ts']|ago }}</td>
+            <td class="r fig">{{ row['price']|price }}</td>
+            <td class="r fig">
+              {{ (row['closed_price'] if row['closed_price'] else t.now)|price
+                 if (row['closed_price'] or t.now) else '—' }}</td>
+            <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' }}">
+              {{ t.review.move|pct(1) if t.review.usable else '—' }}</td>
+            <td>
+              <span class="chip {{ 'long' if (row['balance'] or 0) > 0.15
+                                   else 'short' if (row['balance'] or 0) < -0.15
+                                   else 'mute' }}">
+                {{ 'Bullish' if (row['balance'] or 0) > 0.15
+                   else 'Bearish' if (row['balance'] or 0) < -0.15 else 'Balanced' }}
+              </span></td>
+            <td>
+              {% if row['outcome'] %}
+                <span class="chip {{ 'long' if row['outcome'] == 'right'
+                                     else 'short' if row['outcome'] == 'wrong'
+                                     else 'hold' if row['outcome'] == 'luck'
+                                     else 'mute' }}">{{ row['outcome'] }}</span>
+                <div class="faint" style="font-size:var(--t-xs)">
+                  closed {{ row['closed_ts']|ago }}</div>
+              {% elif t.review.usable %}
+                <span class="soft">{{ t.review.outcome }}</span>
+                <div class="faint" style="font-size:var(--t-xs)">
+                  {{ t.review.days }} day{{ '' if t.review.days == 1 else 's' }} in</div>
+              {% else %}
+                <span class="faint">{{ t.review.reason or 'not yet priced' }}</span>
+              {% endif %}
+            </td>
+            <td class="r">
+              <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center;flex-wrap:wrap">
+                <a data-working href="{{ url_for('research', symbol=row['symbol']) }}">Review</a>
+                {% if not row['outcome'] %}
+                  <form method="post" action="{{ url_for('close_thesis') }}"
+                        style="display:flex;gap:4px;align-items:center">
+                    <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
+                    <input type="hidden" name="back" value="{{ url_for('monitor') }}">
+                    <label class="sr" for="out-{{ row['id'] }}">Outcome for {{ row['symbol'] }}</label>
+                    <select class="field" id="out-{{ row['id'] }}" name="outcome"
+                            style="min-height:36px;font-size:var(--t-xs);padding:0 26px 0 9px">
+                      {% for key, meaning in outcomes.items() %}
+                        <option value="{{ key }}"
+                          {{ 'selected' if key == t.proposed }}>{{ key }}</option>
+                      {% endfor %}
+                    </select>
+                    <button class="btn quiet sm" type="submit">Close it out</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="{{ url_for('reopen_thesis') }}">
+                    <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
+                    <input type="hidden" name="back" value="{{ url_for('monitor') }}">
+                    <button class="btn quiet sm" type="submit">Reopen</button>
+                  </form>
+                {% endif %}
+                <form method="post" action="{{ url_for('delete_thesis') }}"
+                      onsubmit="return confirm('Delete this saved thesis?');">
+                  <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
+                  <input type="hidden" name="back" value="{{ url_for('monitor') }}">
+                  <button class="btn quiet sm" type="submit">Delete</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:var(--s2) var(--s3) var(--s3)">
+      <p class="prose">
+        The outcome offered when you close one is the outcome the price supports,
+        not the one you remember. You can pick a different one, but you have to
+        do it on purpose.
+      </p>
+      <ul class="list">
+        {% for key, meaning in outcomes.items() %}
+          <li><b>{{ key }}</b> — {{ meaning }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% else %}
+      <div class="blank">
+        No theses saved. Write one from any
+        <a href="{{ url_for('index') }}">research page</a> and it can be judged
+        against what actually happens.
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

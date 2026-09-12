@@ -1,0 +1,31 @@
+# Render deployment. The disk is the important line: without it the database
+# and the cookie key live inside the container and vanish on every redeploy,
+# taking the trade journal and everyone's session with them.
+services:
+  - type: web
+    name: stockbot
+    runtime: docker
+    plan: starter            # free tier sleeps, which stops alert checking
+    healthCheckPath: /healthz
+    disk:
+      name: stockbot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: STOCKBOT_DB
+        value: /data/stockbot.db
+      - key: STOCKBOT_CONFIG
+        value: /data/config.json
+      - key: STOCKBOT_BEHIND_PROXY
+        value: "1"
+      # Set these in the Render dashboard, not here: this file is committed.
+      - key: STOCKBOT_PUBLIC_URL
+        sync: false
+      - key: STOCKBOT_SECRET_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

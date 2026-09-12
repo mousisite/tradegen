@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Something went wrong · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>That didn't work</h1>
+  {% if symbol %}
+    <p>While analysing <b>{{ symbol }}</b>.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <p class="fig loss" style="font-size:var(--t-sm);margin:0 0 var(--s2)">{{ message }}</p>
+  {% if no_key %}
+    <p class="prose">To read charts from images, create a file called
+      <b>.env</b> in the Stock Bot folder containing:</p>
+    <p class="fig" style="background:var(--sunken);border:1px solid var(--rule);
+       border-radius:var(--r-sm);padding:12px var(--s2);font-size:var(--t-xs);
+       margin:var(--s2) 0">ANTHROPIC_API_KEY=your-key-here</p>
+    <p class="prose">Then stop the server and start it again. Typing a ticker in
+      by hand needs no key and works exactly the same from there on.</p>
+  {% else %}
+    <p class="prose">
+      Usually this means one of three things: the ticker does not exist, a
+      crypto symbol is missing its <b>-USD</b> ending, or the interval you
+      picked has too little history for that instrument.
+    </p>
+  {% endif %}
+  <p style="margin:var(--s3) 0 0">
+    <a class="btn quiet" href="{{ url_for('index') }}">Back to analysis</a>
+  </p>
+</div>
+
+{% endblock %}

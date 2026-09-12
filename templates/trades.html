@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% block title %}Trades · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Your trading journal</h1>
+  <p>Log what you actually took, let the bot mark it to market, and find out
+    whether the process works before real money is involved.</p>
+</div>
+
+{% if summary.trades %}
+<div class="card">
+  <div class="figs">
+    <div class="f"><div class="k">Closed</div>
+      <div class="v fig">{{ summary.trades }}</div>
+      <div class="n">{{ summary.open }} open</div></div>
+    <div class="f"><div class="k">Hit rate</div>
+      <div class="v fig">{{ summary.hit_rate|pct }}</div>
+      <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost</div></div>
+    <div class="f"><div class="k">Expectancy</div>
+      <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
+        {{ summary.expectancy_r|signed(3) }}R</div>
+      <div class="n">per trade</div></div>
+    <div class="f"><div class="k">Total</div>
+      <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
+        {{ summary.total_r|signed(2) }}R</div>
+      <div class="n">{{ summary.pnl|money }} cash</div></div>
+    <div class="f"><div class="k">Average win</div>
+      <div class="v fig gain">{{ summary.avg_win_r|signed(2) }}R</div></div>
+    <div class="f"><div class="k">Average loss</div>
+      <div class="v fig loss">{{ summary.avg_loss_r|signed(2) }}R</div></div>
+    <div class="f"><div class="k">Profit factor</div>
+      <div class="v fig">{{ "%.2f"|format(summary.profit_factor) if summary.profit_factor else '—' }}</div></div>
+    <div class="f"><div class="k">Worst drawdown</div>
+      <div class="v fig">{{ "%.2f"|format(summary.max_drawdown_r) }}R</div></div>
+  </div>
+  {% if summary.trades < 30 %}
+    <p class="prose" style="margin-top:var(--s3)">
+      {{ summary.trades }} closed trades is not enough to separate skill from
+      luck. Thirty is a reasonable minimum before any of these numbers mean
+      something.
+    </p>
+  {% endif %}
+</div>
+{% endif %}
+
+<section>
+  <div class="sechead"><h2>Log a trade by hand</h2>
+    <span class="tail">for anything the bot did not propose</span></div>
+  <div class="card">
+    <form method="post" action="{{ url_for('open_trade_manual') }}">
+      <div class="setgrid">
+        <div class="setfield">
+          <label for="m-symbol">Instrument</label>
+          <input class="field fig" id="m-symbol" name="symbol" type="text"
+                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+        </div>
+        <div class="setfield">
+          <label for="m-direction">Side</label>
+          <select class="field" id="m-direction" name="direction">
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </div>
+        <div class="setfield">
+          <label for="m-entry">Entry price</label>
+          <input class="field fig" id="m-entry" name="entry" type="number"
+                 step="any" required>
+        </div>
+        <div class="setfield">
+          <label for="m-stop">Stop price</label>
+          <input class="field fig" id="m-stop" name="stop" type="number"
+                 step="any" required>
+          <div class="hint">Below the entry for a long, above it for a short.</div>
+        </div>
+        <div class="setfield">
+          <label for="m-target">Target <span class="faint">optional</span></label>
+          <input class="field fig" id="m-target" name="target" type="number" step="any">
+        </div>
+        <div class="setfield">
+          <label for="m-qty">Size <span class="faint">optional</span></label>
+          <input class="field fig" id="m-qty" name="quantity" type="number" step="any">
+          <div class="hint">Units. Needed for cash P&amp;L, not for R.</div>
+        </div>
+        <div class="setfield">
+          <label for="m-interval">Interval</label>
+          <select class="field" id="m-interval" name="interval">
+            {% for code, label in intervals %}
+              <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <div class="hint">Used when marking the position to market.</div>
+        </div>
+      </div>
+      <button class="btn quiet" type="submit" style="margin-top:var(--s3)">Add to journal</button>
+    </form>
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Open</h2>
+    <span class="tail">{{ open_trades|length }} position{{ '' if open_trades|length == 1 else 's' }}</span>
+  </div>
+  <div class="card pad0">
+    {% if open_trades %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th>Side</th><th class="r">Entry</th>
+          <th class="r">Stop</th><th class="r">Target</th><th class="r">Now</th>
+          <th class="r">Open R</th><th>State</th><th class="r">Close it</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for t in open_trades %}
+          {% set m = live.get(t['id'], {}) %}
+          <tr>
+            <td><b>{{ t['symbol'] }}</b>
+              <div class="faint" style="font-size:var(--t-xs)">{{ t['ts_opened']|ago }}</div></td>
+            <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
+              {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
+            <td class="r fig">{{ t['entry']|price }}</td>
+            <td class="r fig loss">{{ t['stop']|price }}</td>
+            <td class="r fig gain">{{ t['target1']|price }}</td>
+            <td class="r fig">{{ m.price|price if m.price else '—' }}</td>
+            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}">
+              {{ m.r|signed if m.r is not none else '—' }}</td>
+            <td>
+              {% if m.status == 'past stop' %}<span class="chip short">Stopped</span>
+              {% elif m.status == 'past target' %}<span class="chip long">At target</span>
+              {% elif m.status == 'no data' %}<span class="chip mute">No data</span>
+              {% else %}<span class="chip mute">Running</span>{% endif %}
+            </td>
+            <td>
+              <form class="inline-form" action="{{ url_for('close_trade') }}" method="post">
+                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <label class="sr" for="px{{ t['id'] }}">Exit price for {{ t['symbol'] }}</label>
+                <input class="field fig" id="px{{ t['id'] }}" type="number" name="price"
+                       step="any" required placeholder="price"
+                       value="{{ '%s'|format(m.price) if m.price else '' }}">
+                <label class="sr" for="why{{ t['id'] }}">Reason</label>
+                <select class="field" id="why{{ t['id'] }}" name="reason">
+                  <option value="target">target</option>
+                  <option value="stop">stop</option>
+                  <option value="manual" selected>manual</option>
+                </select>
+                <button class="btn quiet sm" type="submit">Close</button>
+              </form>
+            </td>
+            <td class="r">
+              <form method="post" action="{{ url_for('delete_trade') }}"
+                    onsubmit="return confirm('Delete the {{ t['symbol'] }} trade? This cannot be undone.');">
+                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <button class="btn quiet sm" type="submit"
+                        title="Delete this trade" aria-label="Delete the {{ t['symbol'] }} trade">
+                  Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">
+        Nothing open. Analyse an instrument and use
+        <b>Log this as a paper trade</b> on the result, or add one by hand above.
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Closed</h2>
+    <span class="tail">{{ closed|length }} trade{{ '' if closed|length == 1 else 's' }}</span>
+  </div>
+  <div class="card pad0">
+    {% if closed %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th>Side</th><th class="r">Entry</th>
+          <th class="r">Stop</th><th class="r">Exit</th><th>Why</th>
+          <th class="r">R</th><th class="r">Cash</th><th class="r">Closed</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for t in closed %}
+          <tr>
+            <td><b>{{ t['symbol'] }}</b></td>
+            <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
+              {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
+            <td class="r fig">{{ t['entry']|price }}</td>
+            <td class="r fig soft">{{ t['stop']|price }}</td>
+            <td class="r fig">{{ t['exit_price']|price }}</td>
+            <td class="soft">{{ t['exit_reason'] }}</td>
+            <td class="r fig {{ 'gain' if (t['r_multiple'] or 0) > 0 else 'loss' }}">
+              <b>{{ t['r_multiple']|signed }}</b></td>
+            <td class="r fig {{ 'gain' if (t['pnl'] or 0) > 0 else 'loss' }}">
+              {{ t['pnl']|money }}</td>
+            <td class="r faint">{{ t['ts_closed']|ago }}</td>
+            <td class="r">
+              <form method="post" action="{{ url_for('delete_trade') }}"
+                    onsubmit="return confirm('Delete this closed {{ t['symbol'] }} trade? Your statistics will change.');">
+                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <button class="btn quiet sm" type="submit"
+                        aria-label="Delete the {{ t['symbol'] }} trade">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">No closed trades yet.</div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

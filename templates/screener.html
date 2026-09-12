@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% set active = 'screener' %}
+{% block title %}Screener · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Find something worth analysing</h1>
+  <p>Start from a ready-made screen, or set your own filters. Every result shows
+    the numbers that got it through, so you can check rather than trust.</p>
+</div>
+
+<section style="margin-top:0">
+  <div class="sechead"><h2>Ready-made screens</h2>
+    <span class="tail">each one states what it is looking for</span></div>
+  <div class="cols b">
+    {% for key, p in presets.items() %}
+      <div class="card">
+        <div style="font-weight:600;font-size:var(--t-base);font-family:var(--serif)">
+          {{ p.label }}</div>
+        <p class="prose" style="margin-top:6px">{{ p.why }}</p>
+        <form method="get" action="{{ url_for('screener') }}" data-working
+              style="margin-top:var(--s2)">
+          <input type="hidden" name="preset" value="{{ key }}">
+          <button class="btn quiet sm" type="submit">Run this screen</button>
+        </form>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>Or build your own</h2></div>
+  <div class="card">
+    <form method="get" action="{{ url_for('screener') }}" data-working>
+      <input type="hidden" name="go" value="1">
+      <div class="setgrid">
+        <div class="setfield">
+          <label for="universe">Start from</label>
+          <select class="field" id="universe" name="universe">
+            {% for key, label in universes.items() %}
+              <option value="{{ key }}" {{ 'selected' if key == universe }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <div class="hint">Ignored if you list your own instruments below.</div>
+        </div>
+        <div class="setfield">
+          <label for="symbols">Or your own list</label>
+          <input class="field fig" id="symbols" name="symbols" type="text"
+                 value="{{ symbols_raw }}" placeholder="AAPL MSFT NVDA"
+                 autocomplete="off" spellcheck="false">
+          <div class="hint">Separated by spaces or commas.</div>
+        </div>
+      </div>
+
+      <div class="setgrid" style="margin-top:var(--s3)">
+        {% for key, spec in filter_specs.items() %}
+          <div class="setfield">
+            <label for="f-{{ key }}">{{ spec.label }}
+              {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
+            <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
+                   step="any" value="{{ filters.get(key, '') if not filters.get(key) is none else '' }}"
+                   placeholder="{{ 'percent' if spec.unit == 'pct' else
+                                   'dollars' if spec.unit == 'usd' else
+                                   'multiple' if spec.unit == 'x' else 'any' }}">
+          </div>
+        {% endfor %}
+      </div>
+      <button class="btn" type="submit" style="margin-top:var(--s3)">Run screen</button>
+    </form>
+    <p class="prose" style="margin-top:var(--s3)">
+      Filters marked slower need full company fundamentals, which is one request
+      per candidate. Those run only on names that already passed everything else.
+      Percentages can be typed either way: 15 and 0.15 both mean fifteen percent.
+    </p>
+  </div>
+</section>
+
+{% if result %}
+<section>
+  <div class="sechead">
+    <h2>Results</h2>
+    <span class="count">{{ result.passed|length }} passed</span>
+    <span class="tail">{{ result.scanned }} scanned from {{ result.universe }},
+      {{ result.rejected }} rejected</span>
+  </div>
+
+  {% if result.filters %}
+    <div class="card" style="margin-bottom:var(--s3)">
+      <span class="eyebrow">What was asked for</span>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:var(--s1)">
+        {% for f in result.filters %}
+          <span class="chip mute">{{ f.label }} <span class="fig">{{ f.value }}</span></span>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="card pad0">
+    {% if result.passed %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th class="r">Price</th><th class="r">Today</th>
+          <th class="r">Market cap</th><th class="r">P/E</th>
+          {% if result.deep %}<th class="r">ROE</th><th class="r">Margin</th>
+          <th class="r">Growth</th><th class="r">Quality</th>{% endif %}
+          <th class="r">Off high</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for c in result.passed %}
+          <tr>
+            <td><b>{{ c.symbol }}</b>
+              <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
+            <td class="r fig">{{ c.price|price }}</td>
+            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' }}">
+              {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
+            <td class="r fig">{{ "%.1fB"|format(c.market_cap/1000000000)
+                if c.market_cap else '—' }}</td>
+            <td class="r fig">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
+            {% if result.deep %}
+              <td class="r fig">{{ c.roe|pct if c.roe is not none else '—' }}</td>
+              <td class="r fig">{{ c.net_margin|pct if c.net_margin is not none else '—' }}</td>
+              <td class="r fig {{ 'gain' if (c.revenue_growth or 0) > 0 else '' }}">
+                {{ c.revenue_growth|pct if c.revenue_growth is not none else '—' }}</td>
+              <td class="r fig">{{ c.quality|pct if c.quality is not none else '—' }}</td>
+            {% endif %}
+            <td class="r fig soft">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
+            <td class="r">
+              <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d') }}">Analyse</a>
+              ·
+              <a data-working href="{{ url_for('research', symbol=c.symbol, interval='1d') }}">Research</a>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing passed these filters.</div>
+    {% endif %}
+  </div>
+
+  {% if result.notes %}
+    <div class="card" style="margin-top:var(--s3)">
+      <ul class="list warn">{% for n in result.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+    </div>
+  {% endif %}
+
+  <p class="prose" style="margin-top:var(--s3)">
+    Passing a screen means the numbers cleared a threshold, nothing more. It is
+    a shortlist to investigate, not a list to buy. Where a figure was not
+    reported the instrument was excluded rather than assumed to pass.
+  </p>
+</section>
+{% endif %}
+
+{% endblock %}

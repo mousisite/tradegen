@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% set active = 'signin' %}
+{% block title %}Sign in · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="signin">
+  <div class="mark" aria-hidden="true">
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 16.5l5.5-6 4 3.5L21 5"/><path d="M15 5h6v6"/>
+    </svg>
+  </div>
+
+  <h1>Stock Bot</h1>
+  <p class="lede">
+    Your journal, watchlist, alerts and saved theses belong to your account.
+    The measured strategy record is shared, because it describes instruments
+    rather than people.
+  </p>
+
+  {% if reason %}
+    <div class="notice">{{ reason }}</div>
+  {% endif %}
+
+  {% if google_ready %}
+    <a class="gbtn" href="{{ url_for('google_start', next=next_url) }}">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
+        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>
+        <path fill="#FBBC05" d="M3.97 10.72a5.4 5.4 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/>
+        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59C13.46.9 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
+      </svg>
+      Continue with Google
+    </a>
+    <p class="fine">
+      Stock Bot asks Google only for your name, email address and profile
+      picture. It cannot see anything else in your Google account, and it never
+      sees your password.
+    </p>
+  {% else %}
+    <div class="card" style="text-align:left">
+      <span class="eyebrow">Not set up yet</span>
+      <p class="prose" style="margin-top:var(--s1)">
+        {{ why_not or "Google sign-in is not configured on this installation." }}
+      </p>
+      <p class="prose">
+        On your own machine you do not need it: leave the credentials unset and
+        the app opens straight into your own data with no account at all. Set
+        <span class="fig">GOOGLE_CLIENT_ID</span> and
+        <span class="fig">GOOGLE_CLIENT_SECRET</span> only when putting this
+        somewhere other people can reach.
+      </p>
+    </div>
+  {% endif %}
+
+  <p class="legal" style="border-top:0;padding-top:0;margin-top:var(--s4)">
+    <b>Analysis software, not financial advice.</b>
+    Every figure this produces is measured from historical price data and can
+    stop describing the future at any moment.
+  </p>
+</div>
+
+{% endblock %}

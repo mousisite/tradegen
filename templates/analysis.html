@@ -1,0 +1,464 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+{% block title %}{{ r.bars.symbol }} · Stock Bot{% endblock %}
+
+{% macro lean(v) %}
+  <div class="lean"><span class="zero"></span>
+    {% if v >= 0 %}<i class="up" style="width:{{ (v * 50)|round(1) }}%"></i>
+    {% else %}<i class="dn" style="width:{{ (-v * 50)|round(1) }}%"></i>{% endif %}
+  </div>
+{% endmacro %}
+
+{% block content %}
+
+{% set chg = ((r.bars.last_price - r.bars.prev_close) / r.bars.prev_close * 100) if r.bars.prev_close else None %}
+
+{% if request.args.get('fromimage') == '1' %}
+  <div class="fromshot">
+    <b>Read {{ r.bars.symbol }} from your screenshot.</b>
+    The image was only used to identify the instrument. Everything below runs on
+    live data, because a screenshot can be minutes old by the time it is read.
+  </div>
+{% endif %}
+
+<div class="card" style="margin-bottom:var(--s3)">
+  <div class="instrument">
+    <div class="who">
+      <span class="sym">{{ r.bars.symbol }}</span>
+      <span class="name">{{ r.bars.name }}</span>
+    </div>
+    <div class="price">
+      <span class="now">{{ r.bars.last_price|price }}</span>
+      {% if chg is not none %}
+        <span class="chg {{ 'gain' if chg >= 0 else 'loss' }}">{{ chg|signed }}%</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="factline">
+    <span><b>{{ r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
+    <span>{{ r.bars.interval }} bars</span>
+    <span>last <b>{{ r.bars.last_bar_time }}</b></span>
+    <span>{% if r.bars.market_open %}<b class="gain">market open</b>
+          {% else %}market closed{% endif %}</span>
+    <span><b>{{ r.regime.describe() }}</b></span>
+    <span>{{ "%.1f"|format(r.elapsed) }}s</span>
+  </div>
+</div>
+
+{% set a = plan.action %}
+<div class="call {{ 'buy' if a == 'BUY' else 'sell' if a == 'SHORT'
+                    else 'wait' if a == 'WAIT' else 'skip' }}">
+  <span class="word">{{ a|capitalize }}</span>
+  <span class="line">{{ plan.headline }}</span>
+</div>
+
+{% if plan.entry and a != 'AVOID' %}
+<div class="cols a" style="margin-top:var(--s3)">
+  <div class="card">
+    <span class="eyebrow">The plan</span>
+    <dl class="pairs">
+      <dt>Entry</dt>
+      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
+          <span class="faint">{{ plan.entry_type }}</span></dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}</dd>
+      <dt>Reward to risk</dt>
+      <dd><span class="fig">{{ "%.2f"|format(plan.reward_risk or 0) }}&thinsp;:&thinsp;1</span>
+          <span class="faint">needs {{ plan.breakeven_rate|pct }}</span></dd>
+      {% if plan.position and not plan.position.error %}
+      <dt>Size</dt>
+      <dd><span class="fig">{{ plan.position.quantity }}</span> units
+          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span></dd>
+      <dt>You risk</dt>
+      <dd><span class="fig">{{ plan.position.risk_amount|money }}</span>
+          <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span></dd>
+      {% if plan.position.gap_loss %}
+      <dt>If it gaps</dt>
+      <dd><span class="fig {{ 'loss' if (plan.position.gap_multiple or 0) > 2 else '' }}">{{ plan.position.gap_loss|money }}</span>
+          <span class="faint">{{ "%.2f"|format(plan.position.gap_pct_of_account) }}% of account,
+            {{ "%.1f"|format(plan.position.gap_multiple) }}&times; the budget</span></dd>
+      {% endif %}
+      {% elif plan.position.error %}
+      <dt>Size</dt><dd class="loss">{{ plan.position.error }}</dd>
+      {% endif %}
+    </dl>
+  </div>
+  <div class="card">
+    <span class="eyebrow">How to take it</span>
+    <p class="prose">{{ plan.trigger }}</p>
+    <p class="prose">{{ plan.entry_rationale }}</p>
+    <p class="prose"><b>If this goes wrong.</b> {{ plan.invalidation }}</p>
+    {% if plan.position and plan.position.gap_loss %}
+      <p class="prose"><b>The stop is not a guarantee.</b>
+        A move the size of this instrument's worst day in
+        {{ plan.position.gap_samples }} bars ({{ (plan.position.gap_move)|pct(1) }})
+        would open past the stop at about
+        {{ plan.position.gap_price|price }}, costing roughly
+        {{ plan.position.gap_loss|money }} rather than the
+        {{ plan.position.risk_amount|money }} budgeted. Position sizing that
+        only counts the stop understates what a bad morning does.</p>
+    {% endif %}
+    {% if r.run_id %}
+      <form action="{{ url_for('take_trade') }}" method="post" style="margin-top:var(--s3)">
+        <input type="hidden" name="run_id" value="{{ r.run_id }}">
+        <button class="btn quiet sm" type="submit">Log this as a paper trade</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<section>
+  <div class="sechead">
+    <h2>The odds, measured</h2>
+    <span class="tail">from this instrument's own history</span>
+  </div>
+  <div class="card">
+    {% if plan.probability is not none %}
+    <div class="figs" style="margin-bottom:var(--s3)">
+      <div class="f"><div class="k">Reached target first</div>
+        <div class="v fig">{{ plan.probability|pct }}</div>
+        <div class="n">95% range {{ plan.prob_low|pct }}–{{ plan.prob_high|pct }}</div></div>
+      <div class="f"><div class="k">Expectancy</div>
+        <div class="v fig {{ 'gain' if (plan.expectancy_r or 0) > 0 else 'loss' }}">
+          {{ plan.expectancy_r|signed(3) }}R</div>
+        <div class="n">per trade, after costs</div></div>
+      <div class="f"><div class="k">Needs</div>
+        <div class="v fig">{{ (plan.breakeven_rate or calib.breakeven)|pct }}</div>
+        <div class="n">to break even</div></div>
+      <div class="f"><div class="k">Sample</div>
+        <div class="v fig">{{ plan.prob_samples }}</div>
+        <div class="n">{{ 'similar setups' if plan.prob_reliable else 'too few to trust' }}</div></div>
+      <div class="f"><div class="k">Typical hold</div>
+        <div class="v fig">{{ "%.0f"|format(calib.avg_bars_held or 0) }}</div>
+        <div class="n">bars, about
+          {{ hold_text }}</div></div>
+      {% if calib.holdout_hit_rate is not none %}
+      <div class="f"><div class="k">Most recent third</div>
+        <div class="v fig {{ 'gain' if (calib.holdout_expectancy or 0) > 0 else 'loss' }}">
+          {{ calib.holdout_expectancy|signed(3) }}R</div>
+        <div class="n">{{ calib.holdout_samples }} of them</div></div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <p class="prose">{{ plan.edge_verdict }}</p>
+    {% if calib.cost_r >= 0.25 %}
+      <p class="prose"><b class="loss">Costs are the problem here.</b>
+        {{ "%.2f"|format(calib.cost_r) }}R per round trip at
+        {{ "%.0f"|format(calib.cost_bps) }} basis points. Fees alone eat most of
+        the risk budget on this instrument and interval.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section>
+  <div class="cols b">
+    {% if calib.curve %}
+    <div class="card pad0">
+      <div class="cardhead">
+        <span class="eyebrow">Does conviction predict the outcome?</span>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Conviction</th><th class="r">Setups</th>
+            <th class="r">Hit rate</th><th style="width:38%"></th></tr></thead>
+          <tbody>
+          {% set be = plan.breakeven_rate or calib.breakeven %}
+          {% for row in calib.curve %}
+            <tr>
+              <td class="fig soft">{{ "%.2f"|format(row.low) }}–{{ "%.2f"|format(row.high) }}</td>
+              <td class="r fig soft">{{ row.n }}</td>
+              <td class="r fig {{ 'gain' if row.hit_rate > be else 'loss' }}">{{ row.hit_rate|pct }}</td>
+              <td><div class="meter"><i style="width:{{ (row.hit_rate*100)|round(1) }}%;
+                background:{{ 'var(--gain)' if row.hit_rate > be else 'var(--loss)' }}"></i></div></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+        If the hit rate does not climb as conviction rises, the score is not
+        carrying information. Rows in green clear the {{ be|pct }} break-even line.
+      </p>
+    </div>
+    {% endif %}
+
+    <div class="card pad0">
+      <div class="cardhead"><span class="eyebrow">Where the signal comes from</span></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Family</th><th style="width:90px"></th>
+            <th class="r">Lean</th><th class="r">Active</th></tr></thead>
+          <tbody>
+          {% for f in families %}
+            <tr>
+              <td>{{ f.name.replace('_',' ')|capitalize }}</td>
+              <td>{{ lean(f.lean) }}</td>
+              <td class="r fig {{ 'gain' if f.lean > 0 else 'loss' if f.lean < 0 else 'soft' }}">
+                {{ f.lean|signed }}</td>
+              <td class="r fig soft">{{ f.active }}/{{ f.total }}</td>
+            </tr>
+          {% endfor %}
+            <tr>
+              <td><b>Combined</b></td><td>{{ lean(r.composite) }}</td>
+              <td class="r fig"><b>{{ r.composite|signed }}</b></td><td></td>
+            </tr>
+            <tr>
+              <td><b>With news</b></td><td>{{ lean(plan.conviction) }}</td>
+              <td class="r fig"><b>{{ plan.conviction|signed }}</b></td>
+              <td class="r faint">final</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+        Agreement inside one family is discounted. Ten trend strategies nodding
+        along is one observation about trend, not ten.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>Strategy detail</h2>
+    <span class="tail">strongest 12 of {{ r.signals|length }}</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Strategy</th><th>Family</th><th style="width:88px"></th>
+          <th class="r">Score</th><th class="r">Weight</th><th>What it sees</th></tr></thead>
+        <tbody>
+        {% for s in ranked[:12] %}
+          <tr>
+            <td>{{ s.name.replace('_',' ')|capitalize }}</td>
+            <td class="soft">{{ s.family.replace('_',' ') }}</td>
+            <td>{{ lean(s.score) }}</td>
+            <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
+              {{ s.score|signed }}</td>
+            <td class="r fig soft">{{ "%.2f"|format(s.weight) }}</td>
+            <td class="soft">{{ s.reason }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+{% if r.strategy_report and r.strategy_report.overall %}
+{% set best = r.strategy_report.best(minimum=40, limit=5) %}
+{% set worst = r.strategy_report.worst(minimum=40, limit=3) %}
+{% if best or worst %}
+<section>
+  <div class="sechead">
+    <h2>What {{ r.bars.symbol }} taught the bot</h2>
+    <span class="tail">{{ r.strategy_report.samples }} setups tested</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Strategy</th><th>Family</th><th class="r">Setups</th>
+          <th class="r">Hit rate</th><th class="r">Net R</th>
+          <th class="r">Weight given</th></tr></thead>
+        <tbody>
+        {% for st in best + worst %}
+          <tr>
+            <td>{{ st.name.replace('_',' ')|capitalize }}</td>
+            <td class="soft">{{ st.family.replace('_',' ') }}</td>
+            <td class="r fig soft">{{ st.n }}</td>
+            <td class="r fig">{{ st.hit_rate|pct }}</td>
+            <td class="r fig {{ 'gain' if st.expectancy > 0 else 'loss' }}">
+              {{ st.expectancy|signed(3) }}</td>
+            <td class="r fig">{{ "%.2f"|format(st.multiplier()) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      These weights were applied to the call above. A strategy that lost money
+      on this instrument is trusted less here, whatever its reputation elsewhere.
+    </p>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+
+<section>
+  <div class="cols c">
+    <div class="card pad0">
+      <div class="cardhead"><span class="eyebrow">News and chatter</span></div>
+      <div style="padding:0 var(--s3)">
+        <div class="figs" style="margin-bottom:var(--s2)">
+          <div class="f"><div class="k">Overall</div>
+            <div class="v fig {{ 'gain' if r.sentiment.score > 0.1 else 'loss' if r.sentiment.score < -0.1 else '' }}">
+              {{ r.sentiment.score|signed }}</div>
+            <div class="n">{{ r.sentiment.label() }}</div></div>
+          <div class="f"><div class="k">Headlines</div>
+            <div class="v fig">{{ r.sentiment.n_news }}</div></div>
+          <div class="f"><div class="k">Posts</div>
+            <div class="v fig">{{ r.sentiment.n_social }}</div>
+            <div class="n">{{ r.sentiment.bullish_tags }} bull ·
+              {{ r.sentiment.bearish_tags }} bear</div></div>
+        </div>
+      </div>
+      {% if r.sentiment.items %}
+        <div class="tablewrap">
+          <table>
+            <tbody>
+            {% for it in r.sentiment.items[:6] %}
+              <tr>
+                <td class="r fig {{ 'gain' if it.score > 0.1 else 'loss' if it.score < -0.1 else 'soft' }}"
+                    style="width:56px">{{ it.score|signed }}</td>
+                <td>{{ it.text[:108] }}
+                  <span class="faint">· {{ "%.1f"|format(it.age_hours) }}h ·
+                    {{ it.kind }}</span></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="blank">No news retrieved for this instrument.</div>
+      {% endif %}
+      <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+        Scored by {{ r.sentiment.method }}.
+      </p>
+    </div>
+
+    <div>
+      {% if plan.risks %}
+      <div class="card">
+        <span class="eyebrow">Worth knowing</span>
+        <ul class="list warn">{% for x in plan.risks %}<li>{{ x }}</li>{% endfor %}</ul>
+      </div>
+      {% endif %}
+      {% if overlap and overlap.warnings %}
+      <div class="card" style="border-color:var(--hold)">
+        <span class="eyebrow" style="color:var(--hold)">Against what you already hold</span>
+        <ul class="list warn">
+          {% for w in overlap.warnings %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+        {% if overlap.pairs %}
+          <div class="tablewrap" style="margin-top:var(--s2)">
+            <table>
+              <thead><tr><th>Open position</th><th class="r">Correlation</th></tr></thead>
+              <tbody>
+              {% for p in overlap.pairs[:6] %}
+                <tr>
+                  <td>{{ p.symbol }}</td>
+                  <td class="r fig {{ 'loss' if p.correlation >= 0.75
+                                      else 'hold' if p.correlation >= 0.6
+                                      else 'soft' }}">
+                    {{ "%.2f"|format(p.correlation) }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="prose" style="margin-top:var(--s2)">
+            Measured over {{ overlap.samples }} shared daily returns. Correlation
+            rises toward one in a sell-off, so these numbers flatter the account
+            on exactly the day it matters most.
+          </p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if calendar_rows %}
+      <div class="card">
+        <span class="eyebrow">Already on the calendar</span>
+        <dl class="pairs">
+          {% for row in calendar_rows %}
+            <dt>{{ row.label }}{% if row.estimated %}
+              <span class="faint">estimated</span>{% endif %}</dt>
+            <dd><span class="fig">{{ row.when }}</span>
+              <span class="faint">
+                {{ 'today' if row.days < 1 else
+                   'tomorrow' if row.days < 2 else
+                   '%d days'|format(row.days|round(0,'floor')|int) }}</span></dd>
+          {% endfor %}
+        </dl>
+        <p class="prose" style="margin-top:var(--s2)">
+          A scheduled event inside the holding window is listed above under
+          things worth knowing. One outside it is here for context only.
+        </p>
+      </div>
+      {% endif %}
+      {% if plan.confirmations %}
+      <div class="card">
+        <span class="eyebrow">Check before you enter</span>
+        <ul class="list ok">{% for x in plan.confirmations %}<li>{{ x }}</li>{% endfor %}</ul>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+{% if request.args.get('alert_set') %}
+  <div class="saved" style="margin-top:var(--s3)">
+    Alert set. It is listed on the <a href="{{ url_for('monitor') }}">Monitor</a>
+    page, which is where it gets checked.
+  </div>
+{% endif %}
+
+{% if suggestions %}
+<section>
+  <div class="sechead">
+    <h2>Worth being told about</h2>
+    <span class="tail">set one and the Monitor page checks it</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Condition</th><th>Why this one</th><th></th></tr></thead>
+        <tbody>
+        {% for sg in suggestions %}
+          <tr>
+            <td>{{ sg.label }}</td>
+            <td class="soft">{{ sg.why }}</td>
+            <td class="r">
+              <form method="post" action="{{ url_for('add_alert') }}">
+                <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+                <input type="hidden" name="kind" value="{{ sg.kind }}">
+                <input type="hidden" name="threshold" value="{{ sg.threshold }}">
+                <input type="hidden" name="interval" value="{{ r.bars.interval }}">
+                <input type="hidden" name="note" value="{{ sg.why }}">
+                <input type="hidden" name="back" value="{{ request.full_path }}">
+                <button class="btn quiet sm" type="submit">Set it</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      Nothing runs while this window is closed. These are checked when you open
+      the Monitor page or run a routine, and each one says when it last looked.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+<div style="display:flex;gap:var(--s1);margin-top:var(--s4);flex-wrap:wrap">
+  <a class="btn" data-working
+     href="{{ url_for('research', symbol=r.bars.symbol, interval=r.bars.interval) }}">
+    Research the business</a>
+  <form method="post" action="{{ url_for('watch', action='add') }}">
+    <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+    <input type="hidden" name="interval" value="{{ r.bars.interval }}">
+    <input type="hidden" name="back" value="{{ request.full_path }}">
+    <button class="btn quiet" type="submit">Add to watchlist</button>
+  </form>
+</div>
+
+<p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
+  <a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
+  · Data from Yahoo Finance, Google News and StockTwits
+  {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
+</p>
+
+{% endblock %}

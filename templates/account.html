@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% set active = 'account' %}
+{% block title %}Account · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Your account</h1>
+  <p>What is yours, what is shared, and how to take either one with you.</p>
+</div>
+
+<div class="card">
+  <div class="whoami">
+    {% if current_user.picture %}
+      <img class="avatar" src="{{ current_user.picture }}" alt="" width="52" height="52">
+    {% else %}
+      <span class="avatar letter" aria-hidden="true">{{ current_user.initial }}</span>
+    {% endif %}
+    <div>
+      <div style="font-family:var(--serif);font-size:var(--t-md)">
+        {{ current_user.display }}</div>
+      <div class="soft">{{ current_user.email }}</div>
+      <div class="faint" style="font-size:var(--t-xs);margin-top:2px">
+        {% if current_user.is_local %}
+          Signed in as the local account, because this installation has no
+          sign-in configured.
+        {% else %}
+          Signed in with {{ current_user.provider|capitalize }}.
+        {% endif %}
+      </div>
+    </div>
+    {% if not current_user.is_local %}
+      <form method="post" action="{{ url_for('signout') }}" style="margin-left:auto">
+        <button class="btn quiet" type="submit">Sign out</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<section>
+  <div class="sechead"><h2>What belongs to you</h2>
+    <span class="tail">nobody else signed in here can read any of it</span></div>
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Trades</div>
+        <div class="v fig">{{ counts.trades }}</div></div>
+      <div class="f"><div class="k">Analyses run</div>
+        <div class="v fig">{{ counts.runs }}</div></div>
+      <div class="f"><div class="k">Watching</div>
+        <div class="v fig">{{ counts.watchlist }}</div></div>
+      <div class="f"><div class="k">Alerts</div>
+        <div class="v fig">{{ counts.alerts }}</div></div>
+      <div class="f"><div class="k">Theses</div>
+        <div class="v fig">{{ counts.theses }}</div></div>
+    </div>
+    <p class="prose" style="margin-top:var(--s3)">
+      The measured strategy record is deliberately not on this list. It is a set
+      of measurements about how strategies behave on particular instruments,
+      which is a fact about the market rather than about you, and every analysis
+      anyone runs makes it better for everyone. It stays when an account goes.
+    </p>
+    <div style="display:flex;gap:var(--s1);flex-wrap:wrap;margin-top:var(--s3)">
+      {% for key, spec in datasets.items() %}
+        <a class="btn quiet sm" href="{{ url_for('export_data', dataset=key, fmt='csv') }}">
+          {{ spec.label }} as CSV</a>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+{% if everyone and everyone|length > 1 %}
+<section>
+  <div class="sechead"><h2>Accounts on this installation</h2>
+    <span class="count">{{ everyone|length }}</span>
+    <span class="tail">visible because you are the local account</span></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Who</th><th>Email</th><th>Signed in with</th></tr></thead>
+        <tbody>
+        {% for person in everyone %}
+          <tr>
+            <td><b>{{ person.display }}</b>
+              {% if person.id == current_user.id %}
+                <span class="chip mute">you</span>{% endif %}</td>
+            <td class="soft">{{ person.email }}</td>
+            <td class="soft">{{ person.provider }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      Each of these sees only their own journal. This list exists so that whoever
+      runs the installation can see who has signed in, not so anyone can read
+      anyone else's positions.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% if not current_user.is_local %}
+<section>
+  <div class="sechead"><h2>Leaving</h2></div>
+  <div class="card" style="border-color:var(--loss)">
+    <span class="eyebrow" style="color:var(--loss)">This cannot be undone</span>
+    <p class="prose" style="margin-top:var(--s1)">
+      Deleting your account removes your trades, watchlist, alerts, saved theses
+      and analysis history immediately and permanently. Download anything you
+      want to keep first, using the buttons above. The shared strategy record
+      stays, because it was never yours alone.
+    </p>
+    <form method="post" action="{{ url_for('delete_account') }}"
+          onsubmit="return confirm('Delete this account and everything in it? This cannot be undone.');"
+          style="margin-top:var(--s3);display:flex;gap:var(--s1);align-items:flex-end;flex-wrap:wrap">
+      <div class="setfield" style="flex:0 1 240px">
+        <label for="confirm">Type <b>delete</b> to confirm</label>
+        <input class="field" id="confirm" name="confirm" type="text"
+               autocomplete="off" placeholder="delete" required>
+      </div>
+      <button class="btn" type="submit"
+              style="background:var(--loss);border-color:var(--loss)">
+        Delete my account</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

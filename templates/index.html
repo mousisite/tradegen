@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>What should I do with this?</h1>
+  <p>Enter a stock, ETF or crypto ticker. You get a call with levels, position
+    size, and the measured odds behind it, not a guess.</p>
+</div>
+
+<div class="card">
+  <form class="searchrow" action="{{ url_for('analyse') }}" method="get" data-working>
+    <label class="sr" for="symbol">Ticker or company name</label>
+    <input class="field" id="symbol" type="text" name="symbol"
+           placeholder="AAPL, NVDA, BTC-USD, Tesla…"
+           autofocus autocomplete="off" spellcheck="false" required>
+    <label class="sr" for="interval">Bar interval</label>
+    <select class="field" id="interval" name="interval">
+      {% for code, label in intervals %}
+        <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Analyse</button>
+  </form>
+  <div class="pills">
+    {% for s in ['AAPL','NVDA','TSLA','MSFT','SPY','BTC-USD','ETH-USD'] %}
+      <a data-working href="{{ url_for('analyse', symbol=s, interval='1d') }}">{{ s }}</a>
+    {% endfor %}
+  </div>
+  <p class="prose" style="margin-top:var(--s2)">
+    Daily bars are preselected because they are the only interval where this
+    bot has measured positive expectancy. Shorter intervals lose to trading
+    costs before the strategy gets a say.
+  </p>
+
+  {# Screenshot route. The image only identifies the instrument; the analysis
+     itself always runs on live data. #}
+  <form id="shotform" action="{{ url_for('analyse_image') }}" method="post"
+        enctype="multipart/form-data">
+    <input type="hidden" name="interval" id="shotinterval" value="1d">
+    <label class="drop {{ '' if has_key else 'locked' }}" id="drop"
+           for="chart" {{ '' if has_key else 'aria-disabled=true' }}>
+      <img id="thumb" class="thumb" alt="" hidden>
+      <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="15" rx="2"/>
+        <path d="M3 15l4.5-4.5 3.5 3 4-4L21 15"/>
+        <circle cx="8.5" cy="8.5" r="1.2"/>
+      </svg>
+      {% if has_key %}
+        <span class="head" id="drophead">Or drop a chart screenshot here</span>
+        <span class="sub">Click to browse, drag an image in, or paste with
+          Ctrl+V. It reads the ticker for you.</span>
+      {% else %}
+        <span class="head">Screenshot reading needs an API key</span>
+        <span class="sub">Add <b>ANTHROPIC_API_KEY</b> to the .env file in this
+          folder and restart. Typing a ticker works either way.</span>
+      {% endif %}
+      <input type="file" id="chart" name="chart" accept="image/*"
+             {{ '' if has_key else 'disabled' }}>
+    </label>
+  </form>
+</div>
+
+{% if has_key %}
+<script>
+  (function () {
+    var form  = document.getElementById('shotform');
+    var input = document.getElementById('chart');
+    var zone  = document.getElementById('drop');
+    var head  = document.getElementById('drophead');
+    var thumb = document.getElementById('thumb');
+    var busy  = document.getElementById('working');
+    var ivSel = document.getElementById('interval');
+    var ivOut = document.getElementById('shotinterval');
+
+    function send(file) {
+      if (!file || !file.type.startsWith('image/')) { return; }
+      // Show the chart back to the user so it is obvious which image is going.
+      var reader = new FileReader();
+      reader.onload = function (e) { thumb.src = e.target.result; thumb.hidden = false; };
+      reader.readAsDataURL(file);
+
+      var data = new DataTransfer();
+      data.items.add(file);
+      input.files = data.files;
+      ivOut.value = ivSel.value;
+      head.textContent = 'Reading the chart…';
+      busy.classList.add('on');
+      form.submit();
+    }
+
+    input.addEventListener('change', function () { send(input.files[0]); });
+
+    ['dragenter', 'dragover'].forEach(function (evt) {
+      zone.addEventListener(evt, function (e) {
+        e.preventDefault(); zone.classList.add('over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (evt) {
+      zone.addEventListener(evt, function (e) {
+        e.preventDefault(); zone.classList.remove('over');
+      });
+    });
+    zone.addEventListener('drop', function (e) {
+      if (e.dataTransfer.files.length) { send(e.dataTransfer.files[0]); }
+    });
+
+    // Win+Shift+S then Ctrl+V anywhere on the page.
+    document.addEventListener('paste', function (e) {
+      var items = (e.clipboardData || {}).items || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') === 0) {
+          send(items[i].getAsFile());
+          e.preventDefault();
+          return;
+        }
+      }
+    });
+  })();
+</script>
+{% endif %}
+
+{% if summary.trades or open_trades %}
+<section>
+  <div class="sechead">
+    <h2>Your record</h2>
+    <span class="tail"><a href="{{ url_for('trades') }}">Open the journal</a></span>
+  </div>
+
+  {% if summary.trades %}
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Closed trades</div>
+        <div class="v fig">{{ summary.trades }}</div>
+        <div class="n">{{ summary.open }} still open</div></div>
+      <div class="f"><div class="k">Hit rate</div>
+        <div class="v fig">{{ summary.hit_rate|pct }}</div>
+        <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost</div></div>
+      <div class="f"><div class="k">Expectancy</div>
+        <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
+          {{ summary.expectancy_r|signed(3) }}R</div>
+        <div class="n">per trade</div></div>
+      <div class="f"><div class="k">Total</div>
+        <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
+          {{ summary.total_r|signed(2) }}R</div>
+        <div class="n">{{ summary.pnl|money }} cash</div></div>
+      <div class="f"><div class="k">Worst drawdown</div>
+        <div class="v fig">{{ "%.2f"|format(summary.max_drawdown_r) }}R</div></div>
+    </div>
+    {% if summary.trades < 30 %}
+      <p class="prose" style="margin-top:var(--s3)">
+        {{ summary.trades }} closed trades cannot separate skill from luck.
+        Treat all of this as provisional until you pass about thirty.
+      </p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if open_trades %}
+  <div class="card pad0" style="margin-top:var(--s3)">
+    <div class="cardhead"><span class="eyebrow">Open positions</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th>Side</th><th class="r">Entry</th>
+          <th class="r">Stop</th><th class="r">Target</th><th class="r">At risk</th>
+        </tr></thead>
+        <tbody>
+        {% for t in open_trades %}
+          <tr>
+            <td><b>{{ t['symbol'] }}</b></td>
+            <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
+              {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
+            <td class="r fig">{{ t['entry']|price }}</td>
+            <td class="r fig loss">{{ t['stop']|price }}</td>
+            <td class="r fig gain">{{ t['target1']|price }}</td>
+            <td class="r fig soft">{{ t['risk_amount']|money }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+<section>
+  <div class="sechead">
+    <h2>Recent analyses</h2>
+    <span class="tail">
+      {{ "{:,}".format(counts.runs) }} run{{ '' if counts.runs == 1 else 's' }} ·
+      {{ "{:,}".format(counts.strategy_stats) }} strategy records ·
+      {{ counts.symbols_seen }} instrument{{ '' if counts.symbols_seen == 1 else 's' }}
+    </span>
+  </div>
+  <div class="card pad0">
+    {% if runs %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>When</th><th>Instrument</th><th>Bars</th><th>Conditions</th>
+          <th class="r">Conviction</th><th>Call</th><th class="r">Entry</th>
+          <th class="r">Expectancy</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for r in runs %}
+          <tr>
+            <td class="faint">{{ r['ts']|ago }}</td>
+            <td><b>{{ r['symbol'] }}</b></td>
+            <td class="fig soft">{{ r['interval'] }}</td>
+            <td class="soft">{{ (r['regime_trend'] or '—')|capitalize }}</td>
+            <td class="r fig">{{ r['conviction']|signed }}</td>
+            <td>
+              {% set a = r['action'] %}
+              <span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
+                                   else 'hold' if a == 'WAIT' else 'mute' }}">
+                {{ a|capitalize }}</span>
+            </td>
+            <td class="r fig">{{ r['entry']|price }}</td>
+            <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}">
+              {{ r['expectancy_r']|signed(3) }}</td>
+            <td class="r"><a data-working
+              href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval']) }}">Run again</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing analysed yet. Enter a ticker above to start.</div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

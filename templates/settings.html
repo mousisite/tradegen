@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% set active = 'settings' %}
+{% block title %}Settings · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Settings</h1>
+  <p>These change what the bot recommends and how much it tells you to buy.
+    The broker cost figures matter more than anything else on this page.</p>
+</div>
+
+{% if saved %}
+  <div class="saved">Saved. New settings apply to the next analysis you run.</div>
+{% endif %}
+{% if error %}
+  <div class="saved" style="background:var(--loss-wash);border-color:var(--loss);color:var(--loss)">
+    {{ error }}
+  </div>
+{% endif %}
+
+<form method="post" action="{{ url_for('settings') }}">
+
+<section style="margin-top:0">
+  <div class="sechead"><h2>Your account</h2></div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="account_size">Account size</label>
+        <input class="field fig" id="account_size" name="account_size" type="number"
+               step="any" min="1" value="{{ cfg.account_size }}">
+        <div class="hint">Used to work out position sizes. It never leaves this machine.</div>
+      </div>
+      <div class="setfield">
+        <label for="risk_per_trade_pct">Risk per trade</label>
+        <input class="field fig" id="risk_per_trade_pct" name="risk_per_trade_pct"
+               type="number" step="any" min="0.01" max="10" value="{{ cfg.risk_per_trade_pct }}">
+        <div class="hint">Percent of the account you lose if the stop is hit. One
+          percent is a common ceiling.</div>
+      </div>
+      <div class="setfield">
+        <label for="max_position_pct">Largest position</label>
+        <input class="field fig" id="max_position_pct" name="max_position_pct"
+               type="number" step="any" min="1" max="100" value="{{ cfg.max_position_pct }}">
+        <div class="hint">Percent of the account in any one instrument. On small
+          accounts this cap usually binds before the risk figure does.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead">
+    <h2>What your broker charges</h2>
+    <span class="tail">the setting that changes the verdict most</span>
+  </div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="cost_bps_equity">Stocks and ETFs, round trip</label>
+        <input class="field fig" id="cost_bps_equity" name="cost_bps_equity"
+               type="number" step="any" min="0" value="{{ cfg.cost_bps_equity }}">
+        <div class="hint">Basis points, in and out combined. 2 is typical for a
+          commission-free broker paying only the spread.</div>
+      </div>
+      <div class="setfield">
+        <label for="cost_bps_crypto">Crypto, round trip</label>
+        <input class="field fig" id="cost_bps_crypto" name="cost_bps_crypto"
+               type="number" step="any" min="0" value="{{ cfg.cost_bps_crypto }}">
+        <div class="hint">20 means 0.1% taker fee on each side, which is normal
+          on a retail exchange.</div>
+      </div>
+    </div>
+    <p class="prose" style="margin-top:var(--s3)">
+      <b>Why this dominates everything.</b> On five-minute crypto bars, a 20
+      basis point round trip costs about 1.4 times the entire stop distance.
+      That pushes the break-even win rate near 98%, which nothing achieves. Put
+      your real numbers here before you trust a single call.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>How trades are built</h2></div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="interval">Default interval</label>
+        <select class="field" id="interval" name="interval">
+          {% for code, label in intervals %}
+            <option value="{{ code }}" {{ 'selected' if code == cfg.interval }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">Daily is the only interval measured with positive
+          expectancy so far.</div>
+      </div>
+      <div class="setfield">
+        <label for="stop_atr_multiple">Stop distance</label>
+        <input class="field fig" id="stop_atr_multiple" name="stop_atr_multiple"
+               type="number" step="0.1" min="0.2" max="10" value="{{ cfg.stop_atr_multiple }}">
+        <div class="hint">In ATR, the instrument's own volatility unit. Wider
+          stops survive noise but risk more per unit.</div>
+      </div>
+      <div class="setfield">
+        <label for="target_atr_multiple">First target</label>
+        <input class="field fig" id="target_atr_multiple" name="target_atr_multiple"
+               type="number" step="0.1" min="0.2" max="20" value="{{ cfg.target_atr_multiple }}">
+        <div class="hint">Also in ATR. Together with the stop this sets your
+          reward to risk.</div>
+      </div>
+      <div class="setfield">
+        <label for="horizon_bars">Give it this long</label>
+        <input class="field fig" id="horizon_bars" name="horizon_bars"
+               type="text" inputmode="numeric" value="{{ cfg.horizon_bars }}">
+        <div class="hint">Bars a setup gets to work before it is closed at
+          whatever it is worth. <b>auto</b> scales it to the interval, which
+          matters: a fixed 24 bars is two hours on 5-minute bars but five weeks
+          on daily ones.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>How cautious to be</h2></div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="min_conviction">Minimum conviction</label>
+        <input class="field fig" id="min_conviction" name="min_conviction"
+               type="number" step="0.01" min="0" max="1" value="{{ cfg.min_conviction }}">
+        <div class="hint">Below this the bot proposes nothing at all.</div>
+      </div>
+      <div class="setfield">
+        <label for="strong_conviction">Buy at market above</label>
+        <input class="field fig" id="strong_conviction" name="strong_conviction"
+               type="number" step="0.01" min="0" max="1" value="{{ cfg.strong_conviction }}">
+        <div class="hint">Under this it will tell you to wait for a better
+          price instead of paying the spread now.</div>
+      </div>
+      <div class="setfield">
+        <label for="require_positive_expectancy">Refuse losing setups</label>
+        <select class="field" id="require_positive_expectancy" name="require_positive_expectancy">
+          <option value="1" {{ 'selected' if cfg.require_positive_expectancy }}>Yes, stand aside</option>
+          <option value="0" {{ '' if cfg.require_positive_expectancy else 'selected' }}>No, show the plan anyway</option>
+        </select>
+        <div class="hint">When a setup has lost money historically on that
+          instrument, refuse it however good the indicators look. Leave this on.</div>
+      </div>
+      <div class="setfield">
+        <label for="allow_shorts">Short selling</label>
+        <select class="field" id="allow_shorts" name="allow_shorts">
+          <option value="0" {{ '' if cfg.allow_shorts else 'selected' }}>Long only</option>
+          <option value="1" {{ 'selected' if cfg.allow_shorts }}>Allow shorts</option>
+        </select>
+        <div class="hint">With shorts off, a bearish read simply becomes
+          "do not buy".</div>
+      </div>
+      <div class="setfield">
+        <label for="use_llm_sentiment">Headline scoring</label>
+        <select class="field" id="use_llm_sentiment" name="use_llm_sentiment">
+          <option value="1" {{ 'selected' if cfg.use_llm_sentiment }}>Use Claude when a key is set</option>
+          <option value="0" {{ '' if cfg.use_llm_sentiment else 'selected' }}>Keyword scoring only</option>
+        </select>
+        <div class="hint">
+          {% if has_key %}A key is set, so headlines are read properly.
+          {% else %}No API key found, so keyword scoring is in use either way.
+            Add one to <b>.env</b> to improve it.{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>Background checking</h2>
+    <span class="tail">only while this window is open</span></div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="alert_check_minutes">Check alerts every</label>
+        <input class="field fig" id="alert_check_minutes" name="alert_check_minutes"
+               type="number" step="1" min="0" max="240"
+               value="{{ cfg.alert_check_minutes }}">
+        <div class="hint">Minutes. 0 switches it off. Below 1 minute is refused,
+          because the data sources are free and rate limited.</div>
+      </div>
+    </div>
+    {% if scheduler %}
+      <div class="figs" style="margin-top:var(--s3)">
+        <div class="f"><div class="k">State</div>
+          <div class="v fig {{ 'gain' if scheduler.running else 'loss' }}">
+            {{ 'running' if scheduler.running else 'stopped' }}</div></div>
+        <div class="f"><div class="k">Checks run</div>
+          <div class="v fig">{{ scheduler.runs }}</div></div>
+        <div class="f"><div class="k">Failures</div>
+          <div class="v fig {{ 'loss' if scheduler.failures else '' }}">
+            {{ scheduler.failures }}</div></div>
+        <div class="f"><div class="k">Last looked</div>
+          <div class="v fig">{{ scheduler.last_run|ago if scheduler.last_run else 'not yet' }}</div></div>
+      </div>
+      {% if scheduler.last_error %}
+        <p class="prose" style="color:var(--loss);margin-top:var(--s2)">
+          Last error: {{ scheduler.last_error }}</p>
+      {% endif %}
+    {% endif %}
+    <p class="prose" style="margin-top:var(--s3)">
+      <b>Nothing runs when this window is closed.</b> The check happens inside
+      the server process, so stopping the server stops the watching. An alert
+      that must survive a closed laptop needs the app hosted somewhere that
+      stays up, which this does not pretend to be.
+    </p>
+  </div>
+</section>
+
+<div style="display:flex;gap:var(--s1);margin-top:var(--s4);flex-wrap:wrap">
+  <button class="btn" type="submit">Save settings</button>
+  <a class="btn quiet" href="{{ url_for('settings', reset='1') }}">Restore defaults</a>
+</div>
+
+</form>
+
+<section>
+  <div class="sechead"><h2>Take your data with you</h2>
+    <span class="tail">no account needed, nothing phoned home</span></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>What</th><th class="r">Rows</th><th>Why you would want it</th>
+          <th class="r">Download</th></tr></thead>
+        <tbody>
+        {% for key, spec in datasets.items() %}
+          <tr>
+            <td><b>{{ spec.label }}</b></td>
+            <td class="r fig {{ 'faint' if not export_counts.get(key) }}">
+              {{ "{:,}".format(export_counts.get(key, 0)) }}</td>
+            <td class="soft">{{ spec.why }}</td>
+            <td class="r">
+              {% if export_counts.get(key) %}
+                <a href="{{ url_for('export_data', dataset=key, fmt='csv') }}">CSV</a>
+                ·
+                <a href="{{ url_for('export_data', dataset=key, fmt='json') }}">JSON</a>
+              {% else %}
+                <span class="faint">nothing yet</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      The measured strategy record is the slowest of these to rebuild, because
+      it is the accumulated result of back-testing everything you have looked
+      at. Keep a copy of it before doing anything drastic to the database.
+    </p>
+  </div>
+</section>
+
+<p class="legal">
+  Settings are written to <b>config.json</b> in the project folder. You can edit
+  that file directly if you prefer; the two stay in sync. The database lives in
+  <b>data/stockbot.db</b>. Both can be moved elsewhere with the
+  <b>STOCKBOT_CONFIG</b> and <b>STOCKBOT_DB</b> environment variables, which is
+  how you keep a paper journal separate from a live one.
+</p>
+
+{% endblock %}
