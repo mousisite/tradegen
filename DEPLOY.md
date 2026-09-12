@@ -21,20 +21,22 @@ Nothing else. No database to provision, no Redis, no build step.
 
 ## 1. Get the code onto the host
 
-The repository is not a git repository yet. Make it one and push it somewhere
-the host can read:
+The repository is already initialised, committed, and on a `main` branch.
+Create an empty repository on GitHub and push to it:
 
 ```
-git init
-git add -A
-git commit -m "Stock Bot"
-git branch -M main
 git remote add origin <your empty GitHub repo>
 git push -u origin main
 ```
 
-`.gitignore` already excludes `.env`, `data/`, and the bundled runtime, so no
-credential and no journal leaves your machine.
+`.gitignore` excludes `.env`, `config.json`, `data/`, `backups/` and the
+bundled runtime, so no credential and no journal leaves your machine. That was
+checked against the staged files before the first commit, not merely assumed:
+nothing matching an API key, a client secret or a private key is in the
+history.
+
+If you would rather the repository were private, make it private on GitHub
+before pushing. Both hosts can deploy from a private repository.
 
 ---
 
