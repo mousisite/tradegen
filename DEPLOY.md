@@ -10,12 +10,38 @@ waiting for Google.
 
 | | What | Where |
 |---|---|---|
-| 1 | A hosting account | [render.com](https://render.com) or [fly.io](https://fly.io). Both give free HTTPS, which Google requires |
+| 1 | A hosting account | [render.com](https://render.com) or [fly.io](https://fly.io). Both terminate HTTPS for you, which Google requires. **Not free — see below** |
 | 2 | A Google Cloud project | [console.cloud.google.com](https://console.cloud.google.com) |
 | 3 | An email address for support | Google's consent screen asks for one and shows it to users |
 | 4 | An Anthropic API key *(optional)* | [console.anthropic.com](https://console.anthropic.com). Unlocks screenshot reading, better sentiment, and written reasoning |
 
 Nothing else. No database to provision, no Redis, no build step.
+
+### What it costs
+
+Be clear-eyed about this before Monday rather than after the first invoice.
+
+`render.yaml` asks for the **`starter`** instance type and a **1 GB disk**.
+Neither is on Render's free tier, and that is deliberate, for two reasons:
+
+- **A free instance has no persistent disk at all.** Without one the database
+  lives inside the container and every redeploy deletes the journal, the saved
+  theses and the accumulated strategy record. That is not a cheaper version of
+  this app; it is a broken one.
+- **A free instance sleeps when idle.** A sleeping process checks no alerts, so
+  the Monitor page would quietly stop doing the one thing it is for.
+
+Fly.io is the same shape: a volume and a machine that does not auto-stop.
+`fly.toml` already sets `auto_stop_machines = false` for exactly that reason.
+
+**Check the current price yourself on their pricing page.** I cannot look it up,
+and hosting prices change; I am not going to quote you a number I cannot
+verify. Expect a small monthly figure for the instance plus a little for the
+disk, on either host.
+
+If you want to spend nothing at all on Monday, the honest option is to run it
+on your own machine exactly as you do now and share nothing. There is no free
+configuration of this that also keeps your data and checks your alerts.
 
 ---
 
@@ -220,9 +246,10 @@ Then the few things no script can check:
 
 ## Things that will bite
 
-**The free tier sleeps.** On Render's free plan the service stops when idle,
-which stops alert checking. The `starter` plan in `render.yaml` does not. If
-alerts matter, do not use a sleeping tier.
+**Do not downgrade to a free instance to save money.** It costs you the disk,
+and without the disk every redeploy destroys the journal. It also sleeps, which
+stops alert checking. If the monthly cost is the problem, run it locally
+instead; a free deployment that loses your data is worse than no deployment.
 
 **The database is one file.** SQLite on a mounted disk is genuinely fine at this
 scale and will hold hundreds of users without complaint. What it will not

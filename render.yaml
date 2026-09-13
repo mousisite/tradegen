@@ -5,7 +5,11 @@ services:
   - type: web
     name: stockbot
     runtime: docker
-    plan: starter            # free tier sleeps, which stops alert checking
+    # A paid instance type, on purpose. Render's free tier has no persistent
+    # disk, so the database would live inside the container and every redeploy
+    # would delete the journal. It also sleeps when idle, which stops alert
+    # checking. Check current pricing on Render's site before deploying.
+    plan: starter
     healthCheckPath: /healthz
     disk:
       name: stockbot-data
