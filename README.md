@@ -594,6 +594,7 @@ config.json         risk, costs, thresholds, strategy weights
 data/stockbot.db    created on first run
 serve.py            production server (waitress), used by the container
 backup.py           consistent snapshots via SQLite's backup API, then verified
+preflight.py        checks a live deployment before anyone else sees it
 Dockerfile          the deployed image
 DEPLOY.md           putting it online, step by step
 tests/              every suite, runnable with tests/run_all.py

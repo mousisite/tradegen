@@ -181,6 +181,25 @@ written reasoning on the research page.
 
 ## Before you tell anyone about it
 
+Most of this is a script. Run it against the real address:
+
+```
+python preflight.py https://<your-address>
+```
+
+It checks roughly two dozen things: that the health check reaches the database,
+that the privacy and terms pages are readable by a stranger (which is what
+Google verifies), that the private pages are not, that sign-in reaches Google
+with PKCE and a state parameter, that the client secret is not in the redirect,
+and that the session cookie carries HttpOnly, Secure and SameSite. It also
+prints the exact callback address to paste into Google, so there is nothing to
+mistype.
+
+It is read-only: every request is a GET any visitor could make, so it is safe
+to run against a live deployment whenever you want.
+
+Then the few things no script can check:
+
 - [ ] `/healthz` returns ok
 - [ ] Sign in with a second Google account and confirm it sees an empty journal,
       not yours. This is the one that matters, and `tests/test_accounts.py`
