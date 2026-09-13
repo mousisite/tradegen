@@ -222,7 +222,12 @@ def session_secret(path: Optional[str] = None) -> bytes:
     try:
         if os.path.exists(path):
             with open(path, "rb") as fh:
-                existing = fh.read().strip()
+                existing = fh.read()
+            # Deliberately not stripped. These are random bytes, not text, and
+            # about one key in twenty begins or ends with a byte that happens
+            # to be whitespace; stripping those would silently return a
+            # different key from the one that was written, invalidating every
+            # session issued since the file was created.
             if len(existing) >= 32:
                 return existing
     except OSError:

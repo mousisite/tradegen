@@ -20,6 +20,7 @@ ROOT = os.path.dirname(HERE)
 SUITES = [
     ("test_templates.py",    False, "every page template compiles and links resolve"),
     ("test_sentiment.py",    False, "the news lexicon scores phrases the right way"),
+    ("test_upstream.py",     True,  "caching, single-flight and backing off a throttled source"),
     ("test_indicators.py",   True,  "indicator maths against known values"),
     ("test_pivots.py",       True,  "pivot levels sit in the right units"),
     ("test_strategies.py",   True,  "the 34 strategies fire sanely and agree on direction"),

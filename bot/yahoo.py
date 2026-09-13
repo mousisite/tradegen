@@ -19,6 +19,8 @@ from typing import Dict, Optional
 
 import requests
 
+from . import upstream
+
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
 
@@ -83,12 +85,24 @@ def _ensure(force: bool = False) -> None:
             _handshake()
 
 
+_HOST = "Yahoo Finance"
+
+
 def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
-    """GET an authenticated Yahoo endpoint and return parsed JSON.
+    """GET an authenticated Yahoo endpoint, cached and de-duplicated.
 
     A 401 means the crumb went stale, so the handshake is redone once and the
     request retried rather than surfacing a confusing authorisation error.
     """
+    key = "yahoo|%s|%s" % (url, sorted((params or {}).items()))
+    try:
+        return upstream.cached(key, lambda: _get_once(url, params, tries),
+                               host=_HOST)
+    except upstream.Throttled as exc:
+        raise YahooError(str(exc))
+
+
+def _get_once(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
     last = None
     for attempt in range(tries):
         _ensure(force=(attempt > 0 and last == 401))
@@ -103,12 +117,22 @@ def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
 
         if r.status_code == 200:
             try:
-                return r.json()
+                parsed = r.json()
             except ValueError:
                 raise YahooError("Yahoo returned something that was not JSON.")
+            upstream.note_ok(_HOST)
+            return parsed
         last = r.status_code
         if r.status_code == 404:
             raise YahooError("Yahoo has no data at %s" % url.rsplit("/", 1)[-1])
+        if upstream.is_throttle(r.status_code):
+            # Retrying into a rate limit makes it worse for everyone sharing
+            # this address, so stop here and let the breaker hold the door.
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+            raise YahooError(
+                "Yahoo is rate limiting this server (HTTP %s). Wait a minute "
+                "and try again; the limit is shared by everyone using this "
+                "installation." % r.status_code)
         time.sleep(0.4 * (attempt + 1))
 
     raise YahooError("Yahoo request failed after %d tries (last: %s)" % (tries, last))

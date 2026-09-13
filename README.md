@@ -615,6 +615,7 @@ bot/
 
   accounts.py       who owns what, sessions, and the shared/personal split
   auth.py           Google sign-in: authorization code flow with PKCE
+  upstream.py       caching, single-flight and backoff for the shared sources
   yahoo.py          authenticated Yahoo session: cookie, crumb, retry
   catalysts.py      earnings and dividend dates, and whether they fall in range
   scheduler.py      the background loop that actually checks alerts

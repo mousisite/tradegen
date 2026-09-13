@@ -292,6 +292,23 @@ foundation to take money on top of. Fine for a launch; plan to replace it before
 anyone pays.
 
 **Rate limits are shared now.** One person analysing ten instruments is nothing.
-Fifty people hitting Yahoo through one server address is a different thing.
-Watch for `/healthz` staying green while analyses start failing, which is what
-throttling looks like from the inside.
+Fifty people hitting Yahoo through one server address is a different thing,
+because the free sources count requests per address rather than per person.
+
+`bot/upstream.py` exists for this. It does three things:
+
+- **Caches identical requests for 45 seconds.** A portfolio page that made five
+  upstream requests makes none on the next load, and nothing measurable changes
+  in that window.
+- **Collapses simultaneous identical requests into one.** Twelve threads asking
+  for the same bars at the same moment produce one upstream request and all
+  twelve get its answer. Caching alone does not do this; the cache is still
+  empty when all twelve look.
+- **Stops asking when the source refuses.** After three throttling responses in
+  a row it opens a circuit breaker for a minute, honouring `Retry-After` where
+  one is given, and fails fast with a message saying so. Retrying into a rate
+  limit is how a shared address gets blocked rather than throttled.
+
+If you do see throttling, the symptom is `/healthz` staying green while
+analyses fail, and the message will say plainly that the limit is shared across
+the installation rather than a problem with the user's account.

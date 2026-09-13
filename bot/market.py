@@ -14,6 +14,8 @@ from typing import Optional
 import numpy as np
 import requests
 
+from . import upstream
+
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -118,20 +120,44 @@ class Bars:
         return self.session_id == self.session_id[-1]
 
 
-def _get(url: str, params: dict, tries: int = 3) -> dict:
+_HOST = "Yahoo Finance"
+
+
+def _fetch(url: str, params: dict, tries: int = 3) -> dict:
+    """One request, with retries that stop when the source says stop."""
     last = None
     for attempt in range(tries):
         try:
             r = requests.get(url, params=params, headers=_HEADERS, timeout=20)
             if r.status_code == 200:
+                upstream.note_ok(_HOST)
                 return r.json()
             last = "HTTP %s" % r.status_code
+            if upstream.is_throttle(r.status_code):
+                # Retrying into a rate limit is how a shared address gets
+                # blocked rather than throttled. Record it and give up now.
+                upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+                break
             if r.status_code in (404, 422):
                 break
         except requests.RequestException as exc:
             last = str(exc)
         time.sleep(0.6 * (attempt + 1))
     raise DataError("request to %s failed: %s" % (url, last))
+
+
+def _get(url: str, params: dict, tries: int = 3) -> dict:
+    """A request that may be answered from a recent identical one.
+
+    Keyed on the full query, so two callers asking for different ranges of the
+    same instrument are correctly treated as different requests.
+    """
+    key = "chart|%s|%s" % (url, sorted(params.items()))
+    try:
+        return upstream.cached(key, lambda: _fetch(url, params, tries),
+                               host=_HOST)
+    except upstream.Throttled as exc:
+        raise DataError(str(exc))
 
 
 def normalise_symbol(raw: str) -> str:

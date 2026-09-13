@@ -319,6 +319,23 @@ first = auth_mod.session_secret(key_path)
 second = auth_mod.session_secret(key_path)
 check("a key is generated", len(first) >= 32)
 check("it is stable across calls", first == second)
+
+# A key is random bytes, and roughly one in twenty begins or ends with a byte
+# that happens to be whitespace. Reading one back must return exactly what was
+# written, so this forces the cases that would otherwise show up as an
+# occasional mysterious sign-out.
+# 0x20 space, 0x09 tab, 0x0a newline, 0x0d return, 0x0b and 0x0c the two
+# vertical forms. Built numerically so the bytes are unmistakable.
+for edge in (bytes([n]) for n in (0x20, 0x09, 0x0A, 0x0D, 0x0B, 0x0C)):
+    import secrets as _secrets
+    path = _os.path.join(tempfile.mkdtemp(), "secret.key")
+    written = edge + _secrets.token_bytes(46) + edge
+    with open(path, "wb") as fh:
+        fh.write(written)
+    check("a key wrapped in %r survives being read back" % edge,
+          auth_mod.session_secret(path) == written,
+          "%d bytes written, %d read" % (len(written),
+                                         len(auth_mod.session_secret(path))))
 check("it is not a fixed constant",
       auth_mod.session_secret(_os.path.join(tempfile.mkdtemp(), "k")) != first)
 
