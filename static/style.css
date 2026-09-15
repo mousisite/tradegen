@@ -593,3 +593,24 @@ ul.list.ok li::marker { color: var(--gain); }
 .legalpage .prose + .tablewrap,
 .legalpage ul.list { margin-top: var(--s2); }
 .legalpage .tablewrap { margin-top: var(--s2); }
+
+/* ---------- charts ---------- */
+
+/* Drawn as inline SVG, so they inherit the theme's colours and are painted
+   before any script runs. The viewBox scales; the labels do not, which keeps
+   them legible at phone width. */
+.chart {
+  display: block; width: 100%; height: auto;
+  max-height: 240px; overflow: visible;
+}
+.chart .clab {
+  font-family: var(--mono); font-size: 10px;
+  fill: var(--ink-3); letter-spacing: -.02em;
+}
+.chart rect { transition: opacity .15s ease; }
+.chart rect:hover { opacity: .78; }
+
+@media (max-width: 760px) {
+  .chart { max-height: 190px; }
+  .chart .clab { font-size: 11px; }
+}

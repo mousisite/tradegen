@@ -202,6 +202,31 @@ written reasoning on the research page.
 | `GOOGLE_ALLOWED_DOMAINS` | no | Restrict who may sign in |
 | `GOOGLE_REDIRECT_URI` | no | Only if the callback differs from `PUBLIC_URL` + path |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
+| `SENTRY_DSN` | recommended | Error reporting. Without it a 3am failure is invisible until someone emails you |
+| `STOCKBOT_ADMIN_EMAIL` | recommended | Who may see `/usage`. Without it, nobody can on a deployment |
+| `STOCKBOT_BACKUP_HOURS` | no | Hours between automatic backups, default 12. Set 0 to switch off |
+| `STOCKBOT_BACKUP_DIR` | no | Where they go, default `<database folder>/backups` |
+| `STOCKBOT_BACKUP_KEEP` | no | How many to keep, default 8 |
+
+---
+
+## Two more worth setting
+
+**`SENTRY_DSN`** — sign up at sentry.io, create a Python/Flask project, copy
+the DSN. Without it, an error at three in the morning is invisible until a user
+bothers to email you, and most will simply leave instead. Personal data and
+credentials are stripped before anything is sent, and failures the app already
+handles (an unknown ticker, a rate limit) are never reported, so the alerts
+stay meaningful.
+
+**`STOCKBOT_ADMIN_EMAIL`** — your Google address. It unlocks `/usage`, which
+shows what people actually do: how many came back on a second day, which
+instruments they look at, whether they pick intraday or daily bars. That last
+one answers the positioning question better than any opinion can. Without this
+set, nobody can see that page on a deployment, including you.
+
+Backups run automatically every 12 hours once deployed, are verified before
+being kept, and prune to the newest eight. Nothing to configure.
 
 ---
 

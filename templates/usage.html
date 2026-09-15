@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% set active = 'usage' %}
+{% block title %}Usage · Stock Bot{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>What people actually do</h1>
+  <p>Read from the analyses this app already recorded, not from tracking. There
+    is no analytics script on any page and nothing leaves this server.</p>
+</div>
+
+<div class="card">
+  <div class="figs">
+    <div class="f"><div class="k">Accounts</div>
+      <div class="v fig">{{ data.stats.accounts }}</div></div>
+    <div class="f"><div class="k">Used it</div>
+      <div class="v fig">{{ data.stats.active }}</div>
+      <div class="n">in {{ days }} days</div></div>
+    <div class="f"><div class="k">Came back</div>
+      <div class="v fig {{ 'gain' if data.stats.returning else 'loss' }}">
+        {{ data.stats.returning }}</div>
+      <div class="n">on a second day</div></div>
+    <div class="f"><div class="k">Analyses</div>
+      <div class="v fig">{{ "{:,}".format(data.stats.analyses) }}</div>
+      <div class="n">{{ "%.1f"|format(data.stats.per_active) }} each</div></div>
+    <div class="f"><div class="k">Instruments</div>
+      <div class="v fig">{{ data.stats.instruments }}</div></div>
+    <div class="f"><div class="k">Acted on</div>
+      <div class="v fig">{{ data.stats.trades + data.stats.theses }}</div>
+      <div class="n">{{ data.stats.trades }} trades, {{ data.stats.theses }} theses</div></div>
+  </div>
+</div>
+
+{% if data.notes %}
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">What this does and does not show</span>
+    <ul class="list">{% for n in data.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+  </div>
+{% endif %}
+
+{% if trend %}
+<section>
+  <div class="sechead"><h2>Analyses per day</h2></div>
+  <div class="card">{{ trend|safe }}</div>
+</section>
+{% endif %}
+
+<section>
+  <div class="cols b">
+    <div class="card pad0">
+      <div class="cardhead"><span class="eyebrow">Most looked at</span></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Instrument</th><th class="r">Analyses</th>
+            <th class="r">People</th></tr></thead>
+          <tbody>
+          {% for s in data.symbols %}
+            <tr>
+              <td><a href="{{ url_for('research', symbol=s.symbol) }}">{{ s.symbol }}</a></td>
+              <td class="r fig">{{ s.runs }}</td>
+              <td class="r fig soft">{{ s.people }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="3" class="blank">Nothing yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card pad0">
+      <div class="cardhead"><span class="eyebrow">What it told them</span></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Call</th><th class="r">Times</th>
+            <th style="width:40%"></th></tr></thead>
+          <tbody>
+          {% for c in data.calls %}
+            <tr>
+              <td><span class="chip {{ 'long' if c.call == 'BUY'
+                   else 'short' if c.call == 'SHORT'
+                   else 'hold' if c.call == 'WAIT' else 'mute' }}">{{ c.call }}</span></td>
+              <td class="r fig">{{ c.count }}</td>
+              <td><div class="meter"><i style="width:{{ (c.share*100)|round(1) }}%;
+                background:var(--accent)"></i></div></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="3" class="blank">Nothing yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if data.intervals %}
+      <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+        Which timeframe people pick says which product they want:
+        {% for i in data.intervals %}<b>{{ i.interval }}</b>
+          {{ "%.0f%%"|format(i.share * 100) }}{% if not loop.last %}, {% endif %}{% endfor %}.
+      </p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sechead"><h2>The machinery</h2>
+    <span class="tail">how the server is holding up</span></div>
+  <div class="card">
+    <div class="figs">
+      <div class="f"><div class="k">Cached upstream calls</div>
+        <div class="v fig">{{ upstream.cached_keys }}</div>
+        <div class="n">requests not repeated</div></div>
+      <div class="f"><div class="k">In flight</div>
+        <div class="v fig">{{ upstream.in_flight }}</div></div>
+      {% if scheduler %}
+        <div class="f"><div class="k">Alert checks</div>
+          <div class="v fig">{{ scheduler.runs }}</div>
+          <div class="n">{{ scheduler.failures }} failed</div></div>
+        <div class="f"><div class="k">Last looked</div>
+          <div class="v fig">{{ scheduler.last_run|ago if scheduler.last_run else 'not yet' }}</div></div>
+      {% endif %}
+    </div>
+    {% for host, state in upstream.hosts.items() %}
+      <p class="prose" style="margin-top:var(--s2)">
+        <b>{{ host }}</b>:
+        {% if state.open_for > 0 %}
+          <span class="loss">rate limited, not being asked for another
+            {{ "%.0f"|format(state.open_for) }} seconds</span>
+        {% else %}
+          answering normally{% if state.times_opened %}, throttled
+          {{ state.times_opened }} time(s) since this server started{% endif %}
+        {% endif %}
+      </p>
+    {% endfor %}
+  </div>
+</section>
+
+<p class="legal">
+  Everything here comes from rows this app already wrote in the course of doing
+  its job. No analytics script runs on any page, nothing is sent to a third
+  party, and this view is limited to whoever runs the installation.
+</p>
+
+{% endblock %}

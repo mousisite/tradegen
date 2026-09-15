@@ -69,6 +69,28 @@ _CONCEPTS = {
     "long_term_debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
     "rd_expense": ["ResearchAndDevelopmentExpense"],
     "dividends_paid": ["PaymentsOfDividendsCommonStock", "PaymentsOfDividends"],
+
+    # Added for the measured quality, distress and manipulation scores. Each is
+    # a documented input to a published, tested model rather than something
+    # invented here, and every one of them is read from a filing.
+    "current_assets": ["AssetsCurrent"],
+    "current_liabilities": ["LiabilitiesCurrent"],
+    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+    "receivables": ["AccountsReceivableNetCurrent",
+                    "ReceivablesNetCurrent",
+                    "AccountsReceivableNet"],
+    "inventory": ["InventoryNet"],
+    "ppe_net": ["PropertyPlantAndEquipmentNet"],
+    "depreciation": ["DepreciationDepletionAndAmortization",
+                     "DepreciationAmortizationAndAccretionNet",
+                     "Depreciation"],
+    "sga_expense": ["SellingGeneralAndAdministrativeExpense",
+                    "GeneralAndAdministrativeExpense"],
+    "total_debt": ["DebtLongtermAndShorttermCombinedAmount", "LongTermDebt"],
+    "interest_expense": ["InterestExpense", "InterestExpenseDebt"],
+    "cost_of_revenue": ["CostOfRevenue", "CostOfGoodsAndServicesSold",
+                        "CostOfGoodsSold", "CostOfServices"],
+    "assets_and_equity": ["LiabilitiesAndStockholdersEquity"],
 }
 
 # Filings worth surfacing, with what each one actually tells you.
@@ -494,7 +516,12 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
 
     wanted = ("revenue", "gross_profit", "operating_income", "net_income",
               "operating_cashflow", "capex", "assets", "liabilities", "equity",
-              "eps_diluted", "rd_expense", "long_term_debt")
+              "eps_diluted", "rd_expense", "long_term_debt",
+              # Inputs to the scored models. Requested here so one fetch of the
+              # company's facts serves the whole analysis.
+              "current_assets", "current_liabilities", "retained_earnings",
+              "receivables", "inventory", "ppe_net", "depreciation",
+              "sga_expense", "shares_diluted", "cost_of_revenue")
     table: Dict[str, List[Dict]] = {}
     for concept in wanted:
         rows = facts.series(concept, years)
@@ -519,6 +546,26 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
                 row["fcf_margin"] = row["free_cashflow"] / rev[fy]
         if row:
             derived[fy] = row
+
+    # A company that re-registers gets a new CIK, and its whole filing history
+    # stays under the old one. The new entity then has a couple of quarterly
+    # filings and nothing else, which would otherwise render as a blank table
+    # with no explanation. Exxon Mobil did exactly this.
+    if len(years_seen) < 2:
+        return {
+            "available": False,
+            "entity": facts.entity,
+            "cik": facts.cik,
+            "reason": (
+                "%s files under CIK %d, which holds only %d year%s of annual "
+                "figures. That usually means the company re-registered and its "
+                "history sits under a predecessor CIK. The filings are on "
+                "EDGAR; this table cannot assemble them automatically."
+                % (facts.entity, facts.cik, len(years_seen),
+                   "" if len(years_seen) == 1 else "s")),
+            "source_url": ("https://www.sec.gov/cgi-bin/browse-edgar?action="
+                           "getcompany&CIK=%010d" % facts.cik),
+        }
 
     return {
         "available": True,

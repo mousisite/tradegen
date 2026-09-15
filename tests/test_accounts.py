@@ -417,9 +417,16 @@ pinned = [l.split("#")[0].strip() for l in open(req_path, encoding="utf-8")
 pinned = [l for l in pinned if l]
 check("requirements.txt lists something", len(pinned) >= 5)
 
+# A requirement may name extras, as in sentry-sdk[flask]. The distribution is
+# still called sentry-sdk; the bracket selects optional dependencies.
+def _distribution(requirement):
+    return requirement.split("[")[0].strip()
+
+
 req_names = set()
 for line in pinned:
     name, _, want = line.partition("==")
+    name = _distribution(name)
     req_names.add(name.lower().replace("-", "_"))
     check("%s is pinned to a version" % name, bool(want), line)
     try:
@@ -430,7 +437,9 @@ for line in pinned:
         check("%s is actually installed" % name, False)
 
 _STDLIB = set(_sys.stdlib_module_names)
-_LOCAL = {"bot", "web", "analyze", "paper", "menu", "serve", "harness", "setup"}
+# Modules that live in this repository rather than being installed.
+_LOCAL = {"bot", "web", "analyze", "paper", "menu", "serve", "harness", "setup",
+          "backup", "preflight"}
 _ALIAS = {"pil": "pillow", "dotenv": "python_dotenv"}
 
 imported = {}

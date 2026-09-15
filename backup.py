@@ -42,11 +42,23 @@ def take(out_dir: str, with_csv: bool = False) -> str:
 
     source_path = db_mod.default_path()
     if not os.path.exists(source_path):
-        raise SystemExit("There is no database at %s yet." % source_path)
+        # A normal exception, not SystemExit. This is called from a scheduler
+        # as well as from a command line, and a library that kills the process
+        # is a library that cannot be scheduled.
+        raise FileNotFoundError("There is no database at %s yet." % source_path)
 
     os.makedirs(out_dir, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     target_path = os.path.join(out_dir, "stockbot-%s.db" % stamp)
+
+    # The stamp is only accurate to the second, so two backups taken in the
+    # same second would land on the same filename and one would silently
+    # replace the other. Rare in normal use and disastrous when it happens,
+    # because the count of backups you think you have would be wrong.
+    suffix = 1
+    while os.path.exists(target_path):
+        target_path = os.path.join(out_dir, "stockbot-%s-%d.db" % (stamp, suffix))
+        suffix += 1
 
     source = sqlite3.connect(source_path, timeout=30.0)
     target = sqlite3.connect(target_path)
@@ -149,7 +161,13 @@ def main(argv=None) -> int:
 
     print()
     print("  Backing up")
-    path = take(args.out, with_csv=args.csv)
+    try:
+        path = take(args.out, with_csv=args.csv)
+    except FileNotFoundError as exc:
+        print("  %s" % exc)
+        print("  Nothing to back up yet. Run the app once first.")
+        print()
+        return 1
     print()
     print("  Verifying the copy that was just written")
     ok = verify(path)

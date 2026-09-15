@@ -129,6 +129,11 @@ otherwise. Each links to where the work happens.
 | 16 | Paper trading | `paper.py`, `bot/database.py` | Positions sized against your account, marked to market, closed with the R-multiple computed |
 | 17 | Automated workflows | `bot/workflows.py` | Four routines: check open positions, a morning sweep, hunt for setups, re-analyse the watchlist |
 | 18 | AI financial reasoning | `bot/reasoning.py` | Reasons over the facts already gathered, never over its own recollection. Needs a key |
+| 19 | Published scoring models | `bot/quality.py` | Piotroski F-Score, Altman Z-Score, Beneish M-Score and the accruals ratio, computed from filed figures. Not invented here: each was published and tested against decades of filings |
+| 20 | Charts | `bot/charts.py` | Price history and filed financials, drawn as inline SVG with no charting library and no third-party script |
+| 21 | Error reporting | `bot/monitoring.py` | Optional Sentry, with personal data and credentials stripped before anything is sent, and expected failures never reported |
+| 22 | Scheduled backups | `backup.py`, `serve.py` | A verified snapshot on a timer, pruned to the newest few |
+| 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
 | — | Screenshot reading | `bot/vision.py` | Identifies the instrument and timeframe from a chart image. Needs a key |
 
 ---
@@ -356,6 +361,36 @@ paper journal and a live one side by side without editing anything:
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. Unset means no login at all |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
+
+---
+
+## What the published models say
+
+Four models run against the filed figures on every research page. None was
+invented here, and that is the point: each was published, tested against
+decades of filings, and can be looked up.
+
+| Model | What it asks |
+|---|---|
+| **Piotroski F-Score** | How many of nine measures of financial strength improved. Piotroski (2000) found the high scorers among cheap stocks went on to beat the low scorers by a wide margin |
+| **Altman Z-Score** | How far the balance sheet is from financial distress. From 1968 and still the standard first check |
+| **Beneish M-Score** | Eight ratios that moved together in companies later found to have manipulated earnings. A smoke detector, not a verdict |
+| **Accruals ratio** | How much of the profit arrived as cash. Sloan (1996): earnings not backed by cash tend to reverse |
+
+Three things they deliberately will not do:
+
+**Score a bank on Altman.** The coefficients were fitted on manufacturers, and
+a balance sheet that is mostly other people's money by design reads as
+distressed however healthy it is. A number there would mislead, so none is
+given.
+
+**Rescale a partial score.** If only seven of the nine Piotroski tests can be
+measured, it says "6 of 7" and names what was missing, rather than quietly
+grading out of nine.
+
+**Accuse anyone.** A Beneish score above the line says the ratios warrant
+reading the filing. Fast-growing honest companies trip it as readily as
+dishonest ones.
 
 ---
 
@@ -615,6 +650,10 @@ bot/
 
   accounts.py       who owns what, sessions, and the shared/personal split
   auth.py           Google sign-in: authorization code flow with PKCE
+  quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
+  charts.py         price and filed-financial charts as inline SVG
+  monitoring.py     optional error reporting, with personal data stripped
+  usage.py          what people actually do, from rows already written
   upstream.py       caching, single-flight and backoff for the shared sources
   yahoo.py          authenticated Yahoo session: cookie, crumb, retry
   catalysts.py      earnings and dividend dates, and whether they fall in range

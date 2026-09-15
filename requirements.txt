@@ -11,3 +11,6 @@ python-dotenv==1.2.3
 feedparser==6.0.14  # Google News RSS. Not optional: sentiment imports it at module level
 rich==15.0.0
 anthropic==1.4.0  # Optional features only, but the import must resolve when a key is set
+# Optional: error reporting. Inert unless SENTRY_DSN is set, but the
+# import has to resolve for the feature to be switchable at all.
+sentry-sdk[flask]==2.69.1

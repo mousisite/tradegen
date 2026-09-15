@@ -38,6 +38,7 @@ class Research:
     quality: Optional[Dict] = None
     valuation: Optional[Dict] = None
     sec_history: Optional[Dict] = None
+    scores: Optional[Dict] = None
     filings: List = field(default_factory=list)
     risk: Optional[object] = None
     options: Optional[Dict] = None
@@ -254,6 +255,19 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
     if out.fundamentals is not None:
         step("Valuing the business")
         out.quality = fund_mod.quality_score(out.fundamentals)
+
+    # Published models applied to the filed figures. Runs on data already
+    # fetched, so it costs no extra network request.
+    if out.sec_history:
+        from . import quality as quality_mod
+        try:
+            out.scores = quality_mod.assess(
+                out.sec_history,
+                out.fundamentals.get("market_cap") if out.fundamentals else None,
+                getattr(out.fundamentals, "sector", "") if out.fundamentals else "")
+        except Exception as exc:
+            out.scores = {"available": False,
+                          "reason": "The scored models could not be run: %s" % exc}
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),

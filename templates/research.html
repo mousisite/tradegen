@@ -269,6 +269,117 @@
 </section>
 {% endif %}
 
+{% if price_svg %}
+<section>
+  <div class="sechead">
+    <h2>The last year</h2>
+    <span class="tail">closing prices, {{ a.bars.interval }} bars</span>
+  </div>
+  <div class="card">
+    {{ price_svg|safe }}
+  </div>
+</section>
+{% endif %}
+
+{% if filed_charts %}
+<section>
+  <div class="sechead">
+    <h2>The shape of the business</h2>
+    <span class="tail">as filed, one bar per annual report</span>
+  </div>
+  <div class="cols b">
+    {% for key, label in [('revenue', 'Revenue'), ('net_income', 'Net income'),
+                          ('operating_cashflow', 'Operating cash flow'),
+                          ('net_margin', 'Net margin')] %}
+      {% if filed_charts.get(key) %}
+        <div class="card">
+          <span class="eyebrow">{{ label }}</span>
+          {{ filed_charts[key]|safe }}
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  <p class="prose" style="margin-top:var(--s3)">
+    Bars rather than a line, because each is a separate audited figure from one
+    annual report. A line between two of them would imply values in between
+    that were never reported. Hover a bar for the exact number.
+  </p>
+</section>
+{% endif %}
+
+{% if r.scores and r.scores.available %}
+{% set q = r.scores %}
+<section>
+  <div class="sechead">
+    <h2>What the published models say</h2>
+    <span class="tail">applied to filed figures, not opinions</span>
+  </div>
+
+  <div class="card">
+    <p class="prose" style="color:var(--ink);font-size:var(--t-base)">{{ q.headline }}</p>
+  </div>
+
+  <div class="cols b" style="margin-top:var(--s3)">
+    {% for key in ['piotroski', 'altman', 'beneish', 'accruals'] %}
+      {% set s = q.scores[key] %}
+      <div class="card">
+        <div style="display:flex;align-items:baseline;gap:var(--s2)">
+          <div style="font-family:var(--serif);font-size:var(--t-base);font-weight:600">
+            {{ s.name }}</div>
+          <div class="fig" style="margin-left:auto;font-size:var(--t-md);
+               color:{{ 'var(--ink-3)' if not s.usable else 'var(--ink)' }}">
+            {% if s.usable %}
+              {% if key == 'piotroski' %}{{ "%d"|format(s.value|int) }}
+              {% elif key == 'accruals' %}{{ "%+.1f%%"|format(s.value * 100) }}
+              {% else %}{{ "%.2f"|format(s.value) }}{% endif %}
+            {% else %}—{% endif %}
+          </div>
+        </div>
+        {% if s.scale %}<div class="faint" style="font-size:var(--t-xs);margin-top:2px">
+          {{ s.scale }}</div>{% endif %}
+        <p class="prose" style="margin-top:var(--s2)">{{ s.verdict }}</p>
+        <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s1)">
+          {{ s.meaning }}</p>
+
+        {% if s.tests %}
+          <div class="tablewrap" style="margin-top:var(--s2)">
+            <table>
+              <tbody>
+              {% for t in s.tests %}
+                <tr>
+                  <td style="width:26px">
+                    {% if t.passed is none %}<span class="faint">?</span>
+                    {% elif t.passed %}<span class="gain">&check;</span>
+                    {% else %}<span class="loss">&times;</span>{% endif %}
+                  </td>
+                  <td>{{ t.name }}</td>
+                  <td class="soft" style="font-size:var(--t-xs)">{{ t.detail }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% elif s.inputs %}
+          <dl class="pairs" style="margin-top:var(--s2)">
+            {% for label, value in s.inputs.items() %}
+              <dt style="font-size:var(--t-xs)">{{ label }}</dt>
+              <dd class="fig" style="font-size:var(--t-xs)">{{ "%.2f"|format(value) }}</dd>
+            {% endfor %}
+          </dl>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+
+  <p class="prose" style="margin-top:var(--s3)">{{ q.note }}</p>
+</section>
+{% elif r.scores and r.scores.reason %}
+<section>
+  <div class="sechead"><h2>What the published models say</h2></div>
+  <div class="card"><p class="prose">{{ r.scores.reason }}</p></div>
+</section>
+{% endif %}
+
 {% if r.sec_history and r.sec_history.available %}
 {% set h = r.sec_history %}
 <section>

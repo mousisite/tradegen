@@ -43,6 +43,7 @@ from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
 from bot import auth as auth_mod
 from bot import catalysts as catalysts_mod
+from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
 from bot import engine
@@ -52,6 +53,7 @@ from bot import portfolio as portfolio_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import thesis as thesis_mod
+from bot import usage as usage_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
@@ -672,6 +674,13 @@ def research():
                 oldest = min(_RESEARCH_CACHE, key=lambda k: _RESEARCH_CACHE[k][0])
                 _RESEARCH_CACHE.pop(oldest, None)
 
+    # Drawn from the bars and filings already in hand, so no extra request.
+    price_svg = charts_mod.price_chart(
+        [float(v) for v in analysis.bars.close[-260:]],
+        labels=("about a year ago", "now"),
+        title="%s price history" % analysis.bars.symbol)
+    filed_charts = charts_mod.charts_for(found.sec_history or {})
+
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         saved = db_mod.thesis_list(conn, analysis.bars.symbol, limit=6, user=uid())
@@ -687,7 +696,8 @@ def research():
              "created": row["created_ts"]}, analysis.bars.last_price)))
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
-                           saved=reviews, watched=watched)
+                           saved=reviews, watched=watched,
+                           price_svg=price_svg, filed_charts=filed_charts)
 
 
 @app.route("/thesis/save", methods=["POST"])
@@ -926,6 +936,59 @@ def _redirect_uri() -> str:
     if public:
         return public + url_for("google_callback")
     return url_for("google_callback", _external=True)
+
+
+def _is_operator() -> bool:
+    """Whether this account may see figures covering everybody.
+
+    The local account is whoever runs the server on their own machine. On a
+    deployment there is no local account, so STOCKBOT_ADMIN_EMAIL names who the
+    operator is. Anyone else gets a flat refusal: activity across all users is
+    not something an ordinary user should be able to read.
+    """
+    user = getattr(g, "user", None)
+    if user is None:
+        return False
+    if user.is_local:
+        return True
+    allowed = {e.strip().lower()
+               for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+               if e.strip()}
+    return bool(allowed) and user.email.lower() in allowed
+
+
+@app.route("/usage")
+def usage():
+    """What people actually do with it. Operator only."""
+    if not _is_operator():
+        return render_template(
+            "error.html", symbol="",
+            message="This page covers activity across every account, so it is "
+                    "limited to whoever runs this installation. Set "
+                    "STOCKBOT_ADMIN_EMAIL to your address to see it."), 403
+
+    try:
+        days = max(1, min(365, int(request.args.get("days", "30"))))
+    except ValueError:
+        days = 30
+
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        data = usage_mod.read(conn, days)
+    finally:
+        conn.close()
+
+    trend = ""
+    if len(data["daily"]) > 1:
+        trend = charts_mod.bar_chart(
+            [d["day"] for d in data["daily"]],
+            [float(d["runs"]) for d in data["daily"]],
+            width=720, height=180, title="Analyses per day", money=False)
+
+    from bot import upstream as upstream_mod
+    return render_template("usage.html", data=data, days=days, trend=trend,
+                           upstream=upstream_mod.stats(),
+                           scheduler=(ALERTS.status() if ALERTS else None))
 
 
 @app.route("/privacy")
