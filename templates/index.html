@@ -3,9 +3,10 @@
 {% block content %}
 
 <div class="pagehead">
-  <h1>What should I do with this?</h1>
-  <p>Enter a stock, ETF or crypto ticker. You get a call with levels, position
-    size, and the measured odds behind it, not a guess.</p>
+  <h1>It will tell you when it does not know</h1>
+  <p>Enter a ticker and you get a call with levels, position size and the
+    measured odds behind it. When the odds say there is no edge, it says that
+    instead of inventing one, and it shows you the sample it counted.</p>
 </div>
 
 <div class="card">
@@ -30,7 +31,8 @@
   <p class="prose" style="margin-top:var(--s2)">
     Daily bars are preselected because they are the only interval where this
     bot has measured positive expectancy. Shorter intervals lose to trading
-    costs before the strategy gets a say.
+    costs before the strategy gets a say. That is an unhelpful thing for a
+    trading tool to admit, and it is what the back-tests found.
   </p>
 
   {# Screenshot route. The image only identifies the instrument; the analysis

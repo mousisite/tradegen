@@ -13,10 +13,19 @@
 
   <h1>Stock Bot</h1>
   <p class="lede">
-    Your journal, watchlist, alerts and saved theses belong to your account.
-    The measured strategy record is shared, because it describes instruments
-    rather than people.
+    Most tools tell you what to buy. This one back-tests its own advice, tells
+    you when there is no edge, and keeps score of whether you were right for
+    the reason you gave or merely lucky.
   </p>
+
+  <ul class="list" style="text-align:left;margin-bottom:var(--s4)">
+    <li>Every figure cites the filing it came from, so you can check rather
+      than trust.</li>
+    <li>Position sizes state what a gap past your stop would actually cost,
+      not only what the stop budgets.</li>
+    <li>Saved theses close out as right, wrong, right-by-luck or undecided.
+      The luck column is the point.</li>
+  </ul>
 
   {% if reason %}
     <div class="notice">{{ reason }}</div>
