@@ -34,12 +34,28 @@ class AuthError(RuntimeError):
     """Something went wrong signing in, phrased for the person who sees it."""
 
 
+def _first_line(raw: str) -> str:
+    """The first non-empty line, trimmed.
+
+    Neither of these values is ever multi-line, and pasting more than intended
+    into a hosting dashboard's value box is an easy mistake that produces a
+    baffling result: Google reports "client not found" rather than "your client
+    id has a newline in it". Taking the first line turns a confusing dead end
+    into a working sign-in, and cannot discard anything legitimate.
+    """
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
 def client_id() -> str:
-    return (os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+    return _first_line(os.environ.get("GOOGLE_CLIENT_ID"))
 
 
 def client_secret() -> str:
-    return (os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    return _first_line(os.environ.get("GOOGLE_CLIENT_SECRET"))
 
 
 def allowed_domains() -> Tuple[str, ...]:
