@@ -42,6 +42,14 @@ class Reasoning:
     model: str = ""
     reason_unavailable: str = ""
     raw: str = ""
+    # Figures the model stated that could not be traced back to the evidence
+    # it was given. Empty is the expected case; anything here is a warning.
+    unverified: List[str] = field(default_factory=list)
+    checked_figures: int = 0
+
+    @property
+    def grounded(self) -> bool:
+        return not self.unverified
 
 
 def available() -> bool:
@@ -141,7 +149,7 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
         return Reasoning(False, raw=text, reason_unavailable=(
             "The model's reply could not be read as structured output."))
 
-    return Reasoning(
+    result = Reasoning(
         available=True,
         summary=parsed.get("summary", ""),
         key_question=parsed.get("key_question", ""),
@@ -151,6 +159,101 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
         blind_spots=_as_list(parsed.get("blind_spots")),
         confidence=(parsed.get("confidence") or "").lower(),
         model=chosen, raw=text)
+
+    # The model was told to use only the evidence supplied. This checks that it
+    # did, rather than taking its word for it.
+    return verify(result, _facts_block(payload))
+
+
+# ---------------------------------------------------------------------------
+# Checking the answer against the evidence
+# ---------------------------------------------------------------------------
+
+# A figure inside prose. Captures 28%, 1,234.5, -0.31, $4.2B.
+_FIGURE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bn|bp|B|M|K|k|x)?")
+
+
+def _numbers_in(text: str) -> List[str]:
+    return [m.group(0).strip() for m in _FIGURE.finditer(text or "")]
+
+
+def _as_float(token: str) -> Optional[float]:
+    cleaned = token.replace(",", "").replace("$", "").strip()
+    multiplier = 1.0
+    for suffix, scale in (("%", 0.01), ("bn", 1e9), ("B", 1e9), ("M", 1e6),
+                          ("K", 1e3), ("k", 1e3)):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[:-len(suffix)].strip()
+            multiplier = scale
+            break
+    try:
+        return float(cleaned) * multiplier
+    except ValueError:
+        return None
+
+
+def _grounded(value: float, evidence: List[float]) -> bool:
+    """Whether a stated figure is traceable to something in the evidence.
+
+    Tolerant on purpose. The model is asked to write plainly, so it will round
+    0.2812 to 28% and 416,161,000,000 to 416B, and neither is an invention. The
+    check is for figures with no relative anywhere in the evidence at all.
+    """
+    for known in evidence:
+        if known == 0:
+            if abs(value) < 1e-9:
+                return True
+            continue
+        for candidate in (value, value * 100.0, value / 100.0):
+            if abs(candidate - known) <= abs(known) * 0.02 + 1e-9:
+                return True
+    return False
+
+
+def verify(reasoning: "Reasoning", facts_text: str) -> "Reasoning":
+    """Flag figures in the answer that are not in the evidence.
+
+    The prompt tells the model to use only what it was given, and to prefer the
+    specific to the general. Those two instructions pull against each other:
+    asking for "margins fell from 28% to 19%" is exactly the request that
+    produces a confident number nobody checked. So the numbers are checked.
+
+    Deliberately conservative. Small bare integers are skipped because they are
+    almost always prose rather than data ("three years", "two of nine"), and
+    flagging them would bury a real invention under noise.
+    """
+    evidence = [v for v in (_as_float(t) for t in _numbers_in(facts_text))
+                if v is not None]
+    if not evidence:
+        return reasoning
+
+    prose = " ".join([
+        reasoning.summary, reasoning.key_question,
+        reasoning.strongest_bull, reasoning.strongest_bear,
+        " ".join(reasoning.what_would_change_it),
+        " ".join(reasoning.blind_spots),
+    ])
+
+    unverified, checked = [], 0
+    for token in _numbers_in(prose):
+        value = _as_float(token)
+        if value is None:
+            continue
+        bare = not any(c in token for c in "%$.,") and abs(value) < 10
+        if bare:
+            continue
+        if 1900 <= value <= 2100 and float(value).is_integer():
+            continue                      # a year, not a measurement
+        checked += 1
+        if not _grounded(value, evidence):
+            unverified.append(token)
+
+    reasoning.checked_figures = checked
+    # Preserve order, drop duplicates.
+    seen = set()
+    reasoning.unverified = [t for t in unverified
+                            if not (t in seen or seen.add(t))][:8]
+    return reasoning
 
 
 def _parse(text: str) -> Optional[Dict]:

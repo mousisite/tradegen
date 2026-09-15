@@ -286,11 +286,26 @@ class CompanyFacts:
                 "url": f.url(self.cik)}
 
     def series(self, concept: str, years: int = 10) -> List[Dict]:
-        """Annual history for a concept, oldest first."""
+        """Annual history for a concept, oldest first.
+
+        The unit travels with the value. A foreign private issuer files in its
+        home currency, so dropping the unit here is how a figure in yen ends up
+        being divided by a market value in dollars three modules away, without
+        anything noticing.
+        """
         rows = self.annual.get(concept) or []
         return [{"fy": f.fy, "value": f.value, "end": f.end, "form": f.form,
-                 "filed": f.filed, "url": f.url(self.cik)}
+                 "filed": f.filed, "unit": f.unit, "url": f.url(self.cik)}
                 for f in rows[-years:]]
+
+    def currencies(self, concepts) -> set:
+        """Every currency the given concepts were reported in."""
+        found = set()
+        for concept in concepts:
+            for fact in self.annual.get(concept) or []:
+                if fact.unit and fact.unit not in ("shares", "pure"):
+                    found.add(fact.unit.split("/")[0])
+        return found
 
     def cagr(self, concept: str, years: int = 5) -> Optional[float]:
         """Compound annual growth for a concept, when the history supports it."""
@@ -567,10 +582,21 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
                            "getcompany&CIK=%010d" % facts.cik),
         }
 
+    # Which currency the accounts are in, and whether they are consistent.
+    # A mixed set means some concepts came back in a different unit, and any
+    # ratio crossing them would be meaningless.
+    money_concepts = [c for c in wanted
+                      if c not in ("eps_diluted", "shares_diluted")]
+    currencies = facts.currencies(money_concepts)
+    currency = sorted(currencies)[0] if len(currencies) == 1 else ""
+
     return {
         "available": True,
         "entity": facts.entity,
         "cik": facts.cik,
+        "currency": currency,
+        "currencies": sorted(currencies),
+        "mixed_currency": len(currencies) > 1,
         "years": years_seen,
         "table": table,
         "derived": derived,

@@ -267,6 +267,77 @@ finally:
         _os.environ.pop(key, None)
     web.app.config["AUTH_MODE"] = None
 
+
+print()
+print("=" * 72)
+print("CHECKING THE MODEL'S ANSWER AGAINST THE EVIDENCE")
+print("=" * 72)
+
+from bot import reasoning as R
+
+evidence = ("Revenue 416161000000 for 2025, up from 383285000000. "
+            "Net margin 0.269. Operating cash flow 111500000000. "
+            "Piotroski 8 of 9. Altman Z 12.48. Free cash flow yield 2.26%.")
+
+grounded = R.Reasoning(
+    True,
+    summary="Revenue reached 416.2B, up from 383.3B, at a 26.9% net margin.",
+    strongest_bull="Operating cash flow of 111.5B covers the dividend easily.",
+    strongest_bear="An Altman of 12.48 says nothing about whether it is cheap.")
+R.verify(grounded, evidence)
+print("   grounded answer: %d figures checked, %d unverified"
+      % (grounded.checked_figures, len(grounded.unverified)))
+check("a grounded answer passes", grounded.grounded, grounded.unverified)
+check("and it actually checked something", grounded.checked_figures >= 4)
+
+invented = R.Reasoning(
+    True,
+    summary="Revenue reached 416.2B but margins fell from 31.4% to 26.9%.",
+    strongest_bull="Free cash flow grew 47% last year.",
+    strongest_bear="Debt of 88.3B is a concern.")
+R.verify(invented, evidence)
+print("   invented figures caught: %s" % invented.unverified)
+check("invented figures are caught", not invented.grounded)
+check("the fabricated margin is named", "31.4%" in invented.unverified)
+check("the fabricated growth rate is named", "47%" in invented.unverified)
+check("the fabricated debt figure is named", "88.3B" in invented.unverified)
+check("the real figures are not flagged",
+      not any(f.startswith("416") or f == "26.9%" for f in invented.unverified),
+      invented.unverified)
+
+# Rounding is not invention. The model is told to write plainly, so it will
+# round, and flagging that would bury a real fabrication in noise.
+rounded = R.Reasoning(True, summary="Margin of about 27% on revenue near 416B.")
+R.verify(rounded, evidence)
+check("sensible rounding is not called an invention", rounded.grounded,
+      rounded.unverified)
+
+# Prose numbers and years must not be flagged either.
+prose = R.Reasoning(
+    True, summary="Over the last 3 years, 2 of the 9 measures worsened.",
+    strongest_bull="Since 2023 the trend has held.")
+R.verify(prose, evidence)
+check("small bare integers are left alone", prose.grounded, prose.unverified)
+
+years = R.Reasoning(True, summary="Between 2019 and 2025 the picture changed.")
+R.verify(years, evidence)
+check("years are not treated as measurements", years.grounded, years.unverified)
+
+empty = R.Reasoning(True, summary="The evidence is too thin to say much.")
+R.verify(empty, evidence)
+check("an answer with no figures is grounded", empty.grounded)
+check("and reports that it checked none", empty.checked_figures == 0)
+
+check("no evidence means no false accusations",
+      R.verify(R.Reasoning(True, summary="Revenue was 999B."), "").grounded)
+
+# The percentage form is the one most likely to trip a naive comparison: the
+# evidence holds 0.269 and the model writes 26.9%.
+scaled = R.Reasoning(True, summary="A net margin of 26.9%.")
+R.verify(scaled, "Net margin 0.269")
+check("a fraction in the evidence matches a percentage in the prose",
+      scaled.grounded, scaled.unverified)
+
 print()
 print("%d failure(s)" % len(fails))
 print("OPS OK" if not fails else "FAILURES: %s" % fails)

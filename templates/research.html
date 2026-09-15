@@ -72,11 +72,26 @@
   </div>
   <div class="card">
     {% if r.reasoning.available %}
+      {% if r.reasoning.unverified %}
+        <div class="notice" style="margin-bottom:var(--s3)">
+          <b>Check these figures before relying on them.</b>
+          The reasoning below states
+          {% for f in r.reasoning.unverified %}<span class="fig">{{ f }}</span>{% if not loop.last %}, {% endif %}{% endfor %},
+          which could not be traced back to any number in the evidence it was
+          given. Everything measured elsewhere on this page is unaffected.
+        </div>
+      {% endif %}
       <p class="prose" style="font-size:var(--t-base);color:var(--ink)">
         {{ r.reasoning.summary }}</p>
       {% if r.reasoning.key_question %}
         <p class="prose" style="margin-top:var(--s3)">
           <b>The question that decides it.</b> {{ r.reasoning.key_question }}</p>
+      {% endif %}
+      {% if r.reasoning.checked_figures and not r.reasoning.unverified %}
+        <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+          Every one of the {{ r.reasoning.checked_figures }} figures stated above
+          was traced back to the measured evidence.
+        </p>
       {% endif %}
       <div class="cols b" style="margin-top:var(--s3)">
         <div>

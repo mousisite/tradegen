@@ -614,3 +614,12 @@ ul.list.ok li::marker { color: var(--gain); }
   .chart { max-height: 190px; }
   .chart .clab { font-size: 11px; }
 }
+
+/* The grounding warning reuses the sign-in notice styling, which needs to be
+   available outside that page now. */
+.card > .notice {
+  background: var(--hold-wash); border: 1px solid var(--hold);
+  color: var(--ink); border-radius: var(--r-sm);
+  padding: 11px var(--s2); font-size: var(--t-sm); line-height: 1.6;
+}
+.card > .notice b { font-weight: 600; }

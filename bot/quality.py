@@ -173,6 +173,12 @@ def piotroski(history: Dict) -> Score:
         out.missing.append("at least two years of filings")
         return out
 
+    problem = _currency_problem(history)
+    if problem:
+        out.reliable = False
+        out.verdict = problem
+        return out
+
     year, prior = _two_years(table, years,
                              ["net_income", "assets", "operating_cashflow",
                               "revenue"])
@@ -313,6 +319,29 @@ def piotroski(history: Dict) -> Score:
 # Altman Z-Score
 # ---------------------------------------------------------------------------
 
+def _currency_problem(history: Dict, needs_market_value: bool = False) -> str:
+    """Why these filings cannot be used, if they cannot.
+
+    A foreign private issuer files in its home currency. Mixing those figures
+    with each other, or with a market value quoted in dollars, produces a
+    number that looks entirely reasonable and is wrong by whatever the exchange
+    rate happens to be. Refusing is the only honest option, because there is no
+    exchange rate in the filing to correct it with.
+    """
+    if history.get("mixed_currency"):
+        return ("These filings report in more than one currency (%s), so the "
+                "figures cannot be compared with each other. Any ratio across "
+                "them would be wrong by an exchange rate that the filing does "
+                "not state."
+                % ", ".join(history.get("currencies") or []))
+    currency = history.get("currency") or ""
+    if needs_market_value and currency and currency != "USD":
+        return ("The accounts are filed in %s while the market value is quoted "
+                "in US dollars. Dividing one by the other would be wrong by the "
+                "exchange rate, so this is not calculated." % currency)
+    return ""
+
+
 def altman_z(history: Dict, market_cap: Optional[float] = None,
              sector: str = "") -> Score:
     """How far this company is from financial distress.
@@ -331,6 +360,12 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
     if not years:
         out.reliable = False
         out.missing.append("filed financials")
+        return out
+
+    problem = _currency_problem(history, needs_market_value=True)
+    if problem:
+        out.reliable = False
+        out.verdict = problem
         return out
 
     if sector and any(word in sector.lower() for word in _NOT_FOR_Z):
@@ -426,6 +461,12 @@ def beneish_m(history: Dict) -> Score:
     if len(years) < 2:
         out.reliable = False
         out.missing.append("two consecutive years")
+        return out
+
+    problem = _currency_problem(history)
+    if problem:
+        out.reliable = False
+        out.verdict = problem
         return out
 
     year, prior = _two_years(table, years,
@@ -535,6 +576,12 @@ def accruals(history: Dict) -> Score:
     if len(years) < 2:
         out.reliable = False
         out.missing.append("two years of filings")
+        return out
+
+    problem = _currency_problem(history)
+    if problem:
+        out.reliable = False
+        out.verdict = problem
         return out
 
     year, prior = _two_years(table, years,

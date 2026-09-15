@@ -316,6 +316,79 @@ if out["available"]:
     check("a real bank is refused a Z-score",
           not out["scores"]["altman"].usable)
 
+
+print()
+print("=" * 72)
+print("CURRENCY: REFUSING RATHER THAN MIXING")
+print("=" * 72)
+
+# A foreign private issuer files in its home currency. Mixing those figures
+# with each other, or with a market value in dollars, produces a number that
+# looks entirely reasonable and is wrong by an exchange rate.
+mixed = history(
+    net_income={2023: 100.0, 2024: 200.0}, assets={2023: 1000.0, 2024: 1000.0},
+    operating_cashflow={2023: 150.0, 2024: 300.0},
+    revenue={2023: 1000.0, 2024: 1100.0},
+    gross_profit={2023: 400.0, 2024: 600.0},
+    current_assets={2023: 300.0, 2024: 500.0},
+    current_liabilities={2023: 200.0, 2024: 200.0},
+    retained_earnings={2023: 300.0, 2024: 400.0},
+    operating_income={2023: 120.0, 2024: 150.0},
+    liabilities={2023: 600.0, 2024: 600.0},
+    receivables={2023: 100.0, 2024: 100.0}, ppe_net={2023: 500.0, 2024: 500.0},
+    depreciation={2023: 50.0, 2024: 50.0}, sga_expense={2023: 200.0, 2024: 200.0},
+    shares_diluted={2023: 100.0, 2024: 99.0},
+    long_term_debt={2023: 200.0, 2024: 100.0},
+)
+mixed["mixed_currency"] = True
+mixed["currencies"] = ["CNY", "USD"]
+
+out = quality.assess(mixed, market_cap=2000.0, sector="Technology")
+for key, s in out["scores"].items():
+    check("%s refuses on mixed currencies" % s.name, not s.usable, s.value)
+check("and every refusal names the currencies",
+      all("CNY" in s.verdict and "USD" in s.verdict
+          for s in out["scores"].values()))
+check("and explains that an exchange rate is missing",
+      all("exchange rate" in s.verdict for s in out["scores"].values()))
+
+# A single non-dollar currency is fine for the ratios that stay inside the
+# filing, and not fine for the one that divides by a dollar market value.
+foreign = dict(mixed)
+foreign["mixed_currency"] = False
+foreign["currencies"] = ["EUR"]
+foreign["currency"] = "EUR"
+
+out = quality.assess(foreign, market_cap=2000.0, sector="Technology")
+check("filing-only ratios still work in euros",
+      out["scores"]["piotroski"].usable)
+check("the accruals ratio still works in euros",
+      out["scores"]["accruals"].usable)
+check("but Altman refuses, because it divides by a dollar market value",
+      not out["scores"]["altman"].usable)
+check("and says which currency the accounts are in",
+      "EUR" in out["scores"]["altman"].verdict)
+
+usd = dict(foreign)
+usd["currencies"] = ["USD"]
+usd["currency"] = "USD"
+check("dollars are scored normally",
+      quality.assess(usd, market_cap=2000.0, sector="Technology")
+      ["scores"]["altman"].usable)
+
+# And the same against a real filer that genuinely reports in two currencies.
+from bot import sec as _sec
+
+for symbol in ("BABA", "TM"):
+    filings = _sec.financial_history(symbol, years=8)
+    if not filings.get("available"):
+        continue
+    print("   %-5s reports in %s" % (symbol, filings.get("currencies")))
+    if filings.get("mixed_currency"):
+        real = quality.assess(filings, 1e11, "Technology")
+        check("%s is refused rather than mixed" % symbol,
+              all(not s.usable for s in real["scores"].values()))
+
 print()
 print("%d failure(s)" % len(fails))
 print("QUALITY MODELS OK" if not fails else "FAILURES: %s" % fails)

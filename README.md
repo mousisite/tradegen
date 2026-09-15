@@ -364,6 +364,41 @@ paper journal and a live one side by side without editing anything:
 
 ---
 
+## Where it refuses to answer
+
+A wrong answer delivered confidently costs more than no answer. These are the
+places the app declines rather than producing a number that would look fine and
+be wrong.
+
+**Mixed currencies.** A foreign private issuer files in its home currency.
+Alibaba's filings come back in yuan and dollars, Toyota's in yen and dollars.
+Dividing a market value quoted in dollars by liabilities reported in yen gives
+a perfectly plausible Altman score that is wrong by the exchange rate, and the
+filing contains no rate to correct it with. Every model refuses on those, and
+names the currencies it found.
+
+**Models applied outside their domain.** No Altman Z for a bank: the
+coefficients were fitted on manufacturers, and a balance sheet that is mostly
+other people's money by design reads as distressed however healthy it is.
+
+**Partial evidence.** A Piotroski score computed from seven available tests
+says "6 of 7" and names the two it could not measure, rather than grading out
+of nine and looking worse than the company is.
+
+**Figures the reasoning could not source.** The language model is given the
+gathered evidence and told to use nothing else. That instruction is then
+checked: every figure in its answer is matched back against the evidence, and
+anything with no relative there is listed on the page as unverified. Rounding
+is not treated as invention, years are not treated as measurements, and a
+fraction in the evidence matches a percentage in the prose. When the check
+passes, the page says how many figures it verified.
+
+**A company that re-registered.** Exxon Mobil's history sits under a
+predecessor CIK, so its new one holds two quarterly filings and nothing else.
+That is reported as what it is rather than rendering an empty table.
+
+---
+
 ## What the published models say
 
 Four models run against the filed figures on every research page. None was
