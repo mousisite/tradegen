@@ -89,6 +89,21 @@ def text(result: Dict) -> str:
     return result["body"].decode("utf-8", "replace")
 
 
+def header(result: Dict, name: str) -> str:
+    """One header, found regardless of case.
+
+    Header names are case-insensitive per the HTTP spec and proxies normalise
+    them freely: Render returns "location" where the origin sent "Location".
+    Looking one up in a plain dict is therefore a bug that only shows up behind
+    a proxy, which is to say only in production.
+    """
+    wanted = name.lower()
+    for key, value in result.get("headers", {}).items():
+        if key.lower() == wanted:
+            return value
+    return ""
+
+
 def run(base: str, report: Report) -> None:
     base = base.rstrip("/")
 
@@ -185,7 +200,7 @@ def run(base: str, report: Report) -> None:
         print("  That is correct for a private test and wrong for a public launch.")
         signed_in_mode = False
     elif home["status"] in (301, 302, 307, 308):
-        where = home["headers"].get("Location", "")
+        where = header(home, "Location")
         if "/signin" in where:
             report.ok("sign-in is switched on", "the app redirects to /signin")
             signed_in_mode = True
@@ -217,7 +232,7 @@ def run(base: str, report: Report) -> None:
 
     start = fetch(base + "/auth/google")
     if start["status"] in (301, 302, 307, 308):
-        where = start["headers"].get("Location", "")
+        where = header(start, "Location")
         if where.startswith("https://accounts.google.com/"):
             report.ok("starting sign-in reaches Google")
             query = where.split("?", 1)[-1]
@@ -262,7 +277,7 @@ def run(base: str, report: Report) -> None:
         page = fetch(base + path)
         if signed_in_mode:
             if page["status"] in (301, 302, 307, 308) and \
-                    "/signin" in page["headers"].get("Location", ""):
+                    "/signin" in header(page, "Location"):
                 report.ok("%s needs an account" % path)
             elif page["status"] == 200:
                 report.bad("%s needs an account" % path,
@@ -286,7 +301,7 @@ def run(base: str, report: Report) -> None:
     # which is the first point at which a real cookie exists.
     cookie = None
     for path in ("/auth/google", "/signin", "/"):
-        raw = fetch(base + path)["headers"].get("Set-Cookie")
+        raw = header(fetch(base + path), "Set-Cookie")
         if raw:
             cookie = raw
             break
