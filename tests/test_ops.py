@@ -338,6 +338,53 @@ R.verify(scaled, "Net margin 0.269")
 check("a fraction in the evidence matches a percentage in the prose",
       scaled.grounded, scaled.unverified)
 
+
+print()
+print("=" * 72)
+print("CHARTS DO NOT MIX CURRENCIES")
+print("=" * 72)
+
+from bot import sec as _sec
+
+mixed = {"available": True, "mixed_currency": True, "currencies": ["JPY", "USD"],
+         "table": {
+             "revenue": [{"fy": 2023, "value": 3.0e13, "unit": "JPY"},
+                         {"fy": 2024, "value": 3.1e13, "unit": "JPY"}],
+             "net_income": [{"fy": 2023, "value": 3.4e9, "unit": "USD"},
+                            {"fy": 2024, "value": 4.0e9, "unit": "USD"}]},
+         "years": [2023, 2024], "derived": {}}
+
+years, values = charts.margin_series(mixed)
+check("no margin is computed across currencies", years == [] and values == [])
+
+drawn = charts.charts_for(mixed)
+check("each single line item is still drawn", "revenue" in drawn)
+check("and carries the unit it was filed in", drawn.get("revenue_unit") == "JPY")
+check("net income carries its own unit", drawn.get("net_income_unit") == "USD")
+check("no margin chart is produced", "net_margin" not in drawn)
+
+same = dict(mixed)
+same["mixed_currency"] = False
+same["currencies"] = ["USD"]
+same["table"] = {
+    "revenue": [{"fy": 2023, "value": 1000.0, "unit": "USD"},
+                {"fy": 2024, "value": 1100.0, "unit": "USD"}],
+    "net_income": [{"fy": 2023, "value": 100.0, "unit": "USD"},
+                   {"fy": 2024, "value": 200.0, "unit": "USD"}]}
+years, values = charts.margin_series(same)
+check("one currency still produces a margin", len(years) == 2, years)
+check("and the margin is right",
+      abs(values[-1] - 200.0 / 1100.0) < 1e-9, values)
+
+# Against the real filer that caused this.
+toyota = _sec.financial_history("TM", years=8)
+if toyota.get("available") and toyota.get("mixed_currency"):
+    margins = [v.get("net_margin") for v in (toyota.get("derived") or {}).values()
+               if v.get("net_margin") is not None]
+    check("Toyota gets no cross-currency margin", margins == [], margins[:3])
+    check("but its line items are still charted",
+          bool(charts.charts_for(toyota).get("revenue")))
+
 print()
 print("%d failure(s)" % len(fails))
 print("OPS OK" if not fails else "FAILURES: %s" % fails)

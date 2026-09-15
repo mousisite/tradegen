@@ -216,7 +216,14 @@ def series_from_history(history: Dict, concept: str) -> Tuple[List[int], List[fl
 
 
 def margin_series(history: Dict) -> Tuple[List[int], List[float]]:
-    """Net margin per filed year, as a fraction."""
+    """Net margin per filed year, as a fraction.
+
+    Refuses when the two lines are reported in different currencies, which
+    happens for foreign issuers and would otherwise produce a margin wrong by
+    the exchange rate.
+    """
+    if history.get("mixed_currency"):
+        return [], []
     revenue = dict(zip(*series_from_history(history, "revenue")))
     income = dict(zip(*series_from_history(history, "net_income")))
     years = sorted(set(revenue) & set(income))
@@ -229,9 +236,21 @@ def margin_series(history: Dict) -> Tuple[List[int], List[float]]:
 
 
 def charts_for(history: Dict) -> Dict[str, str]:
-    """The set of filed-financial charts worth drawing for one company."""
+    """The set of filed-financial charts worth drawing for one company.
+
+    Each chart covers one line item, so it is internally consistent even when
+    the filing as a whole mixes currencies. The title carries the unit, because
+    two charts side by side invite a comparison the currencies do not support.
+    """
     if not history or not history.get("available"):
         return {}
+
+    units = {}
+    for concept in ("revenue", "net_income", "operating_cashflow"):
+        for row in (history.get("table") or {}).get(concept) or []:
+            if row.get("unit"):
+                units[concept] = row["unit"]
+                break
 
     out = {}
     for key, concept, label in (
@@ -240,9 +259,12 @@ def charts_for(history: Dict) -> Dict[str, str]:
         ("operating_cashflow", "operating_cashflow", "Operating cash flow"),
     ):
         years, values = series_from_history(history, concept)
-        svg = bar_chart(years, values, title=label)
+        unit = units.get(concept, "")
+        svg = bar_chart(years, values,
+                        title="%s%s" % (label, (" in %s" % unit) if unit else ""))
         if svg:
             out[key] = svg
+            out[key + "_unit"] = unit
 
     years, values = margin_series(history)
     svg = bar_chart(years, values, title="Net margin", money=False)

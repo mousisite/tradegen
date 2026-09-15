@@ -546,18 +546,35 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
     years_seen = sorted({r["fy"] for rows in table.values() for r in rows if r["fy"]})
 
     derived = {}
-    rev = {r["fy"]: r["value"] for r in table.get("revenue", [])}
-    ni = {r["fy"]: r["value"] for r in table.get("net_income", [])}
-    ocf = {r["fy"]: r["value"] for r in table.get("operating_cashflow", [])}
-    capex = {r["fy"]: r["value"] for r in table.get("capex", [])}
+    # Keyed with the unit, so a ratio is only formed between figures reported in
+    # the same currency. Toyota files revenue in yen and net income in dollars;
+    # dividing one by the other gives a margin wrong by the exchange rate.
+    def _by_year(concept):
+        return {r["fy"]: (r["value"], r.get("unit")) for r in table.get(concept, [])}
+
+    def _same_unit(*pairs):
+        units = {p[1] for p in pairs if p is not None}
+        return len(units) <= 1
+
+    rev_u = _by_year("revenue")
+    ni_u = _by_year("net_income")
+    ocf_u = _by_year("operating_cashflow")
+    capex_u = _by_year("capex")
+    rev = {k: v[0] for k, v in rev_u.items()}
+    ni = {k: v[0] for k, v in ni_u.items()}
+    ocf = {k: v[0] for k, v in ocf_u.items()}
+    capex = {k: v[0] for k, v in capex_u.items()}
+
     for fy in years_seen:
         row = {}
-        if rev.get(fy) and ni.get(fy) is not None and rev[fy] != 0:
+        if (rev.get(fy) and ni.get(fy) is not None and rev[fy] != 0
+                and _same_unit(rev_u.get(fy), ni_u.get(fy))):
             row["net_margin"] = ni[fy] / rev[fy]
-        if ocf.get(fy) is not None and capex.get(fy) is not None:
+        if (ocf.get(fy) is not None and capex.get(fy) is not None
+                and _same_unit(ocf_u.get(fy), capex_u.get(fy))):
             # Capex is filed as a positive outflow, so free cash flow subtracts it.
             row["free_cashflow"] = ocf[fy] - abs(capex[fy])
-            if rev.get(fy):
+            if rev.get(fy) and _same_unit(rev_u.get(fy), ocf_u.get(fy)):
                 row["fcf_margin"] = row["free_cashflow"] / rev[fy]
         if row:
             derived[fy] = row

@@ -308,7 +308,8 @@
                           ('net_margin', 'Net margin')] %}
       {% if filed_charts.get(key) %}
         <div class="card">
-          <span class="eyebrow">{{ label }}</span>
+          <span class="eyebrow">{{ label }}{% if filed_charts.get(key ~ '_unit') %}
+            <span class="faint">in {{ filed_charts[key ~ '_unit'] }}</span>{% endif %}</span>
           {{ filed_charts[key]|safe }}
         </div>
       {% endif %}
@@ -319,6 +320,18 @@
     annual report. A line between two of them would imply values in between
     that were never reported. Hover a bar for the exact number.
   </p>
+  {% if r.sec_history and r.sec_history.mixed_currency %}
+    <div class="card" style="margin-top:var(--s3);border-color:var(--hold)">
+      <span class="eyebrow" style="color:var(--hold)">Different currencies</span>
+      <p class="prose" style="margin-top:var(--s1)">
+        This company files in {{ r.sec_history.currencies|join(' and ') }}, and
+        each chart above is labelled with its own. Do not compare one against
+        another: the filing states no exchange rate, so any ratio across them
+        would be wrong by whatever the rate happened to be. Margins and the
+        scored models are withheld for the same reason.
+      </p>
+    </div>
+  {% endif %}
 </section>
 {% endif %}
 
