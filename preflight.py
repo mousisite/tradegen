@@ -55,7 +55,7 @@ class Report:
         return sum(1 for v, _, _ in self.rows if v == WARN)
 
 
-def fetch(url: str, redirect: bool = False) -> Dict:
+def fetch(url: str, redirect: bool = False, _retried: bool = False) -> Dict:
     """One GET. Never raises; a failure is a result like any other."""
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):
@@ -81,6 +81,12 @@ def fetch(url: str, redirect: bool = False) -> Dict:
                 "headers": dict(exc.headers or {}),
                 "seconds": time.time() - started, "url": url}
     except Exception as exc:
+        # A DNS hiccup or a dropped connection is not the site being down, and
+        # reporting it as such is the worst thing this tool can get wrong. One
+        # retry costs a second and removes almost all of that noise.
+        if not _retried:
+            time.sleep(1.5)
+            return fetch(url, redirect, _retried=True)
         return {"status": 0, "body": b"", "headers": {},
                 "seconds": time.time() - started, "error": str(exc), "url": url}
 
