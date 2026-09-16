@@ -83,6 +83,11 @@
             <td class="r fig">
               {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}
               {% if not r.reliable %}<span class="faint">thin</span>{% endif %}
+              {% if r.accounts == 'sound' %}
+                <div class="faint" style="font-size:var(--t-xs)">accounts check out</div>
+              {% elif r.accounts == 'not filed' %}
+                <div class="faint" style="font-size:var(--t-xs)">no filings to check</div>
+              {% endif %}
             </td>
             <td class="r">
               <a data-working href="{{ url_for('analyse', symbol=r.symbol,
@@ -97,6 +102,39 @@
       "Worked before" counts how many times this same setup reached its target
       before its stop, on this instrument's own history. It is a shortlist to
       look into, not a list to buy.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% if result.dropped %}
+<section>
+  <div class="sechead">
+    <h2>Left out on purpose</h2>
+    <span class="count">{{ result.dropped|length }}</span>
+    <span class="tail">the chart looked fine, the accounts did not</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Instrument</th><th>Why it was left out</th><th></th></tr></thead>
+        <tbody>
+        {% for r in result.dropped %}
+          <tr>
+            <td><b>{{ r.symbol }}</b></td>
+            <td class="soft">{{ r.dropped_because }}</td>
+            <td class="r"><a data-working
+              href="{{ url_for('research', symbol=r.symbol) }}">See why</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      You asked for something to hold for months, so the filings were checked
+      as well as the chart. These had a setup worth taking on a shorter view
+      and something in the accounts that makes holding them for months a
+      different bet.
     </p>
   </div>
 </section>

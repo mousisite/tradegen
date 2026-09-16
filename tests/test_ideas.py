@@ -117,6 +117,59 @@ check("it admits how many it skipped", "had no setup" in body or "no setup at al
 check("it says an empty list is the app working",
       "not failing" in body)
 
+
+print()
+print("=" * 72)
+print("IT MUST NOT RECOMMEND SOMETHING NOBODY ASKED FOR")
+print("=" * 72)
+
+# The resolver falls back to a fuzzy search for a dead ticker, which is right
+# when a person mistypes and wrong here: a scan that silently substitutes is
+# recommending an instrument nothing vetted. APT-USD is dead on the source and
+# used to come back as STAPT-USD.
+from bot import config as config_mod
+
+_cfg = config_mod.load()
+check("a dead ticker returns nothing rather than a substitute",
+      ideas._look_at("APT-USD", "1d", _cfg) is None)
+check("a nonsense ticker returns nothing",
+      ideas._look_at("ZZQQ99XX", "1d", _cfg) is None)
+
+real = ideas._look_at("AAPL", "1d", _cfg)
+check("a real ticker still works", real is not None and real["symbol"] == "AAPL")
+
+everything = ideas._universe("both", 60)
+check("no dead tickers are carried in the list", "APT-USD" not in everything)
+
+scan = ideas.find("crypto", "medium", _cfg, limit=10)
+asked = set(ideas._universe("crypto", 10))
+returned = {r["symbol"] for r in scan["passed"] + scan["watch"]}
+check("every name shown was a name asked about",
+      returned <= asked, sorted(returned - asked))
+
+print()
+print("=" * 72)
+print("MONTHS MUST NOT BE A COPY OF WEEKS")
+print("=" * 72)
+
+check("the long horizon is marked as needing sound accounts",
+      ideas.HORIZONS["long"].get("needs_sound_accounts") is True)
+check("the medium horizon is not",
+      not ideas.HORIZONS["medium"].get("needs_sound_accounts"))
+
+long_scan = ideas.find("stocks", "long", _cfg, limit=16)
+print("   long: ready %d, left out %d"
+      % (len(long_scan["passed"]), len(long_scan.get("dropped") or [])))
+check("the long scan reports what it left out", "dropped" in long_scan)
+check("everything kept carries an accounts verdict",
+      all(r.get("accounts") in ("sound", "not filed") for r in long_scan["passed"]),
+      [r.get("accounts") for r in long_scan["passed"]])
+check("everything left out carries a reason",
+      all(r.get("dropped_because") for r in (long_scan.get("dropped") or [])))
+check("a coin is never kept for a months-long hold on its accounts",
+      not any(r.get("asset_class") == "crypto" and r.get("accounts") == "sound"
+              for r in long_scan["passed"]))
+
 import sys as _exit_sys
 print()
 print("%d failure(s)" % len(fails))

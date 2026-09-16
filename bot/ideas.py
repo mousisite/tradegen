@@ -45,22 +45,30 @@ HORIZONS = {
     },
     "long": {
         "label": "Months", "interval": "1d",
-        "why": "Hold for months. The company matters more than the chart.",
+        "why": "Hold for months. The company has to stand up, not just the chart.",
         "warning": "",
+        # Over months the accounts matter more than the pattern, so this one
+        # additionally requires the filings to look sound. Without that it
+        # would be an identical copy of the weeks option, which is worse than
+        # not offering it.
+        "needs_sound_accounts": True,
     },
 }
 
 # Hand-kept because the free screener endpoints cover no crypto at all.
 CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD",
           "AVAX-USD", "LINK-USD", "DOT-USD", "LTC-USD", "BCH-USD", "SHIB-USD",
-          "UNI-USD", "ATOM-USD", "NEAR-USD", "APT-USD"]
+          "UNI-USD", "ATOM-USD", "NEAR-USD", "XLM-USD", "HBAR-USD",
+          "FIL-USD", "ETC-USD", "ICP-USD", "ARB-USD", "OP-USD", "INJ-USD",
+          "SUI-USD", "TRX-USD", "VET-USD", "ALGO-USD",
+          "AAVE-USD"]
 
 # A spread of liquid names, used when the live screener is unavailable.
 FALLBACK_STOCKS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
                    "AMD", "AVGO", "JPM", "V", "UNH", "XOM", "KO", "WMT",
                    "COST", "NFLX", "DIS", "BA", "PFE"]
 
-MAX_SCANNED = 24
+MAX_SCANNED = 40
 
 
 def _universe(market: str, limit: int) -> List[str]:
@@ -68,10 +76,18 @@ def _universe(market: str, limit: int) -> List[str]:
 
     stocks: List[str] = []
     if market in ("stocks", "both"):
-        try:
-            stocks = screener_mod.universe_symbols("most_actives", 40) or []
-        except Exception:
-            stocks = []
+        # Several screens rather than one, because "most active" alone is a
+        # narrow and repetitive slice of the market.
+        seen = set()
+        for screen in ("most_actives", "day_gainers", "undervalued_growth_stocks",
+                       "growth_technology_stocks"):
+            try:
+                for symbol in screener_mod.universe_symbols(screen, 30) or []:
+                    if symbol not in seen:
+                        seen.add(symbol)
+                        stocks.append(symbol)
+            except Exception:
+                continue
         if not stocks:
             stocks = list(FALLBACK_STOCKS)
         # Anything with a suffix is a foreign listing or a warrant; both are
@@ -94,6 +110,14 @@ def _look_at(symbol: str, interval: str, cfg: Dict) -> Optional[Dict]:
         result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
                                 with_learning=True, record=False)
     except Exception:
+        return None
+
+    # The resolver falls back to a fuzzy search when a ticker is dead, so a
+    # request for APT-USD can come back as STAPT-USD. That is helpful when a
+    # person mistypes and unacceptable here: this list would be recommending an
+    # instrument nobody asked about and nothing vetted.
+    got = (result.bars.symbol or "").upper()
+    if got != symbol.upper():
         return None
 
     plan = result.plan
@@ -137,6 +161,44 @@ def _worth_showing(row: Dict) -> bool:
     return True
 
 
+def _accounts_hold_up(symbol: str) -> Optional[Dict]:
+    """Whether the filings support holding this for months. None when unknown.
+
+    Only called for names that already cleared the price test, so this costs a
+    handful of requests rather than one per instrument scanned.
+    """
+    from . import fundamentals as fundamentals_mod
+    from . import quality as quality_mod
+    from . import sec as sec_mod
+
+    try:
+        filings = sec_mod.financial_history(symbol, years=8)
+        if not filings.get("available"):
+            return None
+        facts = fundamentals_mod.load(symbol, with_sec=False)
+        scored = quality_mod.assess(filings, facts.get("market_cap"), facts.sector)
+    except Exception:
+        return None
+    if not scored.get("available"):
+        return None
+
+    models = scored["scores"]
+    strength = models["piotroski"]
+    distress = models["altman"]
+    earnings = models["accruals"]
+
+    reasons = []
+    if strength.usable and strength.value <= 3:
+        reasons.append("its finances got worse in most ways last year")
+    if distress.usable and distress.value < 1.81:
+        reasons.append("the balance sheet scores in the distress range")
+    if earnings.usable and earnings.value > 0.10:
+        reasons.append("reported profit is running well ahead of cash")
+
+    return {"ok": not reasons, "reasons": reasons,
+            "strength": strength.value if strength.usable else None}
+
+
 def find(market: str = "stocks", horizon: str = "medium",
          cfg: Optional[Dict] = None, limit: int = MAX_SCANNED,
          progress=None) -> Dict:
@@ -166,6 +228,31 @@ def find(market: str = "stocks", horizon: str = "medium",
     passed = [r for r in rows if _worth_showing(r)]
     passed.sort(key=lambda r: (-(r["expectancy"] or 0), -(r["conviction"] or 0)))
 
+    # Holding for months is a bet on the business, not on the pattern, so the
+    # long option additionally reads the filings. Anything that fails is moved
+    # out with the reason attached rather than silently dropped.
+    dropped: List[Dict] = []
+    if HORIZONS[horizon].get("needs_sound_accounts") and passed:
+        kept = []
+        for candidate in passed:
+            if candidate.get("asset_class") == "crypto":
+                candidate["dropped_because"] = (
+                    "A coin files no accounts, so there is nothing to check "
+                    "before holding it for months.")
+                dropped.append(candidate)
+                continue
+            verdict = _accounts_hold_up(candidate["symbol"])
+            if verdict is None:
+                candidate["accounts"] = "not filed"
+                kept.append(candidate)
+            elif verdict["ok"]:
+                candidate["accounts"] = "sound"
+                kept.append(candidate)
+            else:
+                candidate["dropped_because"] = verdict["reasons"][0].capitalize() + "."
+                dropped.append(candidate)
+        passed = kept
+
     # A positive edge measured over years does not mean a setup is firing
     # today, and on most days none is. Without this second tier the page would
     # be empty almost every time, which is honest and useless. These are the
@@ -190,6 +277,7 @@ def find(market: str = "stocks", horizon: str = "medium",
         "asked_for": len(symbols),
         "passed": passed,
         "watch": watch[:10],
+        "dropped": dropped,
         "avoided": len(avoided),
         "thin": len(thin),
         "seconds": time.time() - started,
