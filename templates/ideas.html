@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% set active = 'ideas' %}
+{% block title %}Find something · TradeGen{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>What should I look at?</h1>
+  <p>Pick what you trade and how long you hold. It runs the full analysis over
+    a list of instruments and shows only what actually cleared the bar.</p>
+</div>
+
+<div class="card">
+  <form method="get" action="{{ url_for('ideas') }}" data-working>
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="market">What do you trade?</label>
+        <select class="field" id="market" name="market">
+          {% for key, spec in markets.items() %}
+            <option value="{{ key }}" {{ 'selected' if key == market }}>{{ spec.label }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">{{ markets[market].why }}</div>
+      </div>
+      <div class="setfield">
+        <label for="horizon">How long do you hold?</label>
+        <select class="field" id="horizon" name="horizon">
+          {% for key, spec in horizons.items() %}
+            <option value="{{ key }}" {{ 'selected' if key == horizon }}>{{ spec.label }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">{{ horizons[horizon].why }}</div>
+      </div>
+    </div>
+    <button class="btn" type="submit" style="margin-top:var(--s3)">Find something</button>
+  </form>
+  <p class="prose" style="margin-top:var(--s3)">
+    This takes a few seconds. It is running the whole back-test on every
+    instrument in the list, not reading a saved score.
+  </p>
+</div>
+
+{% if result %}
+
+<div class="plainbox" style="margin-top:var(--s3)">
+  <span class="eyebrow">In plain words</span>
+  <p class="lead">
+    {% if result.passed %}
+      {{ result.passed|length }} worth a look right now.
+    {% else %}
+      Nothing worth buying today.
+    {% endif %}
+  </p>
+  <p class="prose">{{ result.summary }}</p>
+  {% if result.warning %}
+    <p class="prose"><b>Worth knowing.</b> {{ result.warning }}</p>
+  {% endif %}
+</div>
+
+{% if result.passed %}
+<section>
+  <div class="sechead">
+    <h2>Ready now</h2>
+    <span class="count">{{ result.passed|length }}</span>
+    <span class="tail">a setup is firing and it has paid off before</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th>Call</th><th class="r">Price</th>
+          <th class="r">Buy at</th><th class="r">Get out at</th>
+          <th class="r">Worked before</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for r in result.passed %}
+          <tr>
+            <td><b>{{ r.symbol }}</b></td>
+            <td><span class="chip {{ 'long' if r.action == 'BUY'
+                 else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
+            <td class="r fig">{{ r.price|price }}</td>
+            <td class="r fig">{{ r.entry|price if r.entry else '—' }}</td>
+            <td class="r fig loss">{{ r.stop|price if r.stop else '—' }}</td>
+            <td class="r fig">
+              {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}
+              {% if not r.reliable %}<span class="faint">thin</span>{% endif %}
+            </td>
+            <td class="r">
+              <a data-working href="{{ url_for('analyse', symbol=r.symbol,
+                 interval=result.interval) }}">Open</a>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      "Worked before" counts how many times this same setup reached its target
+      before its stop, on this instrument's own history. It is a shortlist to
+      look into, not a list to buy.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% if result.watch %}
+<section>
+  <div class="sechead">
+    <h2>Worth watching</h2>
+    <span class="count">{{ result.watch|length }}</span>
+    <span class="tail">has paid off before, nothing firing today</span>
+  </div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th class="r">Price</th>
+          <th class="r">Worked before</th><th>Why not today</th><th></th>
+        </tr></thead>
+        <tbody>
+        {% for r in result.watch %}
+          <tr>
+            <td><b>{{ r.symbol }}</b></td>
+            <td class="r fig">{{ r.price|price }}</td>
+            <td class="r fig">
+              {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}</td>
+            <td class="soft">No setup is firing right now.</td>
+            <td class="r">
+              <form method="post" action="{{ url_for('watch', action='add') }}"
+                    style="display:inline">
+                <input type="hidden" name="symbol" value="{{ r.symbol }}">
+                <input type="hidden" name="interval" value="{{ result.interval }}">
+                <input type="hidden" name="back" value="{{ request.full_path }}">
+                <button class="btn quiet sm" type="submit">Watch</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      These have made money after costs on their own history, but nothing is
+      happening on them today. Adding one to your watchlist means the routines
+      on the Monitor page will keep checking it for you.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+<p class="legal">
+  Looked at {{ result.scanned }} instruments on {{ result.interval }} bars in
+  {{ "%.0f"|format(result.seconds) }} seconds.
+  {{ result.avoided }} had no setup at all.
+  A list can be empty, and often is. That is the app working, not failing.
+</p>
+
+{% endif %}
+
+{% endblock %}

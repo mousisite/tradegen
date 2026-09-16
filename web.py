@@ -47,6 +47,7 @@ from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
 from bot import engine
+from bot import ideas as ideas_mod
 from bot import export as export_mod
 from bot import market as market_mod
 from bot import plain as plain_mod
@@ -1031,6 +1032,27 @@ def export_data(dataset, fmt):
         built["body"], mimetype=built["mimetype"],
         headers={"Content-Disposition":
                  'attachment; filename="%s"' % built["filename"]})
+
+
+@app.route("/ideas")
+def ideas():
+    """What is worth looking at, given how you trade."""
+    market = request.args.get("market") or "stocks"
+    horizon = request.args.get("horizon") or "medium"
+    cfg = config_mod.load(app.config.get("CFG_PATH"))
+
+    result = None
+    if request.args.get("market") or request.args.get("horizon"):
+        try:
+            result = ideas_mod.find(market, horizon, cfg)
+        except Exception as exc:
+            return render_template("error.html", symbol="",
+                                   message="The scan failed: %s" % exc), 502
+
+    return render_template("ideas.html", result=result,
+                           market=market if market in ideas_mod.MARKETS else "stocks",
+                           horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
+                           markets=ideas_mod.MARKETS, horizons=ideas_mod.HORIZONS)
 
 
 @app.route("/screener", methods=["GET"])

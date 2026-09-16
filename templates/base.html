@@ -30,6 +30,8 @@
     <nav class="nav">
       <a href="{{ url_for('index') }}"
          {% if active == 'home' %}aria-current="page"{% endif %}>Analyse</a>
+      <a href="{{ url_for('ideas') }}"
+         {% if active == 'ideas' %}aria-current="page"{% endif %}>Find</a>
       <a href="{{ url_for('screener') }}"
          {% if active == 'screener' %}aria-current="page"{% endif %}>Screener</a>
       <a href="{{ url_for('portfolio') }}"

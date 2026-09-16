@@ -29,6 +29,7 @@ SUITES = [
     ("test_valuation.py",    True,  "discounted cash flow, multiples, risk measures"),
     ("test_fundamentals.py", True,  "Yahoo ratios reconciled against SEC filings"),
     ("test_screener.py",     True,  "filters accept and reject for stated reasons"),
+    ("test_ideas.py",        True,  "the idea finder, and what it refuses to pad out"),
     ("test_modules.py",      True,  "thesis, alerts, reasoning payload and workflows"),
     ("test_thesis.py",       True,  "closing a thesis out, scoring the record, safe redirects"),
     ("test_operations.py",   True,  "earnings in the window, background checking, export, overlap"),
