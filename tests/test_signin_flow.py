@@ -131,6 +131,21 @@ try:
     for tag in ('name="description"', 'property="og:title"',
                 'property="og:image"', 'name="twitter:card"'):
         check("the page carries %s" % tag, tag in card)
+    # X and several chat clients drop a card whose image is not https, and
+    # behind a TLS terminator the app sees a plain http request, so these must
+    # be built from the public address rather than the observed one.
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://tradegen.app"
+    try:
+        secure = visitor.get("/signin").data.decode("utf-8", "replace")
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
+    for tag in ("og:url", "og:image", "twitter:image"):
+        line = [l for l in secure.splitlines() if tag in l][0]
+        check("%s is an https address on the real domain" % tag,
+              'content="https://tradegen.app' in line, line.strip())
+    check("and the preview address carries no query string",
+          "?" not in [l for l in secure.splitlines() if "og:url" in l][0])
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))

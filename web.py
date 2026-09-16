@@ -82,14 +82,17 @@ app.config.update(
 # headers are what the proxy uses to say what the browser actually asked for.
 # Only enabled deliberately, since trusting them when there is no proxy in
 # front would let a client spoof its own scheme and host.
-if os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower() in ("1", "true", "yes"):
+_public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
+# An https public address is an operator saying there is a TLS terminator in
+# front, which is the only way these headers get set at all.
+if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
+        in ("1", "true", "yes")) or _public.startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
 # is served over https; on localhost it stays off or the cookie never arrives.
-_public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
 if _public.startswith("https://"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
@@ -1031,6 +1034,22 @@ def _public_base() -> str:
     """
     return ((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().rstrip("/")
             or request.url_root.rstrip("/"))
+
+
+@app.context_processor
+def _preview_urls():
+    """Absolute https addresses for the link-preview tags.
+
+    url_for(_external=True) builds from what the app sees, and behind a TLS
+    terminator that is a plain http internal request. X and several chat
+    clients silently drop a card whose image is not https, so these are built
+    from the public address rather than the observed one. The query string is
+    dropped because a scraper lands on ?next=... and that is not the address
+    anyone should be sharing.
+    """
+    base = _public_base()
+    return {"canonical_url": base + request.path,
+            "preview_image": base + url_for("static", filename="preview.png")}
 
 
 @app.route("/robots.txt")

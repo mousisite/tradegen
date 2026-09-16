@@ -13,14 +13,14 @@
 <meta property="og:type" content="website">
 <meta property="og:title" content="{% block og_title %}TradeGen{% endblock %}">
 <meta property="og:description" content="{{ _blurb }}">
-<meta property="og:url" content="{{ request.url }}">
-<meta property="og:image" content="{{ url_for('static', filename='preview.png', _external=True) }}">
+<meta property="og:url" content="{{ canonical_url }}">
+<meta property="og:image" content="{{ preview_image }}">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="TradeGen">
 <meta name="twitter:description" content="{{ _blurb }}">
-<meta name="twitter:image" content="{{ url_for('static', filename='preview.png', _external=True) }}">
+<meta name="twitter:image" content="{{ preview_image }}">
 <title>{% block title %}TradeGen{% endblock %}</title>
 {# Preconnect first so the font request is not waiting on DNS and TLS.
    Source Serif stands in for Tiempos, Inter for Styrene, JetBrains Mono for
