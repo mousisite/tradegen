@@ -119,7 +119,7 @@ def healthcheck():
 # once Google sign-in is configured.
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
-                    "robots", "sitemap"}
+                    "robots", "sitemap", "index"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -279,6 +279,16 @@ def inject_globals():
 
 @app.route("/")
 def index():
+    # A signed-out visitor gets the landing page here rather than a redirect to
+    # /signin. Search engines are reluctant to index a login page, and a
+    # redirect from the front door is the weakest thing a crawler can be
+    # handed: the address everyone shares would have had nothing behind it.
+    # It is also the first thing a person arriving from a link sees, and a bare
+    # login form asks them to commit before they know what this is.
+    if getattr(g, "user", None) is None:
+        return render_template("signin.html", reason="",
+                               why_not=auth_mod.why_not(), next_url="")
+
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)

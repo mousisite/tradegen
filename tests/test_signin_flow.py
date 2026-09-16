@@ -109,8 +109,17 @@ try:
     print("=" * 72)
 
     visitor = web.app.test_client()
-    check("a stranger is not signed in",
-          visitor.get("/").status_code == 302)
+
+    # The front door answers rather than redirecting. A crawler handed a
+    # redirect to a login form has nothing to index, and the address on every
+    # shared link is this one.
+    front = visitor.get("/")
+    check("the front door answers a stranger", front.status_code == 200,
+          front.status_code)
+    check("and it says what the app is, not just a login box",
+          "back-tests its own advice" in front.data.decode("utf-8", "replace"))
+    check("a stranger still cannot reach the journal",
+          visitor.get("/trades").status_code == 302)
 
     # Crawlers and link-preview scrapers never sign in. When these started
     # returning a redirect to the sign-in page, search engines read the whole
@@ -261,8 +270,10 @@ try:
     print("=" * 72)
 
     visitor.post("/signout")
-    check("signed out, the app asks for a login again",
-          visitor.get("/").status_code == 302)
+    check("signed out, the front door goes back to the landing page",
+          visitor.get("/").status_code == 200)
+    check("and the journal is behind the login again",
+          visitor.get("/trades").status_code == 302)
 
     response, state, verifier = start_flow(visitor)
     google2 = FakeGoogle()

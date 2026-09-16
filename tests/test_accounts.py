@@ -276,7 +276,12 @@ try:
     # A fresh client, so no session exists yet.
     anon = web.app.test_client()
     r = anon.get("/")
-    check("an anonymous visitor is sent to sign in",
+    check("an anonymous visitor gets the landing page, not a redirect",
+          r.status_code == 200, r.status_code)
+    check("and it carries no one's journal",
+          "Open positions" not in r.data.decode("utf-8", "replace"))
+    r = anon.get("/trades")
+    check("a page holding data still sends them to sign in",
           r.status_code == 302 and "/signin" in r.headers.get("Location", ""))
     r = anon.get("/api/alerts/status")
     check("the api answers 401 rather than redirecting", r.status_code == 401)
@@ -359,10 +364,13 @@ _os.environ["GOOGLE_CLIENT_SECRET"] = "deploy-check-secret"
 web.app.config["AUTH_MODE"] = None
 try:
     stranger = web.app.test_client()
-    for path in ("/privacy", "/terms", "/healthz", "/signin", "/static/style.css"):
+    # "/" is on this list deliberately: it is the address everyone shares, so it
+    # has to answer a stranger rather than bouncing them to a login form.
+    for path in ("/", "/privacy", "/terms", "/healthz", "/signin",
+                 "/static/style.css"):
         check("%s is readable without signing in" % path,
               stranger.get(path).status_code == 200)
-    for path in ("/", "/trades", "/account", "/export/trades.csv", "/settings"):
+    for path in ("/trades", "/account", "/export/trades.csv", "/settings"):
         r = stranger.get(path)
         check("%s still needs an account" % path,
               r.status_code == 302 and "/signin" in r.headers.get("Location", ""),
