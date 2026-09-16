@@ -1455,7 +1455,7 @@ def main(argv=None) -> int:
         print()
         print("  Port %d is already in use." % args.port)
         print()
-        print("  Stock Bot is probably still running in another window.")
+        print("  TradeGen is probably still running in another window.")
         print("  Close that window, or start this one on a different port:")
         print()
         print("      Stock Bot.bat --port %d" % (args.port + 1))
@@ -1467,7 +1467,7 @@ def main(argv=None) -> int:
     url = "http://%s:%d" % ("127.0.0.1" if args.host == "0.0.0.0" else args.host,
                             args.port)
     print()
-    print("  Stock Bot is running.")
+    print("  TradeGen is running.")
     print()
     print("      %s" % url)
     print()

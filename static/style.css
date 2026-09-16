@@ -643,3 +643,7 @@ ul.list.ok li::marker { color: var(--gain); }
 .plainbox ul.list li { color: var(--ink); font-size: var(--t-base); }
 .plainbox .prose { color: var(--ink-2); }
 .plainbox .prose + .prose { margin-top: var(--s1); }
+
+/* A safety net for any image added later. The one image on the site already
+   constrains itself; this makes that true by default rather than by memory. */
+img { max-width: 100%; height: auto; }

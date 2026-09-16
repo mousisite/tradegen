@@ -33,6 +33,7 @@ required.
 | Page | What it does |
 |---|---|
 | **Analyse** | Type a ticker or drop in a chart screenshot, get the full call with levels, odds and reasoning |
+| **Find** | Pick what you trade and how long you hold; it back-tests a list of instruments and shows only what cleared the bar |
 | **Research** | The business behind the ticker: filed financials, valuation, a two-sided thesis, options pricing, recent filings, every claim cited |
 | **Screener** | Ready-made and custom screens over a chosen universe, showing the numbers that got each name through |
 | **Portfolio** | What you are exposed to: concentration, sector weights, correlation between holdings, a market-shock table |
@@ -134,6 +135,8 @@ otherwise. Each links to where the work happens.
 | 21 | Error reporting | `bot/monitoring.py` | Optional Sentry, with personal data and credentials stripped before anything is sent, and expected failures never reported |
 | 22 | Scheduled backups | `backup.py`, `serve.py` | A verified snapshot on a timer, pruned to the newest few |
 | 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
+| 24 | Find something | `bot/ideas.py` | Pick stocks or crypto and how long you hold; it back-tests a list and shows only what cleared the bar. Refuses to pad the list |
+| 25 | Plain English | `bot/plain.py` | The same answer without the jargon, above the technical one. A test fails if jargon leaks in |
 | — | Screenshot reading | `bot/vision.py` | Identifies the instrument and timeframe from a chart image. Needs a key |
 
 ---
@@ -361,6 +364,38 @@ paper journal and a live one side by side without editing anything:
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. Unset means no login at all |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
+
+---
+
+## Finding something to look at
+
+The Find page answers the question people actually arrive with: *out of
+everything, what should I look at today?* Pick stocks or crypto, and whether
+you hold for days, weeks or months. It runs the whole back-test over forty
+instruments and ranks by the measured edge after costs.
+
+Two lists, and the second is why the first can stay honest:
+
+**Ready now** — a setup is firing *and* the approach has made money after costs
+on that instrument's own history.
+
+**Worth watching** — it has paid off before and nothing is happening today. The
+action offered is to watch it, not to buy it.
+
+Measuring forty instruments typically finds a handful with a positive edge and
+one or two with a setup actually firing, because an edge measured over years
+says nothing about today. Without the second list the page would be empty
+almost every day: honest, and useless.
+
+**Months is not a copy of Weeks.** Holding something for months is a bet on the
+business rather than the pattern, so that option reads the filings as well as
+the chart. Anything whose accounts do not hold up moves to a list that names
+the measure that failed, and a coin is never kept on that basis because it
+files no accounts at all.
+
+**It will not pad the list.** Every screener on the internet always has ten
+rows, because ten rows feel like the page worked. That is how people end up
+trading the least bad of a bad batch.
 
 ---
 
@@ -689,6 +724,8 @@ bot/
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
   usage.py          what people actually do, from rows already written
+  ideas.py          the Find page: scan a list, rank by measured edge
+  plain.py          the same answer in words a beginner can act on
   upstream.py       caching, single-flight and backoff for the shared sources
   yahoo.py          authenticated Yahoo session: cookie, crumb, retry
   catalysts.py      earnings and dividend dates, and whether they fall in range
