@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>{% block title %}Stock Bot{% endblock %}</title>
+<title>{% block title %}TradeGen{% endblock %}</title>
 {# Preconnect first so the font request is not waiting on DNS and TLS.
    Source Serif stands in for Tiempos, Inter for Styrene, JetBrains Mono for
    the figures. All three have real fallback stacks in the CSS. #}
@@ -25,7 +25,7 @@
           <path d="M3 16.5l5.5-6 4 3.5L21 5"/><path d="M15 5h6v6"/>
         </svg>
       </span>
-      Stock Bot
+      TradeGen
     </a>
     <nav class="nav">
       <a href="{{ url_for('index') }}"
@@ -125,7 +125,7 @@
       bar.hidden = false;
       if (window.Notification && Notification.permission === 'granted') {
         try {
-          new Notification('Stock Bot', { body: text.textContent });
+          new Notification('TradeGen', { body: text.textContent });
         } catch (e) {}
       }
     }

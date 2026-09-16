@@ -55,7 +55,7 @@ def main(argv=None) -> int:
 
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
     print()
-    print("  Stock Bot")
+    print("  TradeGen")
     print("    listening on   %s:%d with %d threads"
           % (args.host, args.port, args.threads))
     if public:
