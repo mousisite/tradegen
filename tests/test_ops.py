@@ -385,6 +385,100 @@ if toyota.get("available") and toyota.get("mixed_currency"):
     check("but its line items are still charted",
           bool(charts.charts_for(toyota).get("revenue")))
 
+
+print()
+print("=" * 72)
+print("PLAIN ENGLISH")
+print("=" * 72)
+
+from bot import plain
+
+
+class FakePlan:
+    action = "WAIT"
+    entry, stop, target1 = 100.0, 95.0, 120.0
+    probability, prob_samples, prob_reliable = 0.33, 103, True
+    breakeven_rate = 0.40
+    position = {"quantity": 10, "risk_amount": 50.0,
+                "gap_loss": 160.0, "gap_multiple": 3.2}
+
+
+class FakeBars:
+    currency = "USD"
+
+
+said = plain.explain_plan(FakePlan(), FakeBars(), "about 2 weeks")
+print("   %s" % said["headline"])
+for line in said["points"]:
+    print("      - %s" % line[:78])
+print("   sure: %s" % said["sure"][:90])
+print("   risk: %s" % said["risk"][:90])
+
+check("a WAIT is explained as do not buy yet", "not buy yet" in said["headline"])
+check("the buy price is named", "100" in " ".join(said["points"]))
+check("the get-out price is named", "95" in " ".join(said["points"]))
+
+# The whole point of the plain version: turn a rate into counted events.
+check("the odds are given as counts, not a percentage",
+      "103 times" in said["sure"] and "34 of those" in said["sure"], said["sure"])
+check("and it says the bar was not cleared",
+      "not been shown to make money" in said["sure"], said["sure"])
+check("gap risk is spelled out in cash", "160" in said["risk"], said["risk"])
+
+# No jargon may leak into the plain version. This is the rule the box exists
+# for, so it is asserted rather than trusted.
+everything = " ".join([said["headline"], said["sure"], said["risk"], said["hold"]]
+                      + said["points"]).lower()
+for word in ("expectancy", "r-multiple", "confidence interval", "atr",
+             "wilson", "piotroski", "altman", "beneish", "basis point",
+             "sharpe", "drawdown"):
+    check("the word %r never appears" % word, word not in everything)
+
+avoid = FakePlan()
+avoid.action = "AVOID"
+said = plain.explain_plan(avoid, FakeBars())
+check("an AVOID says leave it alone", "alone" in said["headline"])
+check("and reassures that this is normal",
+      "normal answer" in " ".join(said["points"]))
+
+shorting = FakePlan()
+shorting.action = "SHORT"
+said = plain.explain_plan(shorting, FakeBars())
+check("a SHORT warns a beginner off",
+      "beginners should skip" in " ".join(said["points"]))
+
+# Nothing may crash on missing figures, because that is the common case.
+class Bare:
+    action = "AVOID"
+    entry = stop = target1 = probability = breakeven_rate = None
+    prob_samples = 0
+    prob_reliable = False
+    position = {}
+
+
+bare = plain.explain_plan(Bare(), FakeBars())
+check("a plan with no numbers still explains itself", bool(bare["headline"]))
+check("and offers no figures it does not have", bare["sure"] == "" and bare["risk"] == "")
+
+
+class FakeResearch:
+    sec_history = {"available": False}
+    fundamentals = None
+    scores = None
+    valuation = None
+
+
+told = plain.explain_company(FakeResearch())
+check("a non-filer is explained, not blamed", told["available"] is False)
+check("and the reason is plain", "crypto" in told["why"])
+check("and it says the price side still works", "price side" in told["why"])
+
+for symbol in ("AAPL", "DOGE-USD"):
+    for page in ("analyse", "research"):
+        body = c.get("/%s?symbol=%s&interval=1d" % (page, symbol))             .data.decode("utf-8", "replace")
+        check("%s %s shows the plain box" % (symbol, page),
+              'class="plainbox"' in body)
+
 print()
 print("%d failure(s)" % len(fails))
 print("OPS OK" if not fails else "FAILURES: %s" % fails)

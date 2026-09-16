@@ -52,6 +52,22 @@
   <span class="line">{{ plan.headline }}</span>
 </div>
 
+{% if plain %}
+<div class="plainbox">
+  <span class="eyebrow">In plain words</span>
+  <p class="lead">{{ plain.headline }}</p>
+  {% if plain.points %}
+    <ul class="list">{% for x in plain.points %}<li>{{ x }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if plain.sure %}<p class="prose"><b>How sure is it?</b> {{ plain.sure }}</p>{% endif %}
+  {% if plain.risk %}<p class="prose"><b>What it could cost.</b> {{ plain.risk }}</p>{% endif %}
+  {% if plain.hold %}<p class="prose">{{ plain.hold }}</p>{% endif %}
+  <p class="prose faint" style="font-size:var(--t-xs)">
+    Everything below this box is the same answer with the workings shown.
+  </p>
+</div>
+{% endif %}
+
 {% if plan.entry and a != 'AVOID' %}
 <div class="cols a" style="margin-top:var(--s3)">
   <div class="card">

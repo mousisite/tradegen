@@ -284,6 +284,18 @@
 </section>
 {% endif %}
 
+{% if plain %}
+<div class="plainbox">
+  <span class="eyebrow">In plain words</span>
+  {% if plain.available %}
+    <ul class="list">{% for x in plain.points %}<li>{{ x }}</li>{% endfor %}</ul>
+    <p class="prose faint" style="font-size:var(--t-xs)">{{ plain.note }}</p>
+  {% else %}
+    <p class="prose">{{ plain.why }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if price_svg %}
 <section>
   <div class="sechead">

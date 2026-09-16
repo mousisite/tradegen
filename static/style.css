@@ -623,3 +623,23 @@ ul.list.ok li::marker { color: var(--gain); }
   padding: 11px var(--s2); font-size: var(--t-sm); line-height: 1.6;
 }
 .card > .notice b { font-weight: 600; }
+
+/* ---------- plain-English box ---------- */
+
+/* Sits above everything technical. Tinted so it reads as a different voice
+   rather than another section of the same report. */
+.plainbox {
+  background: var(--accent-wash);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  padding: var(--s3);
+  margin-bottom: var(--s3);
+}
+.plainbox .lead {
+  font-family: var(--serif); font-size: var(--t-md);
+  color: var(--ink); margin: var(--s1) 0 var(--s2); line-height: 1.35;
+}
+.plainbox ul.list { margin-bottom: var(--s2); }
+.plainbox ul.list li { color: var(--ink); font-size: var(--t-base); }
+.plainbox .prose { color: var(--ink-2); }
+.plainbox .prose + .prose { margin-top: var(--s1); }

@@ -49,6 +49,7 @@ from bot import database as db_mod
 from bot import engine
 from bot import export as export_mod
 from bot import market as market_mod
+from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
@@ -364,7 +365,9 @@ def analyse():
                            families=families, ranked=ranked, hold_text=hold_text,
                            plan=result.plan, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
-                           overlap=overlap)
+                           overlap=overlap,
+                           plain=plain_mod.explain_plan(result.plan, result.bars,
+                                                        hold_text))
 
 
 def _family_rollup(result: engine.Analysis):
@@ -697,7 +700,8 @@ def research():
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
-                           price_svg=price_svg, filed_charts=filed_charts)
+                           price_svg=price_svg, filed_charts=filed_charts,
+                           plain=plain_mod.explain_company(found))
 
 
 @app.route("/thesis/save", methods=["POST"])
