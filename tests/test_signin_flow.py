@@ -112,6 +112,29 @@ try:
     check("a stranger is not signed in",
           visitor.get("/").status_code == 302)
 
+    # Crawlers and link-preview scrapers never sign in. When these started
+    # returning a redirect to the sign-in page, search engines read the whole
+    # site as a dead end and nothing was indexable at all.
+    for path in ("/robots.txt", "/sitemap.xml", "/privacy", "/terms"):
+        check("a stranger can read %s" % path,
+              visitor.get(path).status_code == 200,
+              visitor.get(path).status_code)
+
+    sitemap = visitor.get("/sitemap.xml").data.decode()
+    check("the sitemap names the sign-in page", "/signin" in sitemap)
+    check("and does not leak a page behind the login",
+          "/trades" not in sitemap and "/portfolio" not in sitemap)
+
+    # Without these a link pasted on TikTok, Discord or Reddit renders as a
+    # bare URL, which is the difference between a click and a scroll past.
+    card = visitor.get("/signin").data.decode("utf-8", "replace")
+    for tag in ('name="description"', 'property="og:title"',
+                'property="og:image"', 'name="twitter:card"'):
+        check("the page carries %s" % tag, tag in card)
+    check("the preview image exists on disk",
+          _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
+                                        "static", "preview.png")))
+
     response, state, verifier = start_flow(visitor)
     check("starting sign-in redirects to Google", response.status_code == 302)
     check("a state was stored for this browser", bool(state))

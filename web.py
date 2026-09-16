@@ -115,7 +115,8 @@ def healthcheck():
 # Pages reachable without being signed in. Everything else needs an account
 # once Google sign-in is configured.
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
-                    "static", "healthcheck", "privacy", "terms"}
+                    "static", "healthcheck", "privacy", "terms",
+                    "robots", "sitemap"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -994,6 +995,59 @@ def usage():
     return render_template("usage.html", data=data, days=days, trend=trend,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
+
+
+ROBOTS = """User-agent: *
+Allow: /$
+Allow: /signin
+Allow: /privacy
+Allow: /terms
+Disallow: /analyse
+Disallow: /research
+Disallow: /trades
+Disallow: /portfolio
+Disallow: /monitor
+Disallow: /account
+Disallow: /usage
+Disallow: /export
+Disallow: /auth
+Disallow: /api
+
+Sitemap: %s/sitemap.xml
+"""
+
+# The pages a stranger can read without signing in. Everything else returns a
+# redirect to a crawler, which reads as a dead end and is worth saying plainly
+# rather than letting a robot discover one 302 at a time.
+PUBLIC_PAGES = [("/", "weekly", "1.0"), ("/signin", "monthly", "0.6"),
+                ("/privacy", "yearly", "0.3"), ("/terms", "yearly", "0.3")]
+
+
+def _public_base() -> str:
+    """The address to print in robots.txt and the sitemap.
+
+    Both files must name absolute URLs, and both are wrong if they name the
+    internal host instead of the domain people typed.
+    """
+    return ((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().rstrip("/")
+            or request.url_root.rstrip("/"))
+
+
+@app.route("/robots.txt")
+def robots():
+    return Response(ROBOTS % _public_base(), mimetype="text/plain")
+
+
+@app.route("/sitemap.xml")
+def sitemap():
+    base = _public_base()
+    rows = "".join(
+        "<url><loc>%s%s</loc><changefreq>%s</changefreq>"
+        "<priority>%s</priority></url>" % (base, path, freq, priority)
+        for path, freq, priority in PUBLIC_PAGES)
+    return Response('<?xml version="1.0" encoding="UTF-8"?>'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    '%s</urlset>' % rows, mimetype="application/xml")
 
 
 @app.route("/privacy")
