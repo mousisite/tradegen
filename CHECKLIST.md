@@ -141,7 +141,21 @@ this up. This step is for month three, not for launch day.
 8. Go back to Search Console and click **Verify**. If it says it cannot find
    it, wait five minutes and click Verify again. DNS changes are not instant.
 9. Once verified, click **Sitemaps** in the left menu.
-10. In the box, type `sitemap.xml` and click **Submit**.
+10. **Before typing anything, look at the dropdown at the top left.** It names
+    the site you are currently looking at. It has to say `tradegen.app`. If it
+    names a different site, click it and switch. Search Console refuses a
+    sitemap that does not belong to the site you have open, and the message it
+    gives, *Invalid sitemap address*, does not say that is the reason.
+11. In the box, type the **whole address**:
+
+    ```
+    https://tradegen.app/sitemap.xml
+    ```
+
+    A Domain property needs the full address. Typing only `sitemap.xml` works
+    for the other kind of property, the URL-prefix kind, and is rejected here.
+
+12. Click **Submit**.
 
 **How you know it worked:** the sitemap row says **Success** and shows
 **4 discovered pages**. Four is correct. That is every page a stranger can
