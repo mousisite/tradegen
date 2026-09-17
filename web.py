@@ -145,6 +145,40 @@ def auth_required() -> bool:
     return auth_mod.configured()
 
 
+# Addresses this app used to answer on. A link somebody saved still works, and
+# a search engine moves what it learned to the new name instead of treating the
+# two as rival copies of the same site.
+RETIRED_HOSTS = {"tradegen.app", "www.tradegen.app"}
+
+
+@app.before_request
+def _moved_permanently():
+    """Send a request for an old address to the current one.
+
+    Registered before _identify so a visitor on the old name is moved rather
+    than first being asked to sign in at an address that is no longer the
+    product's.
+    """
+    host = (request.host or "").split(":")[0].lower()
+    if host not in RETIRED_HOSTS:
+        return None
+
+    target = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().rstrip("/")
+    if not target:
+        return None
+
+    # Without this the app redirects to itself forever, which is what happens
+    # the moment the public address has not been switched over yet.
+    if target.split("//")[-1].split("/")[0].lower() == host:
+        return None
+
+    # full_path always carries a "?", even with nothing after it.
+    path = request.full_path
+    if path.endswith("?"):
+        path = path[:-1]
+    return redirect(target + path, code=301)
+
+
 @app.before_request
 def _identify():
     """Attach the signed-in person, or the local account, to this request."""

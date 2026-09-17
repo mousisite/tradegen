@@ -155,6 +155,26 @@ try:
     check("and the preview address carries no query string",
           "?" not in [l for l in secure.splitlines() if "og:url" in l][0])
 
+    # The old address has to keep working, or every link anyone saved dies the
+    # day the name changes. The loop guard matters as much as the redirect:
+    # before the public address is switched over, old host and new host are the
+    # same string, and a redirect to itself takes the whole site down.
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+    try:
+        moved = visitor.get("/trades", base_url="https://tradegen.app")
+        check("the old address redirects to the new one",
+              moved.status_code == 301, moved.status_code)
+        check("and keeps the path the person asked for",
+              moved.headers.get("Location") == "https://orenth.app/trades",
+              moved.headers.get("Location"))
+
+        _os.environ["STOCKBOT_PUBLIC_URL"] = "https://tradegen.app"
+        same = visitor.get("/", base_url="https://tradegen.app")
+        check("no redirect loop when the names still match",
+              same.status_code != 301, same.status_code)
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))
