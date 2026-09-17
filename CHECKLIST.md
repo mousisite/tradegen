@@ -235,119 +235,194 @@ be watching for your address when the links appear.
 
 ---
 
-## B. Make the GitHub repository public (2 minutes)
+## B. Put your code on the internet (2 minutes)
 
-The easiest one, and it never expires.
+**What GitHub is:** a website where people keep their code. Yours is already
+there, but it is set to private, so nobody can see it. Making it public means
+anyone can read the code.
 
-**Before you do:** the code has been checked. No password, key or secret was
-ever committed, `.env.example` is all blanks, and `.gitignore` keeps the
-database, the session key and your settings out. It is safe to publish.
+**Why bother:** two reasons. It gives Google a real link pointing at your app,
+which is the thing you do not have. And when you post on Reddit or Hacker
+News, being able to say "here is the code, go check it" is the most trusted
+thing you can say. People assume trading apps are lying. Showing the code is
+how you prove you are not.
 
-**The honest trade-off:** anyone can read the code and copy it. That is real.
-It matters less than it sounds, because the code is not the hard part — the
-measured history and the people using it are. And "here is the source" is the
-single most credible thing you can say on Reddit or Hacker News.
+**The risk, said plainly:** anyone can copy your code. That is true. It
+matters less than it sounds. The code is not the valuable part. The valuable
+part is the record of what the app measured over time, and the people who use
+it. Neither of those can be copied.
 
-1. Go to **github.com/mousisite/stockbot**
-2. Click **Settings** (top right of the repo, not your profile settings)
-3. Scroll to the very bottom, to the red **Danger Zone** box
-4. Click **Change visibility** then **Change to public**
-5. It makes you type the repository name to confirm. Type `mousisite/stockbot`
-6. Confirm
+**It is safe.** I checked every version of the code you have ever saved, not
+just the current one. No password, no key, no secret is in there anywhere.
 
-Then, while you are there, rename it so it matches the product:
+### Do this
 
-7. Still in **Settings**, at the top, the **Repository name** box
-8. Change `stockbot` to `tradegen`, click **Rename**
-9. GitHub forwards the old address automatically, so nothing breaks
+1. Open **github.com/mousisite/stockbot**
+2. Near the top of the page there is a row of words: Code, Issues, Pull
+   requests, and so on. At the end of that row, click **Settings**.
+   Careful: this is the Settings for the code, not the Settings for your
+   account. The account one is under your picture in the corner. You want the
+   one in the row.
+3. Scroll all the way down. At the bottom there is a box with a red border
+   called **Danger Zone**.
+4. In that box, find **Change repository visibility** and click
+   **Change visibility**.
+5. Choose **Make public**.
+6. GitHub makes you prove you mean it. It shows a box and asks you to type the
+   name. Type: `mousisite/stockbot`
+7. Click the confirm button.
 
-**Last step, and do not skip it:** on the repo's front page, click the gear
-icon beside **About** on the right, and put `https://tradegen.app` in the
-**Website** box. That is the actual link.
+Done. Your code is now public.
 
----
+### Two small things while you are there
 
-## C. Hacker News, "Show HN" (10 minutes)
+**Rename it.** The code is called "stockbot" but the app is called TradeGen.
 
-The highest ceiling of anything on this list. A post that lands brings a few
-thousand technical readers in an afternoon, and they are exactly the people
-who will find the flaws in the back-testing.
+1. Still on that same Settings page, scroll back to the top
+2. The first box says **Repository name**
+3. Change `stockbot` to `tradegen`
+4. Click **Rename**
 
-**Be warned:** most Show HN posts get no attention at all. That is normal and
-not a verdict on the app.
+Nothing breaks. GitHub forwards the old name to the new one automatically.
 
-1. Make an account at **news.ycombinator.com** if you do not have one
-2. Click **submit** at the top
-3. **Title** — must start with `Show HN:`. Keep it flat and factual. Hacker
-   News actively dislikes excitement. Use:
-   `Show HN: TradeGen – stock research that back-tests its own advice and reports no edge`
-4. **URL** — `https://tradegen.app`
-5. Leave the text box empty, then **immediately** add a comment on your own
-   post. This is the convention: the comment is where you explain yourself.
-   Use the draft in [LAUNCH.md](LAUNCH.md), shortened. Say plainly that you
-   are one person, that 42 of 54 analyses came back Avoid, and that you want
-   the methodology attacked.
-6. **When to post:** a weekday, around 8–10am US Pacific. Never a weekend.
+**Add the link. Do not skip this one, it is the whole point.**
 
-**Then:** stay at your computer for three hours and answer every single
-comment. Honestly, including the harsh ones. Engaging well with criticism is
-worth more than the post itself.
+1. Click **Code** to go back to the front page of your repository
+2. On the right side there is a section called **About**. Next to it is a small
+   gear icon. Click it.
+3. A box opens. Find the field called **Website**.
+4. Type: `https://tradegen.app`
+5. Click **Save changes**
 
----
-
-## D. Reddit (20 minutes, and read this warning first)
-
-**The trap:** almost every finance subreddit auto-deletes posts from new
-accounts, and you will not be told. Your post will simply not appear. If your
-Reddit account is new or has no karma, spend a week commenting normally in
-those subs before you post anything of your own.
-
-Where to post, and what to watch for, is written out in [LAUNCH.md](LAUNCH.md).
-Read that file, not this one, for the wording.
-
-The short version:
-
-1. Check your account age and karma. New account? Wait. Comment first.
-2. Read the subreddit rules in the sidebar. Some ban self-promotion outright,
-   some allow it only on certain days.
-3. Post to **one** subreddit. Start with **r/SecurityAnalysis** — small, but
-   it is the audience that actually values filings over hype.
-4. Answer every comment for the rest of the day.
-5. Wait a few days. Fix what they found. Then the next subreddit.
-
-**Do not post to r/wallstreetbets.** That audience wants confirmation, and the
-whole character of this app is refusing to give it.
+That link is the reason you did all of this.
 
 ---
 
-## E. Product Hunt (30 minutes, and not yet)
+## C. Hacker News (10 minutes)
 
-Worth doing, but **you only get one launch day** and it is wasted on a product
-nobody has used yet. Do this after Reddit and Hacker News have given you a
-round of feedback and you have fixed what they found.
+**What it is:** a website where programmers, engineers and people who build
+startups read and discuss things. It is plain and ugly and extremely widely
+read. If your post reaches the front page, a few thousand people visit your
+app that afternoon.
 
-When you are ready:
+**Why it is worth the most:** these are the people who will actually try to
+break your back-testing and tell you where it is wrong. That is worth more
+than traffic.
 
-1. Make an account at **producthunt.com** and use it normally for a week
-   first. Brand new accounts launching products get ignored.
-2. Click **Submit** and fill in: name, a one-line tagline, description,
-   the link, and at least one image. The preview card at
-   `static/preview.png` works as a starting point.
-3. Schedule it for a **Tuesday or Wednesday**, 12:01am US Pacific. That gives
-   the post a full day on the leaderboard.
-4. Be present all day answering comments.
+**"Show HN" is a label.** It means "I made this thing myself." Posts with that
+label are allowed to be about your own project. Without it, posting your own
+work looks like advertising.
+
+### Do this
+
+1. Go to **news.ycombinator.com** and make an account if you do not have one
+2. At the top of the page, click **submit**
+3. In the **Title** box, paste exactly this:
+
+   ```
+   Show HN: TradeGen – stock research that back-tests its own advice and reports no edge
+   ```
+
+   Do not make it more exciting than that. This website dislikes excitement
+   and will punish it. Flat and factual wins here.
+
+4. In the **URL** box, type: `https://tradegen.app`
+5. Leave the **text** box empty
+6. Click **submit**
+7. Your post appears. Click on it, and write the first comment yourself. This
+   is how it is done here: the post is the link, your comment is where you
+   explain. Say these things:
+   - You built it yourself, one person
+   - Out of 54 analyses, 42 came back saying Avoid
+   - You want them to tell you where the method is wrong
+
+   Longer wording is in [LAUNCH.md](LAUNCH.md).
+
+**When to post:** a weekday, in the morning, US west coast time. Never a
+weekend, the site is quiet.
+
+**Then stay at your computer for three hours.** Answer every comment,
+including the rude ones, calmly and honestly. How you handle criticism is
+what people are actually judging.
+
+**What to expect:** most posts get no attention at all. That is normal. It is
+not a verdict on your app.
 
 ---
 
-## What to honestly expect
+## D. Reddit (20 minutes, but read the warning first)
 
-None of these four make you rank for the word "tradegen." There is an older
-crypto project with that name and seven years of history behind it.
+**The warning, and it is a real trap:** almost every money and investing
+subreddit automatically deletes posts from new accounts. It does not tell you.
+Your post looks fine on your screen and is invisible to everybody else. People
+sit refreshing a post nobody can see.
 
-What they do is get Google to **discover** you — to walk down a path to your
-address for the first time — and put the app in front of real people. The
-second part is worth more than the first.
+**So check first.** If your Reddit account is new, or has no karma (karma is
+the points you get from people upvoting you), do not post yet. Spend a week
+just commenting normally in those subreddits. Then post.
 
-The order that matters: **A** today, **B** today, **C** when you have a free
-weekday morning, **D** once your Reddit account is old enough, **E** after
-the feedback from C and D is folded in.
+### Do this
+
+1. Check your account. Old with some karma? Continue. New? Wait a week first.
+2. Pick **one** subreddit. Start with **r/SecurityAnalysis**. It is small, but
+   the people there care about company filings rather than hype, which is
+   exactly what your app is.
+3. Read the rules in the sidebar before posting. Some subreddits ban posting
+   your own projects completely. Some allow it only on certain days.
+4. Post it. The wording is written out in [LAUNCH.md](LAUNCH.md).
+5. Answer every comment that day.
+6. Wait a few days. Fix whatever they found. Then try the next subreddit.
+
+**Do not post to r/wallstreetbets.** That crowd wants to be told they are
+right. Your app's whole personality is refusing to do that. You would get
+voted down for the one thing that makes it good.
+
+---
+
+## E. Product Hunt (30 minutes, but not yet)
+
+**What it is:** a website where new apps are shown for one day and people vote
+for their favourites. Doing well there sends a lot of visitors.
+
+**Why not yet:** you get one launch day, ever. Spending it before anyone has
+used the app wastes it. Do Hacker News and Reddit first, fix what they find,
+then come here.
+
+### When you are ready
+
+1. Make an account at **producthunt.com** and use it normally for a week.
+   Brand new accounts that immediately launch something get ignored.
+2. Click **Submit** and fill in:
+   - Name: TradeGen
+   - Tagline: one short line
+   - Description: a paragraph
+   - Link: `https://tradegen.app`
+   - At least one picture. The file at `static/preview.png` works to start.
+3. Schedule it for a **Tuesday or Wednesday at 12:01am US west coast time**.
+   That gives you the whole day on the board instead of half of it.
+4. Be at your computer that day answering comments.
+
+---
+
+## What to honestly expect from all four
+
+None of these will make you come up first when someone searches the word
+"tradegen." There is an older crypto project with that name and seven years of
+history behind it. That fight is not worth having.
+
+What these do is two things:
+
+**They let Google find you.** Right now Google has no path to walk down to
+reach your app. These build the first path.
+
+**They put the app in front of real people.** This part is worth more than the
+Google part.
+
+### The order
+
+| When | What |
+|---|---|
+| Today | **A** (Search Console) and **B** (GitHub). 8 minutes total. |
+| A free weekday morning | **C** (Hacker News) |
+| Once your Reddit account is old enough | **D** (Reddit) |
+| After C and D give you feedback and you fix it | **E** (Product Hunt) |
