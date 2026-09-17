@@ -33,7 +33,7 @@ except ImportError:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Serve TradeGen in production.")
+    parser = argparse.ArgumentParser(description="Serve Orenth in production.")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int,
                         default=int(os.environ.get("PORT", "8000")))
@@ -55,7 +55,7 @@ def main(argv=None) -> int:
 
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
     print()
-    print("  TradeGen")
+    print("  Orenth")
     print("    listening on   %s:%d with %d threads"
           % (args.host, args.port, args.threads))
     if public:

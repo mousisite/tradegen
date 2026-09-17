@@ -72,7 +72,7 @@ def draw_menu() -> None:
             lines.append("" if not key else "[dim]%s[/]" % key)
         else:
             lines.append("   [bold cyan]%2s[/]  %s" % (key, label))
-    console.print(Panel("\n".join(lines), title="TradeGen",
+    console.print(Panel("\n".join(lines), title="Orenth",
                         border_style="cyan", padding=(1, 2)))
 
 

@@ -143,7 +143,7 @@ try:
     # X and several chat clients drop a card whose image is not https, and
     # behind a TLS terminator the app sees a plain http request, so these must
     # be built from the public address rather than the observed one.
-    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://tradegen.app"
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
     try:
         secure = visitor.get("/signin").data.decode("utf-8", "replace")
     finally:
@@ -151,7 +151,7 @@ try:
     for tag in ("og:url", "og:image", "twitter:image"):
         line = [l for l in secure.splitlines() if tag in l][0]
         check("%s is an https address on the real domain" % tag,
-              'content="https://tradegen.app' in line, line.strip())
+              'content="https://orenth.app' in line, line.strip())
     check("and the preview address carries no query string",
           "?" not in [l for l in secure.splitlines() if "og:url" in l][0])
 

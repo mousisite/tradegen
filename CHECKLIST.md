@@ -29,8 +29,8 @@ all on a deployment until you say who you are.
 6. Click **Save Changes**. Render restarts the app by itself. Wait for the
    status at the top to say **Live** again, about two minutes.
 
-**How you know it worked:** sign in at https://tradegen.app and go to
-https://tradegen.app/usage . Before this step it showed a refusal. Now it
+**How you know it worked:** sign in at https://orenth.app and go to
+https://orenth.app/usage . Before this step it showed a refusal. Now it
 shows numbers.
 
 **If it still refuses:** the email has a typo, or it is a different Google
@@ -47,7 +47,7 @@ sees your trades, and you would find out from them.
 1. Open a **private / incognito window** (Ctrl+Shift+N in Chrome). This is
    important: it makes the browser forget you, so you are testing as a
    stranger would, not as yourself with a different hat on.
-2. Go to https://tradegen.app and sign in with a **different Google account**.
+2. Go to https://orenth.app and sign in with a **different Google account**.
    Any second account you have. If you do not have one, making a throwaway
    Gmail takes two minutes and is worth it.
 3. Click through: **Trades**, **Portfolio**, **Monitor**, **Strategies**.
@@ -79,7 +79,7 @@ can be lost is yours.
 4. Go to **dashboard.render.com**, your **stockbot** service.
 5. Top right, click **Manual Deploy** then **Deploy latest commit**.
 6. Wait for **Live**. About two minutes.
-7. Go back to https://tradegen.app/trades and refresh.
+7. Go back to https://orenth.app/trades and refresh.
 
 **What you should see:** the fake trade still there.
 
@@ -97,7 +97,7 @@ so, and do not launch until it is fixed.
 on a phone, holding it in one hand. Something that looks fine on a laptop can
 be unusable there.
 
-1. On your phone, open https://tradegen.app and sign in.
+1. On your phone, open https://orenth.app and sign in.
 2. Check these specifically, because they are the ones that break on small
    screens:
    - Can you read the numbers in the tables without zooming?
@@ -119,7 +119,7 @@ If anything looks wrong, a screenshot says it faster than a description.
 ever linked to it. Without an introduction you are waiting for Google to trip
 over you by accident, which can take months.
 
-Be aware before you start: **even after doing this, searching "tradegen" will
+Be aware before you start: **even after doing this, searching "orenth" will
 not reliably find you for two to six weeks.** There is no trick that speeds
 this up. This step is for month three, not for launch day.
 
@@ -127,10 +127,10 @@ this up. This step is for month three, not for launch day.
 2. Sign in with your Google account.
 3. You get a box asking for a property. There are two kinds. Pick the **left**
    one, **Domain**.
-4. Type `tradegen.app` — no `https://`, no `www`, just that.
+4. Type `orenth.app` — no `https://`, no `www`, just that.
 5. It gives you a long line of text starting with `google-site-verification=`
    and asks you to add it as a TXT record at your DNS provider.
-6. Open **dash.cloudflare.com** in another tab, click **tradegen.app**, then
+6. Open **dash.cloudflare.com** in another tab, click **orenth.app**, then
    **DNS** in the left menu. This is the same page where you added the A
    record earlier.
 7. Click **Add record**:
@@ -142,14 +142,14 @@ this up. This step is for month three, not for launch day.
    it, wait five minutes and click Verify again. DNS changes are not instant.
 9. Once verified, click **Sitemaps** in the left menu.
 10. **Before typing anything, look at the dropdown at the top left.** It names
-    the site you are currently looking at. It has to say `tradegen.app`. If it
+    the site you are currently looking at. It has to say `orenth.app`. If it
     names a different site, click it and switch. Search Console refuses a
     sitemap that does not belong to the site you have open, and the message it
     gives, *Invalid sitemap address*, does not say that is the reason.
 11. In the box, type the **whole address**:
 
     ```
-    https://tradegen.app/sitemap.xml
+    https://orenth.app/sitemap.xml
     ```
 
     A Domain property needs the full address. Typing only `sitemap.xml` works
@@ -166,7 +166,7 @@ read; the rest are behind the sign-in on purpose.
 ## 6. Remove the old address from Google sign-in
 
 **Time:** 2 minutes. **Why:** the app has two addresses right now,
-`tradegen.app` and the old `stockbot-je8m.onrender.com`. Sign-in is allowed
+`orenth.app` and the old `stockbot-je8m.onrender.com`. Sign-in is allowed
 from both. Cleaning that up means one front door instead of two.
 
 **Careful with this one.** Deleting the wrong line breaks sign-in for
@@ -177,11 +177,11 @@ everybody, including you.
 2. Click your OAuth 2.0 Client ID.
 3. Find the section **Authorised redirect URIs**.
 4. **Before deleting anything**, confirm this exact line is in the list:
-   `https://tradegen.app/auth/google/callback`
+   `https://orenth.app/auth/google/callback`
    If it is not there, stop. Deleting the other one would lock you out.
 5. Delete only the line containing `onrender.com`. Click the bin icon beside it.
 6. Click **Save**.
-7. **Test immediately:** open a private window, go to https://tradegen.app,
+7. **Test immediately:** open a private window, go to https://orenth.app,
    and sign in. If it works, this is done. If you get an error mentioning
    `redirect_uri_mismatch`, add the onrender line back.
 
@@ -218,7 +218,7 @@ to discover in public than in private.
 
 # Getting found: your first links
 
-Google has never visited tradegen.app. Not ranked low, not there at all. The
+Google has never visited orenth.app. Not ranked low, not there at all. The
 reason is that no website anywhere links to it, so Google has no path to walk
 down to reach you.
 
@@ -276,11 +276,11 @@ Done. Your code is now public.
 
 ### Two small things while you are there
 
-**Rename it.** The code is called "stockbot" but the app is called TradeGen.
+**Rename it.** The code is called "stockbot" but the app is called Orenth.
 
 1. Still on that same Settings page, scroll back to the top
 2. The first box says **Repository name**
-3. Change `stockbot` to `tradegen`
+3. Change `stockbot` to `orenth`
 4. Click **Rename**
 
 Nothing breaks. GitHub forwards the old name to the new one automatically.
@@ -291,7 +291,7 @@ Nothing breaks. GitHub forwards the old name to the new one automatically.
 2. On the right side there is a section called **About**. Next to it is a small
    gear icon. Click it.
 3. A box opens. Find the field called **Website**.
-4. Type: `https://tradegen.app`
+4. Type: `https://orenth.app`
 5. Click **Save changes**
 
 That link is the reason you did all of this.
@@ -320,13 +320,13 @@ work looks like advertising.
 3. In the **Title** box, paste exactly this:
 
    ```
-   Show HN: TradeGen – stock research that back-tests its own advice and reports no edge
+   Show HN: Orenth – stock research that back-tests its own advice and reports no edge
    ```
 
    Do not make it more exciting than that. This website dislikes excitement
    and will punish it. Flat and factual wins here.
 
-4. In the **URL** box, type: `https://tradegen.app`
+4. In the **URL** box, type: `https://orenth.app`
 5. Leave the **text** box empty
 6. Click **submit**
 7. Your post appears. Click on it, and write the first comment yourself. This
@@ -393,10 +393,10 @@ then come here.
 1. Make an account at **producthunt.com** and use it normally for a week.
    Brand new accounts that immediately launch something get ignored.
 2. Click **Submit** and fill in:
-   - Name: TradeGen
+   - Name: Orenth
    - Tagline: one short line
    - Description: a paragraph
-   - Link: `https://tradegen.app`
+   - Link: `https://orenth.app`
    - At least one picture. The file at `static/preview.png` works to start.
 3. Schedule it for a **Tuesday or Wednesday at 12:01am US west coast time**.
    That gives you the whole day on the board instead of half of it.
@@ -407,7 +407,7 @@ then come here.
 ## What to honestly expect from all four
 
 None of these will make you come up first when someone searches the word
-"tradegen." There is an older crypto project with that name and seven years of
+"orenth." There is an older crypto project with that name and seven years of
 history behind it. That fight is not worth having.
 
 What these do is two things:

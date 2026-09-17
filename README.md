@@ -1,6 +1,6 @@
-# TradeGen
+# Orenth
 
-**Live at [tradegen.app](https://tradegen.app).** Free, no ads, no tracking scripts.
+**Live at [orenth.app](https://orenth.app).** Free, no ads, no tracking scripts.
 
 Give it a screenshot of a chart. It identifies the instrument, pulls live market
 data, runs **34 trading strategies**, measures which of them actually work on

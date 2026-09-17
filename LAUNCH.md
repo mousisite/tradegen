@@ -71,7 +71,7 @@ the app.
 charges costs and uses walk-forward samples with confidence intervals, but I am
 one person and I would rather find the flaw now.
 
-https://tradegen.app
+https://orenth.app
 
 *Not financial advice. By its own measurements most short-horizon trading loses
 money after costs, which it will tell you itself.*
