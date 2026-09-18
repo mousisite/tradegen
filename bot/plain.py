@@ -94,14 +94,30 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         sure = ("The app looked at %d times this same setup happened before. "
                 "It worked %d of those times."
                 % (plan.prob_samples, worked))
+
+        # Saying only how often it worked invites the wrong conclusion, because
+        # a loss here is usually not the whole stop: most trades that miss the
+        # target are closed part-way rather than stopped out. Winning a third
+        # of the time is fine when the wins are three times the size of the
+        # losses, and that is the sentence a person needs in order to judge it.
+        if plan.avg_win_r and plan.avg_loss_r:
+            win_x = plan.avg_win_r
+            lose_x = abs(plan.avg_loss_r)
+            sure += (" When it worked it made about %.1f times what you put at "
+                     "risk. When it did not, it usually lost about %.0f%% of "
+                     "what you put at risk, not all of it, because the trade "
+                     "is closed rather than left to run." % (win_x, lose_x * 100))
+
         if plan.breakeven_rate:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
             if worked <= needed:
-                sure += (" It needed %d wins just to cover trading fees, so "
-                         "this has not been shown to make money." % needed)
+                sure += (" To come out even it needed to work %d of those %d "
+                         "times, so this has not been shown to make money."
+                         % (needed, plan.prob_samples))
             else:
-                sure += (" It needed %d wins to cover trading fees, so it "
-                         "cleared that bar, but not by a lot." % needed)
+                sure += (" To come out even it only needed to work %d of those "
+                         "%d times, so it cleared that bar."
+                         % (needed, plan.prob_samples))
         if not plan.prob_reliable:
             sure += " That is too few times to be confident about."
 

@@ -127,6 +127,7 @@ print("=" * 72)
 # What must hold is the other direction: a market entry is only ever issued on
 # a positive measured record over a reliable sample. These pin that.
 from bot import engine as _eng
+from bot import plain as _plain
 from bot import ideas as _ideas
 
 _cfg_short = dict(_cfg)
@@ -175,6 +176,72 @@ for _s, _p, _c in _entries:
         _far.append((_s, _p.entry, _live))
 check("a market entry is priced at the market, not at a pullback",
       not _far, _far)
+
+
+print()
+print("=" * 72)
+print("THE PAGE MUST NOT ARGUE WITH ITSELF")
+print("=" * 72)
+
+# Break-even used to be (1 + cost) / (1 + reward_risk), which is the answer
+# only if every losing trade resolves at the full stop. They do not: a trade
+# that reaches neither target nor stop inside the horizon is closed at what it
+# is worth, and the average loss lands near -0.5R. The assumption roughly
+# doubled the hit rate a setup appeared to need, so a positive expectancy was
+# printed beside a break-even line it looked like it was failing. Six of eight
+# instruments showed that contradiction.
+#
+# With break-even measured from the same outcomes as the expectancy, the two
+# agree by construction: expectancy = p*W + (1-p)*L is positive exactly when
+# p > -L/(W-L). This pins that, because it is the one piece of arithmetic a
+# sceptical reader will check by hand.
+_checked = 0
+_contradictions = []
+_missing = []
+for _sym in ("T", "AAPL", "KO", "TSLA", "XOM", "META", "AMD", "JPM"):
+    try:
+        _r = _eng.analyse(_sym, _cfg, interval="1d", with_news=False,
+                          with_learning=True, record=False)
+    except Exception:
+        continue
+    _c, _p = _r.calibration, _r.plan
+    if _c.hit_rate is None or _c.expectancy_r is None:
+        continue
+    _checked += 1
+    if not _p.breakeven_rate:
+        _missing.append(_sym)
+        continue
+    if (_c.hit_rate > _p.breakeven_rate) != (_c.expectancy_r > 0):
+        _contradictions.append(
+            (_sym, round(_c.hit_rate, 3), round(_p.breakeven_rate, 3),
+             round(_c.expectancy_r, 3)))
+
+print("   %d instruments checked" % _checked)
+check("beating break-even and making money always agree",
+      not _contradictions, _contradictions)
+check("every plan carries the line its odds have to clear",
+      not _missing, _missing)
+
+_shapes = []
+for _sym in ("T", "AAPL", "KO"):
+    try:
+        _r = _eng.analyse(_sym, _cfg, interval="1d", with_news=False,
+                          with_learning=True, record=False)
+    except Exception:
+        continue
+    _c = _r.calibration
+    if _c.avg_loss_r is not None:
+        _shapes.append((_sym, _c.avg_loss_r))
+
+check("a loss is measured, not assumed to be the whole stop",
+      all(l > -1.0 for _, l in _shapes), _shapes)
+check("and the plain words say what a win and a loss were worth",
+      all(k in _plain.explain_plan(
+          _eng.analyse("T", _cfg, interval="1d", with_news=False,
+                       with_learning=True, record=False).plan,
+          _eng.analyse("T", _cfg, interval="1d", with_news=False,
+                       with_learning=True, record=False).bars)["sure"]
+          for k in ("times what you put at risk", "not all of it")))
 
 
 # --- exit code so a runner can tell pass from fail -------------------------

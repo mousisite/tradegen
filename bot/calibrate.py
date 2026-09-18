@@ -60,6 +60,12 @@ class Calibration:
     stable: Optional[bool] = None
     cost_r: float = 0.0          # round-trip cost expressed in units of risk
     cost_bps: float = 0.0
+    # What a win and a loss were actually worth in this bucket, net of costs.
+    # A loss is rarely the full stop: most trades that do not reach target are
+    # closed at the horizon somewhere in between, and that is the difference
+    # between a break-even line of 22% and one of 49%.
+    avg_win_r: Optional[float] = None
+    avg_loss_r: Optional[float] = None
 
 
 def wilson_interval(wins: int, n: int, z: float = 1.96):
@@ -249,6 +255,23 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
     expectancy = float(np.mean([o.r_multiple for o in grp]))
     avg_held = float(np.mean([o.bars_held for o in grp]))
 
+    # The break-even hit rate, measured rather than assumed.
+    #
+    # (1 + cost) / (1 + reward_risk) is only the answer if every trade that
+    # fails resolves at the full stop. It does not: a trade that reaches
+    # neither target nor stop inside the horizon is closed at what it is worth,
+    # and across instruments the average loss lands between -0.4R and -0.7R
+    # rather than -1.0R. Assuming the full stop roughly doubles the hit rate
+    # the setup appears to need, which put a positive expectancy next to a
+    # break-even line it looked like it was failing -- the page contradicting
+    # itself in the one place a reader checks the arithmetic.
+    won_r = [o.r_multiple for o in grp if o.won]
+    lost_r = [o.r_multiple for o in grp if not o.won]
+    avg_win = float(np.mean(won_r)) if won_r else None
+    avg_loss = float(np.mean(lost_r)) if lost_r else None
+    if avg_win is not None and avg_loss is not None and avg_win > avg_loss             and avg_loss < 0:
+        breakeven = -avg_loss / (avg_win - avg_loss)
+
     # Hold out the most recent third of comparable setups. If the edge exists
     # only in older data, the model has decayed and should not be trusted.
     grp_sorted = sorted(grp, key=lambda o: o.index)
@@ -283,4 +306,5 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
                        note, curve, avg_bars_held=avg_held,
                        holdout_hit_rate=h_rate, holdout_expectancy=h_exp,
                        holdout_samples=len(holdout), stable=stable,
-                       cost_r=avg_cost, cost_bps=cost_bps)
+                       cost_r=avg_cost, cost_bps=cost_bps,
+                       avg_win_r=avg_win, avg_loss_r=avg_loss)

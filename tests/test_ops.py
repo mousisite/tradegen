@@ -399,6 +399,9 @@ class FakePlan:
     entry, stop, target1 = 100.0, 95.0, 120.0
     probability, prob_samples, prob_reliable = 0.33, 103, True
     breakeven_rate = 0.40
+    # A real Plan carries what a win and a loss were actually worth; a stand-in
+    # that does not is testing a shape the code never receives.
+    avg_win_r, avg_loss_r = 1.50, -0.45
     position = {"quantity": 10, "risk_amount": 50.0,
                 "gap_loss": 160.0, "gap_multiple": 3.2}
 

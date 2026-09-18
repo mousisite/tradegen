@@ -45,6 +45,11 @@ class Plan:
     target_rationale: str = ""
     reward_risk: Optional[float] = None
     breakeven_rate: Optional[float] = None
+    # What a win and a loss were actually worth, so the plain-words layer can
+    # say "when it worked it made 1.5x, when it did not it lost about half"
+    # rather than leaving a reader to assume every loss was the whole stop.
+    avg_win_r: Optional[float] = None
+    avg_loss_r: Optional[float] = None
     probability: Optional[float] = None
     prob_low: Optional[float] = None
     prob_high: Optional[float] = None
@@ -339,6 +344,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
             probability=calib.hit_rate, prob_low=calib.ci_low,
             prob_high=calib.ci_high, prob_samples=calib.bucket_samples,
             prob_reliable=calib.reliable, expectancy_r=calib.expectancy_r,
+            breakeven_rate=calib.breakeven,
+            avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
             risks=risks,
             confirmations=["Re-run when price breaks the session range or a "
                            "catalyst lands."])
@@ -355,6 +362,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
             probability=calib.hit_rate, prob_low=calib.ci_low,
             prob_high=calib.ci_high, prob_samples=calib.bucket_samples,
             prob_reliable=calib.reliable, expectancy_r=calib.expectancy_r,
+            breakeven_rate=calib.breakeven,
+            avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
             invalidation="Reconsider a long only if price reclaims %s and "
                          "holds it on a closing basis." % fp(ctx.vwap[i] if np.isfinite(ctx.vwap[i]) else price),
             risks=risks,
@@ -448,7 +457,16 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # it can move the required win rate by tens of percentage points.
     cost_bps = cost_bps_for(bars.asset_class, cfg)
     cost_r = ((entry * cost_bps / 10000.0) / risk_per_unit) if risk_per_unit > 0 else 0.0
-    breakeven = ((1.0 + cost_r) / (1.0 + rr)) if rr > 0 else 1.0
+    # The measured break-even where there is a sample to measure, because
+    # (1 + cost) / (1 + rr) assumes every loss resolves at the full stop and
+    # they do not: the average loss on this instrument runs nearer -0.5R.
+    # Assuming the full stop roughly doubles the hit rate a setup looks like it
+    # needs, and printed a positive expectancy beside a break-even line it
+    # appeared to fail -- the page arguing with itself where a reader checks.
+    if calib.avg_win_r is not None and calib.avg_loss_r is not None             and calib.avg_loss_r < 0 < calib.avg_win_r - calib.avg_loss_r:
+        breakeven = -calib.avg_loss_r / (calib.avg_win_r - calib.avg_loss_r)
+    else:
+        breakeven = ((1.0 + cost_r) / (1.0 + rr)) if rr > 0 else 1.0
     position = size_position(entry, stop, bars, cfg)
 
     if cost_r >= 0.25:
@@ -530,6 +548,7 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         target1=_round_price(target1, price), target2=_round_price(target2, price),
         target_rationale=target_rationale,
         reward_risk=rr, breakeven_rate=breakeven,
+        avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
         probability=calib.hit_rate, prob_low=calib.ci_low, prob_high=calib.ci_high,
         prob_samples=calib.bucket_samples, prob_reliable=calib.reliable,
         expectancy_r=calib.expectancy_r,
