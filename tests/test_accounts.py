@@ -122,6 +122,18 @@ c.post("/trades/open", data={"symbol": "TSLA", "direction": "long",
                              "quantity": "5"})
 c.post("/watch/add", data={"symbol": "NVDA", "interval": "1d"})
 
+# A thesis is the most personal thing in here: it is somebody's own reasoning
+# about a position, not just a row of numbers. Written directly because saving
+# one through the web layer needs a live analysis behind it.
+conn = db.connect(DB)
+for owner, symbol, note in ((alice, "AAPL", "ALICE PRIVATE REASONING"),
+                            (bob, "TSLA", "bob reasoning")):
+    db.thesis_save(conn, symbol=symbol, price=100.0, balance=0.5,
+                   verdict="buy", bull=[], bear=[], falsifiers=["x"],
+                   sources=[], note=note, user=owner.id)
+alice_thesis = db.thesis_list(conn, user=alice.id)[0]["id"]
+conn.close()
+
 conn = db.connect(DB)
 a_trades = [r["symbol"] for r in db.list_trades(conn, user=alice.id)]
 b_trades = [r["symbol"] for r in db.list_trades(conn, user=bob.id)]
@@ -160,10 +172,29 @@ r = c.post("/monitor/alert/delete", data={"alert_id": alice_alert})
 check("Bob cannot delete Alice's alert", r.status_code == 400, r.status_code)
 
 conn = db.connect(DB)
+check("Bob's theses are only his own",
+      [r["user_note"] for r in db.thesis_list(conn, user=bob.id)]
+      == ["bob reasoning"])
+check("Bob cannot read Alice's thesis by its id",
+      db.thesis_get(conn, alice_thesis, user=bob.id) is None,
+      "Alice's reasoning leaked")
+conn.close()
+
+r = c.post("/thesis/delete", data={"thesis_id": alice_thesis})
+check("Bob cannot delete Alice's thesis", r.status_code == 400, r.status_code)
+r = c.post("/thesis/close", data={"thesis_id": alice_thesis,
+                                  "outcome": "right", "price": "150"})
+check("Bob cannot close Alice's thesis", r.status_code == 400, r.status_code)
+
+conn = db.connect(DB)
 check("Alice's trade survived all of that",
       len(db.list_trades(conn, user=alice.id)) == 1)
 check("Alice's alert survived too",
       len(db.alert_list(conn, user=alice.id)) == 1)
+kept = db.thesis_get(conn, alice_thesis, user=alice.id)
+check("Alice's thesis survived, and is still open",
+      kept is not None and kept["outcome"] in (None, ""),
+      dict(kept) if kept else "gone")
 conn.close()
 
 # And the same in reverse, so the test is not accidentally one-directional.

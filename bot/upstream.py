@@ -51,6 +51,17 @@ _inflight: Dict[str, threading.Event] = {}
 _breakers: Dict[str, Dict] = {}
 
 
+def _plainly(seconds: int) -> str:
+    """A wait a person can act on. Nobody plans around 847 seconds."""
+    if seconds < 90:
+        return "%d seconds" % seconds
+    minutes = int(round(seconds / 60.0))
+    if minutes < 60:
+        return "%d minute%s" % (minutes, "" if minutes == 1 else "s")
+    hours = seconds / 3600.0
+    return "%.1f hours" % hours
+
+
 class Throttled(RuntimeError):
     """The source is refusing, and it is not this request's fault."""
 
@@ -58,10 +69,11 @@ class Throttled(RuntimeError):
         self.host = host
         self.seconds = max(1, int(round(seconds)))
         super().__init__(
-            "%s is rate limiting this server, so the request was not sent. "
-            "Try again in about %d seconds. This is a shared limit across "
-            "everyone using this installation, not a problem with your "
-            "account." % (host, self.seconds))
+            "The market data source is rate limiting this site, so the "
+            "request was not sent rather than being sent and failing. Try "
+            "again in about %s. The limit is shared by everyone using the "
+            "site right now, so it is nothing to do with your account."
+            % _plainly(self.seconds))
 
 
 # --- the circuit breaker ----------------------------------------------------
