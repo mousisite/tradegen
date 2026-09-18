@@ -316,7 +316,20 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     direction = 1 if conviction > 0 else (-1 if conviction < 0 else 0)
 
     # --- gate 1: is there any directional opinion at all? -----------------
-    if abs(conviction) < float(cfg["min_conviction"]):
+    #
+    # A positive measured record buys a hearing. Conviction below the floor
+    # normally ends the analysis here, which is right when there is nothing
+    # else to go on. But conviction does not predict expectancy -- 0.010 across
+    # 149 instruments -- and of the instruments this gate discarded, 28 had a
+    # positive expectancy over a reliable sample. Throwing those out on a score
+    # that does not predict, before the score that does is ever consulted, is
+    # the wrong order. They go through to the real gates below instead, which
+    # can still refuse them on their own evidence.
+    heard_out = (calib.reliable
+                 and calib.expectancy_r is not None
+                 and calib.expectancy_r > 0
+                 and conviction != 0)
+    if abs(conviction) < float(cfg["min_conviction"]) and not heard_out:
         return Plan(
             action="AVOID", direction=0,
             headline="No setup. Conviction %.3f is below the %.3f threshold." % (
@@ -359,6 +372,25 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     blocked = blocker is not None and abs(blocker.price - price) < 0.6 * atr_value
 
     strong = abs(conviction) >= float(cfg["strong_conviction"])
+
+    # The measured record is allowed to promote a call, not only to veto one.
+    #
+    # Before this, the only route to a market entry was the conviction score.
+    # Measured across 149 instruments on daily bars, conviction's correlation
+    # with expectancy after costs is 0.010 -- on crypto, -0.349. It does not
+    # predict whether a setup makes money. It also never reached the 0.45
+    # threshold: the highest observed was 0.43, so a market entry was
+    # unreachable by construction and every call came back WAIT or AVOID.
+    #
+    # Gate 3 below could already downgrade to AVOID on a negative measured
+    # expectancy. Evidence could make a call worse and never better, which is
+    # not scepticism, just a one-way ratchet. A positive expectancy over a
+    # sample large enough to be called reliable is the same class of evidence,
+    # pointing the other way, and it is treated the same.
+    measured = (calib.reliable
+                and calib.expectancy_r is not None
+                and calib.expectancy_r > 0)
+
     if over_extended:
         mode = "WAIT"
         why = "Price is %.1f ATR from VWAP, too extended to chase." % abs(extension)
@@ -366,17 +398,24 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         mode = "WAIT"
         why = "Price is sitting into %s, only %.2f away." % (
             blocker.label(), abs(blocker.price - price))
-    elif strong:
+    elif strong or measured:
         # Direction decides the label. Calling a short "BUY" while building a
         # trade whose target sits below the entry is how someone clicks the
         # wrong button, so the two are kept in lockstep.
         mode = "BUY" if direction > 0 else "SHORT"
-        why = "Conviction %.2f clears the %.2f market-entry threshold and price is not extended." % (
-            abs(conviction), cfg["strong_conviction"])
+        if strong:
+            why = ("Conviction %.2f clears the %.2f market-entry threshold and "
+                   "price is not extended." % (abs(conviction),
+                                               cfg["strong_conviction"]))
+        else:
+            why = ("This setup has made %+.2fR per trade after costs across %d "
+                   "cases on this instrument, which is a large enough sample to "
+                   "act on. Price is not extended and nothing is in the way."
+                   % (calib.expectancy_r, calib.bucket_samples))
     else:
         mode = "WAIT"
-        why = "Conviction %.2f is directional but below the %.2f needed to pay the spread at market." % (
-            abs(conviction), cfg["strong_conviction"])
+        why = "Conviction %.2f is directional, and the measured record for this setup is not positive enough for a market entry." % (
+            abs(conviction),)
 
     if mode in ("BUY", "SHORT"):
         entry, entry_rationale, entry_type = price, "current price", "market"

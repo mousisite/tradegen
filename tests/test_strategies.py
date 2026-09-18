@@ -113,6 +113,70 @@ if "error" not in _spy and "error" not in _btc:
     check("crypto carries more gap risk than an index",
           _btc["gap_multiple"] > _spy["gap_multiple"])
 
+print()
+print("=" * 72)
+print("EVIDENCE MAY PROMOTE A CALL, NOT ONLY VETO ONE")
+print("=" * 72)
+
+# A market entry used to require a conviction score above 0.45. Measured over
+# 149 instruments the highest score produced was 0.43, so BUY was unreachable
+# by construction: every call came back WAIT or AVOID. Conviction also does not
+# predict expectancy (r = 0.010 on stocks, -0.349 on crypto), so raising or
+# lowering that threshold would only trade one arbitrary number for another.
+#
+# What must hold is the other direction: a market entry is only ever issued on
+# a positive measured record over a reliable sample. These pin that.
+from bot import engine as _eng
+from bot import ideas as _ideas
+
+_cfg_short = dict(_cfg)
+_cfg_short["allow_shorts"] = True
+
+_calls = []
+for _sym in _ideas._universe("stocks", 40)[:40]:
+    try:
+        _res = _eng.analyse(_sym, _cfg_short, interval="1d", with_news=False,
+                            with_learning=True, record=False)
+    except Exception:
+        continue
+    if (_res.bars.symbol or "").upper() != _sym.upper():
+        continue
+    _calls.append((_sym, _res.plan, _res.calibration))
+
+_entries = [(s, p, c) for s, p, c in _calls if p.action in ("BUY", "SHORT")]
+print("   %d instruments, %d of them a market entry" % (len(_calls), len(_entries)))
+
+check("the app is able to say buy at all", len(_entries) > 0,
+      "every call was WAIT or AVOID, which means the threshold is unreachable")
+
+_unearned = [s for s, p, c in _entries
+             if c.expectancy_r is None or c.expectancy_r <= 0 or not c.reliable]
+check("every market entry rests on a positive measured record",
+      not _unearned, _unearned)
+
+_mislabelled = [s for s, p, c in _entries
+                if (p.action == "BUY") != (p.direction > 0)]
+check("the label always matches the direction of the trade",
+      not _mislabelled, _mislabelled)
+
+_no_levels = [s for s, p, c in _entries if not p.entry or not p.stop]
+check("every market entry carries an entry and a stop",
+      not _no_levels, _no_levels)
+
+# A market entry means buy at today's price. If the entry sits far from it, the
+# label and the plan disagree and somebody acts on the wrong one.
+_prices = {s: r for s, r in
+           [(s, None) for s, _, _ in _entries]}
+_far = []
+for _s, _p, _c in _entries:
+    _live = _eng.analyse(_s, _cfg_short, interval="1d", with_news=False,
+                         with_learning=True, record=False).bars.last_price
+    if _p.entry and _live and abs(_p.entry - _live) / _live > 0.02:
+        _far.append((_s, _p.entry, _live))
+check("a market entry is priced at the market, not at a pullback",
+      not _far, _far)
+
+
 # --- exit code so a runner can tell pass from fail -------------------------
 import sys as _exit_sys
 _bad = bool(globals().get("fails")) or bool(globals().get("fail"))     or (globals().get("ok") is False)
