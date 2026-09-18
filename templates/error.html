@@ -11,7 +11,7 @@
 
 <div class="card">
   <p class="fig loss" style="font-size:var(--t-sm);margin:0 0 var(--s2)">{{ message }}</p>
-  {% if no_key %}
+  {% if no_key and current_user and current_user.is_local %}
     <p class="prose">To read charts from images, create a file called
       <b>.env</b> in the Orenth folder containing:</p>
     <p class="fig" style="background:var(--sunken);border:1px solid var(--rule);
@@ -19,6 +19,9 @@
        margin:var(--s2) 0">ANTHROPIC_API_KEY=your-key-here</p>
     <p class="prose">Then stop the server and start it again. Typing a ticker in
       by hand needs no key and works exactly the same from there on.</p>
+  {% elif no_key %}
+    <p class="prose">Reading charts from a picture is not switched on here.
+      Type the ticker in instead; everything after that is identical.</p>
   {% else %}
     <p class="prose">
       Usually this means one of three things: the ticker does not exist, a

@@ -284,6 +284,20 @@ try:
     check("a replayed callback is refused", replay.status_code == 400,
           replay.status_code)
 
+    # A hosted visitor cannot edit a file on somebody else's server, so being
+    # told to is both useless and makes a working app look half-finished.
+    # These strings are fine on a laptop and wrong on a deployment.
+    print()
+    print("=" * 72)
+    print("WHAT A HOSTED VISITOR IS TOLD")
+    print("=" * 72)
+
+    leaks = (".env", "ANTHROPIC_API_KEY", "start it again", "and restart")
+    for path in ("/", "/settings", "/analyse?symbol=NOTAREALTICKER123"):
+        body = visitor.get(path).data.decode("utf-8", "replace")
+        found = [leak for leak in leaks if leak in body]
+        check("%s keeps setup instructions to itself" % path, not found, found)
+
     print()
     print("=" * 72)
     print("SIGNING OUT, AND BACK IN")

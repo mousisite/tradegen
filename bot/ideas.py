@@ -18,6 +18,7 @@ the thing that has most often worked, not the thing that moved most today.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
@@ -69,6 +70,15 @@ FALLBACK_STOCKS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
                    "COST", "NFLX", "DIS", "BA", "PFE"]
 
 MAX_SCANNED = 40
+
+# A scan of the market is the same question for everybody, and the answer does
+# not meaningfully change minute to minute. Without this, every visitor pays
+# the full scan: on hourly crypto bars that is the better part of a minute of
+# waiting, often to be told nothing cleared the bar.
+CACHE_TTL = 300
+
+# Longer than the slowest scan measured (hourly crypto, ~45s).
+SCAN_WAIT = 150.0
 
 
 def _universe(market: str, limit: int) -> List[str]:
@@ -202,12 +212,37 @@ def _accounts_hold_up(symbol: str) -> Optional[Dict]:
 def find(market: str = "stocks", horizon: str = "medium",
          cfg: Optional[Dict] = None, limit: int = MAX_SCANNED,
          progress=None) -> Dict:
-    """Scan a list and return only what actually cleared the bar."""
+    """Scan a list and return only what actually cleared the bar.
+
+    Shared between callers asking the same question, because they would
+    otherwise each run an identical scan against the same upstream data.
+    """
     from . import config as config_mod
+    from . import upstream
 
     cfg = cfg or config_mod.load()
     market = market if market in MARKETS else "stocks"
     horizon = horizon if horizon in HORIZONS else "medium"
+
+    # The settings are part of the key. Trading costs are a per-person figure
+    # and they decide what clears the bar, so handing one person's scan to
+    # somebody with different costs would quietly answer the wrong question.
+    fingerprint = hashlib.sha1(
+        repr(sorted((str(k), repr(v)) for k, v in cfg.items()))
+        .encode("utf-8")).hexdigest()[:12]
+    key = "ideas:%s:%s:%s:%d" % (market, horizon, fingerprint, limit)
+
+    # The wait has to outlast the scan itself. Hourly crypto bars take the
+    # better part of a minute, and a waiter that gives up early runs the whole
+    # scan a second time.
+    return upstream.cached(
+        key, lambda: _scan(market, horizon, cfg, limit, progress),
+        ttl=CACHE_TTL, wait=SCAN_WAIT)
+
+
+def _scan(market: str, horizon: str, cfg: Dict, limit: int,
+          progress=None) -> Dict:
+    """Run the scan for real. Always the slow path."""
     interval = HORIZONS[horizon]["interval"]
 
     started = time.time()
@@ -281,6 +316,7 @@ def find(market: str = "stocks", horizon: str = "medium",
         "avoided": len(avoided),
         "thin": len(thin),
         "seconds": time.time() - started,
+        "scanned_at": time.time(),
         "warning": HORIZONS[horizon]["warning"],
         "summary": _summary(len(rows), passed, len(avoided), len(thin), horizon,
                             len(watch)),

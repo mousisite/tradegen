@@ -40,6 +40,7 @@
   <form id="shotform" action="{{ url_for('analyse_image') }}" method="post"
         enctype="multipart/form-data">
     <input type="hidden" name="interval" id="shotinterval" value="1d">
+    {% if has_key or (current_user and current_user.is_local) %}
     <label class="drop {{ '' if has_key else 'locked' }}" id="drop"
            for="chart" {{ '' if has_key else 'aria-disabled=true' }}>
       <img id="thumb" class="thumb" alt="" hidden>
@@ -55,13 +56,22 @@
         <span class="sub">Click to browse, drag an image in, or paste with
           Ctrl+V. It reads the ticker for you.</span>
       {% else %}
+        {# Only whoever runs the server can fix this, so only they are told how.
+           A visitor cannot edit a file on someone else's machine, and being
+           shown a setup instruction makes a working app look half-built. #}
         <span class="head">Screenshot reading needs an API key</span>
-        <span class="sub">Add <b>ANTHROPIC_API_KEY</b> to the .env file in this
-          folder and restart. Typing a ticker works either way.</span>
+        {% if current_user and current_user.is_local %}
+          <span class="sub">Add <b>ANTHROPIC_API_KEY</b> to the .env file in
+            this folder and restart. Typing a ticker works either way.</span>
+        {% else %}
+          <span class="sub">Not switched on here. Typing a ticker works
+            exactly the same.</span>
+        {% endif %}
       {% endif %}
       <input type="file" id="chart" name="chart" accept="image/*"
              {{ '' if has_key else 'disabled' }}>
     </label>
+    {% endif %}
   </form>
 </div>
 

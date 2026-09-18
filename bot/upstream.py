@@ -129,12 +129,17 @@ def is_throttle(status: int) -> bool:
 # --- cached, de-duplicated fetching -----------------------------------------
 
 def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
-           host: str = "") -> object:
+           host: str = "", wait: float = 30.0) -> object:
     """Return a cached answer, or fetch one while everyone else waits.
 
     The waiting is the point. Without it, ten simultaneous callers for the same
     key are ten upstream requests, because the cache is still empty when each
     of them looks.
+
+    `wait` has to exceed how long `fetch` actually takes. A waiter that gives
+    up early finds the cache still empty and runs the whole fetch itself, which
+    is the stampede this exists to prevent, and it does it at the worst moment:
+    the defect is invisible until two people ask at once.
     """
     now = time.time()
 
@@ -155,7 +160,7 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
     if not mine:
         # Somebody else is already fetching this. Wait for them rather than
         # asking the source the same question at the same moment.
-        event.wait(timeout=30)
+        event.wait(timeout=wait)
         with _lock:
             hit = _cache.get(key)
         if hit:

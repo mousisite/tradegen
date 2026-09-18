@@ -187,7 +187,9 @@
 
 <p class="legal">
   Looked at {{ result.scanned }} instruments on {{ result.interval }} bars in
-  {{ "%.0f"|format(result.seconds) }} seconds.
+  {{ "%.0f"|format(result.seconds) }} seconds{% if result.age and result.age > 45 %},
+  and this scan ran {{ result.age|int // 60 }} minute(s) ago. Prices have moved
+  since{% endif %}.
   {{ result.avoided }} had no setup at all.
   A list can be empty, and often is. That is the app working, not failing.
 </p>

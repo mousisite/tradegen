@@ -251,6 +251,56 @@ check("each is cached under its own key", upstream.stats()["cached_keys"] >= 2)
 
 print()
 print("%d failure(s)" % len(fails))
+# A fetch slower than the waiter's patience used to mean the waiter gave up,
+# found an empty cache and ran the whole thing again. That is the stampede
+# single-flight exists to prevent, and it only showed up when two people asked
+# at once.
+upstream.reset()
+calls = []
+
+
+def _slow():
+    calls.append(1)
+    time.sleep(1.2)
+    return "answer"
+
+
+results = []
+threads = [threading.Thread(
+    target=lambda: results.append(
+        upstream.cached("slow", _slow, ttl=60, wait=5.0)))
+    for _ in range(4)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+
+check("a slow fetch runs once for four callers", len(calls) == 1, len(calls))
+check("and all four get the answer",
+      results == ["answer"] * 4, results)
+
+upstream.reset()
+impatient = []
+
+
+def _slower():
+    impatient.append(1)
+    time.sleep(1.2)
+    return "answer"
+
+
+out = []
+threads = [threading.Thread(
+    target=lambda: out.append(
+        upstream.cached("impatient", _slower, ttl=60, wait=0.2)))
+    for _ in range(2)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+check("a waiter that gives up early does refetch, which is why wait matters",
+      len(impatient) == 2, len(impatient))
+
 print("UPSTREAM OK" if not fails else "FAILURES: %s" % fails)
 
 import sys as _exit_sys

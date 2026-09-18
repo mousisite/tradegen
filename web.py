@@ -1162,6 +1162,11 @@ def ideas():
     if request.args.get("market") or request.args.get("horizon"):
         try:
             result = ideas_mod.find(market, horizon, cfg)
+            # Scans are shared between everyone asking the same question, so
+            # this one may have run minutes ago. The page says so rather than
+            # presenting a stale list as this second's answer.
+            if result.get("scanned_at"):
+                result = dict(result, age=time.time() - result["scanned_at"])
         except Exception as exc:
             return render_template("error.html", symbol="",
                                    message="The scan failed: %s" % exc), 502

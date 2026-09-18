@@ -163,8 +163,11 @@
         </select>
         <div class="hint">
           {% if has_key %}A key is set, so headlines are read properly.
-          {% else %}No API key found, so keyword scoring is in use either way.
-            Add one to <b>.env</b> to improve it.{% endif %}
+          {% elif current_user and current_user.is_local %}No API key found,
+            so keyword scoring is in use either way. Add one to <b>.env</b> to
+            improve it.
+          {% else %}Headlines are scored with the built-in finance word list.
+          {% endif %}
         </div>
       </div>
     </div>
