@@ -170,6 +170,83 @@ check("a coin is never kept for a months-long hold on its accounts",
       not any(r.get("asset_class") == "crypto" and r.get("accounts") == "sound"
               for r in long_scan["passed"]))
 
+print()
+print("=" * 72)
+print("RISK APPETITE")
+print("=" * 72)
+
+# An appetite narrows what cleared the bar. It must never lower the bar, and
+# "high risk, high reward" must never become "show me the ones that lost".
+spec_wild = ideas.RISKS["wild"]
+spec_steady = ideas.RISKS["steady"]
+
+check("three appetites are offered",
+      set(ideas.RISKS) == {"steady", "balanced", "wild"}, list(ideas.RISKS))
+
+losing = row(symbol="LOSER", expectancy=-0.5, gap_multiple=9.0, probability=0.1)
+check("a losing setup is refused however hungry for risk you are",
+      not ideas._worth_showing(losing))
+
+# Reward-to-risk is not an axis: every plan is built to the same ratio from the
+# settings, so filtering on it would sort by the user's own configuration.
+check("no appetite filters on reward-to-risk",
+      not any("reward_risk" in str(v) for v in ideas.RISKS.values()))
+
+check("high risk demands measured gap risk, not a blank",
+      not ideas._matches_risk(row(gap_multiple=None), spec_wild))
+check("and refuses a calm instrument",
+      not ideas._matches_risk(row(gap_multiple=1.2), spec_wild))
+check("but accepts a violent one",
+      ideas._matches_risk(row(gap_multiple=4.0), spec_wild))
+
+check("steady refuses a violent instrument",
+      not ideas._matches_risk(row(gap_multiple=4.0, probability=0.9),
+                              spec_steady))
+check("steady refuses a setup that rarely works",
+      not ideas._matches_risk(row(gap_multiple=1.2, probability=0.05),
+                              spec_steady))
+check("steady accepts a calm one that usually works",
+      ideas._matches_risk(row(gap_multiple=1.2, probability=0.45), spec_steady))
+
+# An unknown figure is not evidence of safety either, but it is not counted
+# against an instrument the way a measured bad figure is.
+check("an unmeasured gap does not disqualify a steady pick",
+      ideas._matches_risk(row(gap_multiple=None, probability=0.45),
+                          spec_steady))
+
+scans = {name: ideas.find(market="stocks", horizon="medium", risk=name)
+         for name in ("steady", "balanced", "wild")}
+
+for name, scan in scans.items():
+    shown = scan["passed"]
+    check("%s ranks its list 1..N with no gaps" % name,
+          [r["rank"] for r in shown] == list(range(1, len(shown) + 1)),
+          [r.get("rank") for r in shown])
+    check("%s shows nothing that lost money after costs" % name,
+          all((r.get("expectancy") or 0) > 0 for r in shown))
+    check("%s shows nothing measured on too little history" % name,
+          all((r.get("samples") or 0) >= 30 for r in shown))
+
+wild_gaps = [r["gap_multiple"] for r in scans["wild"]["passed"]
+             if r.get("gap_multiple")]
+steady_gaps = [r["gap_multiple"] for r in scans["steady"]["passed"]
+               if r.get("gap_multiple")]
+if wild_gaps and steady_gaps:
+    check("the risky list really is riskier than the calm one",
+          min(wild_gaps) > max(steady_gaps),
+          "wild %s vs steady %s" % (min(wild_gaps), max(steady_gaps)))
+
+check("an appetite never shows more than balanced does",
+      len(scans["wild"]["passed"]) <= len(scans["balanced"]["passed"])
+      and len(scans["steady"]["passed"]) <= len(scans["balanced"]["passed"]))
+check("and the page is told how many it set aside",
+      scans["wild"]["wrong_shape"] >= 0
+      and scans["balanced"]["wrong_shape"] == 0)
+
+check("an unknown appetite falls back rather than failing",
+      ideas.find(market="stocks", horizon="medium",
+                 risk="nonsense")["risk"] == "balanced")
+
 import sys as _exit_sys
 print()
 print("%d failure(s)" % len(fails))

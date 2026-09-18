@@ -1156,12 +1156,14 @@ def ideas():
     """What is worth looking at, given how you trade."""
     market = request.args.get("market") or "stocks"
     horizon = request.args.get("horizon") or "medium"
+    risk = request.args.get("risk") or "balanced"
     cfg = config_mod.load(app.config.get("CFG_PATH"))
 
     result = None
-    if request.args.get("market") or request.args.get("horizon"):
+    if (request.args.get("market") or request.args.get("horizon")
+            or request.args.get("risk")):
         try:
-            result = ideas_mod.find(market, horizon, cfg)
+            result = ideas_mod.find(market, horizon, cfg, risk)
             # Scans are shared between everyone asking the same question, so
             # this one may have run minutes ago. The page says so rather than
             # presenting a stale list as this second's answer.
@@ -1174,7 +1176,9 @@ def ideas():
     return render_template("ideas.html", result=result,
                            market=market if market in ideas_mod.MARKETS else "stocks",
                            horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
-                           markets=ideas_mod.MARKETS, horizons=ideas_mod.HORIZONS)
+                           risk=risk if risk in ideas_mod.RISKS else "balanced",
+                           markets=ideas_mod.MARKETS, horizons=ideas_mod.HORIZONS,
+                           risks=ideas_mod.RISKS)
 
 
 @app.route("/screener", methods=["GET"])

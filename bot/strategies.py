@@ -896,7 +896,12 @@ def gap_behaviour(ctx: Context, i: int) -> Signal:
     sess = bars.session_id[i]
     idx = np.flatnonzero(bars.session_id[:i + 1] == sess)
     hlc = ctx.prior_session_hlc(i)
-    if len(idx) < 2 or hlc is None:
+    # What this needs is the session's opening price and the price now, and a
+    # prior session to measure the gap against. Both prices live on bar i when
+    # a bar is a whole session, which is what a daily bar is: requiring two
+    # bars in the session silently switched this strategy off on daily bars
+    # entirely, on an instrument where two of every three days gap.
+    if not len(idx) or hlc is None:
         return _idle("gap_behaviour", STRUCTURE, "no gap reference")
 
     ph, pl, prev_close = hlc

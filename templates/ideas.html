@@ -30,6 +30,15 @@
         </select>
         <div class="hint">{{ horizons[horizon].why }}</div>
       </div>
+      <div class="setfield">
+        <label for="risk">How much risk do you want?</label>
+        <select class="field" id="risk" name="risk">
+          {% for key, spec in risks.items() %}
+            <option value="{{ key }}" {{ 'selected' if key == risk }}>{{ spec.label }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">{{ risks[risk].why }}</div>
+      </div>
     </div>
     <button class="btn" type="submit" style="margin-top:var(--s3)">Find something</button>
   </form>
@@ -54,6 +63,13 @@
   {% if result.warning %}
     <p class="prose"><b>Worth knowing.</b> {{ result.warning }}</p>
   {% endif %}
+  {% if result.risk_note %}
+    <p class="prose"><b>{{ result.risk_label }}.</b> {{ result.risk_note }}</p>
+  {% endif %}
+  {% if result.wrong_shape %}
+    <p class="prose">{{ result.wrong_shape }} more cleared the bar but did not
+      match the risk you asked for. Switch to <b>Balanced</b> to see them.</p>
+  {% endif %}
 </div>
 
 {% if result.passed %}
@@ -67,19 +83,24 @@
     <div class="tablewrap">
       <table>
         <thead><tr>
+          <th class="r">#</th>
           <th>Instrument</th><th>Call</th><th class="r">Price</th>
           <th class="r">Buy at</th><th class="r">Get out at</th>
+          <th class="r">Gap risk</th>
           <th class="r">Worked before</th><th></th>
         </tr></thead>
         <tbody>
         {% for r in result.passed %}
           <tr>
+            <td class="r fig"><b>{{ r.rank }}</b></td>
             <td><b>{{ r.symbol }}</b></td>
             <td><span class="chip {{ 'long' if r.action == 'BUY'
                  else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
             <td class="r fig">{{ r.price|price }}</td>
             <td class="r fig">{{ r.entry|price if r.entry else '—' }}</td>
             <td class="r fig loss">{{ r.stop|price if r.stop else '—' }}</td>
+            <td class="r fig {{ 'loss' if (r.gap_multiple or 0) > 2.5 }}">
+              {{ "%.1fx"|format(r.gap_multiple) if r.gap_multiple else '—' }}</td>
             <td class="r fig">
               {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}
               {% if not r.reliable %}<span class="faint">thin</span>{% endif %}
@@ -99,9 +120,13 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      Ranked 1 to {{ result.passed|length }} by {{ result.ranked_as }}. Number 1
+      is the best on that measure, not the safest and not a recommendation.
       "Worked before" counts how many times this same setup reached its target
-      before its stop, on this instrument's own history. It is a shortlist to
-      look into, not a list to buy.
+      before its stop, on this instrument's own history. "Gap risk" is how much
+      worse than your stop an overnight move could be: at 3x, a gap costs three
+      times what you meant to risk, and a stop cannot prevent it.
+      It is a shortlist to look into, not a list to buy.
     </p>
   </div>
 </section>
