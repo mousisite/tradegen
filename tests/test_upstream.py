@@ -128,9 +128,16 @@ try:
 except upstream.Throttled as exc:
     check("three in a row closes it", True)
     print("   message: %s" % str(exc)[:100])
-    check("the message names the source", HOST in str(exc))
+    # The host stays on the exception for the log and for Sentry, but out of
+    # the sentence: a reader cannot act on a hostname, and it reads like the
+    # app blaming a machine they have never heard of.
+    check("the source is still on the exception for the log", exc.host == HOST)
+    check("but not in what the reader is shown", HOST not in str(exc))
     check("it says roughly how long", exc.seconds > 0)
-    check("and says it is not the user's fault", "not a problem with your" in str(exc))
+    check("and in a unit a person can act on",
+          "minute" in str(exc) or "second" in str(exc) or "hour" in str(exc))
+    check("and says it is not the reader's fault",
+          "nothing to do with your account" in str(exc))
 
 # While it is closed, no request is even attempted.
 attempted = {"n": 0}
