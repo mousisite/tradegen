@@ -196,26 +196,39 @@ def run(base: str, report: Report) -> None:
     print("SIGN-IN")
     print("=" * 74)
 
+    # Whether sign-in is on is decided by asking for a page that holds somebody
+    # else's data, not by whether the front door redirects. The front door is
+    # deliberately public -- a crawler handed a redirect to a login form has
+    # nothing to index, and a visitor arriving from a link should learn what
+    # this is before being asked to commit. Reading auth from "/" alone
+    # reported a correctly locked app as wide open.
     home = fetch(base + "/")
     if home["status"] == 200:
-        report.warn("sign-in is switched on",
-                    "the app is open to anyone who has the address")
-        print()
-        print("  The home page loads without an account, which means")
-        print("  GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not both set.")
-        print("  That is correct for a private test and wrong for a public launch.")
-        signed_in_mode = False
+        report.ok("the front door answers a stranger")
     elif home["status"] in (301, 302, 307, 308):
-        where = header(home, "Location")
-        if "/signin" in where:
-            report.ok("sign-in is switched on", "the app redirects to /signin")
-            signed_in_mode = True
-        else:
-            report.warn("sign-in is switched on", "redirects to %s" % where[:40])
-            signed_in_mode = True
+        report.warn("the front door answers a stranger",
+                    "it redirects to %s, so there is nothing public to index"
+                    % header(home, "Location")[:40])
     else:
-        report.bad("the home page behaves sensibly", "got %d" % home["status"])
+        report.bad("the front door answers a stranger",
+                   "got %d" % home["status"])
+
+    guarded = fetch(base + "/trades")
+    if guarded["status"] in (301, 302, 307, 308) and             "/signin" in header(guarded, "Location"):
+        report.ok("sign-in is switched on", "the journal requires an account")
+        signed_in_mode = True
+    elif guarded["status"] == 200:
+        report.warn("sign-in is switched on",
+                    "the journal served content to a stranger")
+        print()
+        print("  A page holding personal data loaded without an account, which")
+        print("  means GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not both")
+        print("  set. Correct for a private test, wrong for a public launch.")
         signed_in_mode = False
+    else:
+        report.bad("sign-in is switched on",
+                   "the journal returned %d" % guarded["status"])
+        signed_in_mode = True
 
     page = fetch(base + "/signin")
     if page["status"] == 200:
