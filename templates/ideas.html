@@ -10,7 +10,17 @@
 </div>
 
 <div class="card">
-  <form method="get" action="{{ url_for('ideas') }}" data-working>
+  {# The Find scan runs the whole analysis over 150 instruments, so it is the
+     longest wait in the app. The overlay says what it is actually doing and
+     counts the seconds, and after twelve of them it explains why the wait is
+     one-off rather than leaving somebody watching a spinner. #}
+  <form method="get" action="{{ url_for('ideas') }}" data-working
+        data-working-title="Looking for something"
+        data-working-note="Running the full back-test over every instrument on
+          the list, not reading a saved score."
+        data-working-slow="Still going. The first scan is the slow one because
+          it does the real work; everyone who asks in the next few minutes gets
+          the answer instantly.">
     <div class="setgrid">
       <div class="setfield">
         <label for="market">What do you trade?</label>
@@ -43,8 +53,9 @@
     <button class="btn" type="submit" style="margin-top:var(--s3)">Find something</button>
   </form>
   <p class="prose" style="margin-top:var(--s3)">
-    This takes a few seconds. It is running the whole back-test on every
-    instrument in the list, not reading a saved score.
+    The first scan takes up to half a minute, because it runs the whole
+    back-test on every instrument rather than reading a saved score. The
+    result is then shared, so asking again straight after is instant.
   </p>
 </div>
 

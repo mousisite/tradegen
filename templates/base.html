@@ -95,9 +95,14 @@
    feedback the page reads as frozen and people submit a second time. #}
 <div class="overlay" id="working" role="status" aria-live="polite">
   <div class="spin" aria-hidden="true"></div>
-  <div class="a">Analysing</div>
-  <div class="b">Fetching data, running 34 strategies, and back-testing each one
-    against this instrument's own history.</div>
+  <div class="a" id="workhead">Analysing</div>
+  <div class="b" id="worknote">Fetching data, running 34 strategies, and
+    back-testing each one against this instrument's own history.</div>
+  {# A counter rather than a progress bar. The work happens inside one blocking
+     request, so the page has nothing to measure and a bar would be invented.
+     Seconds elapsed is a real number, and it is the one that tells somebody
+     the page is alive rather than hung. #}
+  <div class="c" id="worktime" aria-hidden="true"></div>
 </div>
 
 {# Alerts that fired while you were on another page. The server checks on a
@@ -113,12 +118,41 @@
 <script>
   (function () {
     var el = document.getElementById('working');
-    function show() { el.classList.add('on'); }
+    var head = document.getElementById('workhead');
+    var note = document.getElementById('worknote');
+    var time = document.getElementById('worktime');
+    var tick = null;
+
+    function show(ev) {
+      var src = ev && ev.currentTarget;
+      if (src && src.getAttribute('data-working-title')) {
+        head.textContent = src.getAttribute('data-working-title');
+      }
+      if (src && src.getAttribute('data-working-note')) {
+        note.textContent = src.getAttribute('data-working-note');
+      }
+      var started = Date.now();
+      var patience = src && src.getAttribute('data-working-slow');
+      time.textContent = '';
+      clearInterval(tick);
+      tick = setInterval(function () {
+        var secs = Math.round((Date.now() - started) / 1000);
+        time.textContent = secs + 's';
+        // Said once, at the point where a wait starts to feel like a failure.
+        // It is also true: the result is shared, so the next person waits none.
+        if (patience && secs === 12) { note.textContent = patience; }
+      }, 1000);
+      el.classList.add('on');
+    }
+
     document.querySelectorAll('[data-working]').forEach(function (node) {
       node.addEventListener(node.tagName === 'FORM' ? 'submit' : 'click', show);
     });
     // Coming back with the browser's back button must not leave this stuck on.
-    window.addEventListener('pageshow', function () { el.classList.remove('on'); });
+    window.addEventListener('pageshow', function () {
+      clearInterval(tick);
+      el.classList.remove('on');
+    });
   })();
 
   // Alerts fire on the server's timer. This asks what has fired since this tab

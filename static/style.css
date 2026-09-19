@@ -402,6 +402,11 @@ ul.list.ok li::marker { color: var(--gain); }
 .overlay .a { font-family: var(--serif); font-size: var(--t-md); }
 .overlay .b { font-size: var(--t-xs); color: var(--ink-3); max-width: 330px;
               text-align: center; line-height: 1.7; }
+/* The elapsed counter. Tabular figures so the number does not jitter the
+   layout every second as digits change width. */
+.overlay .c { font-family: var(--mono); font-size: var(--t-xs);
+              font-variant-numeric: tabular-nums; color: var(--ink-3);
+              letter-spacing: .04em; }
 
 /* ---------- forms in tables ---------- */
 
