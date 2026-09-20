@@ -1080,6 +1080,29 @@ def _public_base() -> str:
             or request.url_root.rstrip("/"))
 
 
+# Other places this same product exists, for the sameAs property below.
+#
+# This is how a search engine tells one Orenth from another: there is a watch
+# brand, a consulting group and an iOS app using the word, and without a set of
+# corroborating profiles all pointing back here, they are one blurred entity.
+#
+# Only add addresses that resolve and that carry this name. A link to a profile
+# branded something else is worse than no link, because it argues the opposite
+# of what it is here to say. Add to this list as the profiles get made:
+# GitHub, a Product Hunt page, an X account, a Reddit account, Wikidata.
+SAME_AS: list = []
+
+
+@app.context_processor
+def _brand():
+    """The identity block, so every page says the same thing about the app."""
+    base = _public_base()
+    return {"site_base": base,
+            "site_name": "Orenth",
+            "site_logo": base + url_for("static", filename="logo.png"),
+            "same_as": SAME_AS}
+
+
 @app.context_processor
 def _preview_urls():
     """Absolute https addresses for the link-preview tags.

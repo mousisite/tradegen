@@ -175,6 +175,46 @@ try:
     finally:
         del _os.environ["STOCKBOT_PUBLIC_URL"]
 
+    # Searching this name alone turns up a watch brand, a consulting group and
+    # an unrelated iOS app. Structured data is how a search engine tells them
+    # apart, and malformed JSON-LD is ignored silently rather than reported.
+    import json as _json
+    import re
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+    try:
+        marked = visitor.get("/").data.decode("utf-8", "replace")
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
+    block = re.search(r'<script type="application/ld\+json">(.*?)</script>',
+                      marked, re.S)
+    check("the page carries structured data", bool(block))
+    if block:
+        try:
+            graph = _json.loads(block.group(1))["@graph"]
+            parsed = True
+        except Exception as exc:
+            graph, parsed = [], False
+            check("and it is valid JSON", False, exc)
+        if parsed:
+            check("and it is valid JSON", True)
+            kinds = {node.get("@type") for node in graph}
+            check("it names an organisation and an application",
+                  {"Organization", "WebApplication"} <= kinds, kinds)
+            for node in graph:
+                for field in ("url", "logo", "image"):
+                    if node.get(field):
+                        check("%s %s is an absolute https address"
+                              % (node["@type"], field),
+                              node[field].startswith("https://orenth.app"),
+                              node[field])
+            # An invented rating or review count is the one kind of structured
+            # data that draws a manual penalty, and this app cannot honestly
+            # publish either.
+            check("it claims no ratings or review counts",
+                  not any(k in _json.dumps(graph)
+                          for k in ("aggregateRating", "reviewCount",
+                                    "ratingValue")))
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))

@@ -22,6 +22,48 @@
 <meta name="twitter:description" content="{{ _blurb }}">
 <meta name="twitter:image" content="{{ preview_image }}">
 <title>{% block title %}Orenth{% endblock %}</title>
+<link rel="canonical" href="{{ canonical_url }}">
+{# Who this is, in the form a search engine reads.
+   Searching the name alone turns up a watch brand, a consulting group and an
+   unrelated iOS app. Without this, they are one blurred entity and none of
+   them is clearly this. sameAs is the part that does the disambiguating, so
+   it carries only addresses that resolve and that use this name.
+   Nothing here is a claim that cannot be checked on the page itself: no
+   ratings, no counts, no awards. #}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "{{ site_base }}/#org",
+      "name": "{{ site_name }}",
+      "url": "{{ site_base }}/",
+      "logo": "{{ site_logo }}",
+      "description": "{{ _blurb }}"{% if same_as %},
+      "sameAs": [{% for link in same_as %}"{{ link }}"{{ ", " if not loop.last }}{% endfor %}]{% endif %}
+    },
+    {
+      "@type": "WebApplication",
+      "@id": "{{ site_base }}/#app",
+      "name": "{{ site_name }}",
+      "url": "{{ site_base }}/",
+      "applicationCategory": "FinanceApplication",
+      "operatingSystem": "Any web browser",
+      "browserRequirements": "Requires JavaScript only for optional extras",
+      "publisher": { "@id": "{{ site_base }}/#org" },
+      "image": "{{ preview_image }}",
+      "description": "{{ _blurb }}",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD",
+        "availability": "https://schema.org/InStock"
+      }
+    }
+  ]
+}
+</script>
 {# Preconnect first so the font request is not waiting on DNS and TLS.
    Source Serif stands in for Tiempos, Inter for Styrene, JetBrains Mono for
    the figures. All three have real fallback stacks in the CSS. #}
