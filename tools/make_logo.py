@@ -32,15 +32,15 @@ def _scale(points, pad: float = 0.0):
     return [(pad + x / 24.0 * span, pad + y / 24.0 * span) for x, y in points]
 
 
-def draw() -> Image.Image:
+def draw(pad_frac: float = 0.16, weight: float = 0.085) -> Image.Image:
     # Supersampled, then reduced: Pillow will not antialias a thick line, and
     # the diagonals look like a staircase at full size without this.
     scale = 4
     big = Image.new("RGB", (SIZE * scale, SIZE * scale), PAPER)
     pen = ImageDraw.Draw(big)
 
-    width = int(SIZE * scale * 0.085)
-    pad = SIZE * scale * 0.16
+    width = int(SIZE * scale * weight)
+    pad = SIZE * scale * pad_frac
 
     def place(points):
         span = SIZE * scale - 2 * pad
@@ -58,9 +58,40 @@ def draw() -> Image.Image:
     return big.resize((SIZE, SIZE), Image.LANCZOS)
 
 
+# Google will not use a data: URI as a search-result favicon; it wants a real
+# file it can fetch. These are the sizes it and the mobile platforms ask for.
+# Google's guidance is a multiple of 48px, so the small end starts there.
+PNG_SIZES = (48, 96, 180, 192, 512)
+
+# The .ico still matters: browsers request /favicon.ico whether or not a page
+# links to one, and a 404 there is a wasted request on every visit.
+ICO_SIZES = (16, 32, 48)
+
+
 if __name__ == "__main__":
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = os.path.join(root, "static", "logo.png")
-    draw().save(out, "PNG", optimize=True)
-    print("wrote %s  (%dx%d, %d bytes)"
-          % (out, SIZE, SIZE, os.path.getsize(out)))
+    static = os.path.join(root, "static")
+    master = draw()
+    # A favicon is read at 16-48px, where generous margins just throw away
+    # pixels. The icons use a tighter frame and a heavier stroke than the
+    # full-size logo so the shape survives being shrunk.
+    tight = draw(pad_frac=0.09, weight=0.105)
+
+    wrote = []
+    master.save(os.path.join(static, "logo.png"), "PNG", optimize=True)
+    wrote.append(("logo.png", SIZE))
+
+    for size in PNG_SIZES:
+        name = "icon-%d.png" % size
+        tight.resize((size, size), Image.LANCZOS).save(
+            os.path.join(static, name), "PNG", optimize=True)
+        wrote.append((name, size))
+
+    # Pillow builds a multi-resolution .ico from one image given the sizes.
+    tight.save(os.path.join(static, "favicon.ico"), "ICO",
+               sizes=[(s, s) for s in ICO_SIZES])
+    wrote.append(("favicon.ico", max(ICO_SIZES)))
+
+    for name, size in wrote:
+        path = os.path.join(static, name)
+        print("  %-16s %4dpx  %6d bytes" % (name, size, os.path.getsize(path)))

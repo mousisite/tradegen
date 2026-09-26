@@ -71,7 +71,16 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23c96442' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16.5l5.5-6 4 3.5L21 5'/><path d='M15 5h6v6'/></svg>">
+{# Real files, not a data: URI. Google fetches an icon to put beside a search
+   result and ignores anything inline, so the inline version got a generic
+   globe. The .ico covers browsers that ask for /favicon.ico unprompted. #}
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48"
+      href="{{ url_for('static', filename='icon-48.png') }}">
+<link rel="icon" type="image/png" sizes="192x192"
+      href="{{ url_for('static', filename='icon-192.png') }}">
+<link rel="apple-touch-icon" sizes="180x180"
+      href="{{ url_for('static', filename='icon-180.png') }}">
 </head>
 <body>
 

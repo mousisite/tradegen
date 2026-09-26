@@ -37,7 +37,8 @@ except ImportError:
     pass
 
 from flask import (Flask, Response, abort, g, jsonify, redirect,
-                   render_template, request, session, url_for)
+                   render_template, request, send_from_directory, session,
+                   url_for)
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -119,7 +120,7 @@ def healthcheck():
 # once Google sign-in is configured.
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
-                    "robots", "sitemap", "index"}
+                    "robots", "sitemap", "index", "favicon"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -1117,6 +1118,21 @@ def _preview_urls():
     base = _public_base()
     return {"canonical_url": base + request.path,
             "preview_image": base + url_for("static", filename="preview.png")}
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Serve a real icon file from the address everything asks for.
+
+    Browsers request /favicon.ico whether or not a page links to one, and
+    Google will not use a data: URI as the icon beside a search result: it
+    fetches a file or shows a generic globe. This route existed as neither, so
+    the request fell through to the sign-in redirect and the search result got
+    the globe.
+    """
+    return send_from_directory(
+        os.path.join(app.root_path, "static"), "favicon.ico",
+        mimetype="image/x-icon", max_age=60 * 60 * 24 * 7)
 
 
 @app.route("/robots.txt")

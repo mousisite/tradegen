@@ -215,6 +215,23 @@ try:
                           for k in ("aggregateRating", "reviewCount",
                                     "ratingValue")))
 
+    # Google fetches an icon to put beside a search result and ignores an
+    # inline data: URI, which is what this used to declare. /favicon.ico also
+    # has to be a real route: browsers ask for it unprompted, and without one
+    # the request fell through to the sign-in redirect.
+    icon = visitor.get("/favicon.ico")
+    check("a stranger can fetch /favicon.ico",
+          icon.status_code == 200, icon.status_code)
+    check("and it is served as an icon",
+          icon.mimetype in ("image/x-icon", "image/vnd.microsoft.icon"),
+          icon.mimetype)
+    check("the page links real icon files, not a data: URI",
+          "data:image/svg+xml" not in card and "favicon.ico" in card)
+    for name in ("icon-48.png", "icon-180.png", "icon-192.png", "logo.png"):
+        got = visitor.get("/static/" + name)
+        check("a stranger can fetch %s" % name,
+              got.status_code == 200, got.status_code)
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))
