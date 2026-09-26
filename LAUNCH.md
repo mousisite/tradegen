@@ -30,8 +30,14 @@ same complaint.
 
 ## Draft
 
-**Title:** I built a stock research tool that back-tests its own advice and
-tells you when it has no edge
+**Title, for Hacker News** (77 characters, and their limit is 80):
+
+```
+Show HN: Orenth - stock research that back-tests itself and reports no edge
+```
+
+**Title, for Reddit:** I built a stock research tool that back-tests its own
+advice and tells you when it has no edge
 
 ---
 
@@ -39,9 +45,12 @@ I got tired of trading tools that always have an opinion. So I built one that
 counts how often its own setups actually worked, charges realistic costs, and
 says "no demonstrated edge" when there isn't one.
 
-It says that a lot. Across the analyses I have run so far, **42 of 54 came back
-as Avoid**. That is an awkward thing for a trading tool to admit and it is what
-the numbers say.
+It says that a lot. Scanning 150 liquid US names on daily bars today, it said
+**avoid on 111 of them**, wait on 25, and buy on 14. That is an awkward split
+for a trading tool to publish and it is what the measurements say.
+
+Re-run that count before you post. It moves with the market, and a figure you
+cannot reproduce on the day is the one thing that will get picked apart.
 
 Three things it does that I had not found elsewhere:
 
@@ -54,7 +63,17 @@ you end up believing your reasoning works when only your luck did.
 **It prices gap risk in cash.** A stop tells you what you intend to lose. It
 also shows what a move the size of that instrument's own worst day would cost,
 because a stop does not survive a gap. On SPY a 1% risk is really about 1.2x
-that. On Bitcoin it is **3.2x**.
+that. On Bitcoin it is **3.2x**. That figure is also the risk dial on the
+idea finder: "high risk, high reward" filters on measured gap risk rather than
+on reward-to-risk, because every plan is built to the same ratio and that
+ratio describes your settings, not the instrument.
+
+**The break-even line is measured, not assumed.** The usual formula assumes
+every loss is a full stop-out. Across these instruments the average loss is
+nearer -0.5R, because most trades that miss the target are closed at the
+horizon rather than stopped. Assuming the full stop roughly doubles the hit
+rate a setup appears to need. Getting this wrong had my own page printing a
+positive expectancy beside a break-even line it looked like it was failing.
 
 **Every figure cites the filing.** Fundamentals come from SEC XBRL data with a
 link to the document, not from a vendor's summary. It runs Piotroski, Altman,

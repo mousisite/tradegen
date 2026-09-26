@@ -1039,8 +1039,25 @@ def usage():
             [float(d["runs"]) for d in data["daily"]],
             width=720, height=180, title="Analyses per day", money=False)
 
+    # Where the database actually sits, because the answer decides whether a
+    # deploy keeps everyone's journal or silently deletes it, and nothing else
+    # in the app ever says. A path inside the container survives nothing.
+    db_path = db_mod.default_path() if not app.config.get("DB_PATH")         else app.config["DB_PATH"]
+    try:
+        db_size = os.path.getsize(db_path)
+    except OSError:
+        db_size = 0
+    storage = {
+        "path": db_path,
+        "size": db_size,
+        # A mounted disk is somewhere the container is not. The check is crude
+        # on purpose: it reports what it sees rather than claiming to know.
+        "on_disk": db_path.startswith("/data") or db_path.startswith("/var/data"),
+    }
+
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
+                           storage=storage,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 

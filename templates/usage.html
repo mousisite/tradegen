@@ -134,6 +134,28 @@
   </div>
 </section>
 
+<section>
+  <div class="sechead"><h2>Where the data lives</h2>
+    <span class="tail">whether a deploy keeps it or deletes it</span></div>
+  <div class="card">
+    <p class="prose">
+      The database is at <span class="fig">{{ storage.path }}</span>,
+      currently {{ "%.1f"|format(storage.size / 1048576.0) }} MB.
+    </p>
+    {% if storage.on_disk %}
+      <p class="prose"><b>This is a mounted disk.</b> It sits outside the
+        container, so deploying a new version leaves it alone. That is what
+        you want.</p>
+    {% else %}
+      <p class="prose loss"><b>This path is inside the container.</b> Every
+        deploy rebuilds the container, so every deploy destroys this file and
+        everything in it: every journal, every thesis, every account. Mount a
+        disk and point <span class="fig">STOCKBOT_DB</span> at it before
+        anyone relies on this.</p>
+    {% endif %}
+  </div>
+</section>
+
 <p class="legal">
   Everything here comes from rows this app already wrote in the course of doing
   its job. No analytics script runs on any page, nothing is sent to a third
