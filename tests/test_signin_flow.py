@@ -232,6 +232,47 @@ try:
         check("a stranger can fetch %s" % name,
               got.status_code == 200, got.status_code)
 
+    # The front door shows one real call so a stranger can see what the app
+    # does before handing over a Google account. The property that matters is
+    # that it never waits for market data: a slow Yahoo must not become a slow
+    # or broken front door. Simulate a refresh that takes three seconds.
+    import time as _time
+    _real_refresh = web._refresh_example
+
+    def _slow_refresh():
+        _time.sleep(3)
+        with web._example_lock:
+            web._example_state["busy"] = False
+
+    web._refresh_example = _slow_refresh
+    saved = dict(web._example_state)
+    web._example_state.update({"at": 0.0, "data": None, "busy": False})
+    try:
+        started = _time.time()
+        cold = visitor.get("/")
+        waited = _time.time() - started
+        check("the front door does not wait for market data",
+              cold.status_code == 200 and waited < 1.0,
+              "%.2fs" % waited)
+        check("and renders fine with no example yet",
+              "A real answer" not in cold.data.decode("utf-8", "replace"))
+
+        web._example_state.update({
+            "at": _time.time() - 600, "busy": True,
+            "data": {"symbol": "NVDA", "action": "WAIT", "price": 100.0,
+                     "headline": "Do not buy yet.",
+                     "sure": "It worked 32 of 98 times.",
+                     "at": _time.time() - 600}})
+        warm = visitor.get("/").data.decode("utf-8", "replace")
+        check("once computed, the example appears", "A real answer" in warm)
+        check("and it says how old it is rather than posing as live",
+              "10 min ago" in warm)
+        check("and never claims to be advice", "not financial advice" in warm)
+    finally:
+        web._refresh_example = _real_refresh
+        web._example_state.clear()
+        web._example_state.update(saved)
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))

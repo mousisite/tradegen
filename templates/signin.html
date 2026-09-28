@@ -27,6 +27,26 @@
       The luck column is the point.</li>
   </ul>
 
+  {# One real answer before anyone is asked for anything. Computed in the
+     background and labelled with its age, so it is never a stale call dressed
+     up as a live one. #}
+  {% if example %}
+    <div class="card" style="text-align:left;margin-bottom:var(--s4)">
+      <span class="eyebrow">A real answer, right now &middot; {{ example.symbol }}
+        at {{ example.price|price }}{% if example.age_min %} &middot;
+        {{ example.age_min }} min ago{% endif %}</span>
+      <p class="lead" style="margin:var(--s1) 0">
+        <span class="chip {{ 'long' if example.action == 'BUY'
+             else 'short' if example.action == 'SHORT'
+             else 'hold' if example.action == 'WAIT' else 'mute' }}">{{ example.action }}</span>
+        {{ example.headline }}
+      </p>
+      {% if example.sure %}<p class="prose">{{ example.sure }}</p>{% endif %}
+      <p class="fine" style="margin-bottom:0">Sign in to ask the same question
+        about any stock or coin. Analysis, not financial advice.</p>
+    </div>
+  {% endif %}
+
   {% if reason %}
     <div class="notice">{{ reason }}</div>
   {% endif %}

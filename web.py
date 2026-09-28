@@ -312,6 +312,63 @@ def inject_globals():
 # Routes
 # ---------------------------------------------------------------------------
 
+# A real answer on the front door, so a stranger sees what the app does before
+# being asked to sign in with Google. Someone arriving from a video will not
+# hand an unknown app their Google account just to find out what it is; they
+# will leave. One real call, in plain words, does the persuading instead.
+#
+# The front door must never wait on market data, so this is computed in the
+# background and the page only ever reads what is already there. The very
+# first visitor after a restart sees the page without it; everyone after sees
+# a real analysis, labelled with how old it is.
+EXAMPLE_SYMBOL = "NVDA"
+EXAMPLE_TTL = 15 * 60
+_example_state = {"at": 0.0, "data": None, "busy": False}
+_example_lock = threading.Lock()
+
+
+def _refresh_example() -> None:
+    try:
+        from bot import engine as engine_mod
+        from bot import plain as plain_mod
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        result = engine_mod.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
+                                    with_news=False, with_learning=True,
+                                    record=False)
+        said = plain_mod.explain_plan(result.plan, result.bars)
+        data = {"symbol": result.bars.symbol,
+                "action": result.plan.action,
+                "headline": said["headline"],
+                "sure": said["sure"],
+                "price": result.bars.last_price,
+                "at": time.time()}
+        with _example_lock:
+            _example_state["data"] = data
+            _example_state["at"] = data["at"]
+    except Exception:
+        # A missing example costs nothing; a front door that errors costs the
+        # visitor. The page simply renders without it.
+        pass
+    finally:
+        with _example_lock:
+            _example_state["busy"] = False
+
+
+def _example():
+    """The cached example, starting a refresh if it is stale. Never blocks."""
+    now = time.time()
+    with _example_lock:
+        data = _example_state["data"]
+        stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
+        if stale and not _example_state["busy"]:
+            _example_state["busy"] = True
+            threading.Thread(target=_refresh_example, daemon=True).start()
+    if data is None:
+        return None
+    # Say how old it is rather than presenting a quarter-hour-old call as live.
+    return dict(data, age_min=int((now - data["at"]) // 60))
+
+
 @app.route("/")
 def index():
     # A signed-out visitor gets the landing page here rather than a redirect to
@@ -322,7 +379,8 @@ def index():
     # login form asks them to commit before they know what this is.
     if getattr(g, "user", None) is None:
         return render_template("signin.html", reason="",
-                               why_not=auth_mod.why_not(), next_url="")
+                               why_not=auth_mod.why_not(), next_url="",
+                               example=_example())
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -856,7 +914,8 @@ def signin():
     return render_template("signin.html",
                            reason=request.args.get("reason", ""),
                            why_not=auth_mod.why_not(),
-                           next_url=_safe_back(request.args.get("next"), ""))
+                           next_url=_safe_back(request.args.get("next"), ""),
+                           example=_example())
 
 
 @app.route("/auth/google")
