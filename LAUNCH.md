@@ -45,8 +45,8 @@ I got tired of trading tools that always have an opinion. So I built one that
 counts how often its own setups actually worked, charges realistic costs, and
 says "no demonstrated edge" when there isn't one.
 
-It says that a lot. Scanning 150 liquid US names on daily bars today, it said
-**avoid on 111 of them**, wait on 25, and buy on 14. That is an awkward split
+It says that a lot. Scanning 149 actively traded US stocks on daily bars on 28 September, it
+said **avoid on 109 of them**, wait on 29, and buy on 11. That is an awkward split
 for a trading tool to publish and it is what the measurements say.
 
 Re-run that count before you post. It moves with the market, and a figure you
@@ -62,8 +62,8 @@ you end up believing your reasoning works when only your luck did.
 
 **It prices gap risk in cash.** A stop tells you what you intend to lose. It
 also shows what a move the size of that instrument's own worst day would cost,
-because a stop does not survive a gap. On SPY a 1% risk is really about 1.2x
-that. On Bitcoin it is **3.2x**. That figure is also the risk dial on the
+because a stop does not survive a gap. On Apple on 28 September that
+was about 1.8x what the stop budgets; on Nvidia, **4.3x**. That figure is also the risk dial on the
 idea finder: "high risk, high reward" filters on measured gap risk rather than
 on reward-to-risk, because every plan is built to the same ratio and that
 ratio describes your settings, not the instrument.
