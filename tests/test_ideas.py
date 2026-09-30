@@ -7,6 +7,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import harness
 
 from bot import ideas
+import time as _time
 
 c, DB = harness.isolated_web("ideas")
 
@@ -246,6 +247,82 @@ check("and the page is told how many it set aside",
 check("an unknown appetite falls back rather than failing",
       ideas.find(market="stocks", horizon="medium",
                  risk="nonsense")["risk"] == "balanced")
+
+print()
+print("=" * 72)
+print("ONE SCAN, SHARED, INSIDE THE TIME A PAGE IS ALLOWED")
+print("=" * 72)
+
+# The slow part depends only on the market and the bar interval, so switching
+# appetite must re-filter an existing scan rather than run another one. Before
+# this, each of the three appetites ran its own thirty-to-forty-second scan.
+ideas.find("stocks", "medium", risk="balanced")
+_t = _time.time()
+ideas.find("stocks", "medium", risk="wild")
+_switch = _time.time() - _t
+check("changing appetite re-filters the same scan instead of rerunning it",
+      _switch < 2.0, "%.1fs" % _switch)
+
+# Shared rows mean shared dicts, and the months view writes on them: which
+# ones had sound accounts, which were dropped and why. None of that may turn
+# up in somebody else's weeks view.
+ideas.find("stocks", "long", risk="balanced")
+_weeks = ideas.find("stocks", "medium", risk="balanced")
+_leaked = [r["symbol"] for r in _weeks["passed"] + _weeks["watch"]
+           if "dropped_because" in r or "accounts" in r]
+check("a mark written for one view never appears in another",
+      not _leaked, _leaked)
+
+# Cloudflare cuts a request off at 100 seconds and shows its own error page.
+# The scan stops short of that and says so rather than failing.
+_real_budget = ideas.SCAN_BUDGET
+ideas.SCAN_BUDGET = 0.001
+try:
+    _rushed = ideas.find("stocks", "medium", limit=23)  # its own cache key
+finally:
+    ideas.SCAN_BUDGET = _real_budget
+check("a scan that runs out of time says it was cut short",
+      _rushed["cut_short"])
+check("and admits how much it did not look at",
+      _rushed["scanned"] < _rushed["asked_for"]
+      and "stopped after" in _rushed["summary"], _rushed["summary"])
+
+# Filings that did not answer in time are unknown, not missing. Calling them
+# "no filings" would be a false statement about the company.
+_real_hold = ideas._accounts_hold_up
+_real_acc = ideas.ACCOUNTS_BUDGET
+
+
+def _slow_hold(symbol):
+    _time.sleep(2)
+    return {"ok": True, "reasons": [], "strength": 7}
+
+
+ideas._accounts_hold_up = _slow_hold
+ideas.ACCOUNTS_BUDGET = 0.2
+try:
+    _started = _time.time()
+    _got = ideas._check_accounts(["AAA", "BBB", "AAA"])
+    _took = _time.time() - _started
+finally:
+    ideas._accounts_hold_up = _real_hold
+    ideas.ACCOUNTS_BUDGET = _real_acc
+check("filings that miss the budget are left out rather than guessed",
+      _got == {}, _got)
+check("and the page does not wait for them", _took < 1.0, "%.1fs" % _took)
+
+_real_check = ideas._check_accounts
+ideas._check_accounts = lambda symbols: {}
+try:
+    _fake = {"market": "stocks", "interval": "1d", "asked_for": 1,
+             "cut_short": False, "seconds": 1.0, "scanned_at": _time.time(),
+             "rows": [row(symbol="SLOW", asset_class="stock", gap_multiple=1.2)]}
+    _listed = ideas._shortlist(_fake, "long", "balanced")
+finally:
+    ideas._check_accounts = _real_check
+check("an unanswered filing is labelled unchecked, not dropped",
+      [r.get("accounts") for r in _listed["passed"]] == ["unchecked"],
+      [r.get("accounts") for r in _listed["passed"]])
 
 import sys as _exit_sys
 print()

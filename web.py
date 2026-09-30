@@ -1246,7 +1246,13 @@ def terms():
 
 
 def _contact() -> str:
-    return (os.environ.get("STOCKBOT_CONTACT") or "").strip() or         "set STOCKBOT_CONTACT to an email address"
+    """The address the legal pages give for questions, or empty.
+
+    Unset, it used to print "set STOCKBOT_CONTACT to an email address" to
+    every visitor, who can do nothing about it. Now the line is left out, and
+    only whoever runs the server is told how to fill it.
+    """
+    return (os.environ.get("STOCKBOT_CONTACT") or "").strip()
 
 
 @app.route("/export/<dataset>.<fmt>")

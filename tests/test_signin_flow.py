@@ -286,6 +286,22 @@ try:
         web._example_state.clear()
         web._example_state.update(saved)
 
+    # Unset, the legal pages used to print "set STOCKBOT_CONTACT to an email
+    # address" to every visitor. Set, the address should be a working link.
+    _saved_contact = _os.environ.pop("STOCKBOT_CONTACT", None)
+    try:
+        bare = visitor.get("/privacy").data.decode("utf-8", "replace")
+        check("with no contact set, visitors see no setup instruction",
+              "STOCKBOT_CONTACT" not in bare)
+        _os.environ["STOCKBOT_CONTACT"] = "hello@example.com"
+        linked = visitor.get("/terms").data.decode("utf-8", "replace")
+        check("with one set, it is a link people can click",
+              'href="mailto:hello@example.com"' in linked)
+    finally:
+        _os.environ.pop("STOCKBOT_CONTACT", None)
+        if _saved_contact is not None:
+            _os.environ["STOCKBOT_CONTACT"] = _saved_contact
+
     check("the preview image exists on disk",
           _os.path.exists(_os.path.join(_os.path.dirname(__file__), "..",
                                         "static", "preview.png")))

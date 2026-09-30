@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Dict, List, Optional
 
 # What you trade.
@@ -143,6 +144,17 @@ CACHE_TTL = 300
 # Longer than the slowest scan measured (hourly crypto, ~45s).
 SCAN_WAIT = 150.0
 
+# Cloudflare sits in front of the site and abandons any request that has not
+# answered within 100 seconds, showing the visitor its own error page. The
+# scan stops well short of that and reports how far it got, so the worst case
+# is a shorter list that says it is shorter, never an error screen.
+SCAN_BUDGET = 60.0
+
+# The months horizon then reads the filings of whatever cleared the bar. The
+# two budgets together stay under Cloudflare's limit with room for the page
+# itself to render.
+ACCOUNTS_BUDGET = 20.0
+
 
 def _universe(market: str, limit: int) -> List[str]:
     from . import screener as screener_mod
@@ -264,6 +276,30 @@ def _matches_risk(row: Dict, spec: Dict) -> bool:
     return True
 
 
+def _check_accounts(symbols: List[str]) -> Dict[str, Optional[Dict]]:
+    """Read several instruments' filings at once, inside a time limit.
+
+    One at a time, twenty candidates took eighteen seconds on a warm machine,
+    and on a slower server after a cold scan that is how a page runs into
+    Cloudflare's cutoff. Whatever has not answered when the budget runs out is
+    simply absent from the result, which the caller reports as unchecked.
+    """
+    found: Dict[str, Optional[Dict]] = {}
+    wanted = list(dict.fromkeys(symbols))
+    if not wanted:
+        return found
+    pool = ThreadPoolExecutor(max_workers=6)
+    futures = {pool.submit(_accounts_hold_up, sym): sym for sym in wanted}
+    try:
+        for future in as_completed(futures, timeout=ACCOUNTS_BUDGET):
+            found[futures[future]] = future.result()
+    except FuturesTimeout:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return found
+
+
 def _accounts_hold_up(symbol: str) -> Optional[Dict]:
     """Whether the filings support holding this for months. None when unknown.
 
@@ -305,10 +341,13 @@ def _accounts_hold_up(symbol: str) -> Optional[Dict]:
 def find(market: str = "stocks", horizon: str = "medium",
          cfg: Optional[Dict] = None, risk: str = "balanced",
          limit: int = MAX_SCANNED, progress=None) -> Dict:
-    """Scan a list and return only what actually cleared the bar.
+    """What cleared the bar, for this market, holding period and appetite.
 
-    Shared between callers asking the same question, because they would
-    otherwise each run an identical scan against the same upstream data.
+    The slow part, analysing every instrument, depends only on the market and
+    the bar interval, so it runs once and is shared: between visitors, between
+    the three risk appetites, and between the weeks and months horizons, which
+    both read daily bars. Changing appetite re-filters a scan that already
+    exists instead of repeating a thirty-second one.
     """
     from . import config as config_mod
     from . import upstream
@@ -317,6 +356,7 @@ def find(market: str = "stocks", horizon: str = "medium",
     market = market if market in MARKETS else "stocks"
     horizon = horizon if horizon in HORIZONS else "medium"
     risk = risk if risk in RISKS else "balanced"
+    interval = HORIZONS[horizon]["interval"]
 
     # The settings are part of the key. Trading costs are a per-person figure
     # and they decide what clears the bar, so handing one person's scan to
@@ -324,37 +364,52 @@ def find(market: str = "stocks", horizon: str = "medium",
     fingerprint = hashlib.sha1(
         repr(sorted((str(k), repr(v)) for k, v in cfg.items()))
         .encode("utf-8")).hexdigest()[:12]
-    key = "ideas:%s:%s:%s:%s:%d" % (market, horizon, risk, fingerprint,
-                                    limit)
+    key = "ideas:%s:%s:%s:%d" % (market, interval, fingerprint, limit)
 
-    # The wait has to outlast the scan itself. Hourly crypto bars take the
-    # better part of a minute, and a waiter that gives up early runs the whole
-    # scan a second time.
-    return upstream.cached(
-        key, lambda: _scan(market, horizon, risk, cfg, limit, progress),
+    # The wait has to outlast the scan itself. A waiter that gives up early
+    # runs the whole scan a second time.
+    scan = upstream.cached(
+        key, lambda: _scan(market, interval, cfg, limit, progress),
         ttl=CACHE_TTL, wait=SCAN_WAIT)
+    return _shortlist(scan, horizon, risk)
 
 
-def _scan(market: str, horizon: str, risk: str, cfg: Dict, limit: int,
+def _scan(market: str, interval: str, cfg: Dict, limit: int,
           progress=None) -> Dict:
-    """Run the scan for real. Always the slow path."""
-    interval = HORIZONS[horizon]["interval"]
-
+    """Analyse every instrument on the list once. Always the slow path."""
     started = time.time()
     symbols = _universe(market, min(limit, MAX_SCANNED))
 
     rows: List[Dict] = []
+    cut_short = False
     # Concurrent because each one is mostly waiting on the network, and the
     # shared cache means overlapping symbols cost one request between them.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(_look_at, s, interval, cfg): s for s in symbols}
-        for future in as_completed(futures):
+    pool = ThreadPoolExecutor(max_workers=6)
+    futures = {pool.submit(_look_at, s, interval, cfg): s for s in symbols}
+    try:
+        for future in as_completed(futures, timeout=SCAN_BUDGET):
             row = future.result()
             if row:
                 rows.append(row)
             if progress:
                 progress("Looked at %d of %d" % (len(rows), len(symbols)))
+    except FuturesTimeout:
+        cut_short = True
+    finally:
+        # Work not yet started is abandoned. The few already running finish in
+        # the background and are discarded; a thread cannot be stopped midway.
+        pool.shutdown(wait=False, cancel_futures=True)
 
+    return {"market": market, "interval": interval, "rows": rows,
+            "asked_for": len(symbols), "cut_short": cut_short,
+            "seconds": time.time() - started, "scanned_at": time.time()}
+
+
+def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
+    """Filter and rank a finished scan for one horizon and appetite. Cheap."""
+    # Copies, because the scan is shared. A rank or a dropped reason written
+    # here for one request must not turn up in somebody else's list.
+    rows = [dict(r) for r in scan["rows"]]
     spec = RISKS[risk]
     cleared = [r for r in rows if _worth_showing(r)]
 
@@ -373,6 +428,8 @@ def _scan(market: str, horizon: str, risk: str, cfg: Dict, limit: int,
     # out with the reason attached rather than silently dropped.
     dropped: List[Dict] = []
     if HORIZONS[horizon].get("needs_sound_accounts") and passed:
+        verdicts = _check_accounts(
+            [c["symbol"] for c in passed if c.get("asset_class") != "crypto"])
         kept = []
         for candidate in passed:
             if candidate.get("asset_class") == "crypto":
@@ -381,7 +438,13 @@ def _scan(market: str, horizon: str, risk: str, cfg: Dict, limit: int,
                     "before holding it for months.")
                 dropped.append(candidate)
                 continue
-            verdict = _accounts_hold_up(candidate["symbol"])
+            if candidate["symbol"] not in verdicts:
+                # Ran out of time rather than found nothing. Kept, and labelled
+                # as unchecked, because "no filings" would be a false claim.
+                candidate["accounts"] = "unchecked"
+                kept.append(candidate)
+                continue
+            verdict = verdicts[candidate["symbol"]]
             if verdict is None:
                 candidate["accounts"] = "not filed"
                 kept.append(candidate)
@@ -415,32 +478,49 @@ def _scan(market: str, horizon: str, risk: str, cfg: Dict, limit: int,
             if r["action"] != "AVOID" and not _worth_showing(r)]
 
     return {
-        "market": market,
+        "market": scan["market"],
         "horizon": horizon,
         "risk": risk,
         "risk_label": spec["label"],
         "ranked_as": spec["ranked_as"],
         "risk_note": spec["note"],
         "wrong_shape": wrong_shape,
-        "interval": interval,
+        "interval": scan["interval"],
         "scanned": len(rows),
-        "asked_for": len(symbols),
+        "asked_for": scan["asked_for"],
+        "cut_short": scan["cut_short"],
         "passed": passed,
         "watch": watch[:10],
         "dropped": dropped,
         "avoided": len(avoided),
         "thin": len(thin),
-        "seconds": time.time() - started,
-        "scanned_at": time.time(),
+        "seconds": scan["seconds"],
+        "scanned_at": scan["scanned_at"],
         "warning": HORIZONS[horizon]["warning"],
         "summary": _summary(len(rows), passed, len(avoided), len(thin), horizon,
-                            len(watch), risk, wrong_shape),
+                            len(watch), risk, wrong_shape,
+                            scan["cut_short"], scan["asked_for"]),
     }
 
 
 def _summary(scanned: int, passed: List[Dict], avoided: int, thin: int,
              horizon: str, watching: int = 0, risk: str = "balanced",
-             wrong_shape: int = 0) -> str:
+             wrong_shape: int = 0, cut_short: bool = False,
+             asked_for: int = 0) -> str:
+    text = _verdict(scanned, passed, avoided, thin, horizon, watching, risk,
+                    wrong_shape)
+    if cut_short:
+        # Said plainly, because a partial list read as a complete one is the
+        # quiet kind of overstatement this app exists to avoid.
+        text += (" It stopped after %d of the %d instruments on its list, to "
+                 "finish inside the time a page is allowed. The rest were not "
+                 "looked at, so something worth seeing may be missing."
+                 % (scanned, asked_for))
+    return text
+
+
+def _verdict(scanned: int, passed: List[Dict], avoided: int, thin: int,
+             horizon: str, watching: int, risk: str, wrong_shape: int) -> str:
     if not scanned:
         return ("Nothing could be read just now. The data source may be busy; "
                 "try again in a minute.")

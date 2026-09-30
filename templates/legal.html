@@ -162,9 +162,17 @@
 
 {% endif %}
 
-  <p class="legal">
-    Questions about this page: {{ contact }}
-  </p>
+  {% if contact %}
+    <p class="legal">
+      Questions about this page:
+      <a href="mailto:{{ contact }}">{{ contact }}</a>
+    </p>
+  {% elif current_user and current_user.is_local %}
+    <p class="legal">
+      Set <span class="fig">STOCKBOT_CONTACT</span> to an email address to show
+      one here.
+    </p>
+  {% endif %}
 </div>
 
 {% endblock %}

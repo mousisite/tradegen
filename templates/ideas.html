@@ -119,6 +119,8 @@
                 <div class="faint" style="font-size:var(--t-xs)">accounts check out</div>
               {% elif r.accounts == 'not filed' %}
                 <div class="faint" style="font-size:var(--t-xs)">no filings to check</div>
+              {% elif r.accounts == 'unchecked' %}
+                <div class="faint" style="font-size:var(--t-xs)">filings not read in time</div>
               {% endif %}
             </td>
             <td class="r">

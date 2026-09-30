@@ -211,7 +211,7 @@
     var dismiss = document.getElementById('firedismiss');
     if (!bar || !window.fetch) { return; }
 
-    var KEY = 'stockbot-alerts-seen';
+    var KEY = 'orenth-alerts-seen';
     var since = 0;
     try { since = parseFloat(window.localStorage.getItem(KEY)) || 0; } catch (e) {}
 
