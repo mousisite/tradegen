@@ -481,6 +481,17 @@ _LOCAL = {"bot", "web", "analyze", "paper", "menu", "serve", "harness", "setup",
           "backup", "preflight"}
 _ALIAS = {"pil": "pillow", "dotenv": "python_dotenv"}
 
+# Anything that is a .py file or a package in this repository is local by
+# definition. A hand-kept list meant every new script read as a missing
+# third-party package until somebody remembered to add it here: the helper
+# scripts in tools/ importing each other was the case that exposed it.
+for _folder, _dirs, _files in _os.walk(ROOT):
+    if any(skip in _folder for skip in (".runtime", "__pycache__", ".git")):
+        continue
+    _LOCAL.update(f[:-3] for f in _files if f.endswith(".py"))
+    if "__init__.py" in _files:
+        _LOCAL.add(_os.path.basename(_folder))
+
 imported = {}
 for folder, _dirs, files in _os.walk(ROOT):
     if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests")):

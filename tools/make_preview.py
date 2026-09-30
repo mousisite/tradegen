@@ -17,6 +17,9 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import make_logo  # noqa: E402  the same drawing as every other logo file
+
 NAME = "Orenth"
 DOMAIN = "orenth.app"
 TAGLINE = "It back-tests its own advice and tells you when it has no edge."
@@ -53,7 +56,11 @@ def draw() -> Image.Image:
     # A rule down the left edge, the same accent as the site's links.
     pen.rectangle([0, 0, 10, HEIGHT], fill=ACCENT)
 
-    pen.text((MARGIN, 96), NAME, font=_font(True, 82), fill=INK)
+    # The mark beside the name, so a pasted link carries the same logo as the
+    # tab, the app icon and the profile picture.
+    mark = make_logo.render(104, scale=0.96)
+    card.paste(mark, (MARGIN, 94), mark)
+    pen.text((MARGIN + 104 + 30, 96), NAME, font=_font(True, 82), fill=INK)
     pen.text((MARGIN, 212), TAGLINE, font=_font(False, 34), fill=SOFT)
 
     y = 392
