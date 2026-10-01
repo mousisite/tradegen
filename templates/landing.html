@@ -109,6 +109,10 @@
 <section class="closing">
   <p class="lead">Free to start.</p>
   <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+  {% if billing_on %}
+    <p class="fine" style="margin-top:var(--s2)">
+      <a href="{{ url_for('pricing') }}">See what Pro adds</a></p>
+  {% endif %}
 </section>
 
 {% endblock %}

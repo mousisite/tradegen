@@ -42,12 +42,22 @@ SUITES = [
     ("test_pipeline.py",     True,  "a full analysis end to end on several instruments"),
     ("test_web_forms.py",    True,  "settings, journal and analysis form handling"),
     ("test_web.py",          True,  "research, screener, portfolio, monitor and links"),
+    ("test_codes.py",        False, "sign-in codes by email and text, and their limits"),
+    ("test_billing.py",      False, "paid plans: signed webhooks, allowances, checkout"),
 ]
 
 TIMEOUT = 900
 
 
 def main() -> int:
+    # A suite missing from the list above would otherwise never run, silently.
+    unlisted = sorted(set(f for f in os.listdir(HERE)
+                          if f.startswith("test_") and f.endswith(".py"))
+                      - set(s[0] for s in SUITES))
+    if unlisted:
+        print("not in SUITES, so never run: %s" % ", ".join(unlisted))
+        return 1
+
     args = [a for a in sys.argv[1:]]
     offline_only = "--offline" in args
     pattern = next((a for a in args if not a.startswith("-")), "")

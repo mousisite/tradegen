@@ -43,6 +43,7 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
 from bot import auth as auth_mod
+from bot import billing as billing_mod
 from bot import catalysts as catalysts_mod
 from bot import codes as codes_mod
 from bot import charts as charts_mod
@@ -123,7 +124,8 @@ def healthcheck():
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
                     "robots", "sitemap", "index", "favicon",
-                    "code_start", "code_verify"}
+                    "code_start", "code_verify", "pricing",
+                    "billing_webhook"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -240,6 +242,48 @@ def _referrer_path() -> str:
     return _safe_back(path, "/")
 
 
+def _pro() -> bool:
+    """Whether this person has everything. Everyone does while billing is off."""
+    return billing_mod.is_pro(getattr(g, "user", None), _is_operator())
+
+
+def _upgrade(reason: str):
+    """The pricing page, saying why they arrived at it."""
+    return render_template("pricing.html", reason=reason,
+                           limits=billing_mod.free_limits(),
+                           price=billing_mod.price_label(), is_pro=False,
+                           has_customer=False), 402
+
+
+def _allowance_left(symbol: str, interval: str) -> bool:
+    """Whether a free account has a look left today for this instrument."""
+    if g.demo or _pro():
+        return True
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return billing_mod.may_view(conn, g.user.id,
+                                    "%s|%s" % (symbol.upper(), interval))
+    finally:
+        conn.close()
+
+
+def _spend_view(symbol: str, interval: str) -> None:
+    """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
+    if g.demo or _pro():
+        return
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        billing_mod.count_view(conn, g.user.id, "%s|%s" % (symbol.upper(), interval))
+    finally:
+        conn.close()
+
+
+def _allowance_used():
+    return _upgrade("You have looked at %d different instruments today, which "
+                    "is the free allowance. It resets at midnight UTC, or Pro "
+                    "has no limit." % billing_mod.free_limits()["analyses_per_day"])
+
+
 def _locked(headline: str, detail: str, examples=True):
     """The page a visitor sees when they reach past what the example can do."""
     return render_template(
@@ -256,6 +300,7 @@ def _expose_user():
             "demo": getattr(g, "demo", False),
             "auth_on": auth_required(),
             "email_ready": codes_mod.email_ready(),
+            "billing_on": billing_mod.ready(),
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured()}
 
@@ -528,6 +573,10 @@ def analyse():
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
+
+    if not _allowance_left(symbol, interval):
+        return _allowance_used()
+
     if g.demo:
         # Address overrides would give every visitor their own cache entry.
         cfg = config_mod.load(app.config.get("CFG_PATH"))
@@ -539,6 +588,7 @@ def analyse():
         return render_template("error.html", message=str(exc), symbol=symbol), 404
     except Exception as exc:                        # keep the app usable
         return render_template("error.html", message=str(exc), symbol=symbol), 500
+    _spend_view(symbol, interval)
 
     families = _family_rollup(result)
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
@@ -879,6 +929,10 @@ def research():
                            "The example shows daily bars. With an account you "
                            "can look at any timeframe.")
 
+
+    if not _allowance_left(symbol, interval):
+        return _allowance_used()
+
     cfg = _cfg()
     try:
         analysis = cached_analysis(symbol, interval, cfg,
@@ -887,6 +941,7 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
         return render_template("error.html", message=str(exc), symbol=symbol), 404
+    _spend_view(symbol, interval)
 
     key = (analysis.bars.symbol.upper(), interval, "research")
     now = time.time()
@@ -1204,6 +1259,100 @@ def code_verify(channel):
                            to=pending["to"], error=error)
 
 
+@app.route("/pricing")
+def pricing():
+    """Free and Pro, side by side. Only exists once billing is set up."""
+    if not billing_mod.ready():
+        abort(404)
+    customer = ""
+    if getattr(g, "user", None) is not None and not g.demo:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            customer = billing_mod.customer_of(conn, g.user.id)
+        finally:
+            conn.close()
+    return render_template("pricing.html", reason=request.args.get("reason", ""),
+                           limits=billing_mod.free_limits(),
+                           price=billing_mod.price_label(),
+                           is_pro=bool(getattr(g, "user", None)) and _pro(),
+                           has_customer=bool(customer))
+
+
+@app.route("/billing/checkout", methods=["POST"])
+def billing_checkout():
+    """Send someone to Stripe's own page to pay."""
+    if not billing_mod.ready() or g.demo:
+        abort(404)
+    if _pro():
+        return redirect(url_for("account"))
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        customer = billing_mod.customer_of(conn, g.user.id)
+    finally:
+        conn.close()
+    try:
+        url = billing_mod.checkout_url(g.user, _public_base(), customer)
+    except billing_mod.BillingError as exc:
+        return render_template("error.html", message=str(exc), symbol=""), 502
+    return redirect(url, code=303)
+
+
+@app.route("/billing/done")
+def billing_done():
+    """Where Stripe sends a buyer back. Asks Stripe directly, not the browser."""
+    upgraded = False
+    session_id = (request.args.get("session_id") or "").strip()
+    if billing_mod.ready() and session_id and not g.demo:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
+        except billing_mod.BillingError:
+            upgraded = False
+        finally:
+            conn.close()
+    return render_template("billing_done.html", upgraded=upgraded)
+
+
+@app.route("/billing/portal", methods=["POST"])
+def billing_portal():
+    """Stripe's own page for cancelling, changing card and receipts."""
+    if not billing_mod.ready() or g.demo:
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        customer = billing_mod.customer_of(conn, g.user.id)
+    finally:
+        conn.close()
+    if not customer:
+        return redirect(url_for("pricing"))
+    try:
+        url = billing_mod.portal_url(customer, _public_base() + url_for("account"))
+    except billing_mod.BillingError as exc:
+        return render_template("error.html", message=str(exc), symbol=""), 502
+    return redirect(url, code=303)
+
+
+@app.route("/billing/webhook", methods=["POST"])
+def billing_webhook():
+    """Stripe telling the server a plan changed. Signed, so it can be believed."""
+    if not billing_mod.ready():
+        abort(404)
+    payload = request.get_data()
+    if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
+                              os.environ["STRIPE_WEBHOOK_SECRET"]):
+        return jsonify({"error": "bad signature"}), 400
+    try:
+        event = json.loads(payload.decode("utf-8"))
+    except ValueError:
+        return jsonify({"error": "not json"}), 400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        outcome = billing_mod.handle(conn, event)
+    finally:
+        conn.close()
+    return jsonify({"received": True, "outcome": outcome})
+
+
 @app.route("/signout", methods=["GET", "POST"])
 def signout():
     """End this session everywhere, not just in this browser."""
@@ -1227,8 +1376,17 @@ def account():
         everyone = accounts_mod.list_users(conn) if g.user.is_local else []
     finally:
         conn.close()
+    plan = {"on": billing_mod.ready(), "pro": _pro(), "customer": ""}
+    if plan["on"]:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            plan["customer"] = billing_mod.customer_of(conn, uid())
+            plan["used"] = billing_mod.views_today(conn, uid())
+        finally:
+            conn.close()
+        plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
     return render_template("account.html", counts=counts, everyone=everyone,
-                           datasets=export_mod.DATASETS)
+                           datasets=export_mod.DATASETS, plan=plan)
 
 
 @app.route("/account/delete", methods=["POST"])
@@ -1239,7 +1397,17 @@ def delete_account():
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        # Stop the subscription first, or a deleted account keeps being
+        # charged. If Stripe cannot be reached, nothing is deleted.
+        customer = billing_mod.customer_of(conn, uid())
+        if customer and billing_mod.ready():
+            billing_mod.close_customer(customer)
         accounts_mod.delete_user(conn, uid())
+    except billing_mod.BillingError:
+        return render_template(
+            "error.html", symbol="",
+            message="Your subscription could not be cancelled just now, so "
+                    "nothing was deleted. Try again in a minute."), 502
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -1522,6 +1690,15 @@ def ideas():
             return render_template("error.html", symbol="",
                                    message="The scan failed: %s" % exc), 502
 
+    # Visitors included: an example that showed more than a free account would
+    # make signing up look like a downgrade.
+    if result is not None and not _pro():
+        keep = billing_mod.free_limits()["find_results"]
+        total = len(result["passed"]) + len(result["watch"])
+        if len(result["passed"]) > keep or len(result["watch"]) > keep:
+            result = dict(result, passed=result["passed"][:keep],
+                          watch=result["watch"][:keep], limited_total=total)
+
     return render_template("ideas.html", result=result, preparing=preparing,
                            market=market if market in ideas_mod.MARKETS else "stocks",
                            horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
@@ -1693,6 +1870,17 @@ def monitor():
 
 @app.route("/monitor/alert/add", methods=["POST"])
 def add_alert():
+    if not _pro():
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            running = len(db_mod.alert_list(conn, active_only=True, user=uid()))
+        finally:
+            conn.close()
+        cap = billing_mod.free_limits()["alerts"]
+        if running >= cap:
+            return _upgrade("A free account can run %d alert%s at a time. "
+                            "Remove one on the Monitor page, or Pro has no limit."
+                            % (cap, "" if cap == 1 else "s"))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         raw = (request.form.get("threshold") or "").strip()
@@ -1898,12 +2086,16 @@ def api_analyse():
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
+    # The same allowance as the pages, or the API is a way round it.
+    if not _allowance_left(symbol, interval):
+        return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0")
     except DataError as exc:
         return jsonify({"error": str(exc)}), 404
+    _spend_view(symbol, interval)
 
     from bot import report as report_mod
     import json as _json

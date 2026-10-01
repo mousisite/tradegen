@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% set active = 'pricing' %}
+{% block title %}Pricing · Orenth{% endblock %}
+{% block content %}
+
+<div class="pagehead" style="text-align:center">
+  <h1>Free to start. Pro when you want more.</h1>
+  {% if reason %}<div class="notice" style="margin-top:var(--s2)">{{ reason }}</div>{% endif %}
+</div>
+
+<div class="plans">
+  <div class="card plan">
+    <span class="eyebrow">Free</span>
+    <p class="price">$0</p>
+    <ul class="list">
+      <li>{{ limits.analyses_per_day }} different stocks or coins analysed a day</li>
+      <li>The top {{ limits.find_results }} in every Find list</li>
+      <li>{{ limits.alerts }} alert running at a time</li>
+      <li>The full journal, portfolio and strategies</li>
+      <li>Download everything you have entered, any time</li>
+    </ul>
+    {% if not current_user or demo %}
+      <a class="btn quiet" href="{{ url_for('signin', next='/pricing') }}">Create free account</a>
+    {% endif %}
+  </div>
+
+  <div class="card plan pro">
+    <span class="eyebrow">Pro</span>
+    <p class="price">{{ price or 'Pro' }}</p>
+    <ul class="list">
+      <li>As many stocks and coins a day as you like</li>
+      <li>Every result in every Find list</li>
+      <li>As many alerts as you like</li>
+      <li>Everything in Free</li>
+    </ul>
+    {% if is_pro and current_user and not demo %}
+      <p class="prose"><b>You have Pro.</b></p>
+      {% if has_customer %}
+        <form method="post" action="{{ url_for('billing_portal') }}">
+          <button class="btn quiet" type="submit">Manage subscription</button>
+        </form>
+      {% endif %}
+    {% elif current_user and not demo %}
+      <form method="post" action="{{ url_for('billing_checkout') }}">
+        <button class="btn" type="submit">Upgrade to Pro</button>
+      </form>
+    {% else %}
+      <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create account to upgrade</a>
+    {% endif %}
+    <p class="fine">Renews monthly. Cancel any time from your account page.
+      Payments are handled by Stripe; your card details never reach Orenth.</p>
+  </div>
+</div>
+
+{# Said plainly, because it is the thing a paying customer might assume
+   otherwise and it is not true. #}
+<p class="legal">
+  <b>Pro gives you more of the same analysis, not better odds.</b> The
+  measurements, the warnings and the calls are identical on both plans.
+  Analysis software, not financial advice.
+</p>
+
+{% endblock %}

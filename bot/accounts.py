@@ -87,6 +87,8 @@ class User:
     picture: str = ""
     provider: str = "local"
     is_local: bool = False
+    plan: str = "free"
+    plan_status: str = ""
 
     @property
     def display(self) -> str:
@@ -102,9 +104,12 @@ class User:
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
+    keys = row.keys()
     return User(id=row["id"], email=row["email"], name=row["name"],
                 picture=row["picture"], provider=row["provider"],
-                is_local=bool(row["is_local"]))
+                is_local=bool(row["is_local"]),
+                plan=row["plan"] if "plan" in keys else "free",
+                plan_status=row["plan_status"] if "plan_status" in keys else "")
 
 
 # --- schema -----------------------------------------------------------------
@@ -117,6 +122,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     account.
     """
     conn.executescript(_SCHEMA)
+
+    # Plan columns, added in place to databases made before there were plans.
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    for column, ddl in (("plan", "TEXT NOT NULL DEFAULT 'free'"),
+                        ("plan_status", "TEXT NOT NULL DEFAULT ''"),
+                        ("stripe_customer", "TEXT NOT NULL DEFAULT ''"),
+                        ("plan_until", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in have:
+            conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
 
     local = _ensure_local(conn)
 
@@ -387,6 +401,9 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
+    from . import billing
+    billing.ensure_schema(conn)
+    conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()

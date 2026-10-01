@@ -175,7 +175,8 @@
   that. Never risk money you cannot afford to lose.
   <br>
   <a href="{{ url_for('terms') }}">Terms</a> ·
-  <a href="{{ url_for('privacy') }}">Privacy</a>
+  <a href="{{ url_for('privacy') }}">Privacy</a>{% if billing_on %} ·
+  <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
 </p>
 </div>
 

@@ -36,6 +36,27 @@
   </div>
 </div>
 
+{% if plan.on %}
+<section>
+  <div class="sechead"><h2>Your plan</h2></div>
+  <div class="card">
+    {% if plan.pro %}
+      <p class="prose"><b>Pro.</b> No limits.</p>
+      {% if plan.customer %}
+        <form method="post" action="{{ url_for('billing_portal') }}">
+          <button class="btn quiet" type="submit">Manage subscription</button>
+        </form>
+        <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
+      {% endif %}
+    {% else %}
+      <p class="prose"><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
+        instruments looked at today.</p>
+      <a class="btn" href="{{ url_for('pricing') }}">See Pro</a>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
 <section>
   <div class="sechead"><h2>What belongs to you</h2>
     <span class="tail">nobody else signed in here can read any of it</span></div>
@@ -108,6 +129,8 @@
       and analysis history immediately and permanently. Download anything you
       want to keep first, using the buttons above. The shared strategy record
       stays, because it was never yours alone.
+      {% if plan.on and plan.customer %}It also cancels your Pro subscription
+        straight away, with no further charges.{% endif %}
     </p>
     <form method="post" action="{{ url_for('delete_account') }}"
           onsubmit="return confirm('Delete this account and everything in it? This cannot be undone.');"

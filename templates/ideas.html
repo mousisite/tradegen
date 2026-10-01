@@ -154,6 +154,15 @@
 </section>
 {% endif %}
 
+{% if result.limited_total %}
+  <div class="plainbox" style="margin-top:var(--s3)">
+    <span class="eyebrow">Free plan</span>
+    <p class="prose">Showing the top of each list. The full scan found
+      {{ result.limited_total }} worth a look.
+      <a href="{{ url_for('pricing') }}">Pro shows all of them.</a></p>
+  </div>
+{% endif %}
+
 {% if result.dropped %}
 <section>
   <div class="sechead">

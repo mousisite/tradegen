@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Thank you · Orenth{% endblock %}
+{% block content %}
+
+<div class="signin">
+  <div class="mark" aria-hidden="true">
+    {% with size=48 %}{% include "_mark.html" %}{% endwith %}
+  </div>
+  {% if upgraded %}
+    <h1>You have Pro</h1>
+    <p class="lede">Thank you. Everything is unlocked now.</p>
+  {% else %}
+    <h1>Payment received</h1>
+    <p class="lede">Your account will switch to Pro within a minute. If it has
+      not, refresh your account page.</p>
+  {% endif %}
+  <div class="cta-stack">
+    <a class="btn" href="{{ url_for('ideas', market='stocks', horizon='medium', risk='balanced') }}">Find something to look at</a>
+    <a class="btn quiet" href="{{ url_for('account') }}">Your account</a>
+  </div>
+</div>
+
+{% endblock %}

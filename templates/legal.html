@@ -43,6 +43,9 @@
       came from, kept so that nobody can flood an inbox or a phone with codes.</li>
   </ul>
   <p class="prose">There are no passwords, so there are none to leak.</p>
+  <p class="prose">If you subscribe to Pro, Orenth stores the customer number
+    Stripe gives it and whether your plan is active. It never sees or stores
+    your card.</p>
 
   <h2>What you create</h2>
   <p class="prose">
@@ -79,6 +82,9 @@
             <td>Delivering the code</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
             <td>Sending and checking the code</td></tr>
+        <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe</td>
+            <td>Taking payment. Your card details go to Stripe directly and
+              never reach Orenth.</td></tr>
       </tbody>
     </table>
   </div>
@@ -170,6 +176,18 @@
     data or delete your account at any time from the Account page. Access may be
     withdrawn for abuse of the service or of the data sources it depends on.
   </p>
+
+  {% if billing_on %}
+  <h2>Pro</h2>
+  <p class="prose">
+    Pro is a monthly subscription, taken by Stripe, that renews until you
+    cancel. You can cancel at any time from your Account page; you keep Pro
+    until the end of the period you have paid for. Deleting your account
+    cancels it straight away. Pro gives you more of the
+    same analysis, not better odds: the measurements, warnings and calls are
+    identical on both plans, and none of it is financial advice.
+  </p>
+  {% endif %}
 
   <h2>Liability</h2>
   <p class="prose">
