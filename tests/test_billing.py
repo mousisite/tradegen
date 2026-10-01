@@ -21,8 +21,9 @@ def check(name, ok, detail=""):
 
 
 STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
+          "STRIPE_PRICE_ID_YEARLY": "price_y",
           "STRIPE_WEBHOOK_SECRET": "whsec_test", "PRO_PRICE_LABEL": "$9 a month"}
-for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL"]:
+for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL", "PRO_TRIAL_DAYS"]:
     _os.environ.pop(key, None)
 
 import web  # noqa: E402
@@ -69,6 +70,34 @@ try:
     check("nor the webhook", c.post("/billing/webhook", data=b"{}").status_code == 404)
 
     _os.environ.update(STRIPE)
+
+    # A stand-in for Stripe from here on, so nothing reaches the network.
+    sent = []
+    PRICES = {"price_x": {"unit_amount": 999, "currency": "usd",
+                          "recurring": {"interval": "month", "interval_count": 1}},
+              "price_y": {"unit_amount": 7999, "currency": "usd",
+                          "recurring": {"interval": "year", "interval_count": 1}},
+              "price_round": {"unit_amount": 900, "currency": "usd",
+                              "recurring": {"interval": "month", "interval_count": 1}}}
+
+    def fake_stripe(method, path, data=None):
+        sent.append((method, path, dict(data or {})))
+        if path.startswith("prices/"):
+            return PRICES[path.split("/", 1)[1]]
+        if path == "checkout/sessions":
+            return {"url": "https://checkout.stripe.test/c/1", "id": "cs_test_1"}
+        if path.startswith("checkout/sessions/"):
+            return {"status": "complete", "client_reference_id": str(paid.id),
+                    "customer": "cus_paid", "payment_status": "paid"}
+        if method == "DELETE":
+            return {"deleted": True}
+        return {"url": "https://billing.stripe.test/p/1"}
+
+    def stripe_down(method, path, data=None):
+        raise billing.BillingError("down")
+
+    real = billing._stripe
+    billing._stripe = fake_stripe
 
     print()
     print("=" * 72)
@@ -194,7 +223,7 @@ try:
     page = r.data.decode("utf-8", "replace")
     check("past the allowance, an analysis shows the pricing page instead",
           r.status_code == 402 and "free allowance" in page, r.status_code)
-    check("which offers the upgrade", "Upgrade to Pro" in page)
+    check("which offers the upgrade", 'action="/billing/checkout"' in page)
     check("the JSON API keeps the same allowance",
           c.get("/api/analyse?symbol=MSFT").status_code == 402)
 
@@ -254,95 +283,129 @@ try:
     print("=" * 72)
     print("PAYING, THROUGH A STAND-IN FOR STRIPE")
     print("=" * 72)
-    sent = []
+    sign_in(paid)
+    r = c.post("/billing/checkout")
+    check("upgrading sends them to Stripe's own page",
+          r.status_code == 303 and r.headers["Location"].startswith("https://checkout.stripe"),
+          r.status_code)
+    _, _, data = sent[-1]
+    check("for this person and this price",
+          data["client_reference_id"] == str(paid.id)
+          and data["line_items[0][price]"] == "price_x")
+    conn = db.connect(DB)
+    known = billing.customer_of(conn, paid.id)
+    conn.close()
+    check("and reuses their Stripe customer instead of making a second one",
+          known and data.get("customer") == known, (known, data.get("customer")))
+    billing.checkout_url(type("U", (), {"id": 90, "email": "new@example.com"})(),
+                         "https://x", call=fake_stripe)
+    check("a first-time buyer has their email filled in for them",
+          sent[-1][2].get("customer_email") == "new@example.com")
+    billing.checkout_url(type("U", (), {"id": 91, "email": "phone1555@users.invalid"})(),
+                         "https://x", call=fake_stripe)
+    check("but a made-up placeholder address is never sent to Stripe",
+          "customer_email" not in sent[-1][2])
 
-    def fake_stripe(method, path, data=None):
-        sent.append((method, path, dict(data or {})))
-        if path == "checkout/sessions":
-            return {"url": "https://checkout.stripe.test/c/1", "id": "cs_test_1"}
-        if path.startswith("checkout/sessions/"):
-            return {"status": "complete", "client_reference_id": str(paid.id),
-                    "customer": "cus_paid", "payment_status": "paid"}
-        if method == "DELETE":
-            return {"deleted": True}
-        return {"url": "https://billing.stripe.test/p/1"}
+    r = c.get("/billing/done?session_id=cs_test_1")
+    check("coming back from Stripe confirms it with Stripe directly",
+          "You have Pro" in r.data.decode("utf-8", "replace"))
+    conn = db.connect(DB)
+    check("and they are Pro straight away", billing.is_pro(A.get_user(conn, paid.id)))
+    conn.close()
 
-    real = billing._stripe
+    sign_in(free)
+    r = c.get("/billing/done?session_id=cs_test_1")
+    check("someone else's checkout cannot upgrade them",
+          "You have Pro" not in r.data.decode("utf-8", "replace"))
+
+    sign_in(paid)
+    r = c.post("/billing/portal")
+    check("managing the subscription goes to Stripe's portal",
+          r.status_code == 303 and "billing.stripe" in r.headers["Location"])
+    page = c.get("/account").data.decode("utf-8", "replace")
+    check("the account page shows the plan", "Manage subscription" in page)
+    check("and a Pro account is not asked to upgrade", "Go Pro" not in page)
+
+    conn = db.connect(DB)
+    leaver = A.upsert_email_user(conn, "leaver@example.com")
+    billing.set_plan(conn, leaver.id, "pro", "active", "cus_leaver")
+    conn.close()
+    sign_in(leaver)
+    billing._stripe = stripe_down
+    r = c.post("/account/delete", data={"confirm": "delete"})
+    conn = db.connect(DB)
+    check("if Stripe cannot be reached, a paying account is not deleted",
+          r.status_code == 502 and A.get_user(conn, leaver.id) is not None,
+          r.status_code)
+    conn.close()
     billing._stripe = fake_stripe
-    try:
-        sign_in(paid)
-        r = c.post("/billing/checkout")
-        check("upgrading sends them to Stripe's own page",
-              r.status_code == 303 and r.headers["Location"].startswith("https://checkout.stripe"),
-              r.status_code)
-        _, _, data = sent[-1]
-        check("for this person and this price",
-              data["client_reference_id"] == str(paid.id)
-              and data["line_items[0][price]"] == "price_x")
-        conn = db.connect(DB)
-        known = billing.customer_of(conn, paid.id)
-        conn.close()
-        check("and reuses their Stripe customer instead of making a second one",
-              known and data.get("customer") == known, (known, data.get("customer")))
-        billing.checkout_url(type("U", (), {"id": 90, "email": "new@example.com"})(),
-                             "https://x", call=fake_stripe)
-        check("a first-time buyer has their email filled in for them",
-              sent[-1][2].get("customer_email") == "new@example.com")
-        billing.checkout_url(type("U", (), {"id": 91, "email": "phone1555@users.invalid"})(),
-                             "https://x", call=fake_stripe)
-        check("but a made-up placeholder address is never sent to Stripe",
-              "customer_email" not in sent[-1][2])
+    r = c.post("/account/delete", data={"confirm": "delete"})
+    conn = db.connect(DB)
+    check("deleting an account cancels its subscription in Stripe",
+          ("DELETE", "customers/cus_leaver", {}) in sent)
+    check("and then deletes the account", A.get_user(conn, leaver.id) is None)
+    conn.close()
 
-        r = c.get("/billing/done?session_id=cs_test_1")
-        check("coming back from Stripe confirms it with Stripe directly",
-              "You have Pro" in r.data.decode("utf-8", "replace"))
-        conn = db.connect(DB)
-        check("and they are Pro straight away", billing.is_pro(A.get_user(conn, paid.id)))
-        conn.close()
+    print()
+    print("=" * 72)
+    print("PRICES, PLANS AND THE FREE TRIAL")
+    print("=" * 72)
+    check("the yearly plan maps to the yearly price",
+          billing.price_id_for("yearly") == "price_y")
+    check("anything else gets the monthly one, even a price id sent by a browser",
+          billing.price_id_for("monthly") == "price_x"
+          and billing.price_id_for("price_round") == "price_x")
+    billing._PRICES.clear()
+    offer = billing.offers()
+    check("prices are read from Stripe, cents and all",
+          offer["monthly"]["label"] == "$9.99 a month"
+          and offer["yearly"]["label"] == "$79.99 a year", offer)
+    check("and what yearly saves is worked out, rounded down", offer["save"] == 33,
+          offer["save"])
+    check("a whole-dollar price has no .00",
+          billing.describe_price("price_round")["label"] == "$9 a month")
+    billing._PRICES.clear()
+    billing._stripe = stripe_down
+    check("if Stripe cannot be reached, the written label stands in",
+          billing.offers()["monthly"]["label"] == "$9 a month")
+    billing._stripe = fake_stripe
 
-        sign_in(free)
-        r = c.get("/billing/done?session_id=cs_test_1")
-        check("someone else's checkout cannot upgrade them",
-              "You have Pro" not in r.data.decode("utf-8", "replace"))
-
-        sign_in(paid)
-        r = c.post("/billing/portal")
-        check("managing the subscription goes to Stripe's portal",
-              r.status_code == 303 and "billing.stripe" in r.headers["Location"])
-        page = c.get("/account").data.decode("utf-8", "replace")
-        check("the account page shows the plan", "Manage subscription" in page)
-        check("and a Pro account is not asked to upgrade", "Go Pro" not in page)
-
-        conn = db.connect(DB)
-        leaver = A.upsert_email_user(conn, "leaver@example.com")
-        billing.set_plan(conn, leaver.id, "pro", "active", "cus_leaver")
-        conn.close()
-        sign_in(leaver)
-
-        def stripe_down(method, path, data=None):
-            raise billing.BillingError("down")
-
-        billing._stripe = stripe_down
-        r = c.post("/account/delete", data={"confirm": "delete"})
-        conn = db.connect(DB)
-        check("if Stripe cannot be reached, a paying account is not deleted",
-              r.status_code == 502 and A.get_user(conn, leaver.id) is not None,
-              r.status_code)
-        conn.close()
-        billing._stripe = fake_stripe
-        r = c.post("/account/delete", data={"confirm": "delete"})
-        conn = db.connect(DB)
-        check("deleting an account cancels its subscription in Stripe",
-              ("DELETE", "customers/cus_leaver", {}) in sent)
-        check("and then deletes the account", A.get_user(conn, leaver.id) is None)
-        conn.close()
-    finally:
-        billing._stripe = real
-
+    conn = db.connect(DB)
+    newcomer = A.upsert_email_user(conn, "newcomer@example.com")
+    conn.close()
+    sign_in(newcomer)
     page = c.get("/pricing").data.decode("utf-8", "replace")
-    check("the pricing page shows the price", "$9 a month" in page)
+    check("the pricing page shows both prices",
+          "$9.99 a month" in page and "$79.99 a year" in page and "save 33%" in page)
+    check("offers a first-timer the free trial",
+          "Free for 7 days" in page and "Start free trial" in page)
     check("and says plainly that Pro is not better odds", "not better odds" in page)
+    c.post("/billing/checkout", data={"plan": "yearly"})
+    _, _, data = sent[-1]
+    check("choosing yearly checks out at the yearly price, with the trial",
+          data["line_items[0][price]"] == "price_y"
+          and data.get("subscription_data[trial_period_days]") == "7", data)
+
+    sign_in(free)
+    c.post("/billing/checkout", data={"plan": "monthly"})
+    check("someone who has paid before gets no second trial",
+          "subscription_data[trial_period_days]" not in sent[-1][2])
+    check("and is not offered one",
+          "Free for 7 days" not in c.get("/pricing").data.decode("utf-8", "replace"))
+
+    _os.environ["PRO_TRIAL_DAYS"] = "0"
+    sign_in(newcomer)
+    c.post("/billing/checkout")
+    check("a trial length of 0 switches trials off",
+          "subscription_data[trial_period_days]" not in sent[-1][2])
+    _os.environ.pop("PRO_TRIAL_DAYS", None)
+
+    with c.session_transaction() as sess:
+        sess.clear()
+    page = c.get("/pricing").data.decode("utf-8", "replace")
+    check("a visitor is invited to try it free", "Try Pro free for 7 days" in page)
 finally:
+    billing._stripe = real
     for key in list(STRIPE) + ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]:
         _os.environ.pop(key, None)
 

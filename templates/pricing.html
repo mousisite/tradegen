@@ -26,7 +26,12 @@
 
   <div class="card plan pro">
     <span class="eyebrow">Pro</span>
-    <p class="price">{{ price or 'Pro' }}</p>
+    {# Both prices come from Stripe, so they always match the charge. #}
+    <p class="price">{{ offer.monthly.label if offer.monthly else 'Pro' }}</p>
+    {% if offer.yearly %}
+      <p class="soft" style="margin:0">or {{ offer.yearly.label }}{% if offer.save %},
+        which saves {{ offer.save }}%{% endif %}</p>
+    {% endif %}
     <ul class="list">
       <li>As many stocks and coins a day as you like</li>
       <li>Every result in every Find list</li>
@@ -41,14 +46,29 @@
         </form>
       {% endif %}
     {% elif current_user and not demo %}
+      {% if trial %}
+        <p class="prose"><b>Free for {{ trial }} days.</b> Cancel before then
+          and you pay nothing.</p>
+      {% endif %}
       <form method="post" action="{{ url_for('billing_checkout') }}">
-        <button class="btn" type="submit">Upgrade to Pro</button>
+        <input type="hidden" name="plan" value="monthly">
+        <button class="btn" type="submit">{{ 'Start free trial' if trial else 'Upgrade to Pro' }}</button>
       </form>
+      {% if offer.yearly %}
+        <form method="post" action="{{ url_for('billing_checkout') }}">
+          <input type="hidden" name="plan" value="yearly">
+          <button class="btn quiet" type="submit">Or pay yearly{% if offer.save %}
+            and save {{ offer.save }}%{% endif %}</button>
+        </form>
+      {% endif %}
     {% else %}
-      <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create account to upgrade</a>
+      <a class="btn" href="{{ url_for('signin', next='/pricing') }}">{{
+        'Try Pro free for %d days' % trial if trial else 'Create account to upgrade' }}</a>
     {% endif %}
-    <p class="fine">Renews monthly. Cancel any time from your account page.
-      Payments are handled by Stripe; your card details never reach Orenth.</p>
+    <p class="fine">{% if trial %}After the free days, {% endif %}Pro renews
+      automatically every {{ 'month or year, whichever you pick,' if offer.yearly else 'month' }}
+      until you cancel. Cancel any time from your Account page. Payments are
+      handled by Stripe; your card details never reach Orenth.</p>
   </div>
 </div>
 

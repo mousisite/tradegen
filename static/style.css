@@ -240,6 +240,7 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plans { display: grid; gap: var(--s3); max-width: 760px; margin: 0 auto;
          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .plan { display: flex; flex-direction: column; gap: var(--s2); }
+.plans .card + .card { margin-top: 0; }     /* the grid's gap spaces them */
 .plan .price { font-family: var(--serif); font-size: var(--t-xl); margin: 0; }
 .plan .list { flex: 1; }
 .plan.pro { border-color: var(--accent); }
@@ -676,8 +677,8 @@ ul.list.ok li::marker { color: var(--gain); }
   padding: 11px var(--s2); font-size: var(--t-sm);
   margin-bottom: var(--s3); text-align: left;
 }
-.signin .fine { margin-top: var(--s3); font-size: var(--t-xs);
-                color: var(--ink-3); line-height: 1.7; text-align: left; }
+.fine { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.7; }
+.signin .fine { margin-top: var(--s3); text-align: left; }
 
 /* Google asks that its button keep its own white ground and mark, so this one
    control deliberately sits outside the warm palette. */

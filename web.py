@@ -247,12 +247,28 @@ def _pro() -> bool:
     return billing_mod.is_pro(getattr(g, "user", None), _is_operator())
 
 
-def _upgrade(reason: str):
-    """The pricing page, saying why they arrived at it."""
+def _pricing_page(reason: str = "", status: int = 200):
+    """Free and Pro side by side, saying why they arrived if there is a reason."""
+    user = getattr(g, "user", None)
+    customer = ""
+    if user is not None and not g.demo:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            customer = billing_mod.customer_of(conn, user.id)
+        finally:
+            conn.close()
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
-                           price=billing_mod.price_label(), is_pro=False,
-                           has_customer=False), 402
+                           offer=billing_mod.offers(),
+                           # One free trial each: not for anyone who has paid before.
+                           trial=0 if customer else billing_mod.trial_days(),
+                           is_pro=user is not None and _pro(),
+                           has_customer=bool(customer)), status
+
+
+def _upgrade(reason: str):
+    """The pricing page, saying why they arrived at it."""
+    return _pricing_page(reason, 402)
 
 
 def _allowance_left(symbol: str, interval: str) -> bool:
@@ -1267,18 +1283,7 @@ def pricing():
     """Free and Pro, side by side. Only exists once billing is set up."""
     if not billing_mod.ready():
         abort(404)
-    customer = ""
-    if getattr(g, "user", None) is not None and not g.demo:
-        conn = db_mod.connect(app.config.get("DB_PATH"))
-        try:
-            customer = billing_mod.customer_of(conn, g.user.id)
-        finally:
-            conn.close()
-    return render_template("pricing.html", reason=request.args.get("reason", ""),
-                           limits=billing_mod.free_limits(),
-                           price=billing_mod.price_label(),
-                           is_pro=bool(getattr(g, "user", None)) and _pro(),
-                           has_customer=bool(customer))
+    return _pricing_page(request.args.get("reason", ""))
 
 
 @app.route("/billing/checkout", methods=["POST"])
@@ -1294,7 +1299,10 @@ def billing_checkout():
     finally:
         conn.close()
     try:
-        url = billing_mod.checkout_url(g.user, _public_base(), customer)
+        url = billing_mod.checkout_url(
+            g.user, _public_base(), customer,
+            price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
+            trial=0 if customer else billing_mod.trial_days())
     except billing_mod.BillingError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)

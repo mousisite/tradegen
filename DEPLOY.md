@@ -212,8 +212,10 @@ written reasoning on the research page.
 | `PHONE_ALLOWED_PREFIXES` | no | Country codes allowed to get texts, e.g. `+1,+44`. Limits SMS fraud |
 | `PHONE_CODES_PER_HOUR` | no | Texts the whole site may send an hour, default 40 |
 | `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` | for paid plans | All three turn on Free and Pro. Webhook address: `<PUBLIC_URL>/billing/webhook` with `checkout.session.completed` and `customer.subscription.created/updated/deleted` |
-| `PRO_PRICE_LABEL` | with paid plans | What the pricing page says, e.g. `$9 a month` |
-| `FREE_ANALYSES_PER_DAY`, `FREE_FIND_RESULTS`, `FREE_ALERTS` | no | The free allowance, default 5, 3 and 1 |
+| `STRIPE_PRICE_ID_YEARLY` | no | A yearly price, offered beside the monthly one with what it saves |
+| `PRO_TRIAL_DAYS` | no | Free days before the first charge, default 7. Set 0 to switch off. One trial per person |
+| `PRO_PRICE_LABEL` | no | Shown only if Stripe cannot be reached; prices are otherwise read from Stripe |
+| `FREE_ANALYSES_PER_DAY`, `FREE_FIND_RESULTS`, `FREE_ALERTS` | no | The free allowance, default 3, 3 and 1 |
 
 ---
 

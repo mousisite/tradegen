@@ -180,9 +180,11 @@
   {% if billing_on %}
   <h2>Pro</h2>
   <p class="prose">
-    Pro is a monthly subscription, taken by Stripe, that renews until you
-    cancel. You can cancel at any time from your Account page; you keep Pro
-    until the end of the period you have paid for. Deleting your account
+    Pro is a monthly or yearly subscription, taken by Stripe, that renews
+    until you cancel. If it starts with a free trial, your card is charged
+    when the trial ends unless you cancel before then, and Stripe emails you
+    a reminder first. You can cancel at any time from your Account page; you
+    keep Pro until the end of the period you have paid for. Deleting your account
     cancels it straight away. Pro gives you more of the
     same analysis, not better odds: the measurements, warnings and calls are
     identical on both plans, and none of it is financial advice.

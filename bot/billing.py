@@ -13,9 +13,14 @@ the webhook secret, and never by anything the browser says. The page a buyer
 lands on after paying also asks Stripe directly, server to server, so the
 upgrade shows at once instead of whenever the webhook happens to arrive.
 
+The prices shown are read from Stripe itself, so the page can never say one
+amount while Stripe charges another.
+
 Optional settings:
-  PRO_PRICE_LABEL         what the pricing page says, e.g. "$9 a month"
-  FREE_ANALYSES_PER_DAY   different instruments a free account can open a day (5)
+  STRIPE_PRICE_ID_YEARLY  a yearly price, offered beside the monthly one
+  PRO_TRIAL_DAYS          free days before the first charge (7; 0 turns it off)
+  PRO_PRICE_LABEL         shown only if Stripe cannot be reached for the price
+  FREE_ANALYSES_PER_DAY   different instruments a free account can open a day (3)
   FREE_FIND_RESULTS       rows a free account sees in each Find list (3)
   FREE_ALERTS             alerts a free account can have running (1)
 """
@@ -62,15 +67,77 @@ def price_label() -> str:
     return (os.environ.get("PRO_PRICE_LABEL") or "").strip()
 
 
+def _num(key: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(key) or default))
+    except ValueError:
+        return default
+
+
 def free_limits() -> Dict[str, int]:
-    def num(key: str, default: int) -> int:
-        try:
-            return max(0, int(os.environ.get(key) or default))
-        except ValueError:
-            return default
-    return {"analyses_per_day": num("FREE_ANALYSES_PER_DAY", 5),
-            "find_results": num("FREE_FIND_RESULTS", 3),
-            "alerts": num("FREE_ALERTS", 1)}
+    return {"analyses_per_day": _num("FREE_ANALYSES_PER_DAY", 3),
+            "find_results": _num("FREE_FIND_RESULTS", 3),
+            "alerts": _num("FREE_ALERTS", 1)}
+
+
+def trial_days() -> int:
+    """Free days before the first charge. Stripe allows up to 730."""
+    return min(730, _num("PRO_TRIAL_DAYS", 7))
+
+
+def price_id_for(plan: str) -> str:
+    """The Stripe price for a plan's name.
+
+    Only ever a name from the form, mapped here: a price id sent by the
+    browser could be any price on the account, including a cheaper one.
+    """
+    yearly = (os.environ.get("STRIPE_PRICE_ID_YEARLY") or "").strip()
+    if plan == "yearly" and yearly:
+        return yearly
+    return os.environ["STRIPE_PRICE_ID"].strip()
+
+
+SYMBOLS = {"usd": "$", "eur": "€", "gbp": "£", "cad": "CA$", "aud": "A$"}
+PRICE_TTL = 3600.0
+_PRICES: Dict[str, tuple] = {}
+
+
+def describe_price(price_id: str, call=None) -> Optional[Dict]:
+    """What a price costs, as Stripe has it, e.g. "$9.99 a month"."""
+    hit = _PRICES.get(price_id)
+    if hit and time.time() - hit[0] < PRICE_TTL:
+        return hit[1]
+    try:
+        found = (call or _stripe)("GET", "prices/" + price_id)
+    except BillingError:
+        return hit[1] if hit else None
+    cents = found.get("unit_amount")
+    recurring = found.get("recurring") or {}
+    if cents is None or recurring.get("interval") not in ("month", "year") \
+            or recurring.get("interval_count", 1) != 1:
+        return None
+    currency = (found.get("currency") or "usd").lower()
+    amount = SYMBOLS.get(currency, currency.upper() + " ") + (
+        "%d" % (cents // 100) if cents % 100 == 0 else "%.2f" % (cents / 100.0))
+    info = {"cents": int(cents), "interval": recurring["interval"],
+            "label": "%s a %s" % (amount, recurring["interval"])}
+    _PRICES[price_id] = (time.time(), info)
+    return info
+
+
+def offers(call=None) -> Dict:
+    """The plans on sale, and how much paying yearly saves, rounded down."""
+    monthly = describe_price(price_id_for("monthly"), call)
+    if monthly is None and price_label():
+        monthly = {"cents": 0, "interval": "month", "label": price_label()}
+    yearly = None
+    if (os.environ.get("STRIPE_PRICE_ID_YEARLY") or "").strip():
+        yearly = describe_price(price_id_for("yearly"), call)
+    save = 0
+    if monthly and yearly and monthly["cents"] and monthly["interval"] == "month" \
+            and yearly["interval"] == "year":
+        save = max(0, int(100 - 100.0 * yearly["cents"] / (monthly["cents"] * 12)))
+    return {"monthly": monthly, "yearly": yearly, "save": save}
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -158,11 +225,12 @@ def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
     return r.json()
 
 
-def checkout_url(user, base: str, customer: str = "", call=None) -> str:
+def checkout_url(user, base: str, customer: str = "", call=None,
+                 price_id: str = "", trial: int = 0) -> str:
     """Where to send someone to pay, on Stripe's own page."""
     data = {
         "mode": "subscription",
-        "line_items[0][price]": os.environ["STRIPE_PRICE_ID"],
+        "line_items[0][price]": price_id or price_id_for("monthly"),
         "line_items[0][quantity]": "1",
         "success_url": base + "/billing/done?session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": base + "/pricing",
@@ -177,6 +245,9 @@ def checkout_url(user, base: str, customer: str = "", call=None) -> str:
         data["customer"] = customer
     elif user.email and not user.email.endswith(".invalid"):
         data["customer_email"] = user.email
+    if trial:
+        # Checkout still takes the card, and charges it when the trial ends.
+        data["subscription_data[trial_period_days]"] = str(trial)
     return (call or _stripe)("POST", "checkout/sessions", data)["url"]
 
 
