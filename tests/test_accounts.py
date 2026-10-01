@@ -361,9 +361,13 @@ try:
           r.status_code == 200, r.status_code)
     check("and it carries no one's journal",
           "Open positions" not in r.data.decode("utf-8", "replace"))
-    r = anon.get("/trades")
-    check("a page holding data still sends them to sign in",
+    r = anon.get("/account")
+    check("the account page still sends them to sign in",
           r.status_code == 302 and "/signin" in r.headers.get("Location", ""))
+    r = anon.get("/trades")
+    check("the journal shows them the example account instead",
+          r.status_code == 200
+          and "looking around an example account" in r.data.decode("utf-8", "replace"))
     r = anon.get("/api/alerts/status")
     check("the api answers 401 rather than redirecting", r.status_code == 401)
     check("the sign-in page is reachable", anon.get("/signin").status_code == 200)
@@ -451,11 +455,68 @@ try:
                  "/static/style.css"):
         check("%s is readable without signing in" % path,
               stranger.get(path).status_code == 200)
-    for path in ("/trades", "/account", "/export/trades.csv", "/settings"):
+    # Pages a visitor may look at are served as the example account; these
+    # hold somebody's own data or act on it, and still need signing in.
+    for path in ("/account", "/export/trades.csv", "/usage"):
         r = stranger.get(path)
         check("%s still needs an account" % path,
               r.status_code == 302 and "/signin" in r.headers.get("Location", ""),
               r.status_code)
+
+    print()
+    print("   A stranger looking around")
+    from bot import demo as _demo
+    for path in ("/trades", "/portfolio", "/monitor", "/settings",
+                 "/strategies", "/analyse?symbol=NVDA&interval=1d"):
+        got = stranger.get(path)
+        check("%s shows the example to a stranger" % path,
+              got.status_code == 200
+              and "looking around an example account"
+              in got.data.decode("utf-8", "replace"), got.status_code)
+
+    # Real people's data never appears in the example.
+    seen = stranger.get("/trades").data.decode("utf-8", "replace")
+    check("Alice's trade is not in the example journal", "987654" not in seen)
+
+    # Nothing a visitor posts is written: every form sends them to sign up,
+    # and back to the page they were on rather than to a URL that only POSTs.
+    for path, form in (("/trades/open", {"symbol": "GME", "direction": "long",
+                                         "entry": "10", "stop": "9"}),
+                       ("/settings", {"account_size": "1"}),
+                       ("/watch/add", {"symbol": "GME"}),
+                       ("/monitor/alert/add", {"symbol": "GME", "kind": "price_above",
+                                               "threshold": "1"})):
+        got = stranger.post(path, data=form,
+                            headers={"Referer": "http://localhost/trades"})
+        check("a visitor posting to %s is sent to sign up" % path,
+              got.status_code == 302 and "/signin" in got.headers.get("Location", ""),
+              got.status_code)
+    check("and is brought back to where they were",
+          "next=/trades" in stranger.post(
+              "/trades/open", data={},
+              headers={"Referer": "http://localhost/trades"}).headers.get("Location", ""))
+
+    conn = db.connect(DB)
+    demo_user = _demo.user(conn)
+    check("the example account gained nothing from any of that",
+          conn.execute("SELECT COUNT(*) FROM trades WHERE user_id=? AND symbol='GME'",
+                       (demo_user.id,)).fetchone()[0] == 0
+          and conn.execute("SELECT COUNT(*) FROM user_settings WHERE user_id=?",
+                           (demo_user.id,)).fetchone()[0] == 0)
+    check("and recorded no analyses for the example",
+          conn.execute("SELECT COUNT(*) FROM runs WHERE user_id=?",
+                       (demo_user.id,)).fetchone()[0] == 0)
+    conn.close()
+
+    # Each of these would make the server analyse or scan something it has
+    # not pre-computed, so a visitor is offered an account instead.
+    for path, says in (("/analyse?symbol=GME&interval=1d", "look up GME"),
+                       ("/analyse?symbol=NVDA&interval=1h", "change the timeframe"),
+                       ("/research?symbol=GME", "look up GME"),
+                       ("/screener?go=1&pe_max=20", "run your own screen"),
+                       ("/ideas?market=stocks&horizon=short", "short holds")):
+        got = stranger.get(path).data.decode("utf-8", "replace")
+        check("%s offers an account instead" % path, says in got)
 
     body = stranger.get("/privacy").data.decode("utf-8", "replace")
     for claim in ("openid", "profile", "No analytics or tracking",

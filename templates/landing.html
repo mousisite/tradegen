@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+{% block title %}Orenth · Stock and crypto research that back-tests its own advice{% endblock %}
+{% block content %}
+
+{# The front door for anyone not signed in. Short on words on purpose: the
+   features are one tap away and show themselves better than a paragraph can,
+   so the page's job is to get someone to tap one. #}
+<section class="hero">
+  <div class="mark" aria-hidden="true">
+    {% with size=56 %}{% include "_mark.html" %}{% endwith %}
+  </div>
+  <h1>Know when <em>not</em> to buy.</h1>
+  <p class="lede">Orenth checks how often a setup actually worked before, and
+    tells you straight when there is no edge.</p>
+  <div class="cta">
+    <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    <a class="btn quiet" href="{{ url_for('analyse', symbol='NVDA', interval='1d') }}">Look around first</a>
+  </div>
+</section>
+
+{% if example %}
+  <a class="card example" href="{{ url_for('analyse', symbol=example.symbol, interval='1d') }}">
+    <span class="eyebrow">Live right now &middot; {{ example.symbol }} at
+      {{ example.price|price }}{% if example.age_min %} &middot;
+      {{ example.age_min }} min ago{% endif %}</span>
+    <span class="lead">
+      <span class="chip {{ 'long' if example.action == 'BUY'
+           else 'short' if example.action == 'SHORT'
+           else 'hold' if example.action == 'WAIT' else 'mute' }}">{{ example.action }}</span>
+      {{ example.headline }}
+    </span>
+    {% if example.samples %}
+      <span class="prose">Found this setup {{ example.samples }} times before.
+        It worked {{ example.worked }} of them.</span>
+    {% endif %}
+    <span class="go">See the whole analysis &rarr;</span>
+    {# Kept for the tests and for anyone reading the page source: this is a
+       real answer, not a mock-up. #}
+    <span class="sr">A real answer, not financial advice.</span>
+  </a>
+{% endif %}
+
+<section>
+  <div class="sechead"><h2>Tap one to see it</h2>
+    <span class="tail">no account needed to look</span></div>
+  <div class="features">
+    <a class="feature" href="{{ url_for('analyse', symbol='NVDA', interval='1d') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <b>Analyse</b>
+      <span class="say">Buy, wait or avoid, with the odds behind it.</span>
+    </a>
+    <a class="feature" href="{{ url_for('ideas', market='stocks', horizon='medium', risk='balanced') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/>
+        <circle cx="12" cy="12" r="1"/></svg>
+      <b>Find</b>
+      <span class="say">Pick stocks or crypto and a risk level. It ranks what is worth a look.</span>
+    </a>
+    <a class="feature" href="{{ url_for('screener', preset='quality_value') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
+      <b>Screener</b>
+      <span class="say">Filter companies by the numbers in their filings.</span>
+    </a>
+    <a class="feature" href="{{ url_for('portfolio') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"/><path d="M12 3v9h9"/></svg>
+      <b>Portfolio</b>
+      <span class="say">What you own, and what a bad day would really cost.</span>
+    </a>
+    <a class="feature" href="{{ url_for('trades') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <rect x="5" y="3" width="14" height="18" rx="2"/>
+        <path d="M9 7h6M9 11h6M9 15h4"/></svg>
+      <b>Journal</b>
+      <span class="say">Log trades. Find out if you were right, or just lucky.</span>
+    </a>
+    <a class="feature" href="{{ url_for('monitor') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+      <b>Alerts</b>
+      <span class="say">Watch stocks and get told when something happens.</span>
+    </a>
+    <a class="feature" href="{{ url_for('strategies') }}">
+      <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 20V10M12 20V4M19 20v-7"/></svg>
+      <b>Strategies</b>
+      <span class="say">Which of 34 trading strategies actually worked.</span>
+    </a>
+  </div>
+</section>
+
+<section class="closing">
+  <p class="lead">Free to start.</p>
+  <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+</section>
+
+{% endblock %}

@@ -30,11 +30,17 @@ def _count(conn, sql, args=()) -> int:
     return int(rows[0][0]) if rows else 0
 
 
+_NOT_DEMO = " AND user_id NOT IN (SELECT id FROM users WHERE provider = 'demo')"
+
+
 def overview(conn: sqlite3.Connection, days: int = 30) -> Dict:
     """Who used it, what they looked at, and what they did about it."""
     since = int(time.time()) - days * DAY
 
-    people = _count(conn, "SELECT COUNT(*) FROM users WHERE is_local = 0")
+    # The example account visitors look around is not a person who signed
+    # up, and its seeded trades are not anybody's activity.
+    people = _count(conn, "SELECT COUNT(*) FROM users WHERE is_local = 0 "
+                          "AND provider != 'demo'")
     active = _count(conn,
                     "SELECT COUNT(DISTINCT user_id) FROM runs WHERE ts >= ?",
                     (since,))
@@ -49,13 +55,13 @@ def overview(conn: sqlite3.Connection, days: int = 30) -> Dict:
             SELECT user_id FROM runs WHERE ts >= ?
             GROUP BY user_id HAVING COUNT(DISTINCT ts / 86400) >= 2)""", (since,))
 
-    trades = _count(conn, "SELECT COUNT(*) FROM trades WHERE ts_opened >= ?",
+    trades = _count(conn, "SELECT COUNT(*) FROM trades WHERE ts_opened >= ?" + _NOT_DEMO,
                     (since,))
-    theses = _count(conn, "SELECT COUNT(*) FROM theses WHERE created_ts >= ?",
+    theses = _count(conn, "SELECT COUNT(*) FROM theses WHERE created_ts >= ?" + _NOT_DEMO,
                     (since,))
-    alerts = _count(conn, "SELECT COUNT(*) FROM alerts WHERE created_ts >= ?",
+    alerts = _count(conn, "SELECT COUNT(*) FROM alerts WHERE created_ts >= ?" + _NOT_DEMO,
                    (since,))
-    watched = _count(conn, "SELECT COUNT(*) FROM watchlist WHERE added_ts >= ?",
+    watched = _count(conn, "SELECT COUNT(*) FROM watchlist WHERE added_ts >= ?" + _NOT_DEMO,
                      (since,))
 
     return {

@@ -47,6 +47,7 @@ from bot import catalysts as catalysts_mod
 from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
+from bot import demo as demo_mod
 from bot import engine
 from bot import ideas as ideas_mod
 from bot import export as export_mod
@@ -180,10 +181,18 @@ def _moved_permanently():
     return redirect(target + path, code=301)
 
 
+# Pages a visitor who is not signed in may open, as the example account. Only
+# ever for GET: nothing here can write, and every form on these pages posts to
+# an endpoint that is not on this list, so it sends them to sign up instead.
+DEMO_ENDPOINTS = {"analyse", "research", "ideas", "screener", "portfolio",
+                  "trades", "monitor", "strategies", "settings"}
+
+
 @app.before_request
 def _identify():
     """Attach the signed-in person, or the local account, to this request."""
     g.user = None
+    g.demo = False
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         token = session.get(SESSION_KEY)
@@ -198,15 +207,49 @@ def _identify():
         return None
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
+    if request.method == "GET" and request.endpoint in DEMO_ENDPOINTS:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            g.user = demo_mod.user(conn)
+        finally:
+            conn.close()
+        g.demo = True
+        return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "Not signed in."}), 401
+    # A visitor who tried to do something. A POST cannot be replayed as a GET
+    # after signing in, so they are brought back to the page they were on.
+    if request.method != "GET":
+        return redirect(url_for("signin", next=_referrer_path()))
     return redirect(url_for("signin", next=request.full_path))
+
+
+def _referrer_path() -> str:
+    """The page a request came from, as a safe path on this site, or "/"."""
+    from urllib.parse import urlparse
+    ref = urlparse(request.referrer or "")
+    if ref.netloc and ref.netloc != request.host:
+        return "/"
+    path = ref.path or "/"
+    if ref.query:
+        path += "?" + ref.query
+    return _safe_back(path, "/")
+
+
+def _locked(headline: str, detail: str, examples=True):
+    """The page a visitor sees when they reach past what the example can do."""
+    return render_template(
+        "locked.html", headline=headline, detail=detail,
+        next_url=request.full_path,
+        back_url=_referrer_path() if request.referrer else url_for("index"),
+        examples=demo_mod.SYMBOLS if examples else ())
 
 
 @app.context_processor
 def _expose_user():
     """Templates need to know who is signed in and whether signing in exists."""
     return {"current_user": getattr(g, "user", None),
+            "demo": getattr(g, "demo", False),
             "auth_on": auth_required(),
             "google_ready": auth_mod.configured()}
 
@@ -224,6 +267,10 @@ _CACHE: Dict[Tuple[str, str], Tuple[float, engine.Analysis]] = {}
 # Research costs several network round trips, so it gets its own cache.
 _RESEARCH_CACHE: Dict[Tuple, Tuple[float, object]] = {}
 _CACHE_TTL = 90.0
+# How long the example account's analyses are reused. Long, because visitors
+# looking around should cost the server one analysis per instrument per
+# quarter hour, however many of them there are.
+DEMO_TTL = 15 * 60.0
 _CACHE_LOCK = threading.Lock()
 
 INTERVALS = [("5m", "5 minutes"), ("15m", "15 minutes"), ("30m", "30 minutes"),
@@ -257,7 +304,8 @@ def _settings_key(cfg: Dict) -> str:
 
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
-                    with_news: bool = True) -> engine.Analysis:
+                    with_news: bool = True, record: bool = True,
+                    ttl: Optional[float] = None) -> engine.Analysis:
     # The settings are part of the key. Position sizes, stops and the call
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
@@ -265,7 +313,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     now = time.time()
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
-        if hit and (now - hit[0]) < _CACHE_TTL:
+        if hit and (now - hit[0]) < (ttl or _CACHE_TTL):
             return hit[1]
 
     # The cache key is deliberately not per user: an analysis of AAPL is the
@@ -274,7 +322,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     # that is written inside engine.analyse before the result is cached.
     result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
                             source="web", db_path=app.config.get("DB_PATH"),
-                            user=uid())
+                            user=uid(), record=record)
     with _CACHE_LOCK:
         _CACHE[key] = (time.time(), result)
         # Keep the cache from growing without bound in a long session.
@@ -365,7 +413,12 @@ def _refresh_example() -> None:
                                     with_news=False, with_learning=True,
                                     record=False)
         said = plain_mod.explain_plan(result.plan, result.bars)
+        plan = result.plan
+        samples = plan.prob_samples or 0
         data = {"symbol": result.bars.symbol,
+                "samples": samples,
+                "worked": (int(round(plan.probability * samples))
+                           if plan.probability is not None and samples else 0),
                 "action": result.plan.action,
                 "headline": said["headline"],
                 "sure": said["sure"],
@@ -407,9 +460,7 @@ def index():
     # It is also the first thing a person arriving from a link sees, and a bare
     # login form asks them to commit before they know what this is.
     if getattr(g, "user", None) is None:
-        return render_template("signin.html", reason="",
-                               why_not=auth_mod.why_not(), next_url="",
-                               example=_example())
+        return render_template("landing.html", example=_example())
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -444,6 +495,19 @@ def analyse():
     if not symbol:
         return redirect(url_for("index"))
 
+    if g.demo:
+        # The example can open a fixed set of instruments on daily bars, each
+        # computed once and shared. Anything else would let a crawler make the
+        # server analyse every ticker it can think of.
+        if symbol.upper() not in demo_mod.SYMBOLS:
+            return _locked("Create an account to look up %s" % symbol.upper()[:12],
+                           "Without an account you can look around the example. "
+                           "With one, you can ask about any stock or coin.")
+        if interval != "1d":
+            return _locked("Create an account to change the timeframe",
+                           "The example shows daily bars. With an account you "
+                           "can look at any timeframe.")
+
     cfg = _cfg()
     if request.args.get("account"):
         try:
@@ -458,8 +522,13 @@ def analyse():
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
+    if g.demo:
+        # Address overrides would give every visitor their own cache entry.
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
     try:
-        result = cached_analysis(symbol, interval, cfg, with_news)
+        result = cached_analysis(symbol, interval, cfg, with_news,
+                                 record=not g.demo,
+                                 ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
         return render_template("error.html", message=str(exc), symbol=symbol), 404
     except Exception as exc:                        # keep the app usable
@@ -791,10 +860,25 @@ def research():
     if not symbol:
         return redirect(url_for("index"))
 
+    if g.demo:
+        # The example can open a fixed set of instruments on daily bars, each
+        # computed once and shared. Anything else would let a crawler make the
+        # server analyse every ticker it can think of.
+        if symbol.upper() not in demo_mod.SYMBOLS:
+            return _locked("Create an account to look up %s" % symbol.upper()[:12],
+                           "Without an account you can look around the example. "
+                           "With one, you can ask about any stock or coin.")
+        if interval != "1d":
+            return _locked("Create an account to change the timeframe",
+                           "The example shows daily bars. With an account you "
+                           "can look at any timeframe.")
+
     cfg = _cfg()
     try:
         analysis = cached_analysis(symbol, interval, cfg,
-                                   request.args.get("news", "1") != "0")
+                                   request.args.get("news", "1") != "0",
+                                   record=not g.demo,
+                                   ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
         return render_template("error.html", message=str(exc), symbol=symbol), 404
 
@@ -943,8 +1027,7 @@ def signin():
     return render_template("signin.html",
                            reason=request.args.get("reason", ""),
                            why_not=auth_mod.why_not(),
-                           next_url=_safe_back(request.args.get("next"), ""),
-                           example=_example())
+                           next_url=_safe_back(request.args.get("next"), ""))
 
 
 @app.route("/auth/google")
@@ -1310,8 +1393,22 @@ def ideas():
     cfg = _cfg()
 
     result = None
-    if (request.args.get("market") or request.args.get("horizon")
-            or request.args.get("risk")):
+    preparing = False
+    asked = (request.args.get("market") or request.args.get("horizon")
+             or request.args.get("risk"))
+    if g.demo and asked:
+        # The example reads a scan made in the background at most once an
+        # hour, so visitors cannot make the server run 150-instrument scans.
+        if horizon == "short":
+            return _locked("Create an account to scan for short holds",
+                           "The example scans daily bars. With an account you "
+                           "can scan for holds of a few days on hourly bars.",
+                           examples=False)
+        result = _demo_shortlist(market, horizon, risk)
+        preparing = result is None
+        if result is not None and result.get("scanned_at"):
+            result = dict(result, age=time.time() - result["scanned_at"])
+    elif asked:
         try:
             result = ideas_mod.find(market, horizon, cfg, risk)
             # Scans are shared between everyone asking the same question, so
@@ -1323,12 +1420,50 @@ def ideas():
             return render_template("error.html", symbol="",
                                    message="The scan failed: %s" % exc), 502
 
-    return render_template("ideas.html", result=result,
+    return render_template("ideas.html", result=result, preparing=preparing,
                            market=market if market in ideas_mod.MARKETS else "stocks",
                            horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
                            risk=risk if risk in ideas_mod.RISKS else "balanced",
                            markets=ideas_mod.MARKETS, horizons=ideas_mod.HORIZONS,
                            risks=ideas_mod.RISKS)
+
+
+# The example account's scans, one per market, refreshed at most hourly and
+# only when a visitor actually asks for one.
+DEMO_SCAN_TTL = 60 * 60.0
+_demo_scans: Dict[str, Dict] = {}
+_demo_scan_lock = threading.Lock()
+
+
+def _refresh_demo_scan(market: str) -> None:
+    try:
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        scan = ideas_mod._scan(market, "1d", cfg, ideas_mod.MAX_SCANNED)
+        with _demo_scan_lock:
+            _demo_scans[market].update(scan=scan, at=time.time())
+    except Exception:
+        pass
+    finally:
+        with _demo_scan_lock:
+            _demo_scans[market]["busy"] = False
+
+
+def _demo_shortlist(market: str, horizon: str, risk: str) -> Optional[Dict]:
+    market = market if market in ideas_mod.MARKETS else "stocks"
+    horizon = horizon if horizon in ideas_mod.HORIZONS else "medium"
+    risk = risk if risk in ideas_mod.RISKS else "balanced"
+    with _demo_scan_lock:
+        slot = _demo_scans.setdefault(market, {"scan": None, "at": 0.0,
+                                               "busy": False})
+        stale = slot["scan"] is None or time.time() - slot["at"] > DEMO_SCAN_TTL
+        if stale and not slot["busy"]:
+            slot["busy"] = True
+            threading.Thread(target=_refresh_demo_scan, args=(market,),
+                             daemon=True).start()
+        scan = slot["scan"]
+    if scan is None:
+        return None
+    return ideas_mod._shortlist(scan, horizon, risk)
 
 
 @app.route("/screener", methods=["GET"])
@@ -1359,7 +1494,23 @@ def screener():
             filters[key] = value
 
     result = None
-    if request.args.get("go") or preset:
+    if g.demo and request.args.get("go") and not preset:
+        return _locked("Create an account to run your own screen",
+                       "The example can run the ready-made screens. With an "
+                       "account you can set your own filters.", examples=False)
+    if g.demo and preset:
+        # A ready-made screen is the same answer for every visitor, so it is
+        # run once and shared rather than once per visit.
+        from bot import upstream as upstream_mod
+        try:
+            result = upstream_mod.cached(
+                "demo-screen:" + preset_key,
+                lambda: screener_mod.run(symbols=None, universe=universe,
+                                         filters=filters, limit=40),
+                ttl=DEMO_TTL, wait=60.0)
+        except Exception as exc:
+            return render_template("error.html", message=str(exc), symbol=""), 500
+    elif request.args.get("go") or preset:
         symbols = [s.strip() for s in symbols_raw.replace(",", " ").split()
                    ] if symbols_raw else None
         try:

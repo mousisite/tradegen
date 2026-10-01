@@ -118,8 +118,13 @@ try:
           front.status_code)
     check("and it says what the app is, not just a login box",
           "back-tests its own advice" in front.data.decode("utf-8", "replace"))
-    check("a stranger still cannot reach the journal",
-          visitor.get("/trades").status_code == 302)
+    journal = visitor.get("/trades")
+    check("a stranger sees the example journal, not a login wall",
+          journal.status_code == 200, journal.status_code)
+    check("and is told plainly it is an example account",
+          "looking around an example account" in journal.data.decode("utf-8", "replace"))
+    check("but the account page still needs signing in",
+          visitor.get("/account").status_code == 302)
 
     # Crawlers and link-preview scrapers never sign in. When these started
     # returning a redirect to the sign-in page, search engines read the whole
@@ -375,7 +380,7 @@ try:
     print()
     print("   what the server did with it:")
     conn = db.connect(DB)
-    people = [u for u in A.list_users(conn) if not u.is_local]
+    people = [u for u in A.list_users(conn) if not u.is_local and u.provider != "demo"]
     conn.close()
     check("exactly one account was created", len(people) == 1, len(people))
     if people:
@@ -433,8 +438,11 @@ try:
     visitor.post("/signout")
     check("signed out, the front door goes back to the landing page",
           visitor.get("/").status_code == 200)
-    check("and the journal is behind the login again",
-          visitor.get("/trades").status_code == 302)
+    check("and the account page is behind the login again",
+          visitor.get("/account").status_code == 302)
+    check("while the journal shows the example again, not theirs",
+          "looking around an example account"
+          in visitor.get("/trades").data.decode("utf-8", "replace"))
 
     response, state, verifier = start_flow(visitor)
     google2 = FakeGoogle()
@@ -445,7 +453,7 @@ try:
         restore()
 
     conn = db.connect(DB)
-    people = [u for u in A.list_users(conn) if not u.is_local]
+    people = [u for u in A.list_users(conn) if not u.is_local and u.provider != "demo"]
     conn.close()
     check("signing in again reuses the same account", len(people) == 1, len(people))
     check("and the app opens", visitor.get("/").status_code == 200)
@@ -468,7 +476,7 @@ try:
         restore()
 
     conn = db.connect(DB)
-    people = {u.email: u for u in A.list_users(conn) if not u.is_local}
+    people = {u.email: u for u in A.list_users(conn) if not u.is_local and u.provider != "demo"}
     conn.close()
     check("now there are two accounts", len(people) == 2, sorted(people))
 
@@ -534,7 +542,7 @@ try:
         del _os.environ["GOOGLE_ALLOWED_DOMAINS"]
 
     conn = db.connect(DB)
-    after = [u for u in A.list_users(conn) if not u.is_local]
+    after = [u for u in A.list_users(conn) if not u.is_local and u.provider != "demo"]
     conn.close()
     check("none of those failures created an account", len(after) == 2, len(after))
 

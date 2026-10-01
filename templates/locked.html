@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Create an account to use this · Orenth{% endblock %}
+{% block content %}
+
+{# Shown when a visitor looking around the example account tries something
+   the example cannot do for them: their own ticker, another timeframe, a scan
+   of their own. Says what they would get, and keeps the way back open. #}
+<div class="signin">
+  <div class="mark" aria-hidden="true">
+    {% with size=48 %}{% include "_mark.html" %}{% endwith %}
+  </div>
+  <h1>{{ headline }}</h1>
+  <p class="lede">{{ detail }}</p>
+
+  <div class="cta-stack">
+    <a class="btn" href="{{ url_for('signin', next=next_url) }}">Create free account</a>
+    {% if back_url %}
+      <a class="btn quiet" href="{{ back_url }}">Keep looking around</a>
+    {% endif %}
+  </div>
+
+  {% if examples %}
+    <p class="fine" style="margin-top:var(--s3)">While you are looking, these work
+      without an account:</p>
+    <div class="pills" style="justify-content:center">
+      {% for s in examples %}
+        <a href="{{ url_for('analyse', symbol=s, interval='1d') }}">{{ s }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

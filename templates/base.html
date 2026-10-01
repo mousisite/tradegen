@@ -113,7 +113,10 @@
       {% endfor %}
     </nav>
     <div class="tools">
-      {% if current_user %}
+      {% if auth_on and (demo or not current_user) and active != 'signin' %}
+        <a class="btn sm" href="{{ url_for('signin') }}">Sign up</a>
+      {% endif %}
+      {% if current_user and not demo %}
         <a class="me" href="{{ url_for('account') }}" title="{{ current_user.email }}"
            {% if active == 'account' %}aria-current="page"{% endif %}>
           {% if current_user.picture %}
@@ -139,7 +142,7 @@
             <a href="{{ href }}"
                {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
           {% endfor %}
-          {% if current_user %}
+          {% if current_user and not demo %}
             <a href="{{ url_for('account') }}"
                {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
           {% endif %}
@@ -148,6 +151,18 @@
     </div>
   </div>
 </header>
+
+{% if demo %}
+  {# Said on every page of the example, so nobody mistakes it for their own
+     account or wonders where these trades came from. #}
+  <div class="demobar" role="note">
+    <div class="inner">
+      <span><b>You are looking around an example account.</b>
+        Nothing here is yours, and nothing you tap can change it.</span>
+      <a class="btn sm" href="{{ url_for('signin') }}">Create free account</a>
+    </div>
+  </div>
+{% endif %}
 
 <div class="wrap">
 {% block content %}{% endblock %}
@@ -180,6 +195,7 @@
 
 {# Alerts that fired while you were on another page. The server checks on a
    timer; this is only how the result reaches you. #}
+{% if current_user and not demo %}
 <div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
   <div class="inner">
     <span class="what" id="firetext"></span>
@@ -187,6 +203,7 @@
     <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
   </div>
 </div>
+{% endif %}
 
 <script>
   // The phone menu closes when you tap anywhere else, or press Escape.

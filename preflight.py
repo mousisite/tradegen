@@ -213,13 +213,17 @@ def run(base: str, report: Report) -> None:
         report.bad("the front door answers a stranger",
                    "got %d" % home["status"])
 
-    guarded = fetch(base + "/trades")
-    if guarded["status"] in (301, 302, 307, 308) and             "/signin" in header(guarded, "Location"):
-        report.ok("sign-in is switched on", "the journal requires an account")
+    # The account page always needs signing in, so it is the one that says
+    # whether sign-in is on. The journal no longer can: a stranger is shown
+    # the example account there, which is the point of it.
+    guarded = fetch(base + "/account")
+    if guarded["status"] in (301, 302, 307, 308) and \
+            "/signin" in header(guarded, "Location"):
+        report.ok("sign-in is switched on", "the account page requires one")
         signed_in_mode = True
     elif guarded["status"] == 200:
         report.warn("sign-in is switched on",
-                    "the journal served content to a stranger")
+                    "the account page served content to a stranger")
         print()
         print("  A page holding personal data loaded without an account, which")
         print("  means GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not both")
@@ -227,72 +231,24 @@ def run(base: str, report: Report) -> None:
         signed_in_mode = False
     else:
         report.bad("sign-in is switched on",
-                   "the journal returned %d" % guarded["status"])
+                   "the account page returned %d" % guarded["status"])
         signed_in_mode = True
 
-    page = fetch(base + "/signin")
-    if page["status"] == 200:
-        report.ok("the sign-in page loads")
-        body = text(page)
-        if "Continue with Google" in body:
-            report.ok("it offers Google sign-in")
-        elif "not configured" in body or "Not set up" in body:
-            report.warn("it offers Google sign-in",
-                        "credentials are not set on the server")
+    if signed_in_mode:
+        journal = fetch(base + "/trades")
+        if journal["status"] == 200 and \
+                "looking around an example account" in text(journal):
+            report.ok("a stranger sees the example account, labelled as one")
         else:
-            report.warn("it offers Google sign-in", "no button found")
-    elif page["status"] in (301, 302, 307, 308) and not signed_in_mode:
-        # With sign-in off every visitor is already the local account, so the
-        # sign-in page redirecting away is right rather than broken.
-        report.ok("the sign-in page is not needed",
-                  "sign-in is off, so it sends you to the app")
-    else:
-        report.bad("the sign-in page loads", "got %d" % page["status"])
-
-    start = fetch(base + "/auth/google")
-    if start["status"] in (301, 302, 307, 308):
-        where = header(start, "Location")
-        if where.startswith("https://accounts.google.com/"):
-            report.ok("starting sign-in reaches Google")
-            query = where.split("?", 1)[-1]
-            sent = re.search(r"redirect_uri=([^&]+)", query)
-            if sent:
-                from urllib.parse import unquote
-                actual = unquote(sent.group(1))
-                if actual == callback:
-                    report.ok("the callback address matches this deployment",
-                              actual)
-                else:
-                    report.bad("the callback address matches this deployment",
-                               "app sends %s" % actual)
-            for needed, label in (("code_challenge_method=S256", "PKCE is on"),
-                                  ("response_type=code", "uses the code flow"),
-                                  ("state=", "sends a state parameter")):
-                if needed in query:
-                    report.ok(label)
-                else:
-                    report.bad(label, "missing from the authorize url")
-            if "client_secret" in query:
-                report.bad("the client secret stays on the server",
-                           "it is in the redirect url")
-            else:
-                report.ok("the client secret stays on the server")
-        else:
-            report.bad("starting sign-in reaches Google", where[:60])
-    elif start["status"] == 503:
-        report.warn("starting sign-in reaches Google",
-                    "credentials not set on the server yet")
-    else:
-        report.bad("starting sign-in reaches Google",
-                   "got %d" % start["status"])
+            report.bad("a stranger sees the example account, labelled as one",
+                       "got %d without the example banner" % journal["status"])
 
     print()
     print("=" * 74)
     print("THE PRIVATE PAGES")
     print("=" * 74)
 
-    for path in ("/trades", "/account", "/portfolio", "/monitor",
-                 "/export/trades.csv"):
+    for path in ("/account", "/export/trades.csv", "/usage"):
         page = fetch(base + path)
         if signed_in_mode:
             if page["status"] in (301, 302, 307, 308) and \

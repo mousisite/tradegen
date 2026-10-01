@@ -59,6 +59,15 @@
   </p>
 </div>
 
+{% if preparing %}
+  <div class="plainbox" style="margin-top:var(--s3)">
+    <span class="eyebrow">Getting ready</span>
+    <p class="prose">The example scan is being run right now: every instrument
+      on the list, back-tested. It takes about a minute. Refresh this page in a
+      moment, or create an account to run your own whenever you like.</p>
+  </div>
+{% endif %}
+
 {% if result %}
 
 <div class="plainbox" style="margin-top:var(--s3)">

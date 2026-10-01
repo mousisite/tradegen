@@ -178,6 +178,57 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
       border-radius: var(--r-sm); }
 .me:hover { background: var(--sunken); text-decoration: none; }
 
+/* The banner on every page of the example account. */
+.demobar { background: var(--accent-wash); border-bottom: 1px solid var(--rule); }
+.demobar .inner {
+  max-width: var(--shell); margin: 0 auto; padding: 10px var(--s3);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s2); flex-wrap: wrap; font-size: var(--t-sm); color: var(--ink);
+}
+
+/* The front page. */
+.hero { text-align: center; padding: var(--s4) 0 var(--s3); }
+.hero .mark { color: var(--ink); display: flex; justify-content: center;
+              margin-bottom: var(--s2); }
+.hero h1 { font-size: var(--t-2xl); line-height: 1.08; letter-spacing: -.02em; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.hero .lede { max-width: 32rem; margin: var(--s2) auto var(--s3);
+              color: var(--ink-2); font-size: var(--t-base); line-height: 1.6; }
+.hero .cta, .cta-stack { display: flex; gap: var(--s1); justify-content: center;
+                         flex-wrap: wrap; }
+.card.example { display: flex; flex-direction: column; gap: 8px; color: var(--ink);
+                max-width: 40rem; margin: 0 auto var(--s4); }
+.card.example:hover { border-color: var(--accent); text-decoration: none; }
+.card.example .lead { margin: 0; }
+.card.example .prose { margin: 0; }
+.card.example .go, .feature .go { color: var(--accent-text); font-size: var(--t-xs);
+                                  font-weight: 500; }
+.features { display: grid; gap: var(--s2);
+            grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+.feature {
+  display: flex; flex-direction: column; gap: 6px; padding: var(--s3);
+  border: 1px solid var(--rule); border-radius: var(--r-md);
+  background: var(--surface); color: var(--ink);
+  transition: border-color .18s ease, transform .18s ease;
+}
+.feature:hover { border-color: var(--accent); text-decoration: none;
+                 transform: translateY(-1px); }
+.feature .ficon { color: var(--accent); margin-bottom: 2px; }
+.feature b { font-size: var(--t-base); font-weight: 600; }
+.feature .say { color: var(--ink-2); font-size: var(--t-sm); line-height: 1.5; }
+.closing { text-align: center; padding: var(--s4) 0 var(--s2); }
+.closing .lead { margin-bottom: var(--s2); }
+.ways { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+        max-width: 360px; margin: 0 auto; }
+@media (max-width: 420px) {
+  .features { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .feature { padding: 14px; }
+  .feature .say { font-size: var(--t-xs); }
+  /* An odd card out spans the row instead of sitting alone on it. */
+  .feature:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .demobar .inner { padding: 10px var(--s2); }
+}
+
 /* The phone menu. Hidden on wide screens, where the row of links fits. */
 .menu { display: none; position: relative; }
 .menu > summary {
@@ -351,7 +402,13 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 
 /* ---------- tables ---------- */
 
-.tablewrap { overflow-x: auto; }
+/* position:relative makes this box the containing block for anything
+   absolutely positioned inside it. Without it, the screen-reader labels in
+   table rows (.sr is position:absolute) measured from the page instead,
+   escaped this box's scrolling, and stretched every page with a wide table
+   far past the edge of a phone: 1113px on a 390px screen for a journal with
+   five trades in it. */
+.tablewrap { overflow-x: auto; position: relative; }
 table { width: 100%; border-collapse: collapse; }
 thead th {
   text-align: left; white-space: nowrap;
