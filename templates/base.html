@@ -84,6 +84,20 @@
 </head>
 <body>
 
+{# One list, drawn twice: as a row of links on a wide screen and as a menu on
+   a phone. Eight links and an avatar are 720 pixels wide, and on a 390 pixel
+   phone the row pushed the whole page wider than the screen: the links past
+   the edge were unreachable and the page could be zoomed out. #}
+{% set nav_items = [
+  (url_for('index'), 'home', 'Analyse'),
+  (url_for('ideas'), 'ideas', 'Find'),
+  (url_for('screener'), 'screener', 'Screener'),
+  (url_for('portfolio'), 'portfolio', 'Portfolio'),
+  (url_for('trades'), 'trades', 'Trades'),
+  (url_for('monitor'), 'monitor', 'Monitor'),
+  (url_for('strategies'), 'strategies', 'Strategies'),
+  (url_for('settings'), 'settings', 'Settings'),
+] %}
 <header class="topbar">
   <div class="inner">
     <a class="wordmark" href="{{ url_for('index') }}">
@@ -92,23 +106,13 @@
       </span>
       Orenth
     </a>
-    <nav class="nav">
-      <a href="{{ url_for('index') }}"
-         {% if active == 'home' %}aria-current="page"{% endif %}>Analyse</a>
-      <a href="{{ url_for('ideas') }}"
-         {% if active == 'ideas' %}aria-current="page"{% endif %}>Find</a>
-      <a href="{{ url_for('screener') }}"
-         {% if active == 'screener' %}aria-current="page"{% endif %}>Screener</a>
-      <a href="{{ url_for('portfolio') }}"
-         {% if active == 'portfolio' %}aria-current="page"{% endif %}>Portfolio</a>
-      <a href="{{ url_for('trades') }}"
-         {% if active == 'trades' %}aria-current="page"{% endif %}>Trades</a>
-      <a href="{{ url_for('monitor') }}"
-         {% if active == 'monitor' %}aria-current="page"{% endif %}>Monitor</a>
-      <a href="{{ url_for('strategies') }}"
-         {% if active == 'strategies' %}aria-current="page"{% endif %}>Strategies</a>
-      <a href="{{ url_for('settings') }}"
-         {% if active == 'settings' %}aria-current="page"{% endif %}>Settings</a>
+    <nav class="nav" aria-label="Main">
+      {% for href, key, label in nav_items %}
+        <a href="{{ href }}"
+           {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <div class="tools">
       {% if current_user %}
         <a class="me" href="{{ url_for('account') }}" title="{{ current_user.email }}"
            {% if active == 'account' %}aria-current="page"{% endif %}>
@@ -120,7 +124,28 @@
           <span class="sr">Account: {{ current_user.display }}</span>
         </a>
       {% endif %}
-    </nav>
+      {# A details element needs no script to open and close, so the menu
+         works even before the page's JavaScript has loaded. #}
+      <details class="menu">
+        <summary aria-label="Open menu">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16"/>
+          </svg>
+          Menu
+        </summary>
+        <nav class="menu-panel" aria-label="Main">
+          {% for href, key, label in nav_items %}
+            <a href="{{ href }}"
+               {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
+          {% endfor %}
+          {% if current_user %}
+            <a href="{{ url_for('account') }}"
+               {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
+          {% endif %}
+        </nav>
+      </details>
+    </div>
   </div>
 </header>
 
@@ -164,6 +189,18 @@
 </div>
 
 <script>
+  // The phone menu closes when you tap anywhere else, or press Escape.
+  (function () {
+    var menu = document.querySelector('details.menu');
+    if (!menu) { return; }
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) { menu.open = false; }
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { menu.open = false; }
+    });
+  })();
+
   (function () {
     var el = document.getElementById('working');
     var head = document.getElementById('workhead');
