@@ -8,6 +8,7 @@
   <p>What is yours, what is shared, and how to take either one with you.</p>
 </div>
 
+<section>
 <div class="card">
   <div class="whoami">
     {% if current_user.picture %}
@@ -35,6 +36,7 @@
     {% endif %}
   </div>
 </div>
+</section>
 
 {% if plan.on %}
 <section>
@@ -43,7 +45,7 @@
     {% if plan.pro %}
       <p class="prose"><b>Pro.</b> No limits.</p>
       {% if plan.customer %}
-        <form method="post" action="{{ url_for('billing_portal') }}">
+        <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
         <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
@@ -51,7 +53,7 @@
     {% else %}
       <p class="prose"><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
         instruments looked at today.</p>
-      <a class="btn" href="{{ url_for('pricing') }}">See Pro</a>
+      <a class="btn" href="{{ url_for('pricing') }}" style="margin-top:var(--s2)">See Pro</a>
     {% endif %}
   </div>
 </section>

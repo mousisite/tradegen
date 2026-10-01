@@ -301,6 +301,9 @@ def _expose_user():
             "auth_on": auth_required(),
             "email_ready": codes_mod.email_ready(),
             "billing_on": billing_mod.ready(),
+            # The upgrade button, for signed-in free accounts only.
+            "go_pro": (billing_mod.ready() and getattr(g, "user", None) is not None
+                       and not getattr(g, "demo", False) and not _pro()),
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured()}
 

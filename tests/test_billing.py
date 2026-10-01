@@ -155,6 +155,8 @@ try:
     print("THE FREE ALLOWANCE")
     print("=" * 72)
     sign_in(free)
+    check("a free account sees the Go Pro button on every page",
+          "Go Pro" in c.get("/account").data.decode("utf-8", "replace"))
     real_analysis = web.cached_analysis
 
     def no_such_ticker(*a, **k):
@@ -309,6 +311,7 @@ try:
               r.status_code == 303 and "billing.stripe" in r.headers["Location"])
         page = c.get("/account").data.decode("utf-8", "replace")
         check("the account page shows the plan", "Manage subscription" in page)
+        check("and a Pro account is not asked to upgrade", "Go Pro" not in page)
 
         conn = db.connect(DB)
         leaver = A.upsert_email_user(conn, "leaver@example.com")

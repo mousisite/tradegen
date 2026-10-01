@@ -587,6 +587,11 @@ ul.list.ok li::marker { color: var(--gain); }
 
 @media (max-width: 1000px) {
   .cols.a, .cols.b, .cols.c { grid-template-columns: 1fr; }
+  /* The row of eight links plus a button and an avatar needs about 940
+     pixels; below that it ran off the side of tablets, not just phones. */
+  .nav { display: none; }
+  .menu { display: block; }
+  .tools { margin-left: auto; }
 }
 @media (max-width: 760px) {
   .wrap { padding: var(--s3) var(--s2) var(--s5); }
@@ -595,9 +600,6 @@ ul.list.ok li::marker { color: var(--gain); }
   .instrument .price { margin-left: 0; text-align: left; width: 100%; }
   .instrument .sym { font-size: var(--t-xl); }
   .call .word { font-size: var(--t-lg); }
-  .nav { display: none; }
-  .menu { display: block; }
-  .tools { margin-left: auto; }
   .wordmark { font-size: var(--t-base); }
 }
 @media (max-width: 420px) {
