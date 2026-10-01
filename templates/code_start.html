@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% set active = 'signin' %}
+{% block title %}Sign in with your {{ spec.label }} · Orenth{% endblock %}
+{% block content %}
+
+<div class="signin">
+  <div class="mark" aria-hidden="true">
+    {% with size=48 %}{% include "_mark.html" %}{% endwith %}
+  </div>
+  <h1>{{ 'What is your email?' if channel == 'email' else 'What is your number?' }}</h1>
+  <p class="lede">
+    {% if channel == 'email' %}We will email you a six-digit code. No password.
+    {% else %}We will text you a six-digit code. Standard message rates may apply.
+    {% endif %}
+  </p>
+
+  {% if error %}<div class="notice">{{ error }}</div>{% endif %}
+
+  <form class="codeform" method="post"
+        action="{{ url_for('code_start', channel=channel) }}">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <label class="sr" for="to">Your {{ spec.label }}</label>
+    {% if channel == 'email' %}
+      <input class="field" id="to" name="to" type="email" required autofocus
+             autocomplete="email" inputmode="email" placeholder="you@example.com"
+             value="{{ value }}">
+    {% else %}
+      <input class="field" id="to" name="to" type="tel" required autofocus
+             autocomplete="tel" inputmode="tel" placeholder="+1 555 123 4567"
+             value="{{ value }}">
+    {% endif %}
+    <button class="btn" type="submit">Send me a code</button>
+  </form>
+
+  <p class="fine" style="margin-top:var(--s3)">
+    <a href="{{ url_for('signin', next=next_url) }}">Other ways to sign in</a>
+  </p>
+</div>
+
+{% endblock %}

@@ -220,6 +220,13 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .closing .lead { margin-bottom: var(--s2); }
 .ways { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
         max-width: 360px; margin: 0 auto; }
+.ways .way { display: flex; align-items: center; justify-content: center; gap: 10px;
+             min-height: 46px; }
+.codeform { max-width: 360px; margin: 0 auto; text-align: left; }
+.codeform .field { width: 100%; }
+.codeform input.code { font-family: var(--mono); font-size: var(--t-lg);
+                       letter-spacing: .3em; text-align: center; }
+.codeform .btn { width: 100%; margin-top: var(--s2); }
 @media (max-width: 420px) {
   .features { grid-template-columns: 1fr 1fr; gap: 10px; }
   .feature { padding: 14px; }

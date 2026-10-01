@@ -44,6 +44,7 @@ from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
 from bot import auth as auth_mod
 from bot import catalysts as catalysts_mod
+from bot import codes as codes_mod
 from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
@@ -121,13 +122,14 @@ def healthcheck():
 # once Google sign-in is configured.
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
-                    "robots", "sitemap", "index", "favicon"}
+                    "robots", "sitemap", "index", "favicon",
+                    "code_start", "code_verify"}
 
 SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "11 September 2026"
+LEGAL_UPDATED = "30 September 2026"
 
 
 def auth_required() -> bool:
@@ -144,7 +146,9 @@ def auth_required() -> bool:
         return False
     if mode == "google":
         return True
-    return auth_mod.configured()
+    # Any configured way in means this is a shared installation.
+    return (auth_mod.configured() or codes_mod.email_ready()
+            or codes_mod.phone_ready())
 
 
 # Addresses this app used to answer on. A link somebody saved still works, and
@@ -251,6 +255,8 @@ def _expose_user():
     return {"current_user": getattr(g, "user", None),
             "demo": getattr(g, "demo", False),
             "auth_on": auth_required(),
+            "email_ready": codes_mod.email_ready(),
+            "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured()}
 
 
@@ -1100,6 +1106,102 @@ def google_callback():
     session.permanent = True
     session[SESSION_KEY] = token
     return redirect(_safe_back(next_url, url_for("index")))
+
+
+def _finish_sign_in(user, next_url: str):
+    """Start a session for someone who just proved who they are."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        accounts_mod.purge_expired(conn)
+        token = accounts_mod.start_session(
+            conn, user.id, request.headers.get("User-Agent", ""))
+    finally:
+        conn.close()
+    session.permanent = True
+    session[SESSION_KEY] = token
+    return redirect(_safe_back(next_url, url_for("index")))
+
+
+def _client_ip() -> str:
+    """Who is asking, for the sending limits.
+
+    Behind Cloudflare the connection comes from Cloudflare, shared by
+    everyone, so its own header naming the visitor is preferred. It can be
+    forged by going round Cloudflare to the host directly; that only weakens
+    the per-network limit, and the per-address limit still holds.
+    """
+    return (request.headers.get("CF-Connecting-IP")
+            or request.remote_addr or "")[:64]
+
+
+_CHANNELS = {
+    "email": {"ready": codes_mod.email_ready, "label": "email address",
+              "clean": codes_mod.clean_email},
+    "phone": {"ready": codes_mod.phone_ready, "label": "phone number",
+              "clean": codes_mod.clean_phone},
+}
+
+
+@app.route("/signin/<channel>", methods=["GET", "POST"])
+def code_start(channel):
+    """Ask for an address, and send it a code."""
+    spec = _CHANNELS.get(channel)
+    if spec is None or not spec["ready"]():
+        abort(404)
+    next_url = _safe_back(request.values.get("next"), "")
+    error = None
+    value = ""
+    if request.method == "POST":
+        value = (request.form.get("to") or "").strip()[:200]
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            target = spec["clean"](value)
+            if channel == "email":
+                codes_mod.send_email_code(conn, target, _client_ip(),
+                                          app.secret_key)
+            else:
+                codes_mod.send_phone_code(conn, target, _client_ip())
+            session["code_login"] = {"channel": channel, "to": target,
+                                     "next": next_url}
+            return redirect(url_for("code_verify", channel=channel))
+        except codes_mod.CodeError as exc:
+            error = str(exc)
+        finally:
+            conn.close()
+    return render_template("code_start.html", channel=channel, spec=spec,
+                           error=error, value=value, next_url=next_url)
+
+
+@app.route("/signin/<channel>/code", methods=["GET", "POST"])
+def code_verify(channel):
+    """Take the code back, and sign the person in."""
+    if channel not in _CHANNELS:
+        abort(404)
+    pending = session.get("code_login") or {}
+    if pending.get("channel") != channel or not pending.get("to"):
+        return redirect(url_for("code_start", channel=channel))
+    error = None
+    if request.method == "POST":
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            if channel == "email":
+                codes_mod.check_email_code(conn, pending["to"],
+                                           request.form.get("code", ""),
+                                           app.secret_key)
+                user = accounts_mod.upsert_email_user(conn, pending["to"])
+            else:
+                codes_mod.check_phone_code(conn, pending["to"],
+                                           request.form.get("code", ""))
+                user = accounts_mod.upsert_phone_user(conn, pending["to"])
+        except (codes_mod.CodeError, ValueError) as exc:
+            error = str(exc)
+        else:
+            session.pop("code_login", None)
+            return _finish_sign_in(user, pending.get("next", ""))
+        finally:
+            conn.close()
+    return render_template("code_verify.html", channel=channel,
+                           to=pending["to"], error=error)
 
 
 @app.route("/signout", methods=["GET", "POST"])

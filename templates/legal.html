@@ -31,6 +31,18 @@
     <span class="fig">profile</span> scopes. It cannot read your Gmail, Drive,
     contacts or calendar, and it never sees your Google password.
   </p>
+  <p class="prose">If you sign in with a code instead:</p>
+  <ul class="list">
+    <li><b>By email:</b> your email address, used as the identity of your
+      account. The code is kept only as a keyed hash, for ten minutes, and can
+      be used once.</li>
+    <li><b>By text:</b> your phone number, used as the identity of your
+      account. The code is created and checked by Twilio and never stored
+      here.</li>
+    <li>For either, the time of each code request and the network address it
+      came from, kept so that nobody can flood an inbox or a phone with codes.</li>
+  </ul>
+  <p class="prose">There are no passwords, so there are none to leak.</p>
 
   <h2>What you create</h2>
   <p class="prose">
@@ -63,6 +75,10 @@
         <tr><td>StockTwits</td><td>The ticker</td><td>Retail posts</td></tr>
         <tr><td>Anthropic</td><td>Headlines and gathered figures, only if an API key is configured</td>
             <td>Sentiment and written reasoning</td></tr>
+        <tr><td>The email delivery service</td><td>Your email address and the code, only if you sign in by email</td>
+            <td>Delivering the code</td></tr>
+        <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
+            <td>Sending and checking the code</td></tr>
       </tbody>
     </table>
   </div>
@@ -92,8 +108,10 @@
 
   <h2>Security</h2>
   <p class="prose">
-    Sign-in uses Google's authorization code flow with PKCE, exchanged between
-    servers. Session tokens are random, opaque and stored, so they can be
+    Google sign-in uses the authorization code flow with PKCE, exchanged
+    between servers. Code sign-in limits how many codes one address and one
+    network can ask for, locks a code after five wrong tries, and caps how many
+    texts can be sent in an hour in total. Session tokens are random, opaque and stored, so they can be
     revoked. Credentials are read from the environment and are never written to
     a configuration file.
   </p>

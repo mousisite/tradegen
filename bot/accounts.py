@@ -93,6 +93,10 @@ class User:
         return self.name or self.email.split("@")[0]
 
     @property
+    def contact(self) -> str:
+        return self.name if self.provider == "phone" else self.email
+
+    @property
     def initial(self) -> str:
         return (self.display or "?")[0].upper()
 
@@ -242,6 +246,57 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
 
     return _row_to_user(conn.execute("SELECT * FROM users WHERE id=?",
                                      (user_id,)).fetchone())
+
+
+def upsert_email_user(conn: sqlite3.Connection, email: str) -> User:
+    """The account behind an email address proved by a one-time code.
+
+    The address is the identity, as it is for Google. Someone who signed up
+    with Google and later signs in with an emailed code reaches the same
+    account, because both proved they control that inbox.
+    """
+    email = (email or "").strip().lower()
+    now = int(time.time())
+    row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO users (email, name, picture, provider, provider_id, "
+            "created_ts, last_seen_ts, is_local) VALUES (?,?,?,?,?,?,?,0)",
+            (email, "", "", "email", email, now, now))
+        conn.commit()
+        user_id = int(cur.lastrowid)
+    else:
+        if row["is_local"] or row["provider"] == "demo":
+            raise ValueError("That address cannot be signed in to.")
+        user_id = int(row["id"])
+        conn.execute("UPDATE users SET last_seen_ts=? WHERE id=?", (now, user_id))
+        conn.commit()
+    return get_user(conn, user_id)
+
+
+def upsert_phone_user(conn: sqlite3.Connection, phone: str) -> User:
+    """The account behind a phone number proved by a texted code.
+
+    The users table needs an email, and a phone account has none, so it gets
+    one under .invalid: a top-level domain reserved never to exist, so the
+    placeholder can never be mistaken for, or delivered to, a real inbox.
+    """
+    now = int(time.time())
+    row = conn.execute("SELECT * FROM users WHERE provider='phone' AND "
+                       "provider_id=?", (phone,)).fetchone()
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO users (email, name, picture, provider, provider_id, "
+            "created_ts, last_seen_ts, is_local) VALUES (?,?,?,?,?,?,?,0)",
+            ("phone%s@users.invalid" % phone.lstrip("+"), phone, "", "phone",
+             phone, now, now))
+        conn.commit()
+        user_id = int(cur.lastrowid)
+    else:
+        user_id = int(row["id"])
+        conn.execute("UPDATE users SET last_seen_ts=? WHERE id=?", (now, user_id))
+        conn.commit()
+    return get_user(conn, user_id)
 
 
 def get_user(conn: sqlite3.Connection, user_id: int) -> Optional[User]:
