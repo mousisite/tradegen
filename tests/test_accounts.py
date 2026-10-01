@@ -205,6 +205,55 @@ check("Alice does not see Bob's", "TSLA" not in page, "TSLA leaked")
 
 print()
 print("=" * 72)
+print("SETTINGS ARE EACH PERSON'S OWN")
+print("=" * 72)
+
+# Settings used to be one shared file on a deployment, so whoever signed in
+# changed everyone's account size, costs and thresholds.
+from bot import config as _cfgmod
+_shared_before = _cfgmod.load(web.app.config.get("CFG_PATH"))["account_size"]
+
+sign_in_as(c, alice)
+r = c.post("/settings", data={"account_size": "123456", "risk_per_trade_pct": "2"})
+check("Alice can save her settings", r.status_code == 302, r.status_code)
+check("and sees them", "123456" in visible(c, "/settings"))
+
+sign_in_as(c, bob)
+check("Bob does not get Alice's account size",
+      "123456" not in visible(c, "/settings"))
+check("and the shared file was not touched",
+      _cfgmod.load(web.app.config.get("CFG_PATH"))["account_size"]
+      == _shared_before)
+
+page = visible(c, "/settings")
+check("Bob is not offered the server-wide alert schedule",
+      "Background checking" not in page)
+check("and is told his settings are his own",
+      "changes nothing for anyone else" in page)
+
+sign_in_as(c, alice)
+c.get("/settings?reset=1")
+check("opening the old reset address leaves Alice's settings alone",
+      "123456" in visible(c, "/settings"))
+c.post("/settings", data={"reset": "1"})
+check("the reset button restores her defaults",
+      "123456" not in visible(c, "/settings"))
+
+# The analysis cache is shared between people, so it has to be keyed on the
+# settings: a different account size is a different position size.
+check("different settings give different analysis cache keys",
+      web._settings_key({"account_size": 1000}) != web._settings_key({"account_size": 9000}))
+check("the same settings give the same key",
+      web._settings_key({"account_size": 1000}) == web._settings_key({"account_size": 1000}))
+
+conn = db.connect(DB)
+A.save_settings(conn, bob.id, {"account_size": 777, "not_a_setting": 1})
+check("only personal settings are stored",
+      A.settings_for(conn, bob.id) == {"account_size": 777})
+conn.close()
+
+print()
+print("=" * 72)
 print("SESSIONS")
 print("=" * 72)
 
@@ -257,6 +306,7 @@ check("Bob owns something to delete", counts["trades"] >= 1)
 removed = A.delete_user(conn, bob.id)
 print("   removed %s" % removed)
 check("his trades are gone", A.owned_counts(conn, bob.id)["trades"] == 0)
+check("and so are his settings", A.settings_for(conn, bob.id) == {})
 check("his account is gone", A.get_user(conn, bob.id) is None)
 check("Alice is untouched", len(db.list_trades(conn, user=alice.id)) == 1)
 check("the shared strategy record is untouched",

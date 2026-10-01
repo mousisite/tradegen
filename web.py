@@ -230,9 +230,38 @@ INTERVALS = [("5m", "5 minutes"), ("15m", "15 minutes"), ("30m", "30 minutes"),
              ("1h", "1 hour"), ("1d", "Daily")]
 
 
+def _cfg() -> Dict:
+    """The settings for this request: the app's, with this person's on top.
+
+    On your own machine there is one person and the settings file is theirs.
+    On a deployment each person has their own, stored against their account,
+    because one shared file meant anyone who signed in changed everybody's
+    account size, costs and thresholds.
+    """
+    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    user = getattr(g, "user", None)
+    if user is not None and not user.is_local:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            cfg.update(accounts_mod.settings_for(conn, user.id))
+        finally:
+            conn.close()
+    return cfg
+
+
+def _settings_key(cfg: Dict) -> str:
+    """A short fingerprint of everything that changes what an analysis says."""
+    import hashlib
+    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS)
+    return hashlib.sha1(repr(picked).encode("utf-8")).hexdigest()[:12]
+
+
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True) -> engine.Analysis:
-    key = (symbol.upper(), interval)
+    # The settings are part of the key. Position sizes, stops and the call
+    # itself depend on them, and without this one person's ?shorts=1 or larger
+    # account was served to the next person who asked for the same ticker.
+    key = (symbol.upper(), interval, bool(with_news), _settings_key(cfg))
     now = time.time()
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
@@ -415,7 +444,7 @@ def analyse():
     if not symbol:
         return redirect(url_for("index"))
 
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
     if request.args.get("account"):
         try:
             cfg["account_size"] = float(request.args["account"])
@@ -586,7 +615,7 @@ def take_trade():
                                    message="That analysis has no entry and stop "
                                            "to trade."), 400
 
-        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        cfg = _cfg()
         direction = 1 if row["action"] in ("BUY", "WAIT") else -1
         entry, stop = float(row["entry"]), float(row["stop"])
         per_unit = abs(entry - stop)
@@ -762,7 +791,7 @@ def research():
     if not symbol:
         return redirect(url_for("index"))
 
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
     try:
         analysis = cached_analysis(symbol, interval, cfg,
                                    request.args.get("news", "1") != "0")
@@ -818,7 +847,7 @@ def save_thesis():
     interval = request.form.get("interval", "1d")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        cfg = _cfg()
         analysis = cached_analysis(symbol, interval, cfg, False)
         found = engine.research(symbol, analysis.bars.last_price, cfg,
                                 analysis=analysis, with_options=False,
@@ -1278,7 +1307,7 @@ def ideas():
     market = request.args.get("market") or "stocks"
     horizon = request.args.get("horizon") or "medium"
     risk = request.args.get("risk") or "balanced"
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
 
     result = None
     if (request.args.get("market") or request.args.get("horizon")
@@ -1349,7 +1378,7 @@ def screener():
 @app.route("/portfolio")
 def portfolio():
     """Exposure, concentration, correlation and what a shock would do."""
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = db_mod.list_trades(conn, status="open", limit=100, user=uid())
@@ -1497,7 +1526,7 @@ def run_workflow(name):
     if name not in workflows_mod.WORKFLOWS:
         return render_template("error.html", message="No routine called %r." % name,
                                symbol=""), 404
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
     report = workflows_mod.run(name, cfg, app.config.get("DB_PATH"),
                                user=uid())
     app.config["LAST_WORKFLOW"] = report
@@ -1513,18 +1542,33 @@ def settings():
     """View and edit the settings that drive every recommendation."""
     cfg_path = app.config.get("CFG_PATH")
     saved = error = None
+    # On a deployment, settings are each person's own; the shared file is only
+    # written for the server's own settings, and only by the operator.
+    personal = not g.user.is_local
+    operator = _is_operator()
 
-    if request.args.get("reset") == "1":
+    # A POST, not a link: restoring defaults used to be /settings?reset=1, so
+    # anyone who opened that address, or any crawler that followed it, wiped
+    # the settings.
+    if request.method == "POST" and request.form.get("reset") == "1":
         try:
-            fresh = json.loads(json.dumps(config_mod.DEFAULTS))
-            config_mod.save(fresh, cfg_path)
-            _CACHE.clear()
+            if personal:
+                conn = db_mod.connect(app.config.get("DB_PATH"))
+                try:
+                    accounts_mod.clear_settings(conn, g.user.id)
+                finally:
+                    conn.close()
+            else:
+                fresh = json.loads(json.dumps(config_mod.DEFAULTS))
+                config_mod.save(fresh, cfg_path)
+                _CACHE.clear()
+                _RESEARCH_CACHE.clear()
             return redirect(url_for("settings", saved="1"))
         except Exception as exc:
             error = str(exc)
 
-    if request.method == "POST":
-        cfg = config_mod.load(cfg_path)
+    if request.method == "POST" and request.form.get("reset") != "1":
+        cfg = _cfg()
         numbers = ("account_size", "risk_per_trade_pct", "max_position_pct",
                    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
                    "target_atr_multiple", "min_conviction", "strong_conviction",
@@ -1544,10 +1588,27 @@ def settings():
                 if request.form.get(flag) is not None:
                     cfg[flag] = request.form[flag] == "1"
 
-            config_mod.save(cfg, cfg_path)
-            # Cached analyses were produced under the old settings.
-            _CACHE.clear()
-            _RESEARCH_CACHE.clear()
+            if personal:
+                conn = db_mod.connect(app.config.get("DB_PATH"))
+                try:
+                    accounts_mod.save_settings(conn, g.user.id, cfg)
+                finally:
+                    conn.close()
+            if not personal or operator:
+                # The server's own settings: the whole file on your own
+                # machine, only the server-level keys for an operator online.
+                shared = config_mod.load(cfg_path)
+                if personal:
+                    for key in ("alert_check_minutes", "use_llm_sentiment"):
+                        shared[key] = cfg[key]
+                else:
+                    shared = cfg
+                config_mod.save(shared, cfg_path)
+                # Cached analyses were produced under the old settings.
+                _CACHE.clear()
+                _RESEARCH_CACHE.clear()
+            if personal and not operator:
+                return redirect(url_for("settings", saved="1"))
             # Apply a changed check interval now rather than at next start.
             if ALERTS is not None:
                 minutes = cfg.get("alert_check_minutes", 5)
@@ -1561,13 +1622,14 @@ def settings():
         except RuntimeError as exc:
             error = str(exc)
 
-    cfg = config_mod.load(cfg_path)
+    cfg = _cfg()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         export_counts = export_mod.counts(conn, user=uid())
     finally:
         conn.close()
     return render_template("settings.html", cfg=cfg,
+                           personal=personal, operator=operator,
                            datasets=export_mod.DATASETS,
                            export_counts=export_counts,
                            scheduler=(ALERTS.status() if ALERTS else None),
@@ -1583,7 +1645,7 @@ def api_analyse():
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
-    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    cfg = _cfg()
     try:
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0")

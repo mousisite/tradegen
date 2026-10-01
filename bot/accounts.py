@@ -19,6 +19,7 @@ itself smarter rather than merely larger.
 """
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 import time
@@ -57,7 +58,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id   INTEGER PRIMARY KEY,
+    data      TEXT NOT NULL,
+    updated   INTEGER NOT NULL
+);
 """
+
+# The settings that are a person's own: their account, their risk, their costs
+# and the thresholds they want calls made at. On a deployment these used to be
+# one shared file, so anyone who signed in changed them for everybody. The
+# settings that drive the server itself, like how often alerts are checked,
+# stay global and are the operator's alone.
+PERSONAL_SETTINGS = (
+    "account_size", "risk_per_trade_pct", "max_position_pct",
+    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
+    "target_atr_multiple", "min_conviction", "strong_conviction",
+    "horizon_bars", "interval", "allow_shorts", "require_positive_expectancy",
+)
 
 
 @dataclass
@@ -312,10 +331,41 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     for table in OWNED_TABLES:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
+    conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()
     return removed
+
+
+def settings_for(conn: sqlite3.Connection, user_id: int) -> Dict:
+    """One person's saved settings, or nothing if they never changed any."""
+    row = conn.execute("SELECT data FROM user_settings WHERE user_id=?",
+                       (user_id,)).fetchone()
+    if row is None:
+        return {}
+    try:
+        data = json.loads(row["data"])
+    except (TypeError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if k in PERSONAL_SETTINGS}
+
+
+def save_settings(conn: sqlite3.Connection, user_id: int, values: Dict) -> None:
+    """Store a person's own settings. Anything not personal is ignored."""
+    clean = {k: v for k, v in values.items() if k in PERSONAL_SETTINGS}
+    conn.execute(
+        "INSERT INTO user_settings (user_id, data, updated) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, "
+        "updated=excluded.updated",
+        (user_id, json.dumps(clean), int(time.time())))
+    conn.commit()
+
+
+def clear_settings(conn: sqlite3.Connection, user_id: int) -> None:
+    """Back to the app's defaults for this person."""
+    conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
+    conn.commit()
 
 
 def owned_counts(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:

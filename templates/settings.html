@@ -155,6 +155,7 @@
         <div class="hint">With shorts off, a bearish read simply becomes
           "do not buy".</div>
       </div>
+      {% if not personal or operator %}
       <div class="setfield">
         <label for="use_llm_sentiment">Headline scoring</label>
         <select class="field" id="use_llm_sentiment" name="use_llm_sentiment">
@@ -170,10 +171,12 @@
           {% endif %}
         </div>
       </div>
+      {% endif %}
     </div>
   </div>
 </section>
 
+{% if not personal or operator %}
 <section>
   <div class="sechead"><h2>Background checking</h2>
     <span class="tail">only while this window is open</span></div>
@@ -214,11 +217,19 @@
     </p>
   </div>
 </section>
+{% endif %}
 
 <div style="display:flex;gap:var(--s1);margin-top:var(--s4);flex-wrap:wrap">
   <button class="btn" type="submit">Save settings</button>
-  <a class="btn quiet" href="{{ url_for('settings', reset='1') }}">Restore defaults</a>
+  {# A button inside the same form, so restoring defaults is a POST rather
+     than an address anyone, or any crawler, could open. #}
+  <button class="btn quiet" type="submit" name="reset" value="1"
+          formnovalidate>Restore defaults</button>
 </div>
+{% if personal %}
+  <p class="prose" style="margin-top:var(--s2)">These are your own settings.
+    Changing them changes nothing for anyone else.</p>
+{% endif %}
 
 </form>
 

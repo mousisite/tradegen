@@ -145,7 +145,12 @@ from bot import config as cfgmod
 # Read back from the isolated config the server was told to write, not the real
 # one: asserting against the real file also meant overwriting the real file.
 check("value persisted", cfgmod.load(harness.CFG_PATH)["account_size"] == 5000.0)
-r = c.get("/settings?reset=1")
+# Restoring defaults used to be a plain link, /settings?reset=1, so anyone
+# who opened it, or any crawler that followed it, wiped the settings.
+c.get("/settings?reset=1")
+check("opening the old reset address no longer resets anything",
+      cfgmod.load(harness.CFG_PATH)["account_size"] == 5000.0)
+r = c.post("/settings", data={"reset": "1"})
 check("reset works", r.status_code == 302
       and cfgmod.load(harness.CFG_PATH)["account_size"] == 10000.0)
 
