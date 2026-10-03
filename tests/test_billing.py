@@ -364,6 +364,10 @@ try:
           offer["save"])
     check("a whole-dollar price has no .00",
           billing.describe_price("price_round")["label"] == "$9 a month")
+    _os.environ["STRIPE_PRICE_ID_YEARLY"] = "price_round"
+    check("a monthly price put in the yearly slot by mistake is not offered as yearly",
+          billing.offers()["yearly"] is None)
+    _os.environ["STRIPE_PRICE_ID_YEARLY"] = "price_y"
     billing._PRICES.clear()
     billing._stripe = stripe_down
     check("if Stripe cannot be reached, the written label stands in",

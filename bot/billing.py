@@ -133,6 +133,9 @@ def offers(call=None) -> Dict:
     yearly = None
     if (os.environ.get("STRIPE_PRICE_ID_YEARLY") or "").strip():
         yearly = describe_price(price_id_for("yearly"), call)
+        # A monthly price pasted into the yearly slot would sell monthly as yearly.
+        if yearly and yearly["interval"] != "year":
+            yearly = None
     save = 0
     if monthly and yearly and monthly["cents"] and monthly["interval"] == "month" \
             and yearly["interval"] == "year":
