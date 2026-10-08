@@ -68,6 +68,20 @@
 </div>
 {% endif %}
 
+{# Makes a public page with the call, the counts and the date, never who
+   shared it. A visitor gets the popular page for the same symbol instead. #}
+{% if not demo %}
+  <form class="sharebar" method="post" action="{{ url_for('share') }}" data-working
+        data-working-title="Making your share page"
+        data-working-note="Freezing this call with today's date and drawing its picture.">
+    <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+    <input type="hidden" name="interval" value="{{ r.bars.interval }}">
+    <button class="btn quiet" type="submit">Share this call</button>
+  </form>
+{% elif popular_url %}
+  <div class="sharebar"><a class="btn quiet" href="{{ popular_url }}">Share this call</a></div>
+{% endif %}
+
 {% if plan.entry and a != 'AVOID' %}
 <div class="cols a" style="margin-top:var(--s3)">
   <div class="card">

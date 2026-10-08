@@ -44,6 +44,7 @@ SUITES = [
     ("test_web.py",          True,  "research, screener, portfolio, monitor and links"),
     ("test_codes.py",        False, "sign-in codes by email and text, and their limits"),
     ("test_billing.py",      False, "paid plans: signed webhooks, allowances, checkout"),
+    ("test_growth.py",       False, "popular pages, sharing, invites, weekly email"),
 ]
 
 TIMEOUT = 900

@@ -6,6 +6,10 @@
 {# The front door for anyone not signed in. Short on words on purpose: the
    features are one tap away and show themselves better than a paragraph can,
    so the page's job is to get someone to tap one. #}
+{% if session.get('ref') and billing_on %}
+  <div class="notice" style="margin-bottom:var(--s3)"><b>A friend invited you.</b>
+    Join and you both get a week of Pro free.</div>
+{% endif %}
 <section class="hero">
   <div class="mark" aria-hidden="true">
     {% with size=56 %}{% include "_mark.html" %}{% endwith %}
@@ -40,6 +44,9 @@
     <span class="sr">A real answer, not financial advice.</span>
   </a>
 {% endif %}
+
+<p class="prose" style="text-align:center;margin-top:var(--s3)">
+  <a href="{{ url_for('stocks_index') }}">Today's checks on popular stocks and coins &rarr;</a></p>
 
 <section>
   <div class="sechead"><h2>Tap one to see it</h2>

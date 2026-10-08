@@ -29,7 +29,7 @@ import sqlite3
 import ssl
 import time
 from email.message import EmailMessage
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 CODE_TTL = 10 * 60
 MAX_ATTEMPTS = 5
@@ -150,14 +150,22 @@ def send_email_code(conn, email: str, ip: str, secret: bytes,
 
 
 def _smtp_send(to: str, code: str) -> None:
+    send_mail(to, "Your Orenth code: %s" % code,
+              "Your Orenth sign-in code is:\n\n    %s\n\n"
+              "It works for ten minutes. If you did not ask for it, ignore this "
+              "email: nobody can sign in without the code.\n" % code)
+
+
+def send_mail(to: str, subject: str, body: str,
+              headers: Optional[Dict[str, str]] = None) -> None:
+    """One plain-text email through the configured SMTP server."""
     msg = EmailMessage()
-    msg["Subject"] = "Your Orenth code: %s" % code
+    msg["Subject"] = subject
     msg["From"] = os.environ["MAIL_FROM"]
     msg["To"] = to
-    msg.set_content(
-        "Your Orenth sign-in code is:\n\n    %s\n\n"
-        "It works for ten minutes. If you did not ask for it, ignore this "
-        "email: nobody can sign in without the code.\n" % code)
+    for key, value in (headers or {}).items():
+        msg[key] = value
+    msg.set_content(body)
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT") or 587)
     try:

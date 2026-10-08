@@ -43,7 +43,8 @@
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
     {% if plan.pro %}
-      <p class="prose"><b>Pro.</b> No limits.</p>
+      <p class="prose"><b>Pro.</b> No limits.{% if plan.bonus_until and not plan.customer %}
+        Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
       {% if plan.customer %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
           <button class="btn quiet" type="submit">Manage subscription</button>
@@ -58,6 +59,42 @@
   </div>
 </section>
 {% endif %}
+
+{% if invite %}
+<section id="invite">
+  <div class="sechead"><h2>Invite friends</h2>
+    <span class="tail">{{ invite.joined }} joined so far</span></div>
+  <div class="card">
+    <p class="prose">When a friend joins through your link, you <b>both</b> get
+      {{ invite_days }} days of Pro free. No card needed.</p>
+    <div class="sharebar" data-url="{{ invite.url }}"
+         data-text="I use Orenth to check stocks before I buy. Join with my link and we both get a free week of Pro.">
+      <input class="field" type="text" value="{{ invite.url }}" readonly
+             aria-label="Your invite link" onclick="this.select()">
+      <button class="btn" type="button" data-act="share">Share link</button>
+      <button class="btn quiet" type="button" data-act="copy">Copy</button>
+      <span class="fine" data-said aria-live="polite"></span>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if weekly.ready %}
+<section id="weekly">
+  <div class="sechead"><h2>Weekly email</h2></div>
+  <div class="card">
+    <p class="prose">Every Monday morning: what Orenth says about the stocks on
+      your watchlist, and the strongest setups among popular stocks.
+      {% if weekly.on %}<b>It's on.</b>{% endif %}</p>
+    <form method="post" action="{{ url_for('weekly_email') }}" style="margin-top:var(--s2)">
+      <input type="hidden" name="on" value="{{ '0' if weekly.on else '1' }}">
+      <button class="btn {{ 'quiet' if weekly.on else '' }}" type="submit">
+        {{ 'Turn it off' if weekly.on else 'Send it to me' }}</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
 
 <section>
   <div class="sechead"><h2>What belongs to you</h2>
@@ -149,5 +186,35 @@
   </div>
 </section>
 {% endif %}
+
+<script>
+(function () {
+  var bar = document.querySelector('#invite .sharebar');
+  if (!bar) { return; }
+  var url = bar.getAttribute('data-url');
+  var said = bar.querySelector('[data-said]');
+  function copy() {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(
+        function () { said.textContent = 'Link copied.'; },
+        function () { said.textContent = 'Select the link and copy it.'; });
+    } else {
+      said.textContent = 'Select the link and copy it.';
+    }
+  }
+  bar.addEventListener('click', function (e) {
+    var act = e.target.getAttribute('data-act');
+    if (act === 'copy') { copy(); }
+    if (act === 'share') {
+      if (navigator.share) {
+        navigator.share({ title: 'Orenth', text: bar.getAttribute('data-text'),
+                          url: url }).catch(function () {});
+      } else {
+        copy();
+      }
+    }
+  });
+})();
+</script>
 
 {% endblock %}

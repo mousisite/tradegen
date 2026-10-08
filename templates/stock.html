@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% set label = name if name == short(symbol) else name ~ " (" ~ short(symbol) ~ ")" %}
+{% if snap %}
+  {% set page_blurb = "Orenth's check on " ~ label ~ ": " ~ snap.action ~ ". " ~ counts(snap) ~ " Not financial advice." %}
+{% endif %}
+{% block title %}{% if frozen %}{{ short(symbol) }}: {{ snap.action }}, shared from Orenth{% else %}{{ label }}: buy, wait or avoid? Today's check · Orenth{% endif %}{% endblock %}
+{% block og_title %}{% if snap %}{{ short(symbol) }}: {{ snap.action }} · Orenth{% else %}{{ label }} · Orenth{% endif %}{% endblock %}
+{# A shared page is a copy of one moment, and an unchecked one has nothing on
+   it yet: neither is a page a search engine should send anyone to. #}
+{% block head_extra %}{% if frozen or not snap %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">{% if frozen %}Shared from Orenth · {{ snap.at|day }}{% else %}Checked every day{% if snap %} · updated {{ snap.at|ago }}{% endif %}{% endif %}</span>
+  <h1>{{ label }}: buy, wait or avoid?</h1>
+</div>
+
+{% if not snap %}
+  <div class="plainbox">
+    <span class="eyebrow">Being checked</span>
+    <p class="prose">This one is being back-tested right now. The page fills
+      in within the hour.</p>
+  </div>
+{% else %}
+  {% set a = snap.action %}
+  <div class="call {{ 'buy' if a == 'BUY' else 'sell' if a == 'SHORT'
+                      else 'wait' if a == 'WAIT' else 'skip' }}">
+    <span class="word">{{ a|capitalize }}</span>
+    <span class="line">{{ snap.headline }}</span>
+  </div>
+
+  <div class="plainbox">
+    <span class="eyebrow">How sure is it?</span>
+    <p class="lead">{{ counts(snap) }}</p>
+    {% if snap.sure %}<p class="prose">{{ snap.sure }}</p>{% endif %}
+    {% if snap.points %}
+      <ul class="list">{% for x in snap.points %}<li>{{ x }}</li>{% endfor %}</ul>
+    {% endif %}
+    <p class="prose faint" style="font-size:var(--t-xs)">
+      Price {{ '$' if snap.currency == 'USD' }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
+      {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}{% endif %}
+    </p>
+  </div>
+
+  <div class="sharebar" data-url="{{ page_url }}"
+       data-text="Orenth says {{ a }} on {{ short(symbol) }}. {{ counts(snap) }}">
+    <button class="btn" type="button" data-act="share">Share</button>
+    <button class="btn quiet" type="button" data-act="copy">Copy link</button>
+    <a class="btn quiet" href="{{ card_url }}" download="orenth-{{ slug(symbol) }}.png">Save picture</a>
+    <span class="fine" data-said aria-live="polite"></span>
+  </div>
+{% endif %}
+
+{% if frozen and today_url %}
+  <p class="prose" style="margin-top:var(--s3)">
+    <a href="{{ today_url }}">See today's check for {{ short(symbol) }} &rarr;</a></p>
+{% endif %}
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">Check any stock or coin, free.</p>
+  <p class="prose">Orenth back-tests every setup against its own history and
+    tells you straight when there is no edge.</p>
+  <div class="cta">
+    {% if not current_user or demo %}
+      <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    {% endif %}
+    <a class="btn quiet" href="{{ url_for('analyse', symbol=symbol, interval='1d') }}">See the full workings</a>
+  </div>
+</section>
+
+{% if others %}
+<section>
+  <div class="sechead"><h2>Other popular checks</h2>
+    <a class="tail" href="{{ url_for('stocks_index') }}">all of them &rarr;</a></div>
+  <ul class="verdicts">
+    {% for v in others %}
+      {% include "_verdict_row.html" %}
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<script>
+(function () {
+  var bar = document.querySelector('.sharebar');
+  if (!bar) { return; }
+  var url = bar.getAttribute('data-url');
+  var text = bar.getAttribute('data-text');
+  var said = bar.querySelector('[data-said]');
+  function copy() {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(
+        function () { said.textContent = 'Link copied.'; },
+        function () { said.textContent = url; });
+    } else {
+      said.textContent = url;
+    }
+  }
+  bar.addEventListener('click', function (e) {
+    var act = e.target.getAttribute('data-act');
+    if (act === 'copy') { copy(); }
+    if (act === 'share') {
+      if (navigator.share) {
+        navigator.share({ title: 'Orenth', text: text, url: url })
+          .catch(function () {});
+      } else {
+        copy();
+      }
+    }
+  });
+})();
+</script>
+
+{% endblock %}

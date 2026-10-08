@@ -52,6 +52,7 @@ def main(argv=None) -> int:
 
     cfg = web.config_mod.load(web.app.config.get("CFG_PATH"))
     loop = web.start_alert_loop(cfg)
+    web.start_background_jobs()
 
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
     print()

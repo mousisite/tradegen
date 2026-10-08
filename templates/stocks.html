@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% set page_blurb = "Buy, wait or avoid? Orenth checks " ~ rows|length ~ " popular stocks and coins every day against their own history, and says so when there is no edge. Not financial advice." %}
+{% block title %}Popular stocks and crypto: buy, wait or avoid today · Orenth{% endblock %}
+{% block og_title %}Popular stocks and crypto, checked daily · Orenth{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Popular stocks and crypto, checked daily</h1>
+  <p>Buy, wait or avoid, from how often the same setup worked before. Tap one
+    to see the numbers.</p>
+</div>
+
+<ul class="verdicts">
+  {% for v in rows %}
+    {% include "_verdict_row.html" %}
+  {% endfor %}
+</ul>
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">Not on the list? Check any stock or coin.</p>
+  <div class="cta">
+    {% if not current_user or demo %}
+      <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    {% else %}
+      <a class="btn" href="{{ url_for('index') }}">Check a stock</a>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

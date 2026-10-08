@@ -241,6 +241,25 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .plan { display: flex; flex-direction: column; gap: var(--s2); }
 .plans .card + .card { margin-top: 0; }     /* the grid's gap spaces them */
+
+/* Sharing, and the list of popular checks. */
+.sharebar { display: flex; flex-wrap: wrap; align-items: center;
+            gap: var(--s1); margin-top: var(--s3); }
+.sharebar .field { flex: 1 1 220px; min-width: 0; }
+.sharebar [data-said]:empty { display: none; }
+.card.closing { padding: var(--s4) var(--s3); }
+.closing .cta { display: flex; flex-wrap: wrap; gap: var(--s1);
+                justify-content: center; }
+.verdicts { list-style: none; margin: 0; padding: 0; display: grid;
+            gap: var(--s1);
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.verdicts a { display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+              border: 1px solid var(--rule); border-radius: var(--r-md);
+              background: var(--surface); color: var(--ink); }
+.verdicts a:hover { border-color: var(--line-strong); text-decoration: none; }
+.verdicts .sym { font-family: var(--mono); font-size: var(--t-sm); min-width: 3.6em; }
+.verdicts .nm { flex: 1; min-width: 0; color: var(--ink-2); font-size: var(--t-sm);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan .price { font-family: var(--serif); font-size: var(--t-xl); margin: 0; }
 .plan .list { flex: 1; }
 .plan.pro { border-color: var(--accent); }
@@ -747,6 +766,7 @@ ul.list.ok li::marker { color: var(--gain); }
   padding: var(--s3);
   margin-bottom: var(--s3);
 }
+.call + .plainbox { margin-top: var(--s2); }
 .plainbox .lead {
   font-family: var(--serif); font-size: var(--t-md);
   color: var(--ink); margin: var(--s1) 0 var(--s2); line-height: 1.35;

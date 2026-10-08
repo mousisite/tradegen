@@ -1,0 +1,11 @@
+{# One popular instrument as a tappable row. Expects v, short and slug. #}
+<li><a href="{{ url_for('stock_page', sym=slug(v.symbol)) }}">
+  <b class="sym">{{ short(v.symbol) }}</b>
+  <span class="nm">{{ v.name }}</span>
+  {% if v.action %}
+    <span class="chip {{ 'long' if v.action == 'BUY' else 'short' if v.action == 'SHORT'
+         else 'hold' if v.action == 'WAIT' else 'mute' }}">{{ v.action }}</span>
+  {% else %}
+    <span class="chip mute">checking</span>
+  {% endif %}
+</a></li>

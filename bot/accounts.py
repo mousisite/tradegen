@@ -89,6 +89,9 @@ class User:
     is_local: bool = False
     plan: str = "free"
     plan_status: str = ""
+    bonus_until: int = 0          # free Pro from invites, until this time
+    weekly_email: bool = False
+    created_ts: int = 0
 
     @property
     def display(self) -> str:
@@ -109,7 +112,11 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 picture=row["picture"], provider=row["provider"],
                 is_local=bool(row["is_local"]),
                 plan=row["plan"] if "plan" in keys else "free",
-                plan_status=row["plan_status"] if "plan_status" in keys else "")
+                plan_status=row["plan_status"] if "plan_status" in keys else "",
+                bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
+                weekly_email=bool(row["weekly_email"]) if "weekly_email" in keys
+                else False,
+                created_ts=row["created_ts"] if "created_ts" in keys else 0)
 
 
 # --- schema -----------------------------------------------------------------
@@ -128,9 +135,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     for column, ddl in (("plan", "TEXT NOT NULL DEFAULT 'free'"),
                         ("plan_status", "TEXT NOT NULL DEFAULT ''"),
                         ("stripe_customer", "TEXT NOT NULL DEFAULT ''"),
-                        ("plan_until", "INTEGER NOT NULL DEFAULT 0")):
+                        ("plan_until", "INTEGER NOT NULL DEFAULT 0"),
+                        ("invite_code", "TEXT NOT NULL DEFAULT ''"),
+                        ("invited_by", "INTEGER NOT NULL DEFAULT 0"),
+                        ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),
+                        ("weekly_email", "INTEGER NOT NULL DEFAULT 0"),
+                        ("digest_week", "TEXT NOT NULL DEFAULT ''")):
         if column not in have:
             conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite ON "
+                 "users(invite_code) WHERE invite_code <> ''")
 
     local = _ensure_local(conn)
 
@@ -401,9 +415,11 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
-    from . import billing
+    from . import billing, public
     billing.ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
+    public.ensure_schema(conn)
+    conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()

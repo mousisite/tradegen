@@ -155,6 +155,8 @@ def is_pro(user, operator: bool = False) -> bool:
         return False
     if user.is_local or operator:
         return True
+    if getattr(user, "bonus_until", 0) > time.time():     # invite reward
+        return True
     return getattr(user, "plan", "free") == "pro" and \
         getattr(user, "plan_status", "") in ACTIVE
 

@@ -7,7 +7,7 @@
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _blurb = "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Every company figure cites the SEC filing it came from." %}
+{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Every company figure cites the SEC filing it came from." %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
@@ -18,11 +18,12 @@
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Orenth">
+<meta name="twitter:title" content="{{ self.og_title() }}">
 <meta name="twitter:description" content="{{ _blurb }}">
 <meta name="twitter:image" content="{{ preview_image }}">
 <title>{% block title %}Orenth{% endblock %}</title>
 <link rel="canonical" href="{{ canonical_url }}">
+{% block head_extra %}{% endblock %}
 {# Who this is, in the form a search engine reads.
    Searching the name alone turns up a watch brand, a consulting group and an
    unrelated iOS app. Without this, they are one blurred entity and none of
@@ -178,7 +179,8 @@
   that. Never risk money you cannot afford to lose.
   <br>
   <a href="{{ url_for('terms') }}">Terms</a> ·
-  <a href="{{ url_for('privacy') }}">Privacy</a>{% if billing_on %} ·
+  <a href="{{ url_for('privacy') }}">Privacy</a> ·
+  <a href="{{ url_for('stocks_index') }}">Popular stocks</a>{% if billing_on %} ·
   <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
 </p>
 </div>

@@ -50,12 +50,15 @@ from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
 from bot import demo as demo_mod
+from bot import digest as digest_mod
 from bot import engine
 from bot import ideas as ideas_mod
+from bot import invites as invites_mod
 from bot import export as export_mod
 from bot import market as market_mod
 from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
+from bot import public as public_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import thesis as thesis_mod
@@ -125,13 +128,15 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
                     "robots", "sitemap", "index", "favicon",
                     "code_start", "code_verify", "pricing",
-                    "billing_webhook"}
+                    "billing_webhook", "stocks_index", "stock_page",
+                    "stock_card", "share_page", "share_card", "join",
+                    "email_stop"}
 
 SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "30 September 2026"
+LEGAL_UPDATED = "8 October 2026"
 
 
 def auth_required() -> bool:
@@ -435,6 +440,14 @@ def _signed(value, digits=2):
         return "-"
 
 
+@app.template_filter("day")
+def _day(ts):
+    try:
+        return time.strftime("%d %b %Y", time.gmtime(int(ts))).lstrip("0")
+    except (TypeError, ValueError):
+        return "-"
+
+
 @app.template_filter("ago")
 def _ago(ts):
     try:
@@ -648,7 +661,12 @@ def analyse():
                            suggestions=suggestions, calendar_rows=calendar_rows,
                            overlap=overlap,
                            plain=plain_mod.explain_plan(result.plan, result.bars,
-                                                        hold_text))
+                                                        hold_text),
+                           # A visitor cannot make a share, but every example
+                           # symbol has a public page to pass around instead.
+                           popular_url=(url_for("stock_page", sym=public_mod.slug(
+                               result.bars.symbol))
+                               if result.bars.symbol in public_mod.NAMES else ""))
 
 
 def _family_rollup(result: engine.Analysis):
@@ -1168,18 +1186,12 @@ def google_callback():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         user = accounts_mod.upsert_google_user(conn, profile)
-        accounts_mod.purge_expired(conn)
-        token = accounts_mod.start_session(
-            conn, user.id, request.headers.get("User-Agent", ""))
     except ValueError as exc:
         return render_template("signin.html", reason=str(exc), why_not="",
                                next_url=""), 400
     finally:
         conn.close()
-
-    session.permanent = True
-    session[SESSION_KEY] = token
-    return redirect(_safe_back(next_url, url_for("index")))
+    return _finish_sign_in(user, next_url)
 
 
 def _finish_sign_in(user, next_url: str):
@@ -1189,6 +1201,11 @@ def _finish_sign_in(user, next_url: str):
         accounts_mod.purge_expired(conn)
         token = accounts_mod.start_session(
             conn, user.id, request.headers.get("User-Agent", ""))
+        # A friend's link they arrived through, credited once the account
+        # exists. accept() ignores it for anyone who was not brand new.
+        ref = session.pop("ref", "")
+        if ref:
+            invites_mod.accept(conn, user.id, ref)
     finally:
         conn.close()
     session.permanent = True
@@ -1388,16 +1405,27 @@ def account():
     finally:
         conn.close()
     plan = {"on": billing_mod.ready(), "pro": _pro(), "customer": ""}
+    invite = {}
     if plan["on"]:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             plan["customer"] = billing_mod.customer_of(conn, uid())
             plan["used"] = billing_mod.views_today(conn, uid())
+            if not g.user.is_local:
+                invite = {"url": _public_base() + url_for(
+                              "join", code=invites_mod.code_for(conn, uid())),
+                          "joined": invites_mod.joined(conn, uid())}
         finally:
             conn.close()
         plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
+        plan["bonus_until"] = (g.user.bonus_until
+                               if g.user.bonus_until > time.time() else 0)
+    weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
+              "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,
-                           datasets=export_mod.DATASETS, plan=plan)
+                           datasets=export_mod.DATASETS, plan=plan,
+                           invite=invite, weekly=weekly,
+                           invite_days=invites_mod.BONUS_DAYS)
 
 
 @app.route("/account/delete", methods=["POST"])
@@ -1612,10 +1640,13 @@ def robots():
 @app.route("/sitemap.xml")
 def sitemap():
     base = _public_base()
+    pages = PUBLIC_PAGES + [("/stocks", "daily", "0.8")] + [
+        ("/stock/" + public_mod.slug(sym), "daily", "0.7")
+        for sym, _ in public_mod.POPULAR]
     rows = "".join(
         "<url><loc>%s%s</loc><changefreq>%s</changefreq>"
         "<priority>%s</priority></url>" % (base, path, freq, priority)
-        for path, freq, priority in PUBLIC_PAGES)
+        for path, freq, priority in pages)
     return Response('<?xml version="1.0" encoding="UTF-8"?>'
                     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
                     '%s</urlset>' % rows, mimetype="application/xml")
@@ -2115,6 +2146,245 @@ def api_analyse():
                            result.composite, result.regime, result.calibration,
                            result.sentiment),
         mimetype="application/json")
+
+
+# ---------------------------------------------------------------------------
+# Pages anyone can read, sharing, invites and the weekly email
+# ---------------------------------------------------------------------------
+
+def _png(data: bytes, max_age: int):
+    return Response(data, mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=%d" % max_age})
+
+
+@app.route("/stocks")
+def stocks_index():
+    """Every popular stock and coin with today's call, for people and search."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        rows = public_mod.verdicts(conn)
+    finally:
+        conn.close()
+    return render_template("stocks.html", rows=rows, short=public_mod.short,
+                           slug=public_mod.slug)
+
+
+@app.route("/stock/<sym>")
+def stock_page(sym):
+    """One popular instrument's call, refreshed daily in the background."""
+    symbol = public_mod.from_slug(sym)
+    if symbol is None:
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        snap = public_mod.verdict(conn, symbol)
+        others = [v for v in public_mod.verdicts(conn) if v["symbol"] != symbol]
+    finally:
+        conn.close()
+    base = _public_base()
+    page = base + url_for("stock_page", sym=public_mod.slug(symbol))
+    card = base + url_for("stock_card", sym=public_mod.slug(symbol))
+    return render_template(
+        "stock.html", snap=snap, symbol=symbol, name=public_mod.NAMES[symbol],
+        short=public_mod.short, slug=public_mod.slug, counts=public_mod.counts_line,
+        others=others[:12], page_url=page, card_url=card, frozen=False,
+        **({"preview_image": card} if snap else {}))
+
+
+@app.route("/stock/<sym>/card.png")
+def stock_card(sym):
+    symbol = public_mod.from_slug(sym)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        snap = public_mod.verdict(conn, symbol) if symbol else None
+    finally:
+        conn.close()
+    if snap is None:
+        abort(404)
+    return _png(public_mod.render_card(snap), 3600)
+
+
+@app.route("/share", methods=["POST"])
+def share():
+    """Freeze what this person is looking at into a page they can pass on."""
+    symbol = (request.form.get("symbol") or "").strip().upper()[:20]
+    interval = request.form.get("interval") or "1d"
+    if not symbol or interval not in dict(INTERVALS):
+        abort(400)
+    if not _allowance_left(symbol, interval):
+        return _allowance_used()
+    try:
+        result = cached_analysis(symbol, interval, _cfg(), record=False)
+    except DataError as exc:
+        return render_template("error.html", message=str(exc), symbol=symbol), 404
+    _spend_view(symbol, interval)
+    snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
+                                                              result.bars))
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        sid = public_mod.create_share(conn, uid(), snap)
+    except public_mod.ShareError as exc:
+        return render_template("error.html", message=str(exc), symbol=symbol), 429
+    finally:
+        conn.close()
+    return redirect(url_for("share_page", sid=sid), code=303)
+
+
+@app.route("/s/<sid>")
+def share_page(sid):
+    """A shared call, exactly as it was when shared."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        snap = public_mod.get_share(conn, sid)
+    finally:
+        conn.close()
+    if snap is None:
+        abort(404)
+    base = _public_base()
+    card = base + url_for("share_card", sid=sid)
+    symbol = snap["symbol"]
+    return render_template(
+        "stock.html", snap=snap, symbol=symbol,
+        name=snap.get("name") or symbol, short=public_mod.short,
+        slug=public_mod.slug, counts=public_mod.counts_line, others=[],
+        page_url=base + url_for("share_page", sid=sid), card_url=card,
+        frozen=True, preview_image=card,
+        today_url=(url_for("stock_page", sym=public_mod.slug(symbol))
+                   if symbol in public_mod.NAMES else ""))
+
+
+@app.route("/s/<sid>.png")
+def share_card(sid):
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        snap = public_mod.get_share(conn, sid)
+    finally:
+        conn.close()
+    if snap is None:
+        abort(404)
+    # Frozen, so it can be cached for a long time.
+    return _png(public_mod.render_card(snap), 86400 * 7)
+
+
+@app.route("/join/<code>")
+def join(code):
+    """A friend's invite link. Remembered until this browser signs up."""
+    if getattr(g, "user", None) is not None:
+        return redirect(url_for("index"))
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        known = invites_mod.inviter(conn, code) is not None
+    finally:
+        conn.close()
+    if known:
+        session["ref"] = code.strip().lower()
+    return redirect(url_for("index"))
+
+
+@app.route("/account/weekly-email", methods=["POST"])
+def weekly_email():
+    if g.demo or not digest_mod.can_receive(g.user):
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        digest_mod.set_wanted(conn, uid(), request.form.get("on") == "1")
+    finally:
+        conn.close()
+    return redirect(url_for("account") + "#weekly")
+
+
+@app.route("/email/stop", methods=["GET", "POST"])
+def email_stop():
+    """Stop the weekly email from a link in it.
+
+    A GET only asks, because mail scanners open every link in a message and
+    would otherwise unsubscribe people who never clicked. A POST stops it,
+    which is also what an inbox's own unsubscribe button sends.
+    """
+    try:
+        user_id = int(request.values.get("u") or 0)
+    except ValueError:
+        user_id = 0
+    if not user_id or not digest_mod.check_token(app.secret_key, user_id,
+                                                 request.values.get("t", "")):
+        abort(404)
+    done = False
+    if request.method == "POST":
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            digest_mod.set_wanted(conn, user_id, False)
+        finally:
+            conn.close()
+        done = True
+    return render_template("email_stop.html", done=done, u=user_id,
+                           t=request.values.get("t", ""))
+
+
+def _public_snapshot(symbol: str) -> dict:
+    """One popular instrument, analysed with the shared settings."""
+    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
+                            with_learning=True, record=False,
+                            db_path=app.config.get("DB_PATH"))
+    return public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
+                                                              result.bars))
+
+
+def _digest_look_up(symbol: str):
+    """A symbol's call for the weekly email: today's public one if there is
+    one, otherwise a fresh analysis."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        stored = public_mod.verdict(conn, symbol)
+    finally:
+        conn.close()
+    if stored and time.time() - stored["at"] < 2 * 86400:
+        return stored
+    return _public_snapshot(symbol)
+
+
+def _refresh_popular_job():
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return public_mod.refresh(conn, _public_snapshot)
+    finally:
+        conn.close()
+
+
+def _weekly_email_job():
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return digest_mod.run(conn, app.secret_key, _public_base_offline(),
+                              _digest_look_up)
+    finally:
+        conn.close()
+
+
+def _public_base_offline() -> str:
+    """The public address outside a request, where request.url_root is not."""
+    return ((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().rstrip("/")
+            or "http://127.0.0.1:8000")
+
+
+BACKGROUND = {}
+
+
+def start_background_jobs():
+    """The daily popular checks and the Monday email. Started by serve.py."""
+    if BACKGROUND:
+        return BACKGROUND
+    BACKGROUND["popular"] = scheduler_mod.Scheduler(
+        _refresh_popular_job, interval_seconds=3600, name="orenth-popular")
+    BACKGROUND["weekly"] = scheduler_mod.Scheduler(
+        _weekly_email_job, interval_seconds=1800, name="orenth-weekly-email")
+    for job in BACKGROUND.values():
+        job.start()
+    # The first popular run soon after start rather than an hour later, but
+    # not at the same moment as everything else waking up.
+    soon = threading.Timer(120, BACKGROUND["popular"].check_now)
+    soon.daemon = True
+    soon.start()
+    return BACKGROUND
 
 
 @app.errorhandler(404)
