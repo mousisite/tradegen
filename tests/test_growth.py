@@ -270,6 +270,28 @@ try:
     check("the account page has the invite link", "/join/" + code in page)
     check("and says how many joined", "3 joined so far" in page)
     check("and until when Pro is free", "Free from invites until" in page)
+
+    # A giveaway prize: free Pro with no card and nothing that renews.
+    _sys.path.insert(0, _os.path.join(harness.ROOT, "tools"))
+    import gift_pro
+    winner = user("winner@example.com")
+    conn = db.connect(DB)
+    until = gift_pro.gift(conn, "  Winner@Example.com ", 365)
+    check("a gifted year is free Pro for a year",
+          abs(until - (time.time() + 365 * 86400)) < 120
+          and billing.is_pro(fresh(winner.id)))
+    check("and stacks on top of free time already there",
+          gift_pro.gift(conn, "winner@example.com", 7) == until + 7 * 86400)
+    texter = A.upsert_phone_user(conn, "+15555550123")
+    gift_pro.gift(conn, "+15555550123", 30)
+    check("a phone account can be gifted by its number",
+          billing.is_pro(fresh(texter.id)))
+    try:
+        gift_pro.gift(conn, "nobody@example.com", 365)
+        check("an unknown address is refused, not created", False)
+    except ValueError:
+        check("an unknown address is refused, not created", True)
+    conn.close()
     for key in STRIPE:
         _os.environ.pop(key, None)
 
