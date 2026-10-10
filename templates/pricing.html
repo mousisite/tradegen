@@ -8,6 +8,14 @@
   {% if reason %}<div class="notice" style="margin-top:var(--s2)">{{ reason }}</div>{% endif %}
 </div>
 
+{% if promo and not (is_pro and current_user and not demo) %}
+  <p class="promo"><b>Founding offer:</b> code
+    <b class="code">{{ promo.code }}</b> gets you Pro {{ promo.what }}
+    {{ promo.how_long }}.{% if promo.left is not none %}
+    <b>{{ promo.left }} of {{ promo.limit }} left.</b>{% endif %}
+    You type it on the payment page.</p>
+{% endif %}
+
 <div class="plans">
   <div class="card plan">
     <span class="eyebrow">Free</span>

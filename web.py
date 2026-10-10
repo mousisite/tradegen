@@ -265,6 +265,7 @@ def _pricing_page(reason: str = "", status: int = 200):
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
                            offer=billing_mod.offers(),
+                           promo=billing_mod.promo(),
                            # One free trial each: not for anyone who has paid before.
                            trial=0 if customer else billing_mod.trial_days(),
                            is_pro=user is not None and _pro(),
@@ -543,7 +544,8 @@ def index():
     # It is also the first thing a person arriving from a link sees, and a bare
     # login form asks them to commit before they know what this is.
     if getattr(g, "user", None) is None:
-        return render_template("landing.html", example=_example())
+        return render_template("landing.html", example=_example(),
+                               promo=billing_mod.promo())
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:

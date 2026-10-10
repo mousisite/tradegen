@@ -242,6 +242,16 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plan { display: flex; flex-direction: column; gap: var(--s2); }
 .plans .card + .card { margin-top: 0; }     /* the grid's gap spaces them */
 
+/* The public discount code. */
+.promo { display: block; background: var(--accent-wash); color: var(--ink);
+         border: 1px solid var(--accent); border-radius: var(--r-md);
+         padding: 12px 16px; font-size: var(--t-sm); line-height: 1.5; margin: 0; }
+a.promo { margin-bottom: var(--s3); }
+p.promo { max-width: 760px; margin: 0 auto var(--s3); }     /* as wide as the plans */
+a.promo:hover { text-decoration: none; border-color: var(--accent-text); }
+.promo .code { font-family: var(--mono); letter-spacing: .04em;
+               color: var(--accent-text); }
+
 /* Sharing, and the list of popular checks. */
 .sharebar { display: flex; flex-wrap: wrap; align-items: center;
             gap: var(--s1); margin-top: var(--s3); }

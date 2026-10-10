@@ -10,6 +10,14 @@
   <div class="notice" style="margin-bottom:var(--s3)"><b>A friend invited you.</b>
     Join and you both get a week of Pro free.</div>
 {% endif %}
+{% if promo %}
+  {# Every word here comes from Stripe, so it is true when it is shown. #}
+  <a class="promo" href="{{ url_for('pricing') }}">
+    <b>Founding offer:</b> code <b class="code">{{ promo.code }}</b> gets you Pro
+    {{ promo.what }} {{ promo.how_long }}.{% if promo.left is not none %}
+    <b>{{ promo.left }} of {{ promo.limit }} left.</b>{% endif %}
+  </a>
+{% endif %}
 <section class="hero">
   <div class="mark" aria-hidden="true">
     {% with size=56 %}{% include "_mark.html" %}{% endwith %}

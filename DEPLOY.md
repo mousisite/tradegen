@@ -216,6 +216,7 @@ written reasoning on the research page.
 | `PRO_TRIAL_DAYS` | no | Free days before the first charge, default 7. Set 0 to switch off. One trial per person |
 | `PRO_PRICE_LABEL` | no | Shown only if Stripe cannot be reached; prices are otherwise read from Stripe |
 | `FREE_ANALYSES_PER_DAY`, `FREE_FIND_RESULTS`, `FREE_ALERTS` | no | The free allowance, default 3, 3 and 1 |
+| `PROMO_CODE` | no | The discount code the front and pricing pages advertise, with how many uses are left, all read from Stripe. Default `HALF`; `none` hides it |
 | `MAIL_POSTAL_ADDRESS` | for the weekly email | A postal address (a PO box works) printed at the foot of the weekly email, as US law requires. With the SMTP settings, it turns the weekly email on |
 
 ---
