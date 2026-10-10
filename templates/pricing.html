@@ -61,6 +61,9 @@
             and save {{ offer.save }}%{% endif %}</button>
         </form>
       {% endif %}
+      {# Stripe's own page takes codes, behind a link that is easy to miss. #}
+      <p class="fine">Have a discount code? Type it on the next page, under
+        "Add promotion code".</p>
     {% else %}
       <a class="btn" href="{{ url_for('signin', next='/pricing') }}">{{
         'Try Pro free for %d days' % trial if trial else 'Create account to upgrade' }}</a>
