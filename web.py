@@ -137,7 +137,7 @@ SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "8 October 2026"
+LEGAL_UPDATED = "10 October 2026"
 
 
 def auth_required() -> bool:

@@ -89,6 +89,9 @@
             <td>Delivering the code</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
             <td>Sending and checking the code</td></tr>
+        <tr><td>Metricool</td><td>The page address without anything after a ?, the
+            window size and the page you came from, only while not signed in</td>
+            <td>Counting visits. No cookie, and nothing that identifies you</td></tr>
         <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
@@ -99,8 +102,9 @@
   <h2>What does not happen</h2>
   <ul class="list">
     <li>No advertising, and no advertising identifiers.</li>
-    <li>No analytics or tracking scripts. The pages load no third-party
-      JavaScript at all.</li>
+    <li>No tracking scripts. The pages load no third-party JavaScript at all.
+      Visits are counted only while you are not signed in, as described
+      above, with no cookie.</li>
     <li>No selling, renting or sharing of personal data with anyone.</li>
     <li>No cookies except the one that keeps you signed in. It holds an opaque
       session token and nothing else.</li>

@@ -519,7 +519,7 @@ try:
         check("%s offers an account instead" % path, says in got)
 
     body = stranger.get("/privacy").data.decode("utf-8", "replace")
-    for claim in ("openid", "profile", "No analytics or tracking",
+    for claim in ("openid", "profile", "No tracking scripts",
                   "No selling, renting or sharing"):
         check("the privacy page states: %s" % claim[:34], claim in body)
     terms_body = stranger.get("/terms").data.decode("utf-8", "replace")

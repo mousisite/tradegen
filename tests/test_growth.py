@@ -212,6 +212,10 @@ try:
     check("a result that rounds to zero has no sign",
           web._signed(-0.004) == "0.00" and web._signed(0.3) == "+0.30")
 
+    page = c.get("/stocks").data.decode()
+    check("visitors are counted, by page path only",
+          "tracker.metricool.com" in page and "location.pathname" in page)
+
     print()
     print("=" * 72)
     print("SHARING A CALL")
@@ -224,6 +228,8 @@ try:
         check("a visitor cannot make a share",
               r.status_code in (302, 303) and "/signin" in r.headers["Location"])
         sign_in(sharer)
+        check("signed-in pages are never counted",
+              "tracker.metricool.com" not in c.get("/stocks").data.decode())
         r = c.post("/share", data={"symbol": "TSLA", "interval": "1d"})
         where = r.headers.get("Location", "")
         check("sharing makes a page and goes to it",

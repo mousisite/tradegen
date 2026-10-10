@@ -82,6 +82,15 @@
       href="{{ url_for('static', filename='icon-192.png') }}">
 <link rel="apple-touch-icon" sizes="180x180"
       href="{{ url_for('static', filename='icon-180.png') }}">
+{# Counts visits for Metricool. Their tag loads a script that sends the full
+   address, query string and all, and /email/stop carries a token there. This
+   sends their same counter request with the path only, so no third-party
+   script runs and no cookie is set. Signed-in pages are never counted. #}
+{% if not current_user or demo %}
+<script>new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
+  + encodeURIComponent(location.origin + location.pathname) + "&bw=" + innerWidth + "&bh=" + innerHeight
+  + (document.referrer ? "&ref=" + encodeURIComponent(document.referrer.split("?")[0]) : "");</script>
+{% endif %}
 </head>
 <body>
 
