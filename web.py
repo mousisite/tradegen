@@ -61,6 +61,7 @@ from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
+from bot import strategies as strategies_mod
 from bot import thesis as thesis_mod
 from bot import usage as usage_mod
 from bot import workflows as workflows_mod
@@ -130,7 +131,7 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "code_start", "code_verify", "pricing",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
-                    "email_stop"}
+                    "email_stop", "backtests", "backtest_page"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -436,7 +437,9 @@ def _pct(value, digits=0):
 @app.template_filter("signed")
 def _signed(value, digits=2):
     try:
-        return "%+.*f" % (digits, float(value))
+        value = round(float(value), digits)
+        # -0.004 rounds to zero, and "-0.00" reads as a loss that is not there.
+        return "%.*f" % (digits, 0.0) if value == 0 else "%+.*f" % (digits, value)
     except (TypeError, ValueError):
         return "-"
 
@@ -1642,9 +1645,19 @@ def robots():
 @app.route("/sitemap.xml")
 def sitemap():
     base = _public_base()
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        rows = public_mod.verdicts(conn)
+    finally:
+        conn.close()
+    # A strategy built for intraday prices never fires on the daily ones these
+    # tests use, and its page would stay empty: not one to send a robot to.
     pages = PUBLIC_PAGES + [("/stocks", "daily", "0.8")] + [
         ("/stock/" + public_mod.slug(sym), "daily", "0.7")
-        for sym, _ in public_mod.POPULAR]
+        for sym, _ in public_mod.POPULAR] + [("/backtests", "daily", "0.8")] + [
+        ("/backtest/" + public_mod.strategy_slug(name), "daily", "0.7")
+        for name in strategies_mod.strategy_names()
+        if public_mod.strategy_results(rows, name)]
     rows = "".join(
         "<url><loc>%s%s</loc><changefreq>%s</changefreq>"
         "<priority>%s</priority></url>" % (base, path, freq, priority)
@@ -2180,7 +2193,7 @@ def stock_page(sym):
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         snap = public_mod.verdict(conn, symbol)
-        others = [v for v in public_mod.verdicts(conn) if v["symbol"] != symbol]
+        others = public_mod.related(symbol, public_mod.verdicts(conn))
     finally:
         conn.close()
     base = _public_base()
@@ -2189,8 +2202,61 @@ def stock_page(sym):
     return render_template(
         "stock.html", snap=snap, symbol=symbol, name=public_mod.NAMES[symbol],
         short=public_mod.short, slug=public_mod.slug, counts=public_mod.counts_line,
-        others=others[:12], page_url=page, card_url=card, frozen=False,
+        others=others, page_url=page, card_url=card, frozen=False,
+        tested=public_mod.symbol_results(snap), label_of=public_mod.strategy_label,
+        strategy_slug=public_mod.strategy_slug,
         **({"preview_image": card} if snap else {}))
+
+
+def _house_method() -> dict:
+    """The settings every public back-test runs on, said on the page."""
+    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    return {"stop": cfg["stop_atr_multiple"], "target": cfg["target_atr_multiple"],
+            "min": public_mod.MIN_TRADES,
+            "days": config_mod.horizon_for("1d", cfg),
+            "equity": cfg["cost_bps_equity"] / 100.0,
+            "crypto": cfg["cost_bps_crypto"] / 100.0}
+
+
+@app.route("/backtests")
+def backtests():
+    """All 34 strategies, back-tested on the popular list, for search."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        rows = public_mod.verdicts(conn)
+    finally:
+        conn.close()
+    table = [dict(public_mod.strategy_summary(public_mod.strategy_results(rows, s.name)),
+                  strategy=s.name, family=s.family)
+             for s in strategies_mod.REGISTRY]
+    table = sorted((t for t in table if t["n"]), key=lambda t: -t["kept"])
+    return render_template("backtests.html", table=table, method=_house_method(),
+                           label_of=public_mod.strategy_label,
+                           strategy_slug=public_mod.strategy_slug)
+
+
+@app.route("/backtest/<name>")
+def backtest_page(name):
+    """Does one strategy work? Its record on every popular instrument."""
+    strategy = public_mod.strategy_from_slug(name)
+    if strategy is None:
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        rows = public_mod.verdicts(conn)
+    finally:
+        conn.close()
+    results = public_mod.strategy_results(rows, strategy)
+    info = strategies_mod.BY_NAME[strategy]
+    kin = [s.name for s in strategies_mod.REGISTRY
+           if s.family == info.family and s.name != strategy]
+    return render_template(
+        "backtest.html", strategy=strategy, info=info,
+        label=public_mod.strategy_label(strategy), results=results,
+        summary=public_mod.strategy_summary(results), kin=kin,
+        method=_house_method(), label_of=public_mod.strategy_label,
+        strategy_slug=public_mod.strategy_slug, short=public_mod.short,
+        slug=public_mod.slug)
 
 
 @app.route("/stock/<sym>/card.png")
@@ -2328,8 +2394,10 @@ def _public_snapshot(symbol: str) -> dict:
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
                             db_path=app.config.get("DB_PATH"))
-    return public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
+    snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))
+    snap["tests"] = public_mod.tests(result.strategy_report)
+    return snap
 
 
 def _digest_look_up(symbol: str):

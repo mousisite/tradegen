@@ -48,6 +48,26 @@ POPULAR = [
 ]
 NAMES = dict(POPULAR)
 
+# Look-alikes, so a page links to what its reader will check next: NVDA to
+# AMD, BTC to ETH. A symbol in no group just gets the list order.
+PEERS = [
+    ("NVDA", "AMD", "AVGO", "INTC", "SMCI", "ARM"),
+    ("AAPL", "MSFT", "AMZN", "META", "GOOGL", "NFLX"),
+    ("TSLA", "RIVN", "F", "UBER"),
+    ("PLTR", "CRWD", "SNOW", "SHOP", "RDDT"),
+    ("COIN", "HOOD", "SOFI", "PYPL", "MSTR", "JPM", "BAC"),
+    ("GME", "AMC"),
+    ("DIS", "NKE", "BA", "WMT", "COST", "KO"),
+    ("SPY", "QQQ", "VOO"),
+    ("BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD",
+     "AVAX-USD", "LINK-USD", "LTC-USD"),
+]
+
+# A strategy that fired fewer times than this on one instrument is left off
+# its tables: a handful of trades is luck, and a page ranking luck would be
+# telling people something it does not know.
+MIN_TRADES = 40
+
 # Daily bars change once a day; checking more often only spends the data
 # source's patience. The gap between checks keeps a run from looking like a
 # burst to it.
@@ -123,6 +143,19 @@ def snapshot(result, plain: Dict) -> Dict:
             "at": int(time.time())}
 
 
+def tests(report) -> Dict[str, List]:
+    """Each strategy's back-test on one instrument: [times, worked, R kept].
+
+    Kept with the popular snapshot rather than read from strategy_stats,
+    because that table also takes the numbers from anyone's own run, under
+    their own stop, target and costs. A public page has to show one method.
+    """
+    if report is None:
+        return {}
+    return {s.name: [s.n, s.wins, round(s.sum_r, 3)]
+            for s in report.overall.values()}
+
+
 # --- the popular list --------------------------------------------------------
 
 def save_verdict(conn: sqlite3.Connection, snap: Dict) -> None:
@@ -146,6 +179,71 @@ def verdicts(conn: sqlite3.Connection) -> List[Dict]:
               conn.execute("SELECT symbol, data FROM public_verdicts")}
     return [stored.get(sym) or {"symbol": sym, "name": name, "action": ""}
             for sym, name in POPULAR]
+
+
+def related(symbol: str, rows: List[Dict], limit: int = 12) -> List[Dict]:
+    """Other popular rows, look-alikes first."""
+    group = next((g for g in PEERS if symbol in g), ())
+    rest = [v for v in rows if v["symbol"] != symbol]
+    return sorted(rest, key=lambda v: v["symbol"] not in group)[:limit]
+
+
+# --- strategy tests ----------------------------------------------------------
+
+_CAPS = {"rsi", "macd", "adx", "di", "sar", "tsi", "roc", "cci", "vwap",
+         "obv", "mfi"}
+_LABELS = {"zscore_reversion": "Z-score reversion",
+           "linreg_channel": "Linear regression channel"}
+
+
+def strategy_label(name: str) -> str:
+    """rsi_reversion reads as RSI reversion."""
+    if name in _LABELS:
+        return _LABELS[name]
+    words = [w.upper() if w in _CAPS else w for w in name.split("_")]
+    return " ".join(words)[:1].upper() + " ".join(words)[1:]
+
+
+def strategy_slug(name: str) -> str:
+    return name.replace("_", "-")
+
+
+def strategy_from_slug(text: str) -> Optional[str]:
+    from .strategies import BY_NAME
+    name = (text or "").lower().replace("-", "_")
+    return name if name in BY_NAME else None
+
+
+def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
+    """How one strategy did on each popular instrument, best first."""
+    out = []
+    for v in rows:
+        n, wins, kept = (v.get("tests") or {}).get(name, (0, 0, 0.0))
+        if n >= MIN_TRADES:
+            out.append({"symbol": v["symbol"], "name": v["name"], "n": n,
+                        "wins": wins, "kept": kept / n})
+    return sorted(out, key=lambda r: -r["kept"])
+
+
+def strategy_summary(results: List[Dict]) -> Dict:
+    """One strategy across every instrument it was tested on.
+
+    Kept is pooled over trades, not averaged over instruments, so a symbol
+    with twenty trades does not count as much as one with three hundred.
+    """
+    n = sum(r["n"] for r in results)
+    return {"tested": len(results),
+            "paid": sum(1 for r in results if r["kept"] > 0),
+            "n": n, "wins": sum(r["wins"] for r in results),
+            "kept": sum(r["kept"] * r["n"] for r in results) / n if n else 0.0}
+
+
+def symbol_results(snap: Optional[Dict]) -> List[Dict]:
+    """Every strategy tested on one instrument, best first."""
+    out = [{"strategy": name, "n": n, "wins": wins, "kept": kept / n}
+           for name, (n, wins, kept) in ((snap or {}).get("tests") or {}).items()
+           if n >= MIN_TRADES]
+    return sorted(out, key=lambda r: -r["kept"])
 
 
 def due(conn: sqlite3.Connection, now: Optional[float] = None) -> List[str]:

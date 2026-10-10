@@ -8,7 +8,18 @@
 {% block og_title %}{% if snap %}{{ short(symbol) }}: {{ snap.action }} · Orenth{% else %}{{ label }} · Orenth{% endif %}{% endblock %}
 {# A shared page is a copy of one moment, and an unchecked one has nothing on
    it yet: neither is a page a search engine should send anyone to. #}
-{% block head_extra %}{% if frozen or not snap %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block head_extra %}{% if frozen or not snap %}<meta name="robots" content="noindex">
+{% else %}
+{# The question the page title asks, answered in the form AI search engines
+   quote. Only what is visible on the page itself. #}
+{% set answer = {"@type": "Answer",
+    "text": "Orenth's check on " ~ (snap.at|day) ~ ": " ~ (snap.action|capitalize) ~ ". "
+            ~ snap.headline ~ " " ~ counts(snap)
+            ~ " This is software output, not financial advice."} %}
+{% set question = {"@type": "Question", "name": "Is " ~ label ~ " a buy right now?",
+    "acceptedAnswer": answer} %}
+<script type="application/ld+json">{{ {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [question]}|tojson }}</script>
+{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
@@ -50,6 +61,25 @@
     <a class="btn quiet" href="{{ card_url }}" download="orenth-{{ slug(symbol) }}.png">Save picture</a>
     <span class="fine" data-said aria-live="polite"></span>
   </div>
+{% endif %}
+
+{% if tested|length >= 6 %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>Which strategies worked on {{ short(symbol) }}</h2>
+    <a class="tail" href="{{ url_for('backtests') }}">all strategies &rarr;</a></div>
+  <p class="prose">Each one back-tested on {{ short(symbol) }}'s own daily
+    prices, after trading costs.</p>
+  {% for title, part in [("Did best", tested[:3]), ("Did worst", tested[-3:]|reverse)] %}
+    <span class="eyebrow">{{ title }}</span>
+    <ul class="list">
+      {% for t in part %}
+        <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:
+          worked {{ t.wins }} of {{ t.n }} times, kept
+          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade</li>
+      {% endfor %}
+    </ul>
+  {% endfor %}
+</section>
 {% endif %}
 
 {% if frozen and today_url %}

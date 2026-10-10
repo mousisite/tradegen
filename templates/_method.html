@@ -1,0 +1,22 @@
+{# How every public strategy test is run. Expects method. #}
+<div class="card" style="margin-top:var(--s3)">
+  <span class="eyebrow">How we tested</span>
+  <ul class="list">
+    <li>Up to 5 years of daily prices for each stock and coin.</li>
+    <li>Every time the strategy leaned up or down, we took a pretend trade
+      that way. Stop {{ method.stop }} ATR away, target {{ method.target }} ATR
+      away, closed after {{ method.days }} trading days if it hit neither.
+      ATR is how much the price usually moves in a day.</li>
+    <li><b>Worked</b> means it reached the target before the stop. If both
+      were touched on the same day, we count it as a loss.</li>
+    <li>Costs come off every trade: {{ method.equity }}% a round trip for
+      stocks, {{ method.crypto }}% for crypto.</li>
+    <li><b>Kept a trade</b> is in R, the amount risked. +0.10R means 10 cents
+      kept for every dollar risked, on average, after costs.</li>
+    <li>Strategies that fired fewer than {{ method.min }} times on a stock are left out:
+      that few is luck.</li>
+  </ul>
+  <p class="prose faint" style="font-size:var(--t-xs)">Re-run every day. Past
+    results do not promise future ones. This is software output, not
+    financial advice.</p>
+</div>

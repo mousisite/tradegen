@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% if summary.tested %}
+  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ summary.tested ~ " popular stocks and coins, after trading costs. It kept money on " ~ summary.paid ~ " of them. Not financial advice." %}
+{% endif %}
+{% block title %}Does {{ label }} work? Back-tested on {{ summary.tested or 'popular' }} stocks and coins · Orenth{% endblock %}
+{% block og_title %}Does {{ label }} work? · Orenth{% endblock %}
+{% block head_extra %}{% if not summary.tested %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">Strategy test · {{ info.family.replace('_', ' ') }}</span>
+  <h1>Does {{ label }} work?</h1>
+  <p>{{ info.description }}. Tested on every popular stock and coin, with real
+    trading costs taken off.</p>
+</div>
+
+{% if not summary.tested %}
+  <div class="plainbox">
+    <span class="eyebrow">Being tested</span>
+    <p class="prose">Nothing to show yet. These tests run once a day on daily
+      prices, and a strategy built for intraday prices may never fire on
+      them.</p>
+  </div>
+{% else %}
+  <div class="plainbox">
+    <span class="eyebrow">The short answer</span>
+    <p class="lead">After costs, it kept money on {{ summary.paid }} of the
+      {{ summary.tested }} stocks and coins we test.</p>
+    <p class="prose">It gave a signal {{ "{:,}".format(summary.n) }} times and
+      worked {{ "{:,}".format(summary.wins) }} of them
+      ({{ (summary.wins / summary.n)|pct(0) }}). On average each trade
+      {{ 'kept' if summary.kept > 0 else 'lost' }}
+      <span class="fig {{ 'gain' if summary.kept > 0 else 'loss' }}">{{ summary.kept|signed(2) }}R</span>.</p>
+  </div>
+
+  <div class="card pad0" style="margin-top:var(--s3)">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Instrument</th><th class="r">Kept a trade</th><th class="r">Hit rate</th>
+          <th class="r">Worked</th><th class="r">Signals</th>
+        </tr></thead>
+        <tbody>
+        {% for r in results %}
+          <tr>
+            <td><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a>
+              <span class="soft">{{ r.name }}</span></td>
+            <td class="r fig {{ 'gain' if r.kept > 0 else 'loss' }}">{{ r.kept|signed(2) }}R</td>
+            <td class="r fig">{{ (r.wins / r.n)|pct(0) }}</td>
+            <td class="r fig">{{ "{:,}".format(r.wins) }}</td>
+            <td class="r fig soft">{{ "{:,}".format(r.n) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endif %}
+
+{% include "_method.html" %}
+
+{% if kin %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>Other {{ info.family.replace('_', ' ') }} strategies</h2>
+    <a class="tail" href="{{ url_for('backtests') }}">all of them &rarr;</a></div>
+  <ul class="list">
+    {% for k in kin %}
+      <li><a href="{{ url_for('backtest_page', name=strategy_slug(k)) }}">Does {{ label_of(k) }} work?</a></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">See what works on the stock you are looking at.</p>
+  <p class="prose">Orenth runs all 34 strategies on any stock or coin, and says
+    so when none of them has an edge.</p>
+  <div class="cta">
+    {% if not current_user or demo %}
+      <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    {% endif %}
+    <a class="btn quiet" href="{{ url_for('stocks_index') }}">Popular stocks</a>
+  </div>
+</section>
+
+{% endblock %}

@@ -41,7 +41,7 @@
       "name": "{{ site_name }}",
       "url": "{{ site_base }}/",
       "logo": "{{ site_logo }}",
-      "description": "{{ _blurb }}"{% if same_as %},
+      "description": {{ _blurb|tojson }}{% if same_as %},
       "sameAs": [{% for link in same_as %}"{{ link }}"{{ ", " if not loop.last }}{% endfor %}]{% endif %}
     },
     {
@@ -54,7 +54,7 @@
       "browserRequirements": "Requires JavaScript only for optional extras",
       "publisher": { "@id": "{{ site_base }}/#org" },
       "image": "{{ preview_image }}",
-      "description": "{{ _blurb }}",
+      "description": {{ _blurb|tojson }},
       "offers": {
         "@type": "Offer",
         "price": "0",
@@ -180,7 +180,8 @@
   <br>
   <a href="{{ url_for('terms') }}">Terms</a> ·
   <a href="{{ url_for('privacy') }}">Privacy</a> ·
-  <a href="{{ url_for('stocks_index') }}">Popular stocks</a>{% if billing_on %} ·
+  <a href="{{ url_for('stocks_index') }}">Popular stocks</a> ·
+  <a href="{{ url_for('backtests') }}">Strategy tests</a>{% if billing_on %} ·
   <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
 </p>
 </div>

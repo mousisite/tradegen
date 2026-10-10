@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% set page_blurb = (table|length or 34) ~ " trading strategies (RSI, MACD, Bollinger, breakouts and more) back-tested on popular stocks and coins, after trading costs. See which ones actually kept money. Not financial advice." %}
+{% block title %}Which trading strategies work? {{ table|length or 34 }} back-tested on stocks and crypto · Orenth{% endblock %}
+{% block og_title %}Which trading strategies work? · Orenth{% endblock %}
+{% block head_extra %}{% if not table %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>Which trading strategies actually work?</h1>
+  <p>{{ table|length or 34 }} strategies, back-tested every day on popular stocks and coins,
+    after trading costs. Best first. Tap one to see every stock.</p>
+</div>
+
+<div class="card pad0">
+  {% if table %}
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Strategy</th><th class="r">Kept a trade</th>
+        <th class="r">Kept money on</th><th class="r">Hit rate</th>
+        <th class="r">Signals</th><th>Family</th>
+      </tr></thead>
+      <tbody>
+      {% for t in table %}
+        <tr>
+          <td><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a></td>
+          <td class="r fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</td>
+          <td class="r fig">{{ t.paid }} of {{ t.tested }}</td>
+          <td class="r fig">{{ (t.wins / t.n)|pct(0) }}</td>
+          <td class="r fig soft">{{ "{:,}".format(t.n) }}</td>
+          <td class="soft">{{ t.family.replace('_', ' ') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="blank">Being tested right now. This fills in within a day.</div>
+  {% endif %}
+</div>
+
+{% include "_method.html" %}
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">Check any stock or coin, free.</p>
+  <p class="prose">Orenth runs all 34 on whatever you are looking at, and says
+    so when none of them has an edge.</p>
+  <div class="cta">
+    {% if not current_user or demo %}
+      <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    {% endif %}
+    <a class="btn quiet" href="{{ url_for('stocks_index') }}">Popular stocks</a>
+  </div>
+</section>
+
+{% endblock %}

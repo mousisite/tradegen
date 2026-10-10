@@ -163,6 +163,57 @@ try:
 
     print()
     print("=" * 72)
+    print("STRATEGY TESTS")
+    print("=" * 72)
+    r = c.get("/backtest/rsi-reversion")
+    page = r.data.decode("utf-8", "replace")
+    check("a strategy page exists before any test",
+          r.status_code == 200 and "Being tested" in page and "noindex" in page,
+          r.status_code)
+    check("an unknown strategy has no page", c.get("/backtest/golden-cross").status_code == 404)
+    report = SimpleNamespace(overall={
+        "rsi_reversion": SimpleNamespace(name="rsi_reversion", n=40, wins=18, sum_r=4.0),
+        "trend_stack": SimpleNamespace(name="trend_stack", n=10, wins=9, sum_r=9.0)})
+    check("a test keeps times, worked and R kept",
+          public.tests(report)["rsi_reversion"] == [40, 18, 4.0])
+    conn = db.connect(DB)
+    for sym, kept in (("NVDA", 4.0), ("AMD", -2.0)):
+        s = snap_for(sym)
+        report.overall["rsi_reversion"].sum_r = kept
+        s["tests"] = public.tests(report)
+        public.save_verdict(conn, s)
+    for name in ("macd_momentum", "pin_bar", "cci_reversion", "aroon_trend",
+                 "obv_divergence"):
+        s = public.verdict(conn, "NVDA")
+        s["tests"][name] = [50, 10, -1.5]
+        public.save_verdict(conn, s)
+    conn.close()
+    r = c.get("/backtest/rsi-reversion")
+    page = r.data.decode("utf-8", "replace")
+    check("then shows each stock it was tested on",
+          r.status_code == 200 and "Does RSI reversion work?" in page
+          and "/stock/nvda" in page and "/stock/amd" in page, r.status_code)
+    check("and how many it kept money on", "kept money on 1 of the" in page)
+    check("open to search engines once tested", "noindex" not in page)
+    page = c.get("/backtests").data.decode("utf-8", "replace")
+    check("the list ranks tested strategies, leaving out too few trades",
+          "RSI reversion" in page and "Trend stack" not in page)
+    page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    check("a stock page says which strategies worked there",
+          "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)
+    check("and answers its question for AI search", '"FAQPage"' in page
+          and "Is NVIDIA (NVDA) a buy right now?" in page)
+    check("its other checks start with look-alikes",
+          page.index("/stock/amd") < page.index("/stock/aapl"))
+    sitemap = c.get("/sitemap.xml").data.decode()
+    check("the sitemap lists the strategy pages",
+          "/backtests</loc>" in sitemap and "/backtest/rsi-reversion</loc>" in sitemap
+          and "/backtest/opening-range-break<" not in sitemap)
+    check("a result that rounds to zero has no sign",
+          web._signed(-0.004) == "0.00" and web._signed(0.3) == "+0.30")
+
+    print()
+    print("=" * 72)
     print("SHARING A CALL")
     print("=" * 72)
     sharer = user("sharer@example.com")
