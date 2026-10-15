@@ -25,9 +25,6 @@ STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_WEBHOOK_SECRET": "whsec_x"}
 for key in list(MAIL) + list(STRIPE) + ["MAIL_POSTAL_ADDRESS", "STOCKBOT_ADMIN_EMAIL"]:
     _os.environ.pop(key, None)
-# The discount banner asks Stripe in the background; these checks are about
-# other things, and must not race it.
-_os.environ["PROMO_CODE"] = "none"
 
 import web  # noqa: E402
 from flask import session  # noqa: E402

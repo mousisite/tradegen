@@ -8,15 +8,6 @@
   {% if reason %}<div class="notice" style="margin-top:var(--s2)">{{ reason }}</div>{% endif %}
 </div>
 
-{% if promo and not (is_pro and current_user and not demo) %}
-  <p class="promo"><b>Founding offer:</b> code
-    <b class="code">{{ promo.code }}</b> gets you Pro {{ promo.what }}
-    {{ promo.how_long }}.{% if promo.left is not none %}
-    <b>{{ promo.left }} of {{ promo.limit }} left.</b>{% endif %}
-    {% if current_user and not demo %}It is already filled in below.{% else %}Sign
-    in and it is filled in for you.{% endif %}</p>
-{% endif %}
-
 <div class="plans">
   <div class="card plan">
     <span class="eyebrow">Free</span>
@@ -60,13 +51,12 @@
           and you pay nothing.</p>
       {% endif %}
       {# The code goes in here, not on Stripe's page, where the box sits
-         behind a link that is easy to miss. #}
+         behind a link that is easy to miss. It is left empty on purpose: the
+         code is passed on by word of mouth, never printed on the site. #}
       <form method="post" action="{{ url_for('billing_checkout') }}">
         <label class="fine" for="code">Discount code</label>
-        <input class="field" id="code" name="code" value="{{ promo.code if promo }}"
+        <input class="field" id="code" name="code" placeholder="Have a code? Type it here"
                autocomplete="off" autocapitalize="characters" spellcheck="false">
-        {% if promo %}<p class="fine" style="margin:0">Pro {{ promo.what }} {{ promo.how_long }}.
-          It comes off on the next page.</p>{% endif %}
         <button class="btn" type="submit" name="plan" value="monthly">{{ 'Start free trial' if trial else 'Upgrade to Pro' }}</button>
         {% if offer.yearly %}
           <button class="btn quiet" type="submit" name="plan" value="yearly">Or pay yearly{% if offer.save %}

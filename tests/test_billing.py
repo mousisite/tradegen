@@ -25,9 +25,6 @@ STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_WEBHOOK_SECRET": "whsec_test", "PRO_PRICE_LABEL": "$9 a month"}
 for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL", "PRO_TRIAL_DAYS"]:
     _os.environ.pop(key, None)
-# The discount banner asks Stripe in the background; these checks are about
-# other things, and must not race it.
-_os.environ["PROMO_CODE"] = "none"
 
 import web  # noqa: E402
 from bot import accounts as A  # noqa: E402
@@ -414,24 +411,18 @@ try:
 
     print()
     print("=" * 72)
-    print("THE DISCOUNT CODE BANNER")
+    print("A SECRET DISCOUNT CODE")
     print("=" * 72)
-    _os.environ["PROMO_CODE"] = "FOUNDER"
-    state = {"used": 37, "nested": False, "down": False, "asked": ""}
+    state = {"used": 37, "nested": False, "asked": ""}
 
     def promo_stripe(method, path, data=None):
-        if state["down"]:
-            raise billing.BillingError("down")
-        coupon = {"id": "co_1", "percent_off": 50,
-                  "duration": state.get("duration", "forever"),
-                  "duration_in_months": 12 if state.get("duration") else None,
-                  "max_redemptions": 100, "times_redeemed": state["used"],
-                  "valid": True}
+        coupon = {"id": "co_1", "percent_off": 50, "duration": "repeating",
+                  "duration_in_months": 12, "max_redemptions": 100,
+                  "times_redeemed": state["used"], "valid": True}
         if path.startswith("promotion_codes?"):
             state["asked"] = path
-            promo = {"id": "promo_1", "code": "FOUNDER", "active": True,
-                     "max_redemptions": None,
-                     "times_redeemed": state["used"]}
+            promo = {"id": "promo_1", "code": "HALF", "active": True,
+                     "max_redemptions": None, "times_redeemed": state["used"]}
             if state["nested"]:
                 promo["coupon"] = coupon
             else:
@@ -441,64 +432,39 @@ try:
             return coupon
         return fake_stripe(method, path, data)
 
-    value = billing.refresh_promo(call=promo_stripe)
-    check("the banner's facts all come from Stripe",
-          value == {"code": "FOUNDER", "what": "half price", "how_long": "forever",
-                    "left": 63, "limit": 100}, value)
-    check("asking only for that code, and only if it is active",
-          "code=FOUNDER" in state["asked"] and "active=true" in state["asked"])
-    state["nested"] = True
-    check("older Stripe accounts nest the coupon, and that works too",
-          (billing.refresh_promo(call=promo_stripe) or {}).get("left") == 63)
-    page = c.get("/").data.decode("utf-8", "replace")
-    check("the front page shows the code and what is left",
-          "Founding offer" in page and "FOUNDER" in page and "63 of 100 left" in page)
-    page = c.get("/pricing").data.decode("utf-8", "replace")
-    check("so does the pricing page, for a visitor", "63 of 100 left" in page)
-    sign_in(paid)
-    check("but not for someone who already has Pro",
-          "63 of 100 left" not in c.get("/pricing").data.decode("utf-8", "replace"))
-    state["down"] = True
-    check("if Stripe cannot be reached, the last true answer stands",
-          (billing.refresh_promo(call=promo_stripe) or {}).get("left") == 63)
-    state.update(down=False, used=100)
-    check("when every use is gone, the banner is gone",
-          billing.refresh_promo(call=promo_stripe) is None and billing.promo() is None)
-    state.update(used=37, duration="repeating")
-    check("a 12-month discount says so in plain words",
-          (billing.refresh_promo(call=promo_stripe) or {}).get("how_long")
-          == "for your first year")
-    state.update(used=37, nested=False)
-    billing.refresh_promo(call=promo_stripe)
     billing._stripe = promo_stripe
     sign_in(newcomer)
     page = c.get("/pricing").data.decode("utf-8", "replace")
-    check("the code box comes filled in", 'name="code" value="FOUNDER"' in page)
-    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "founder"})
+    check("the pricing page has an empty box for a code",
+          'name="code"' in page and "HALF" not in page)
+    check("and nothing anywhere names it",
+          "HALF" not in c.get("/").data.decode("utf-8", "replace"))
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "half "})
     _, _, data = sent[-1]
-    check("and the discount is applied before Stripe's page opens",
+    check("a typed code is applied before Stripe's page opens",
           r.status_code == 303 and data.get("discounts[0][promotion_code]") == "promo_1"
           and "allow_promotion_codes" not in data, data)
-    r = c.post("/billing/checkout", data={"plan": "monthly", "code": ""})
+    check("asking Stripe only for that code, and only if it is active",
+          "code=half" in state["asked"] and "active=true" in state["asked"])
+    state["nested"] = True
+    c.post("/billing/checkout", data={"plan": "monthly", "code": "HALF"})
+    check("older Stripe accounts nest the coupon, and that works too",
+          sent[-1][2].get("discounts[0][promotion_code]") == "promo_1")
+    c.post("/billing/checkout", data={"plan": "monthly", "code": ""})
     check("an empty box still lets Stripe's page take a code",
           sent[-1][2].get("allow_promotion_codes") == "true"
           and "discounts[0][promotion_code]" not in sent[-1][2])
     state["used"] = 100
     before = len(sent)
-    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "FOUNDER"})
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "HALF"})
     check("a code that has run out says so, and sends no one to pay",
           r.status_code == 400 and "does not work, or it has run out"
           in r.data.decode("utf-8", "replace")
           and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
     billing._stripe = fake_stripe
-    _os.environ.pop("PROMO_CODE")
-    check("the code it looks for is HALF unless told otherwise",
-          billing.promo_code() == "HALF")
-    _os.environ["PROMO_CODE"] = "none"
-    check("and it can be switched off", billing.promo() is None)
 finally:
     billing._stripe = real
-    for key in list(STRIPE) + ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "PROMO_CODE"]:
+    for key in list(STRIPE) + ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]:
         _os.environ.pop(key, None)
 
 print()

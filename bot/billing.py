@@ -23,7 +23,6 @@ Optional settings:
   FREE_ANALYSES_PER_DAY   different instruments a free account can open a day (3)
   FREE_FIND_RESULTS       rows a free account sees in each Find list (3)
   FREE_ALERTS             alerts a free account can have running (1)
-  PROMO_CODE              the discount code a banner advertises (HALF; "none" hides it)
 """
 from __future__ import annotations
 
@@ -31,7 +30,6 @@ import hashlib
 import hmac
 import os
 import sqlite3
-import threading
 import time
 from typing import Dict, Optional
 
@@ -145,43 +143,23 @@ def offers(call=None) -> Dict:
     return {"monthly": monthly, "yearly": yearly, "save": save}
 
 
-# --- the public discount code ------------------------------------------------
+# --- a discount code someone typed ------------------------------------------
 #
-# A banner like "code FOUNDER, half price forever, 63 of 100 left" is only
-# worth showing if every word of it is true, so all of it is read from Stripe:
-# the discount, how long it lasts and how many uses remain. It hides itself
-# when the code runs out, is switched off, or cannot be found.
+# Never shown anywhere on the site: the code is passed on by word of mouth,
+# and the pricing page has an empty box for it.
 
-PROMO_TTL = 600.0
-_PROMO = {"at": 0.0, "value": None, "busy": False}
-_PROMO_LOCK = threading.Lock()
+def promotion_id(code: str, call=None) -> str:
+    """Stripe's id for a typed code, or "" if it would not apply right now.
 
-
-def promo_code() -> str:
-    code = (os.environ.get("PROMO_CODE") or "HALF").strip()
-    return "" if code.lower() in ("none", "off") else code
-
-
-def _describe(coupon: Dict) -> tuple:
-    if coupon.get("percent_off"):
-        pct = float(coupon["percent_off"])
-        what = "half price" if pct == 50 else "%g%% off" % pct
-    else:
-        what = "$%g off" % (int(coupon.get("amount_off") or 0) / 100.0)
-    months = coupon.get("duration_in_months")
-    how_long = {"forever": "forever", "once": "on the first payment"}.get(
-        coupon.get("duration"),
-        "for your first year" if months == 12 else "for %s months" % months)
-    return what, how_long
-
-
-def _lookup(code: str, call) -> Optional[Dict]:
-    """A code that would apply right now, with its coupon and uses left.
-
-    Stripe matches the code whatever its capitals. None when it is unknown,
-    switched off, or every use is gone.
+    Stripe matches the code whatever its capitals. A code that is switched
+    off or has used up its redemptions is turned away here, so the person
+    hears it on our page rather than as a refusal on Stripe's.
     """
+    code = code.strip()
+    if not code:
+        return ""
     from urllib.parse import quote
+    call = call or _stripe
     found = (call("GET", "promotion_codes?active=true&limit=1&code="
                   + quote(code)).get("data") or [])
     promo = found[0] if found else None
@@ -192,65 +170,12 @@ def _lookup(code: str, call) -> Optional[Dict]:
         coupon = ref if isinstance(ref, dict) else (
             call("GET", "coupons/" + ref) if ref else None)
     if not (promo and coupon and promo.get("active") and coupon.get("valid", True)):
-        return None
-    caps = [(int(m), int(t or 0)) for m, t in (
-        (promo.get("max_redemptions"), promo.get("times_redeemed")),
-        (coupon.get("max_redemptions"), coupon.get("times_redeemed"))) if m]
-    left = min(m - t for m, t in caps) if caps else None
-    if left is not None and left <= 0:
-        return None
-    return {"promo": promo, "coupon": coupon, "left": left,
-            "limit": min(m for m, _ in caps) if caps else None}
-
-
-def promotion_id(code: str, call=None) -> str:
-    """Stripe's id for a code someone typed, or "" if it would not apply."""
-    found = _lookup(code.strip(), call or _stripe) if code.strip() else None
-    return found["promo"].get("id", "") if found else ""
-
-
-def refresh_promo(call=None) -> Optional[Dict]:
-    """Ask Stripe about the public code now, and remember the answer."""
-    call = call or _stripe
-    code = promo_code()
-    value = None
-    try:
-        found = _lookup(code, call) if code and ready() else None
-        if found:
-            what, how_long = _describe(found["coupon"])
-            value = {"code": found["promo"].get("code") or code, "what": what,
-                     "how_long": how_long, "left": found["left"],
-                     "limit": found["limit"]}
-    except BillingError:
-        with _PROMO_LOCK:                   # keep the last good answer
-            _PROMO["at"] = time.time()
-            return _PROMO["value"]
-    with _PROMO_LOCK:
-        _PROMO["value"], _PROMO["at"] = value, time.time()
-    return value
-
-
-def _refresh_promo_quietly() -> None:
-    try:
-        refresh_promo()
-    except Exception:
-        pass                                # a banner must never break a page
-    finally:
-        with _PROMO_LOCK:
-            _PROMO["busy"] = False
-
-
-def promo() -> Optional[Dict]:
-    """The banner's facts, from memory. A stale answer is refreshed in the
-    background, so no page ever waits on Stripe to draw itself."""
-    if not promo_code() or not ready():
-        return None
-    with _PROMO_LOCK:
-        stale = time.time() - _PROMO["at"] >= PROMO_TTL
-        if stale and not _PROMO["busy"]:
-            _PROMO["busy"] = True
-            threading.Thread(target=_refresh_promo_quietly, daemon=True).start()
-        return _PROMO["value"]
+        return ""
+    for most, used in ((promo.get("max_redemptions"), promo.get("times_redeemed")),
+                       (coupon.get("max_redemptions"), coupon.get("times_redeemed"))):
+        if most and int(used or 0) >= int(most):
+            return ""
+    return promo.get("id", "")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
