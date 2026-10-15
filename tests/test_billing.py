@@ -435,6 +435,15 @@ try:
     check("keeps it in the box, and sends no one to pay yet",
           'value="half"' in page
           and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
+    check("the page can check a code without reloading",
+          'data-check="/billing/code"' in c.get("/pricing").data.decode("utf-8", "replace"))
+    before = len(sent)
+    r = c.post("/billing/code", data={"code": "half"})
+    said = r.data.decode("utf-8", "replace")
+    check("which answers with just the line that goes under the box",
+          r.status_code == 200 and "works: Pro" in said and "half price for your first year" in said
+          and "<html" not in said
+          and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
     r = c.post("/billing/checkout", data={"plan": "monthly", "code": "half "})
     _, _, data = sent[-1]
     check("a typed code is applied before Stripe's page opens",
@@ -460,6 +469,9 @@ try:
     r = c.post("/billing/checkout", data={"apply": "1", "code": "NOPE"})
     check("and so does a wrong one when Apply is pressed",
           r.status_code == 400 and "does not work" in r.data.decode("utf-8", "replace"))
+    r = c.post("/billing/code", data={"code": "NOPE"})
+    check("in place too", r.status_code == 400
+          and "does not work" in r.data.decode("utf-8", "replace"))
     billing._stripe = fake_stripe
 finally:
     billing._stripe = real

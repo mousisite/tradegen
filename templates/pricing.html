@@ -49,7 +49,8 @@
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the
          code is passed on by word of mouth, never printed on the site. #}
-      <form method="post" action="{{ url_for('billing_checkout') }}">
+      <form method="post" action="{{ url_for('billing_checkout') }}"
+            data-check="{{ url_for('billing_code') }}">
         <label class="fine" for="code">Discount code</label>
         {# Apply comes first, so pressing Enter in the box checks the code
            rather than going straight to pay. #}
@@ -59,12 +60,7 @@
                  autocapitalize="characters" spellcheck="false">
           <button class="btn quiet" type="submit" name="apply" value="1">Apply</button>
         </div>
-        {% if applied %}
-          <p class="codesaid ok" role="status">&#10003; Code {{ applied.code }} works: Pro
-            {{ applied.what }} {{ applied.how_long }}. It comes off on the payment page.</p>
-        {% elif code_error %}
-          <p class="codesaid bad" role="alert">{{ code_error }}</p>
-        {% endif %}
+        <div class="codeslot" data-said>{% include "_codesaid.html" %}</div>
         <button class="btn" type="submit" name="plan" value="monthly">Upgrade to Pro</button>
         {% if offer.yearly %}
           <button class="btn quiet" type="submit" name="plan" value="yearly">Or pay yearly{% if offer.save %}
@@ -83,6 +79,31 @@
 
 {# Said plainly, because it is the thing a paying customer might assume
    otherwise and it is not true. #}
+{# Apply answers in place, so the page neither reloads nor jumps to the
+   top. Anything that goes wrong falls back to the plain form post. #}
+<script>
+(function () {
+  var form = document.querySelector('form[data-check]');
+  if (!form || !window.fetch || !window.FormData) { return; }
+  var said = form.querySelector('[data-said]');
+  form.code.addEventListener('input', function () { said.innerHTML = ''; });
+  form.addEventListener('submit', function (e) {
+    if (!e.submitter || e.submitter.name !== 'apply') { return; }
+    e.preventDefault();
+    e.submitter.disabled = true;
+    fetch(form.getAttribute('data-check'), {
+      method: 'POST', body: new FormData(form), credentials: 'same-origin'
+    }).then(function (r) { return r.text(); })
+      .then(function (html) { said.innerHTML = html; })
+      .catch(function () {
+        said.innerHTML = '<p class="codesaid bad" role="alert">Could not check ' +
+          'the code just now. Try again in a moment.</p>';
+      })
+      .then(function () { e.submitter.disabled = false; });
+  });
+})();
+</script>
+
 <p class="legal">
   <b>Pro gives you more of the same analysis, not better odds.</b> The
   measurements, the warnings and the calls are identical on both plans.

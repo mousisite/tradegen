@@ -1,0 +1,9 @@
+{# What the discount box says about the code typed into it. Expects applied
+   or code_error. Drawn by the pricing page, and on its own by /billing/code
+   so Apply can answer without reloading the page. #}
+{% if applied %}
+  <p class="codesaid ok" role="status">&#10003; Code {{ applied.code }} works: Pro
+    {{ applied.what }} {{ applied.how_long }}. It comes off on the payment page.</p>
+{% elif code_error %}
+  <p class="codesaid bad" role="alert">{{ code_error }}</p>
+{% endif %}

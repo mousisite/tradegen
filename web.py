@@ -1310,6 +1310,30 @@ def pricing():
     return _pricing_page(request.args.get("reason", ""))
 
 
+CODE_ERROR = ("That code does not work, or it has run out. Check the "
+              "spelling, or empty the box to pay full price.")
+
+
+@app.route("/billing/code", methods=["POST"])
+def billing_code():
+    """Check a typed discount code and say so, without leaving the page.
+
+    Only answers; nothing is changed. The pricing page puts the answer under
+    the box. Without JavaScript, Apply posts to checkout instead, which says
+    the same thing by drawing the whole page again.
+    """
+    if not billing_mod.ready() or g.demo:
+        abort(404)
+    code = (request.form.get("code") or "").strip()[:40]
+    try:
+        found = billing_mod.promotion(code)
+    except billing_mod.BillingError as exc:
+        return render_template("_codesaid.html", code_error=str(exc)), 502
+    if code and not found:
+        return render_template("_codesaid.html", code_error=CODE_ERROR), 400
+    return render_template("_codesaid.html", applied=found)
+
+
 @app.route("/billing/checkout", methods=["POST"])
 def billing_checkout():
     """Send someone to Stripe's own page to pay."""
@@ -1326,9 +1350,7 @@ def billing_checkout():
     try:
         found = billing_mod.promotion(code)
         if code and not found:
-            return _pricing_page(code=code, code_error=(
-                "That code does not work, or it has run out. Check the "
-                "spelling, or empty the box to pay full price."), status=400)
+            return _pricing_page(code=code, code_error=CODE_ERROR, status=400)
         if request.form.get("apply"):
             return _pricing_page(code=code, applied=found)
         url = billing_mod.checkout_url(
