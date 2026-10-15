@@ -18,7 +18,6 @@ amount while Stripe charges another.
 
 Optional settings:
   STRIPE_PRICE_ID_YEARLY  a yearly price, offered beside the monthly one
-  PRO_TRIAL_DAYS          free days before the first charge (7; 0 turns it off)
   PRO_PRICE_LABEL         shown only if Stripe cannot be reached for the price
   FREE_ANALYSES_PER_DAY   different instruments a free account can open a day (3)
   FREE_FIND_RESULTS       rows a free account sees in each Find list (3)
@@ -78,11 +77,6 @@ def free_limits() -> Dict[str, int]:
     return {"analyses_per_day": _num("FREE_ANALYSES_PER_DAY", 3),
             "find_results": _num("FREE_FIND_RESULTS", 3),
             "alerts": _num("FREE_ALERTS", 1)}
-
-
-def trial_days() -> int:
-    """Free days before the first charge. Stripe allows up to 730."""
-    return min(730, _num("PRO_TRIAL_DAYS", 7))
 
 
 def price_id_for(plan: str) -> str:
@@ -148,8 +142,22 @@ def offers(call=None) -> Dict:
 # Never shown anywhere on the site: the code is passed on by word of mouth,
 # and the pricing page has an empty box for it.
 
-def promotion_id(code: str, call=None) -> str:
-    """Stripe's id for a typed code, or "" if it would not apply right now.
+def _describe(coupon: Dict) -> tuple:
+    """What a coupon gives, in words: ("half price", "for your first year")."""
+    if coupon.get("percent_off"):
+        pct = float(coupon["percent_off"])
+        what = "half price" if pct == 50 else "%g%% off" % pct
+    else:
+        what = "$%g off" % (int(coupon.get("amount_off") or 0) / 100.0)
+    months = coupon.get("duration_in_months")
+    how_long = {"forever": "forever", "once": "on the first payment"}.get(
+        coupon.get("duration"),
+        "for your first year" if months == 12 else "for %s months" % months)
+    return what, how_long
+
+
+def promotion(code: str, call=None) -> Optional[Dict]:
+    """A typed code that would apply right now: Stripe's id and what it gives.
 
     Stripe matches the code whatever its capitals. A code that is switched
     off or has used up its redemptions is turned away here, so the person
@@ -157,7 +165,7 @@ def promotion_id(code: str, call=None) -> str:
     """
     code = code.strip()
     if not code:
-        return ""
+        return None
     from urllib.parse import quote
     call = call or _stripe
     found = (call("GET", "promotion_codes?active=true&limit=1&code="
@@ -170,12 +178,14 @@ def promotion_id(code: str, call=None) -> str:
         coupon = ref if isinstance(ref, dict) else (
             call("GET", "coupons/" + ref) if ref else None)
     if not (promo and coupon and promo.get("active") and coupon.get("valid", True)):
-        return ""
+        return None
     for most, used in ((promo.get("max_redemptions"), promo.get("times_redeemed")),
                        (coupon.get("max_redemptions"), coupon.get("times_redeemed"))):
         if most and int(used or 0) >= int(most):
-            return ""
-    return promo.get("id", "")
+            return None
+    what, how_long = _describe(coupon)
+    return {"id": promo.get("id", ""), "code": promo.get("code") or code,
+            "what": what, "how_long": how_long}
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -266,7 +276,7 @@ def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
 
 
 def checkout_url(user, base: str, customer: str = "", call=None,
-                 price_id: str = "", trial: int = 0, promotion: str = "") -> str:
+                 price_id: str = "", promotion: str = "") -> str:
     """Where to send someone to pay, on Stripe's own page."""
     data = {
         "mode": "subscription",
@@ -290,9 +300,6 @@ def checkout_url(user, base: str, customer: str = "", call=None,
         # a link people miss. Stripe takes one or the other, never both.
         del data["allow_promotion_codes"]
         data["discounts[0][promotion_code]"] = promotion
-    if trial:
-        # Checkout still takes the card, and charges it when the trial ends.
-        data["subscription_data[trial_period_days]"] = str(trial)
     return (call or _stripe)("POST", "checkout/sessions", data)["url"]
 
 

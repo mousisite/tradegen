@@ -23,7 +23,7 @@ def check(name, ok, detail=""):
 STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_PRICE_ID_YEARLY": "price_y",
           "STRIPE_WEBHOOK_SECRET": "whsec_test", "PRO_PRICE_LABEL": "$9 a month"}
-for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL", "PRO_TRIAL_DAYS"]:
+for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL"]:
     _os.environ.pop(key, None)
 
 import web  # noqa: E402
@@ -348,7 +348,7 @@ try:
 
     print()
     print("=" * 72)
-    print("PRICES, PLANS AND THE FREE TRIAL")
+    print("PRICES AND PLANS")
     print("=" * 72)
     check("the yearly plan maps to the yearly price",
           billing.price_id_for("yearly") == "price_y")
@@ -381,33 +381,20 @@ try:
     page = c.get("/pricing").data.decode("utf-8", "replace")
     check("the pricing page shows both prices",
           "$9.99 a month" in page and "$79.99 a year" in page and "save 33%" in page)
-    check("offers a first-timer the free trial",
-          "Free for 7 days" in page and "Start free trial" in page)
+    check("with no free trial", "Upgrade to Pro" in page and "free trial" not in page
+          and "Free for" not in page)
     check("and says plainly that Pro is not better odds", "not better odds" in page)
     c.post("/billing/checkout", data={"plan": "yearly"})
     _, _, data = sent[-1]
-    check("choosing yearly checks out at the yearly price, with the trial",
+    check("choosing yearly checks out at the yearly price, with no trial",
           data["line_items[0][price]"] == "price_y"
-          and data.get("subscription_data[trial_period_days]") == "7", data)
-
-    sign_in(free)
-    c.post("/billing/checkout", data={"plan": "monthly"})
-    check("someone who has paid before gets no second trial",
-          "subscription_data[trial_period_days]" not in sent[-1][2])
-    check("and is not offered one",
-          "Free for 7 days" not in c.get("/pricing").data.decode("utf-8", "replace"))
-
-    _os.environ["PRO_TRIAL_DAYS"] = "0"
-    sign_in(newcomer)
-    c.post("/billing/checkout")
-    check("a trial length of 0 switches trials off",
-          "subscription_data[trial_period_days]" not in sent[-1][2])
-    _os.environ.pop("PRO_TRIAL_DAYS", None)
+          and "subscription_data[trial_period_days]" not in data, data)
 
     with c.session_transaction() as sess:
         sess.clear()
     page = c.get("/pricing").data.decode("utf-8", "replace")
-    check("a visitor is invited to try it free", "Try Pro free for 7 days" in page)
+    check("a visitor is asked to make an account, not offered a trial",
+          "Create account to upgrade" in page and "Try Pro free" not in page)
 
     print()
     print("=" * 72)
@@ -439,6 +426,15 @@ try:
           'name="code"' in page and "HALF" not in page)
     check("and nothing anywhere names it",
           "HALF" not in c.get("/").data.decode("utf-8", "replace"))
+    before = len(sent)
+    r = c.post("/billing/checkout", data={"apply": "1", "code": "half"})
+    page = r.data.decode("utf-8", "replace")
+    check("pressing Apply says the code worked, and what it gives",
+          r.status_code == 200 and "works: Pro" in page
+          and "half price for your first year" in page)
+    check("keeps it in the box, and sends no one to pay yet",
+          'value="half"' in page
+          and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
     r = c.post("/billing/checkout", data={"plan": "monthly", "code": "half "})
     _, _, data = sent[-1]
     check("a typed code is applied before Stripe's page opens",
@@ -461,6 +457,9 @@ try:
           r.status_code == 400 and "does not work, or it has run out"
           in r.data.decode("utf-8", "replace")
           and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
+    r = c.post("/billing/checkout", data={"apply": "1", "code": "NOPE"})
+    check("and so does a wrong one when Apply is pressed",
+          r.status_code == 400 and "does not work" in r.data.decode("utf-8", "replace"))
     billing._stripe = fake_stripe
 finally:
     billing._stripe = real

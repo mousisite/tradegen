@@ -266,6 +266,13 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plan form .btn, .plan > .btn { width: 100%; }
 .plan form { display: flex; flex-direction: column; gap: var(--s2); }
 .plan form .field { flex: none; font-family: var(--mono); letter-spacing: .04em; }
+.coderow { display: flex; gap: var(--s1); }
+.plan form .coderow .field { flex: 1 1 0; min-width: 0; text-transform: uppercase; }
+.plan form .coderow .btn { width: auto; }
+.codesaid { margin: 0; padding: 10px 12px; border-radius: var(--r-sm);
+            font-size: var(--t-sm); line-height: 1.5; }
+.codesaid.ok { color: var(--gain); background: var(--gain-wash); }
+.codesaid.bad { color: var(--loss); background: var(--loss-wash); }
 
 /* The phone menu. Hidden on wide screens, where the row of links fits. */
 .menu { display: none; position: relative; }

@@ -46,28 +46,35 @@
         </form>
       {% endif %}
     {% elif current_user and not demo %}
-      {% if trial %}
-        <p class="prose"><b>Free for {{ trial }} days.</b> Cancel before then
-          and you pay nothing.</p>
-      {% endif %}
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the
          code is passed on by word of mouth, never printed on the site. #}
       <form method="post" action="{{ url_for('billing_checkout') }}">
         <label class="fine" for="code">Discount code</label>
-        <input class="field" id="code" name="code" placeholder="Have a code? Type it here"
-               autocomplete="off" autocapitalize="characters" spellcheck="false">
-        <button class="btn" type="submit" name="plan" value="monthly">{{ 'Start free trial' if trial else 'Upgrade to Pro' }}</button>
+        {# Apply comes first, so pressing Enter in the box checks the code
+           rather than going straight to pay. #}
+        <div class="coderow">
+          <input class="field" id="code" name="code" value="{{ code }}"
+                 placeholder="Have a code? Type it here" autocomplete="off"
+                 autocapitalize="characters" spellcheck="false">
+          <button class="btn quiet" type="submit" name="apply" value="1">Apply</button>
+        </div>
+        {% if applied %}
+          <p class="codesaid ok" role="status">&#10003; Code {{ applied.code }} works: Pro
+            {{ applied.what }} {{ applied.how_long }}. It comes off on the payment page.</p>
+        {% elif code_error %}
+          <p class="codesaid bad" role="alert">{{ code_error }}</p>
+        {% endif %}
+        <button class="btn" type="submit" name="plan" value="monthly">Upgrade to Pro</button>
         {% if offer.yearly %}
           <button class="btn quiet" type="submit" name="plan" value="yearly">Or pay yearly{% if offer.save %}
             and save {{ offer.save }}%{% endif %}</button>
         {% endif %}
       </form>
     {% else %}
-      <a class="btn" href="{{ url_for('signin', next='/pricing') }}">{{
-        'Try Pro free for %d days' % trial if trial else 'Create account to upgrade' }}</a>
+      <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create account to upgrade</a>
     {% endif %}
-    <p class="fine">{% if trial %}After the free days, {% endif %}Pro renews
+    <p class="fine">Pro renews
       automatically every {{ 'month or year, whichever you pick,' if offer.yearly else 'month' }}
       until you cancel. Cancel any time from your Account page. Payments are
       handled by Stripe; your card details never reach Orenth.</p>

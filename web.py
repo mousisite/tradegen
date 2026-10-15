@@ -253,8 +253,13 @@ def _pro() -> bool:
     return billing_mod.is_pro(getattr(g, "user", None), _is_operator())
 
 
-def _pricing_page(reason: str = "", status: int = 200):
-    """Free and Pro side by side, saying why they arrived if there is a reason."""
+def _pricing_page(reason: str = "", status: int = 200, code: str = "",
+                  applied=None, code_error: str = ""):
+    """Free and Pro side by side, saying why they arrived if there is a reason.
+
+    code, applied and code_error are what the discount box last said, so a
+    person sees their code worked before they are sent to pay.
+    """
     user = getattr(g, "user", None)
     customer = ""
     if user is not None and not g.demo:
@@ -266,8 +271,7 @@ def _pricing_page(reason: str = "", status: int = 200):
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
                            offer=billing_mod.offers(),
-                           # One free trial each: not for anyone who has paid before.
-                           trial=0 if customer else billing_mod.trial_days(),
+                           code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
                            has_customer=bool(customer)), status
 
@@ -1318,17 +1322,19 @@ def billing_checkout():
         customer = billing_mod.customer_of(conn, g.user.id)
     finally:
         conn.close()
-    code = (request.form.get("code") or "").strip()
+    code = (request.form.get("code") or "").strip()[:40]
     try:
-        promotion = billing_mod.promotion_id(code) if code else ""
-        if code and not promotion:
-            return _pricing_page("The code %s does not work, or it has run out. "
-                                 "Check the spelling, or empty the box to pay "
-                                 "full price." % code[:40], 400)
+        found = billing_mod.promotion(code)
+        if code and not found:
+            return _pricing_page(code=code, code_error=(
+                "That code does not work, or it has run out. Check the "
+                "spelling, or empty the box to pay full price."), status=400)
+        if request.form.get("apply"):
+            return _pricing_page(code=code, applied=found)
         url = billing_mod.checkout_url(
             g.user, _public_base(), customer,
             price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
-            trial=0 if customer else billing_mod.trial_days(), promotion=promotion)
+            promotion=found["id"] if found else "")
     except billing_mod.BillingError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)
