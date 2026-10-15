@@ -429,7 +429,8 @@ try:
                   "valid": True}
         if path.startswith("promotion_codes?"):
             state["asked"] = path
-            promo = {"code": "FOUNDER", "active": True, "max_redemptions": None,
+            promo = {"id": "promo_1", "code": "FOUNDER", "active": True,
+                     "max_redemptions": None,
                      "times_redeemed": state["used"]}
             if state["nested"]:
                 promo["coupon"] = coupon
@@ -467,6 +468,29 @@ try:
     check("a 12-month discount says so in plain words",
           (billing.refresh_promo(call=promo_stripe) or {}).get("how_long")
           == "for your first year")
+    state.update(used=37, nested=False)
+    billing.refresh_promo(call=promo_stripe)
+    billing._stripe = promo_stripe
+    sign_in(newcomer)
+    page = c.get("/pricing").data.decode("utf-8", "replace")
+    check("the code box comes filled in", 'name="code" value="FOUNDER"' in page)
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "founder"})
+    _, _, data = sent[-1]
+    check("and the discount is applied before Stripe's page opens",
+          r.status_code == 303 and data.get("discounts[0][promotion_code]") == "promo_1"
+          and "allow_promotion_codes" not in data, data)
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": ""})
+    check("an empty box still lets Stripe's page take a code",
+          sent[-1][2].get("allow_promotion_codes") == "true"
+          and "discounts[0][promotion_code]" not in sent[-1][2])
+    state["used"] = 100
+    before = len(sent)
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "FOUNDER"})
+    check("a code that has run out says so, and sends no one to pay",
+          r.status_code == 400 and "does not work, or it has run out"
+          in r.data.decode("utf-8", "replace")
+          and not any(p == "checkout/sessions" for _, p, _ in sent[before:]))
+    billing._stripe = fake_stripe
     _os.environ.pop("PROMO_CODE")
     check("the code it looks for is HALF unless told otherwise",
           billing.promo_code() == "HALF")

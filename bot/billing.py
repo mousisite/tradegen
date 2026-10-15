@@ -175,34 +175,52 @@ def _describe(coupon: Dict) -> tuple:
     return what, how_long
 
 
+def _lookup(code: str, call) -> Optional[Dict]:
+    """A code that would apply right now, with its coupon and uses left.
+
+    Stripe matches the code whatever its capitals. None when it is unknown,
+    switched off, or every use is gone.
+    """
+    from urllib.parse import quote
+    found = (call("GET", "promotion_codes?active=true&limit=1&code="
+                  + quote(code)).get("data") or [])
+    promo = found[0] if found else None
+    coupon = promo.get("coupon") if promo else None
+    if promo and not isinstance(coupon, dict):
+        # Newer API versions name the coupon instead of nesting it.
+        ref = (promo.get("promotion") or {}).get("coupon")
+        coupon = ref if isinstance(ref, dict) else (
+            call("GET", "coupons/" + ref) if ref else None)
+    if not (promo and coupon and promo.get("active") and coupon.get("valid", True)):
+        return None
+    caps = [(int(m), int(t or 0)) for m, t in (
+        (promo.get("max_redemptions"), promo.get("times_redeemed")),
+        (coupon.get("max_redemptions"), coupon.get("times_redeemed"))) if m]
+    left = min(m - t for m, t in caps) if caps else None
+    if left is not None and left <= 0:
+        return None
+    return {"promo": promo, "coupon": coupon, "left": left,
+            "limit": min(m for m, _ in caps) if caps else None}
+
+
+def promotion_id(code: str, call=None) -> str:
+    """Stripe's id for a code someone typed, or "" if it would not apply."""
+    found = _lookup(code.strip(), call or _stripe) if code.strip() else None
+    return found["promo"].get("id", "") if found else ""
+
+
 def refresh_promo(call=None) -> Optional[Dict]:
     """Ask Stripe about the public code now, and remember the answer."""
     call = call or _stripe
     code = promo_code()
     value = None
     try:
-        if code and ready():
-            from urllib.parse import quote
-            found = (call("GET", "promotion_codes?active=true&limit=1&code="
-                          + quote(code)).get("data") or [])
-            promo = found[0] if found else None
-            coupon = promo.get("coupon") if promo else None
-            if promo and not isinstance(coupon, dict):
-                # Newer API versions name the coupon instead of nesting it.
-                ref = (promo.get("promotion") or {}).get("coupon")
-                coupon = ref if isinstance(ref, dict) else (
-                    call("GET", "coupons/" + ref) if ref else None)
-            if promo and coupon and promo.get("active") and coupon.get("valid", True):
-                caps = [(int(m), int(t or 0)) for m, t in (
-                    (promo.get("max_redemptions"), promo.get("times_redeemed")),
-                    (coupon.get("max_redemptions"), coupon.get("times_redeemed")))
-                    if m]
-                left = min(m - t for m, t in caps) if caps else None
-                if left is None or left > 0:
-                    what, how_long = _describe(coupon)
-                    value = {"code": promo.get("code") or code, "what": what,
-                             "how_long": how_long, "left": left,
-                             "limit": min(m for m, _ in caps) if caps else None}
+        found = _lookup(code, call) if code and ready() else None
+        if found:
+            what, how_long = _describe(found["coupon"])
+            value = {"code": found["promo"].get("code") or code, "what": what,
+                     "how_long": how_long, "left": found["left"],
+                     "limit": found["limit"]}
     except BillingError:
         with _PROMO_LOCK:                   # keep the last good answer
             _PROMO["at"] = time.time()
@@ -323,7 +341,7 @@ def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
 
 
 def checkout_url(user, base: str, customer: str = "", call=None,
-                 price_id: str = "", trial: int = 0) -> str:
+                 price_id: str = "", trial: int = 0, promotion: str = "") -> str:
     """Where to send someone to pay, on Stripe's own page."""
     data = {
         "mode": "subscription",
@@ -342,6 +360,11 @@ def checkout_url(user, base: str, customer: str = "", call=None,
         data["customer"] = customer
     elif user.email and not user.email.endswith(".invalid"):
         data["customer_email"] = user.email
+    if promotion:
+        # Applied before Stripe's page opens, because its own box sits behind
+        # a link people miss. Stripe takes one or the other, never both.
+        del data["allow_promotion_codes"]
+        data["discounts[0][promotion_code]"] = promotion
     if trial:
         # Checkout still takes the card, and charges it when the trial ends.
         data["subscription_data[trial_period_days]"] = str(trial)

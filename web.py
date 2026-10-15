@@ -1320,11 +1320,17 @@ def billing_checkout():
         customer = billing_mod.customer_of(conn, g.user.id)
     finally:
         conn.close()
+    code = (request.form.get("code") or "").strip()
     try:
+        promotion = billing_mod.promotion_id(code) if code else ""
+        if code and not promotion:
+            return _pricing_page("The code %s does not work, or it has run out. "
+                                 "Check the spelling, or empty the box to pay "
+                                 "full price." % code[:40], 400)
         url = billing_mod.checkout_url(
             g.user, _public_base(), customer,
             price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
-            trial=0 if customer else billing_mod.trial_days())
+            trial=0 if customer else billing_mod.trial_days(), promotion=promotion)
     except billing_mod.BillingError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)

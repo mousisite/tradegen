@@ -13,7 +13,8 @@
     <b class="code">{{ promo.code }}</b> gets you Pro {{ promo.what }}
     {{ promo.how_long }}.{% if promo.left is not none %}
     <b>{{ promo.left }} of {{ promo.limit }} left.</b>{% endif %}
-    You type it on the payment page.</p>
+    {% if current_user and not demo %}It is already filled in below.{% else %}Sign
+    in and it is filled in for you.{% endif %}</p>
 {% endif %}
 
 <div class="plans">
@@ -58,20 +59,20 @@
         <p class="prose"><b>Free for {{ trial }} days.</b> Cancel before then
           and you pay nothing.</p>
       {% endif %}
+      {# The code goes in here, not on Stripe's page, where the box sits
+         behind a link that is easy to miss. #}
       <form method="post" action="{{ url_for('billing_checkout') }}">
-        <input type="hidden" name="plan" value="monthly">
-        <button class="btn" type="submit">{{ 'Start free trial' if trial else 'Upgrade to Pro' }}</button>
-      </form>
-      {% if offer.yearly %}
-        <form method="post" action="{{ url_for('billing_checkout') }}">
-          <input type="hidden" name="plan" value="yearly">
-          <button class="btn quiet" type="submit">Or pay yearly{% if offer.save %}
+        <label class="fine" for="code">Discount code</label>
+        <input class="field" id="code" name="code" value="{{ promo.code if promo }}"
+               autocomplete="off" autocapitalize="characters" spellcheck="false">
+        {% if promo %}<p class="fine" style="margin:0">Pro {{ promo.what }} {{ promo.how_long }}.
+          It comes off on the next page.</p>{% endif %}
+        <button class="btn" type="submit" name="plan" value="monthly">{{ 'Start free trial' if trial else 'Upgrade to Pro' }}</button>
+        {% if offer.yearly %}
+          <button class="btn quiet" type="submit" name="plan" value="yearly">Or pay yearly{% if offer.save %}
             and save {{ offer.save }}%{% endif %}</button>
-        </form>
-      {% endif %}
-      {# Stripe's own page takes codes, behind a link that is easy to miss. #}
-      <p class="fine">Have a discount code? Type it on the next page, under
-        "Add promotion code".</p>
+        {% endif %}
+      </form>
     {% else %}
       <a class="btn" href="{{ url_for('signin', next='/pricing') }}">{{
         'Try Pro free for %d days' % trial if trial else 'Create account to upgrade' }}</a>
