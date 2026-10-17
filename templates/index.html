@@ -13,7 +13,7 @@
   <form class="searchrow" action="{{ url_for('analyse') }}" method="get" data-working>
     <label class="sr" for="symbol">Ticker or company name</label>
     <input class="field" id="symbol" type="text" name="symbol"
-           placeholder="AAPL, NVDA, BTC-USD, Tesla…"
+           placeholder="AAPL, NVDA, BTC-USD, Tesla…" data-suggest="submit"
            autofocus autocomplete="off" spellcheck="false" required>
     <label class="sr" for="interval">Bar interval</label>
     <select class="field" id="interval" name="interval">

@@ -230,6 +230,36 @@ def resolve(query: str) -> dict:
     return {"symbol": candidate, "name": candidate, "type": ""}
 
 
+# What an analysis can run on. Options, currencies and the like are left out
+# of suggestions rather than offered and then refused.
+_SUGGEST_KINDS = {"equity", "etf", "cryptocurrency", "index"}
+
+
+def search(query: str, limit: int = 6) -> list:
+    """Instruments matching a half-typed ticker or name, best first.
+
+    For the dropdown under a search box: an empty list rather than an error
+    when the lookup fails, because a missing suggestion must never stop
+    someone typing the ticker themselves. Answers are cached by _get, so the
+    same few letters typed twice ask Yahoo once.
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+    try:
+        data = _get(_SEARCH, {"q": text, "quotesCount": 10, "newsCount": 0})
+    except DataError:
+        return []
+    out = []
+    for q in data.get("quotes", []):
+        kind = (q.get("quoteType") or "").lower()
+        if q.get("symbol") and kind in _SUGGEST_KINDS:
+            out.append({"symbol": q["symbol"],
+                        "name": q.get("shortname") or q.get("longname") or q["symbol"],
+                        "where": q.get("exchDisp") or ""})
+    return out[:limit]
+
+
 def _classify(instrument_type: str) -> str:
     t = (instrument_type or "").upper()
     if "CRYPTO" in t:

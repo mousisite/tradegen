@@ -234,6 +234,107 @@
     });
   })();
 
+  // Suggestions under a ticker box as you type. Built here rather than with
+  // a <datalist>, which filters on what was typed before the answers arrive
+  // and often does not reopen when they do.
+  (function () {
+    var boxes = document.querySelectorAll('input[data-suggest]');
+    if (!boxes.length || !window.fetch) { return; }
+    boxes.forEach(function (input, n) {
+      var list = document.createElement('ul');
+      list.className = 'suggest';
+      list.id = 'suggest-' + n;
+      list.setAttribute('role', 'listbox');
+      list.hidden = true;
+      document.body.appendChild(list);
+      input.setAttribute('role', 'combobox');
+      input.setAttribute('aria-autocomplete', 'list');
+      input.setAttribute('aria-controls', list.id);
+      input.setAttribute('aria-expanded', 'false');
+      var items = [], active = -1, timer = null;
+
+      function close() {
+        list.hidden = true;
+        input.setAttribute('aria-expanded', 'false');
+        mark(-1);
+      }
+      function mark(i) {
+        active = i;
+        [].forEach.call(list.children, function (li, j) {
+          li.setAttribute('aria-selected', j === i ? 'true' : 'false');
+        });
+        if (i >= 0) { input.setAttribute('aria-activedescendant', list.id + '-' + i); }
+        else { input.removeAttribute('aria-activedescendant'); }
+      }
+      function choose(i) {
+        input.value = items[i].symbol;
+        close();
+        var form = input.form;
+        if (input.getAttribute('data-suggest') === 'submit' && form) {
+          // requestSubmit, unlike submit, lets the loading screen hear it.
+          if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
+        }
+      }
+      function show(found) {
+        items = found;
+        list.innerHTML = '';
+        found.forEach(function (it, i) {
+          var li = document.createElement('li');
+          li.id = list.id + '-' + i;
+          li.setAttribute('role', 'option');
+          var sym = document.createElement('b');
+          sym.textContent = it.symbol;
+          var name = document.createElement('span');
+          name.textContent = it.name;
+          var where = document.createElement('small');
+          where.textContent = it.where;
+          li.appendChild(sym); li.appendChild(name); li.appendChild(where);
+          // mousedown, not click: a click arrives after the box has lost
+          // focus and closed the list.
+          li.addEventListener('mousedown', function (e) { e.preventDefault(); choose(i); });
+          list.appendChild(li);
+        });
+        if (!found.length) { close(); return; }
+        var box = input.getBoundingClientRect();
+        list.style.left = (box.left + window.scrollX) + 'px';
+        list.style.top = (box.bottom + window.scrollY + 4) + 'px';
+        list.style.width = Math.max(box.width, 260) + 'px';
+        list.hidden = false;
+        input.setAttribute('aria-expanded', 'true');
+        mark(-1);
+      }
+      input.addEventListener('input', function () {
+        clearTimeout(timer);
+        var q = input.value.trim();
+        if (!q) { close(); return; }
+        timer = setTimeout(function () {
+          fetch('{{ url_for("api_search") }}?q=' + encodeURIComponent(q),
+                { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (found) {
+              // Only the answer to what is in the box now: a slow reply to
+              // an earlier letter must not replace a newer one.
+              if (q === input.value.trim() && document.activeElement === input) {
+                show(found);
+              }
+            })
+            .catch(function () {});
+        }, 180);
+      });
+      input.addEventListener('keydown', function (e) {
+        if (list.hidden || !items.length) { return; }
+        if (e.key === 'ArrowDown') { e.preventDefault(); mark((active + 1) % items.length); }
+        else if (e.key === 'ArrowUp') {
+          e.preventDefault(); mark((active - 1 + items.length) % items.length);
+        }
+        else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); choose(active); }
+        else if (e.key === 'Escape') { close(); }
+      });
+      input.addEventListener('blur', close);
+      window.addEventListener('resize', close);
+    });
+  })();
+
   (function () {
     var el = document.getElementById('working');
     var head = document.getElementById('workhead');

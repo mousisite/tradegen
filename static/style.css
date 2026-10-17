@@ -529,8 +529,8 @@ ul.list.ok li::marker { color: var(--gain); }
   background: color-mix(in srgb, var(--paper) 92%, transparent);
 }
 .overlay.on { display: flex; }
-.spin { width: 26px; height: 26px; border-radius: 50%;
-        border: 2px solid var(--rule); border-top-color: var(--accent);
+.spin { width: 40px; height: 40px; border-radius: 50%;
+        border: 4px solid var(--rule); border-top-color: var(--accent);
         animation: turn .8s linear infinite; }
 @keyframes turn { to { transform: rotate(360deg); } }
 .overlay .a { font-family: var(--serif); font-size: var(--t-md); }
@@ -611,7 +611,26 @@ ul.list.ok li::marker { color: var(--gain); }
     animation-iteration-count: 1 !important;
     transition-duration: .001ms !important;
   }
+  /* Except the loading circle, slowed down. Windows turns this setting on
+     with its animation switch, and a circle that never moves reads as a page
+     that has hung, which is the one thing it is there to rule out. */
+  .spin { animation-duration: 1.6s !important;
+          animation-iteration-count: infinite !important; }
 }
+
+/* ---------- search suggestions ---------- */
+
+.suggest { position: absolute; z-index: 80; margin: 0; padding: 4px 0;
+           list-style: none; background: var(--paper); color: var(--ink);
+           border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+           box-shadow: 0 8px 24px rgba(0, 0, 0, .12); }
+.suggest li { display: flex; align-items: baseline; gap: 10px;
+              padding: 10px 14px; cursor: pointer; }
+.suggest li[aria-selected="true"], .suggest li:hover { background: var(--accent-wash); }
+.suggest b { font-family: var(--mono); font-weight: 600; flex: none; }
+.suggest span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; color: var(--ink-2); font-size: var(--t-sm); }
+.suggest small { flex: none; color: var(--ink-3); font-size: var(--t-xs); }
 
 /* ---------- responsive ---------- */
 

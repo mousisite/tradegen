@@ -2168,6 +2168,12 @@ def settings():
                            has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
 
 
+@app.route("/api/search")
+def api_search():
+    """Suggestions for a search box, from what has been typed so far."""
+    return jsonify(market_mod.search((request.args.get("q") or "")[:40]))
+
+
 @app.route("/api/analyse")
 def api_analyse():
     """JSON, for anything you want to build on top."""

@@ -87,7 +87,7 @@
       <div class="setgrid">
         <div class="setfield">
           <label for="a-symbol">Instrument</label>
-          <input class="field fig" id="a-symbol" name="symbol" type="text"
+          <input class="field fig" id="a-symbol" name="symbol" type="text" data-suggest="fill"
                  placeholder="AAPL" required autocomplete="off" spellcheck="false">
         </div>
         <div class="setfield">
@@ -191,7 +191,7 @@
   <div class="card">
     <form class="searchrow" method="post" action="{{ url_for('watch', action='add') }}">
       <label class="sr" for="w-symbol">Instrument to watch</label>
-      <input class="field fig" id="w-symbol" name="symbol" type="text"
+      <input class="field fig" id="w-symbol" name="symbol" type="text" data-suggest="fill"
              placeholder="AAPL" required autocomplete="off" spellcheck="false">
       <label class="sr" for="w-interval">Interval</label>
       <select class="field" id="w-interval" name="interval">

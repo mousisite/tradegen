@@ -205,6 +205,32 @@ for path in ["/", "/screener", "/portfolio", "/monitor", "/settings", "/trades",
         check("link %s" % href[:56], code in (200, 302), "got %d" % code)
 
 print()
+print("=" * 72)
+print("SEARCH SUGGESTIONS")
+print("=" * 72)
+real_get = web.market_mod._get
+web.market_mod._get = lambda url, params, tries=3: {"quotes": [
+    {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NASDAQ"},
+    {"symbol": "AAPL250117C00100000", "quoteType": "OPTION"},
+    {"symbol": "APLE", "longname": "Apple Hospitality REIT", "quoteType": "EQUITY"}]}
+try:
+    found = c.get("/api/search?q=appl").get_json()
+    check("typing part of a name suggests matches",
+          [f["symbol"] for f in found] == ["AAPL", "APLE"], str(found))
+    check("with the name and where it trades",
+          found[0]["name"] == "Apple Inc." and found[0]["where"] == "NASDAQ")
+    check("an empty box asks for nothing", c.get("/api/search?q=").get_json() == [])
+    def down(url, params, tries=3):
+        raise web.DataError("down")
+    web.market_mod._get = down
+    check("a failed lookup suggests nothing rather than breaking",
+          c.get("/api/search?q=appl").get_json() == [])
+finally:
+    web.market_mod._get = real_get
+body = c.get("/").data.decode("utf-8", "replace")
+check("the main search box offers suggestions", 'data-suggest="submit"' in body)
+
+print()
 print("%d failure(s)" % len(fails))
 print("WEB DEEP OK" if not fails else "FAILURES: %s" % fails)
 
