@@ -105,6 +105,25 @@ if _public.startswith("https://"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 
+@app.after_request
+def _harden(response):
+    """Headers that close doors nothing here uses.
+
+    Nothing on this site is meant to be framed, sniffed into another type, or
+    to hand a full address to the next site. HSTS goes only where cookies are
+    already secure, which is the same question: is this served over https.
+    """
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if app.config.get("SESSION_COOKIE_SECURE"):
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
 @app.route("/healthz")
 def healthcheck():
     """Liveness, for whatever is watching the process.
@@ -227,13 +246,18 @@ def _identify():
             conn.close()
         g.demo = True
         return None
+    if request.endpoint is None:
+        # No such page. Sending a typo to the sign-in door tells the person
+        # nothing, and tells a crawler the address exists. Let the 404 answer.
+        return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "Not signed in."}), 401
     # A visitor who tried to do something. A POST cannot be replayed as a GET
     # after signing in, so they are brought back to the page they were on.
     if request.method != "GET":
         return redirect(url_for("signin", next=_referrer_path()))
-    return redirect(url_for("signin", next=request.full_path))
+    # full_path always ends in "?" when there is no query string.
+    return redirect(url_for("signin", next=request.full_path.rstrip("?")))
 
 
 def _referrer_path() -> str:
@@ -2497,8 +2521,9 @@ def start_background_jobs():
 
 @app.errorhandler(404)
 def not_found(_exc):
-    return render_template("error.html", symbol="",
-                           message="No page at that address."), 404
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "No such address."}), 404
+    return render_template("notfound.html"), 404
 
 
 @app.errorhandler(413)

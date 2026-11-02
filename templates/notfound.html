@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}No page here · Orenth{% endblock %}
+{% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>There is no page here</h1>
+  <p>The address may have a typo in it, or the page has moved.</p>
+</div>
+
+<div class="card">
+  <div class="cta">
+    <a class="btn" href="{{ url_for('index') }}">Front page</a>
+    <a class="btn quiet" href="{{ url_for('stocks_index') }}">Popular stocks</a>
+  </div>
+</div>
+
+{% endblock %}

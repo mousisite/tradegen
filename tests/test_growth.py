@@ -215,6 +215,42 @@ try:
 
     print()
     print("=" * 72)
+    print("WRONG ADDRESSES, AND THE HEADERS EVERY PAGE CARRIES")
+    print("=" * 72)
+    r = c.get("/no-such-page")
+    check("a visitor at a wrong address gets a page saying so, not the sign-in door",
+          r.status_code == 404 and "There is no page here" in r.data.decode(), r.status_code)
+    check("and a link back to the front page", 'href="/"' in r.data.decode())
+    r = c.get("/api/no-such-call")
+    check("a wrong API address says so in JSON",
+          r.status_code == 404 and r.get_json() == {"error": "No such address."})
+    r = c.get("/account")
+    loc = r.headers.get("Location", "")
+    check("a real page still asks them to sign in, with a clean return address",
+          r.status_code == 302 and loc.endswith(("next=/account", "next=%2Faccount")), loc)
+    lost = user("lost@example.com")
+    sign_in(lost)
+    check("signed in, a wrong address is the same page",
+          c.get("/no-such-page").status_code == 404)
+    sign_out()
+    h = c.get("/stocks").headers
+    check("every page says do not sniff, do not frame, and keep the referrer short",
+          h.get("X-Content-Type-Options") == "nosniff"
+          and h.get("X-Frame-Options") == "DENY"
+          and h.get("Content-Security-Policy") == "frame-ancestors 'none'"
+          and h.get("Referrer-Policy") == "strict-origin-when-cross-origin", dict(h))
+    check("but not to use https only, when it is not served that way",
+          "Strict-Transport-Security" not in h)
+    web.app.config["SESSION_COOKIE_SECURE"] = True
+    try:
+        check("on https it does, for a year",
+              c.get("/stocks").headers.get("Strict-Transport-Security") == "max-age=31536000")
+    finally:
+        web.app.config["SESSION_COOKIE_SECURE"] = False
+    check("a popular page is checked a few times a day", public.MAX_AGE == 6 * 3600)
+
+    print()
+    print("=" * 72)
     print("SHARING A CALL")
     print("=" * 72)
     sharer = user("sharer@example.com")

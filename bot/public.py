@@ -68,10 +68,12 @@ PEERS = [
 # telling people something it does not know.
 MIN_TRADES = 40
 
-# Daily bars change once a day; checking more often only spends the data
-# source's patience. The gap between checks keeps a run from looking like a
-# burst to it.
-MAX_AGE = 20 * 3600
+# Daily bars close once a day, but the live bar moves all day with it, and a
+# page a day old can contradict the front door's example from ten minutes
+# ago. A few checks a day keeps them in step without leaning on the data
+# source: 48 symbols, four times a day. The pause between checks keeps a run
+# from looking like a burst to it.
+MAX_AGE = 6 * 3600
 PAUSE = 3.0
 
 SHARES_PER_DAY = 30
