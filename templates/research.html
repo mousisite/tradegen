@@ -64,6 +64,10 @@
   </div>
 {% endif %}
 
+{# Thirty phone screens of sections. The bar lists them and sticks under the
+   top bar; it is filled in below from the headings that actually rendered. #}
+<nav class="jump" id="jump" aria-label="Sections" hidden></nav>
+
 {% if r.reasoning %}
 <section style="margin-top:0">
   <div class="sechead">
@@ -795,5 +799,47 @@
   </div>
 </section>
 {% endif %}
+
+<script>
+(function () {
+  var bar = document.getElementById('jump');
+  var heads = [].slice.call(document.querySelectorAll('section > h2, section > .sechead > h2'));
+  if (!bar || heads.length < 3) { return; }
+  var seen = {};
+  heads.forEach(function (h, i) {
+    var id = 's-' + h.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (seen[id]) { id += '-' + i; }
+    seen[id] = true;
+    h.id = id;
+    var a = document.createElement('a');
+    a.href = '#' + id;
+    a.textContent = h.textContent.trim();
+    bar.appendChild(a);
+  });
+  bar.hidden = false;
+  // Mark the section being read, so the bar also says where you are.
+  var links = bar.children;
+  function mark() {
+    var line = (bar.getBoundingClientRect().bottom || 0) + 24;
+    var current = 0;
+    heads.forEach(function (h, i) { if (h.getBoundingClientRect().top <= line) { current = i; } });
+    for (var i = 0; i < links.length; i++) {
+      if (i === current) {
+        links[i].setAttribute('aria-current', 'true');
+        if (links[i].scrollIntoView) { links[i].scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+      } else {
+        links[i].removeAttribute('aria-current');
+      }
+    }
+  }
+  var waiting = false;
+  window.addEventListener('scroll', function () {
+    if (waiting) { return; }
+    waiting = true;
+    requestAnimationFrame(function () { mark(); waiting = false; });
+  }, { passive: true });
+  mark();
+})();
+</script>
 
 {% endblock %}

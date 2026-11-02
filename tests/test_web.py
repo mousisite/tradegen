@@ -43,6 +43,7 @@ for probe in ["The case, both ways", "The business", "As filed with the SEC",
               "Where all of this came from", "What would prove this wrong",
               "Key figures", "sec.gov"]:
     check("research shows '%s'" % probe, probe in body)
+check("research has a bar to jump between its sections", 'class="jump"' in body)
 
 t0 = time.time()
 r2 = c.get("/research?symbol=AAPL&interval=1d")
