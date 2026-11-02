@@ -150,7 +150,7 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "code_start", "code_verify", "pricing",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
-                    "email_stop", "backtests", "backtest_page"}
+                    "email_stop", "backtests", "backtest_page", "record"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -1710,7 +1710,8 @@ def sitemap():
     # tests use, and its page would stay empty: not one to send a robot to.
     pages = PUBLIC_PAGES + [("/stocks", "daily", "0.8")] + [
         ("/stock/" + public_mod.slug(sym), "daily", "0.7")
-        for sym, _ in public_mod.POPULAR] + [("/backtests", "daily", "0.8")] + [
+        for sym, _ in public_mod.POPULAR] + [
+        ("/backtests", "daily", "0.8"), ("/record", "daily", "0.8")] + [
         ("/backtest/" + public_mod.strategy_slug(name), "daily", "0.7")
         for name in strategies_mod.strategy_names()
         if public_mod.strategy_results(rows, name)]
@@ -2256,6 +2257,7 @@ def stock_page(sym):
     try:
         snap = public_mod.verdict(conn, symbol)
         others = public_mod.related(symbol, public_mod.verdicts(conn))
+        history = public_mod.symbol_record(conn, symbol)
     finally:
         conn.close()
     base = _public_base()
@@ -2266,7 +2268,8 @@ def stock_page(sym):
         short=public_mod.short, slug=public_mod.slug, counts=public_mod.counts_line,
         others=others, page_url=page, card_url=card, frozen=False,
         tested=public_mod.symbol_results(snap), label_of=public_mod.strategy_label,
-        strategy_slug=public_mod.strategy_slug,
+        strategy_slug=public_mod.strategy_slug, history=history,
+        how_words=public_mod.HOW_WORDS,
         **({"preview_image": card} if snap else {}))
 
 
@@ -2319,6 +2322,20 @@ def backtest_page(name):
         method=_house_method(), label_of=public_mod.strategy_label,
         strategy_slug=public_mod.strategy_slug, short=public_mod.short,
         slug=public_mod.slug)
+
+
+@app.route("/record")
+def record():
+    """How every past public call turned out, for anyone to check."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        rec = public_mod.record(conn)
+    finally:
+        conn.close()
+    return render_template("record.html", rec=rec, method=_house_method(),
+                           popular_count=len(public_mod.POPULAR),
+                           short=public_mod.short, slug=public_mod.slug,
+                           how_words=public_mod.HOW_WORDS)
 
 
 @app.route("/stock/<sym>/card.png")
@@ -2456,8 +2473,10 @@ def _public_snapshot(symbol: str) -> dict:
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
                             db_path=app.config.get("DB_PATH"))
-    snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
-                                                              result.bars))
+    snap = public_mod.snapshot(
+        result, plain_mod.explain_plan(result.plan, result.bars),
+        stop_atr=cfg["stop_atr_multiple"], target_atr=cfg["target_atr_multiple"],
+        horizon=config_mod.horizon_for("1d", cfg))
     snap["tests"] = public_mod.tests(result.strategy_report)
     return snap
 
@@ -2478,7 +2497,10 @@ def _digest_look_up(symbol: str):
 def _refresh_popular_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        return public_mod.refresh(conn, _public_snapshot)
+        # The bars were fetched moments ago for the check, so scoring the
+        # earlier calls reads them from the cache rather than asking again.
+        return public_mod.refresh(conn, _public_snapshot,
+                                  bars=lambda s: market_mod.fetch_bars(s, "1d"))
     finally:
         conn.close()
 

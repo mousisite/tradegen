@@ -82,6 +82,22 @@
 </section>
 {% endif %}
 
+{% if history and history.latest %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>Past calls on {{ short(symbol) }}</h2>
+    <a class="tail" href="{{ url_for('record') }}">the whole record &rarr;</a></div>
+  <ul class="list">
+    {% for r in history.latest %}
+      <li>{{ r.at|day }}: said <b>{{ r.action }}</b>, the price {{ how_words[r.how] }}
+        ({{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%).
+        <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span></li>
+    {% endfor %}
+  </ul>
+  {% if history.open %}<p class="prose faint" style="font-size:var(--t-xs)">{{ history.open }} more
+    still waiting for {{ 'its' if history.open == 1 else 'their' }} ten days.</p>{% endif %}
+</section>
+{% endif %}
+
 {% if frozen and today_url %}
   <p class="prose" style="margin-top:var(--s3)">
     <a href="{{ today_url }}">See today's check for {{ short(symbol) }} &rarr;</a></p>

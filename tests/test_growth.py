@@ -215,6 +215,112 @@ try:
 
     print()
     print("=" * 72)
+    print("THE TRACK RECORD")
+    print("=" * 72)
+    T = calendar.timegm((2026, 1, 5, 15, 0, 0, 0, 0, 0))          # a Monday, mid-session
+    DAY = 86400
+
+    def call(symbol, action, price, atr):
+        s = snap_for(symbol, action)
+        s.update(price=price, stop=price - 1.5 * atr, target=price + 2.25 * atr,
+                 horizon=10, at=T)
+        return s
+
+    def path(closes, swing=1.0):
+        """Daily bars after the call, one per day, each a little either side of its close."""
+        return SimpleNamespace(timestamp=[T + DAY * (k + 1) for k in range(len(closes))],
+                               high=[c + swing for c in closes], low=[c - swing for c in closes],
+                               close=list(closes))
+
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("before any call, the record page says it is starting",
+          "first calls are written down" in page and "noindex" in page)
+    conn = db.connect(DB)
+    check("a snapshot with no range has no stop or target, so it is not written down",
+          not public.record_call(conn, snap_for("GME")))
+    check("a call is written down", public.record_call(conn, call("NVDA", "BUY", 100.0, 2.0)))
+    check("but only once a day", not public.record_call(conn, call("NVDA", "BUY", 101.0, 2.0)))
+    public.record_call(conn, call("AMD", "AVOID", 50.0, 1.0))
+    public.record_call(conn, call("TSLA", "WAIT", 200.0, 4.0))
+    public.record_call(conn, call("AAPL", "BUY", 80.0, 1.0))
+    public.record_call(conn, call("MSFT", "BUY", 300.0, 3.0))
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("while waiting, it says how many calls it is holding",
+          "5 calls written down since 5 Jan 2026" in page)
+
+    # NVDA, BUY at 100 with target 104.5: reaches it on the third day.
+    check("a buy that reached its target was right",
+          public.settle_calls(conn, "NVDA", path([101, 102, 105, 103])) == 1
+          and conn.execute("SELECT outcome, how FROM calls WHERE symbol='NVDA'").fetchone()[:]
+          == ("right", "target"))
+    # AMD, AVOID at 50 with target 52.25: the price went there anyway.
+    public.settle_calls(conn, "AMD", path([50.5, 51, 53, 53]))
+    check("an avoid when the price rose to the target was wrong",
+          conn.execute("SELECT outcome FROM calls WHERE symbol='AMD'").fetchone()[0] == "wrong")
+    # TSLA, WAIT at 200 with stop 194: the price fell through it.
+    public.settle_calls(conn, "TSLA", path([198, 195, 192, 190], swing=2.0))
+    check("a wait when the price fell to the stop was right",
+          conn.execute("SELECT outcome, how FROM calls WHERE symbol='TSLA'").fetchone()[:]
+          == ("right", "stop"))
+    # AAPL, BUY at 80: ten quiet days, ending at 80.2, inside half a day's move.
+    public.settle_calls(conn, "AAPL", path([80.1] * 9 + [80.2], swing=0.3))
+    check("a price that went nowhere is neither right nor wrong",
+          conn.execute("SELECT outcome, how FROM calls WHERE symbol='AAPL'").fetchone()[:]
+          == ("flat", "flat"))
+    # MSFT: only three quiet days so far.
+    check("a call whose ten days are not up stays open",
+          public.settle_calls(conn, "MSFT", path([301, 302, 301], swing=0.5)) == 0
+          and conn.execute("SELECT outcome FROM calls WHERE symbol='MSFT'").fetchone()[0] is None)
+    check("the stop is checked before the target inside one day",
+          public._walk(SimpleNamespace(high=[110.0], low=[90.0], close=[100.0]),
+                       0, 100.0, 97.0, 104.5, 10)[0] == "stop")
+
+    rec = public.record(conn)
+    check("the record adds up", (rec["all"]["right"], rec["all"]["wrong"], rec["all"]["flat"],
+                                 rec["all"]["open"]) == (2, 1, 1, 1), rec["all"])
+    check("and splits buys from the rest",
+          rec["buy"]["right"] == 1 and rec["hold"]["right"] == 1 and rec["hold"]["wrong"] == 1)
+    mine = public.symbol_record(conn, "NVDA")
+    check("one stock's own record is there too",
+          len(mine["latest"]) == 1 and mine["latest"][0]["how"] == "target")
+    conn.close()
+
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("the record page says the score in plain words",
+          "right 2 times and wrong 1 time" in page and "67% right" in page)
+    check("lists every settled call with what the price did",
+          "rose to the target" in page and "fell to the stop" in page
+          and "went nowhere" in page and "/stock/amd" in page)
+    check("and is open to search engines once there is a score", "noindex" not in page)
+    page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    check("a stock page shows its own past calls",
+          "Past calls on NVDA" in page and "rose to the target" in page)
+    sitemap = c.get("/sitemap.xml").data.decode()
+    check("the sitemap lists the record", "/record</loc>" in sitemap)
+
+    conn = db.connect(DB)
+    fetched = []
+
+    def rising(symbol):
+        fetched.append(symbol)
+        return path([310, 320, 330, 340])
+
+    def analyse_with_levels(symbol):
+        s = call(symbol, "BUY", 300.0, 3.0)
+        s["at"] = T + DAY                                  # the next day's call
+        return s
+
+    public.refresh(conn, analyse_with_levels, now=time.time() + public.MAX_AGE + 1,
+                   sleep=slept.append, bars=rising)
+    check("the daily check writes each call down and scores the earlier ones",
+          fetched and conn.execute("SELECT COUNT(*) FROM calls WHERE day='2026-01-06'").fetchone()[0]
+          == len(public.POPULAR)
+          and conn.execute("SELECT outcome FROM calls WHERE symbol='MSFT' AND day='2026-01-05'")
+          .fetchone()[0] == "right")
+    conn.close()
+
+    print()
+    print("=" * 72)
     print("WRONG ADDRESSES, AND THE HEADERS EVERY PAGE CARRIES")
     print("=" * 72)
     r = c.get("/no-such-page")

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% set a = rec.all %}
+{% if a.decided %}
+  {% set page_blurb = "Orenth makes a call on " ~ popular_count ~ " popular stocks and coins every day, then scores it " ~ method.days ~ " trading days later. So far: right " ~ a.right ~ " times, wrong " ~ a.wrong ~ ". Every call is listed. Not financial advice." %}
+{% endif %}
+{% block title %}Orenth's track record: how its calls turned out · Orenth{% endblock %}
+{% block og_title %}How Orenth's calls turned out · Orenth{% endblock %}
+{% block head_extra %}{% if not a.decided %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">Scored every day</span>
+  <h1>How Orenth's calls turned out</h1>
+  <p>Every day Orenth makes a call on {{ popular_count }} popular stocks and
+    coins. {{ method.days }} trading days later it checks what the price did
+    and writes the result here, right or wrong. Nothing is left out.</p>
+</div>
+
+{% macro times(n) %}{{ n }} time{{ '' if n == 1 else 's' }}{% endmacro %}
+{% macro result(r) %}
+  <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span>
+{% endmacro %}
+
+{% if not rec.total %}
+  <div class="plainbox">
+    <span class="eyebrow">Starting</span>
+    <p class="prose">The first calls are written down with the next daily
+      check. Results appear {{ method.days }} trading days after that.</p>
+  </div>
+{% elif not a.decided %}
+  <div class="plainbox">
+    <span class="eyebrow">Collecting</span>
+    <p class="lead">{{ rec.total }} calls written down since {{ rec.first_at|day }}.</p>
+    <p class="prose">The first results appear {{ method.days }} trading days
+      after a call is made.</p>
+  </div>
+{% else %}
+  <div class="plainbox">
+    <span class="eyebrow">All calls so far</span>
+    <p class="lead">It was right {{ times(a.right) }} and wrong {{ times(a.wrong) }}:
+      {{ a.rate|pct(0) }} right.</p>
+    <p class="prose">{{ a.flat }} went nowhere and {{ a.open }} {{ 'is' if a.open == 1 else 'are' }}
+      still waiting for {{ 'its' if a.open == 1 else 'their' }} {{ method.days }} days.
+      {{ rec.total }} calls since {{ rec.first_at|day }}.</p>
+  </div>
+
+  <div class="plans" style="margin-top:var(--s3)">
+    {% for label, t in [("When it said BUY", rec.buy), ("When it said WAIT or AVOID", rec.hold)] %}
+      <div class="card">
+        <span class="eyebrow">{{ label }}</span>
+        {% if t.decided %}
+          <p class="lead" style="margin:0">{{ t.rate|pct(0) }} right</p>
+          <p class="prose">Right {{ times(t.right) }}, wrong {{ times(t.wrong) }}{% if t.flat %},
+            {{ t.flat }} went nowhere{% endif %}.</p>
+        {% else %}
+          <p class="prose">Nothing decided yet{% if t.open %}: {{ t.open }} waiting{% endif %}.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+
+  <section style="margin-top:var(--s4)">
+    <div class="sechead"><h2>The latest results</h2></div>
+    <div class="card pad0">
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th>Stock</th><th>It said</th><th>Result</th><th>What the price did</th>
+            <th class="r">Move</th><th>Day</th>
+          </tr></thead>
+          <tbody>
+          {% for r in rec.latest %}
+            <tr>
+              <td><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a></td>
+              <td><span class="chip {{ 'long' if r.action == 'BUY' else 'short' if r.action == 'SHORT'
+                   else 'hold' if r.action == 'WAIT' else 'mute' }}">{{ r.action }}</span></td>
+              <td>{{ result(r) }}</td>
+              <td style="white-space:nowrap">{{ how_words[r.how] }}</td>
+              <td class="r fig {{ 'gain' if r.exit_price > r.price else 'loss' if r.exit_price < r.price else '' }}">{{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%</td>
+              <td class="soft" style="white-space:nowrap">{{ r.at|day }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+{% endif %}
+
+<div class="card" style="margin-top:var(--s3)">
+  <span class="eyebrow">How it is scored</span>
+  <ul class="list">
+    <li>Each stock's call is written down once a day, with the price at the time.</li>
+    <li>Then we pretend to buy at that price, with the same stop and target
+      the app uses everywhere: {{ method.stop }} ATR below and {{ method.target }} ATR
+      above. ATR is how much the price usually moves in a day.</li>
+    <li>If it said <b>BUY</b>, it was right when the price reached the target
+      before the stop, or ended at least half a day's move higher after
+      {{ method.days }} trading days. It was wrong when the stop was hit first,
+      or the price ended lower.</li>
+    <li>If it said <b>WAIT</b> or <b>AVOID</b>, the same pretend buy is scored the
+      other way round: right when that buy would have lost, wrong when it
+      would have made money.</li>
+    <li>A price that ended about where it started counts as neither.</li>
+    <li>Calls are never edited or removed.</li>
+  </ul>
+  <p class="prose faint" style="font-size:var(--t-xs)">Past results do not promise
+    future ones. This is software output, not financial advice.</p>
+</div>
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">Check any stock or coin, free.</p>
+  <p class="prose">The same check that made every call on this page, on
+    whatever you are looking at.</p>
+  <div class="cta">
+    {% if not current_user or demo %}
+      <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+    {% endif %}
+    <a class="btn quiet" href="{{ url_for('stocks_index') }}">Popular stocks</a>
+  </div>
+</section>
+
+{% endblock %}

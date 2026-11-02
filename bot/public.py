@@ -93,6 +93,24 @@ CREATE TABLE IF NOT EXISTS shares (
     created  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shares_user ON shares(user_id, created);
+-- One public call a day per symbol, scored once its horizon has passed.
+-- Never edited after that: a record you can change is a story.
+CREATE TABLE IF NOT EXISTS calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol      TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    price       REAL NOT NULL,
+    stop        REAL NOT NULL,
+    target      REAL NOT NULL,
+    horizon     INTEGER NOT NULL,
+    at          INTEGER NOT NULL,
+    outcome     TEXT,
+    how         TEXT,
+    exit_price  REAL,
+    settled     INTEGER,
+    UNIQUE (symbol, day)
+);
 """
 
 
@@ -118,9 +136,22 @@ def from_slug(text: str) -> Optional[str]:
     return symbol if symbol in NAMES else None
 
 
-def snapshot(result, plain: Dict) -> Dict:
-    """The parts of an analysis worth showing a stranger, as plain data."""
+def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.25,
+             horizon: int = 10) -> Dict:
+    """The parts of an analysis worth showing a stranger, as plain data.
+
+    The stop and target are where the house method would put them for a buy
+    at this price. They are kept so the call can be scored later against what
+    the price then did, by the same rule the back-tests use.
+    """
     plan, bars = result.plan, result.bars
+    ctx = getattr(result, "context", None)
+    atr = 0.0
+    if ctx is not None and len(getattr(ctx, "atr", ())):
+        atr = float(ctx.atr[len(ctx.atr) - 1])
+        if atr != atr:                      # NaN: no range to measure
+            atr = 0.0
+    price = float(bars.last_price)
     samples = int(plan.prob_samples or 0)
     worked = (int(round(plan.probability * samples))
               if plan.probability is not None and samples else 0)
@@ -142,6 +173,9 @@ def snapshot(result, plain: Dict) -> Dict:
             "price": float(bars.last_price),
             "currency": getattr(bars, "currency", "") or "USD",
             "interval": bars.interval,
+            "stop": price - stop_atr * atr if atr > 0 else None,
+            "target": price + target_atr * atr if atr > 0 else None,
+            "horizon": int(horizon),
             "at": int(time.time())}
 
 
@@ -260,18 +294,146 @@ def due(conn: sqlite3.Connection, now: Optional[float] = None) -> List[str]:
 
 def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
             now: Optional[float] = None, pause: float = PAUSE,
-            sleep: Callable[[float], None] = time.sleep) -> Dict:
-    """Check everything that is due, one at a time. One failure skips one row."""
+            sleep: Callable[[float], None] = time.sleep,
+            bars: Optional[Callable[[str], object]] = None) -> Dict:
+    """Check everything that is due, one at a time. One failure skips one row.
+
+    Each check also writes the day's call down and, given a way to fetch the
+    daily bars, scores this symbol's earlier calls whose time has come.
+    """
     checked, errors = 0, []
     for n, symbol in enumerate(due(conn, now)):
         if n:
             sleep(pause)
         try:
-            save_verdict(conn, analyse(symbol))
+            snap = analyse(symbol)
+            save_verdict(conn, snap)
             checked += 1
+            record_call(conn, snap)
+            if bars is not None:
+                settle_calls(conn, symbol, bars(symbol))
         except Exception as exc:           # a delisted ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
     return {"checked": checked, "errors": errors}
+
+
+# --- the track record --------------------------------------------------------
+#
+# Every public call is written down and, once its horizon has passed, scored
+# against what the price did, by the same pretend trade the back-tests use: a
+# buy at the call's price with the house stop and target. A BUY was right if
+# that trade paid; a WAIT or AVOID was right if it did not. Then it is left
+# alone. A record that can be edited is a story.
+
+HOW_WORDS = {"target": "rose to the target", "stop": "fell to the stop",
+             "up": "ended higher", "down": "ended lower", "flat": "went nowhere"}
+
+
+def record_call(conn: sqlite3.Connection, snap: Dict) -> bool:
+    """Write today's call down, once per symbol per day. True if it was new."""
+    if not (snap.get("action") and snap.get("price") and snap.get("stop")
+            and snap.get("target")):
+        return False
+    ensure_schema(conn)
+    day = time.strftime("%Y-%m-%d", time.gmtime(snap["at"]))
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO calls (symbol, day, action, price, stop, target, "
+        "horizon, at) VALUES (?,?,?,?,?,?,?,?)",
+        (snap["symbol"], day, snap["action"], float(snap["price"]),
+         float(snap["stop"]), float(snap["target"]), int(snap.get("horizon") or 10),
+         int(snap["at"])))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def _walk(bars, start: int, entry: float, stop: float, target: float,
+          horizon: int):
+    """What a buy at entry did over the bars from start: (how, exit price).
+
+    Same rule as the back-tests: the stop is checked before the target inside
+    a bar, because the order within a day is unknown and guessing the kind
+    order flatters the result. (None, None) while the bars run out first.
+    """
+    n = len(bars.close)
+    for k in range(start, min(start + horizon, n)):
+        if float(bars.low[k]) <= stop:
+            return "stop", stop
+        if float(bars.high[k]) >= target:
+            return "target", target
+    if n < start + horizon:
+        return None, None
+    close = float(bars.close[start + horizon - 1])
+    risk = entry - stop
+    r = (close - entry) / risk if risk > 0 else 0.0
+    return ("up" if r >= 0.5 else "down" if r <= -0.5 else "flat"), close
+
+
+def judge(action: str, how: str) -> str:
+    """right, wrong or flat, from what the call said and what a buy did."""
+    if how == "flat":
+        return "flat"
+    worked = how in ("target", "up")
+    if action == "BUY":
+        return "right" if worked else "wrong"
+    return "wrong" if worked else "right"      # WAIT, AVOID and SHORT all said: not a buy
+
+
+def settle_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
+    """Score this symbol's open calls whose horizon has passed. Returns how many."""
+    ensure_schema(conn)
+    rows = conn.execute("SELECT * FROM calls WHERE symbol=? AND outcome IS NULL "
+                        "ORDER BY at", (symbol,)).fetchall()
+    done = 0
+    n = len(bars.timestamp)
+    for row in rows:
+        # The bar the call fell inside is skipped: part of it was already over.
+        start = next((k for k in range(n) if int(bars.timestamp[k]) > row["at"]), n)
+        how, exit_price = _walk(bars, start, row["price"], row["stop"], row["target"],
+                                row["horizon"])
+        if how is None:
+            continue
+        conn.execute("UPDATE calls SET outcome=?, how=?, exit_price=?, settled=? "
+                     "WHERE id=?", (judge(row["action"], how), how, exit_price,
+                                    int(time.time()), row["id"]))
+        done += 1
+    conn.commit()
+    return done
+
+
+def _tally(rows) -> Dict:
+    out = {"right": 0, "wrong": 0, "flat": 0, "open": 0}
+    for r in rows:
+        out[r["outcome"] or "open"] += 1
+    out["decided"] = out["right"] + out["wrong"]
+    out["rate"] = out["right"] / out["decided"] if out["decided"] else None
+    return out
+
+
+def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = None) -> Dict:
+    """The whole record: tallies for everyone, for buys, for the rest, and the
+    latest settled calls."""
+    ensure_schema(conn)
+    now = now or time.time()
+    rows = conn.execute("SELECT * FROM calls ORDER BY at").fetchall()
+    settled = [dict(r) for r in rows if r["outcome"]]
+    settled.sort(key=lambda r: -r["settled"])
+    return {"total": len(rows),
+            "first_at": rows[0]["at"] if rows else None,
+            "all": _tally(rows),
+            "buy": _tally([r for r in rows if r["action"] == "BUY"]),
+            "hold": _tally([r for r in rows if r["action"] in ("WAIT", "AVOID")]),
+            "month": _tally([r for r in rows if r["at"] >= now - 30 * 86400]),
+            "latest": settled[:limit]}
+
+
+def symbol_record(conn: sqlite3.Connection, symbol: str, limit: int = 6) -> Dict:
+    """One stock's latest settled calls, and how many are still waiting."""
+    ensure_schema(conn)
+    rows = conn.execute("SELECT * FROM calls WHERE symbol=? ORDER BY at DESC",
+                        (symbol,)).fetchall()
+    return {"latest": [dict(r) for r in rows if r["outcome"]][:limit],
+            "open": sum(1 for r in rows if not r["outcome"]),
+            "tally": _tally(rows)}
 
 
 # --- shares ------------------------------------------------------------------
