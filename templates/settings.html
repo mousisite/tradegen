@@ -28,7 +28,11 @@
         <label for="account_size">Account size</label>
         <input class="field fig" id="account_size" name="account_size" type="number"
                step="any" min="1" value="{{ cfg.account_size }}">
-        <div class="hint">Used to work out position sizes. It never leaves this machine.</div>
+        {# The desktop version keeps everything on the machine it runs on;
+           online it is stored with the account, and the hint has to say so. #}
+        <div class="hint">{% if personal %}Used to size positions and to weigh
+          your portfolio. Saved to your account on Orenth's server.{% else %}Used
+          to work out position sizes. It never leaves this machine.{% endif %}</div>
       </div>
       <div class="setfield">
         <label for="risk_per_trade_pct">Risk per trade</label>
@@ -232,9 +236,11 @@
   {# A button inside the same form, so restoring defaults is a POST rather
      than an address anyone, or any crawler, could open. #}
   <button class="btn quiet" type="submit" name="reset" value="1"
-          formnovalidate>Restore defaults</button>
+          formnovalidate
+          onclick="return confirm('Put every setting on this page back to its default?');">
+    Restore defaults</button>
 </div>
-{% if personal %}
+{% if personal and not demo %}
   <p class="prose" style="margin-top:var(--s2)">These are your own settings.
     Changing them changes nothing for anyone else.</p>
 {% endif %}
@@ -243,7 +249,8 @@
 
 <section>
   <div class="sechead"><h2>Take your data with you</h2>
-    <span class="tail">no account needed, nothing phoned home</span></div>
+    <span class="tail">{{ 'download what is yours' if personal
+                          else 'no account needed, nothing phoned home' }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
       <table>
@@ -271,13 +278,19 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      {% if personal %}
+      The measured strategy record is shared by everyone on Orenth, so that
+      download is the whole record, not only the part your analyses added.
+      {% else %}
       The measured strategy record is the slowest of these to rebuild, because
       it is the accumulated result of back-testing everything you have looked
       at. Keep a copy of it before doing anything drastic to the database.
+      {% endif %}
     </p>
   </div>
 </section>
 
+{% if not personal %}
 <p class="legal">
   Settings are written to <b>config.json</b> in the project folder. You can edit
   that file directly if you prefer; the two stay in sync. The database lives in
@@ -285,5 +298,11 @@
   <b>STOCKBOT_CONFIG</b> and <b>STOCKBOT_DB</b> environment variables, which is
   how you keep a paper journal separate from a live one.
 </p>
+{% elif not demo %}
+<p class="legal">
+  Your settings are saved to your account on Orenth's server, and only your
+  own pages use them. Deleting your account deletes them.
+</p>
+{% endif %}
 
 {% endblock %}

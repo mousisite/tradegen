@@ -7,7 +7,7 @@
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Every company figure cites the SEC filing it came from." %}
+{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
@@ -93,6 +93,9 @@
 {% endif %}
 </head>
 <body>
+{# The first stop for a keyboard, so the ten links in the bar are one press
+   rather than ten on every page. Off screen until it has focus. #}
+<a class="skip" href="#main">Skip to content</a>
 
 {# One list, drawn twice: as a row of links on a wide screen and as a menu on
    a phone. Eight links and an avatar are 720 pixels wide, and on a 390 pixel
@@ -103,7 +106,7 @@
   (url_for('ideas'), 'ideas', 'Find'),
   (url_for('screener'), 'screener', 'Screener'),
   (url_for('portfolio'), 'portfolio', 'Portfolio'),
-  (url_for('trades'), 'trades', 'Trades'),
+  (url_for('trades'), 'trades', 'Journal'),
   (url_for('monitor'), 'monitor', 'Monitor'),
   (url_for('strategies'), 'strategies', 'Strategies'),
   (url_for('settings'), 'settings', 'Settings'),
@@ -123,8 +126,11 @@
       {% endfor %}
     </nav>
     <div class="tools">
+      {# Sign in, because the front page and the example's own banner already
+         ask newcomers to create an account; this is the way back in for
+         someone who has one. The page it opens does both. #}
       {% if auth_on and (demo or not current_user) and active != 'signin' %}
-        <a class="btn sm" href="{{ url_for('signin') }}">Sign up</a>
+        <a class="btn sm" href="{{ url_for('signin') }}">Sign in</a>
       {% endif %}
       {% if go_pro and active != 'pricing' %}
         <a class="btn sm" href="{{ url_for('pricing') }}">Go Pro</a>
@@ -192,8 +198,13 @@
 {% endif %}
 
 <div class="wrap">
+{# The page's own content is the main landmark, so a screen reader can jump
+   straight to it; the disclaimer and the footer links sit after it. #}
+<main id="main">
 {% block content %}{% endblock %}
+</main>
 
+<footer>
 <p class="legal">
   <b>Analysis software, not financial advice.</b>
   Every figure here is measured from historical price data and can stop
@@ -208,11 +219,12 @@
   <a href="{{ url_for('record') }}">Track record</a>{% if billing_on %} ·
   <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
 </p>
+</footer>
 </div>
 
 {# An analysis back-tests 34 strategies over tens of thousands of bars. Without
    feedback the page reads as frozen and people submit a second time. #}
-<div class="overlay" id="working" role="status" aria-live="polite">
+<div class="overlay" id="working">
   <div class="spin" aria-hidden="true"></div>
   <div class="a" id="workhead">Analysing</div>
   <div class="b" id="worknote">Fetching data, running {{ strategy_count }} strategies, and
@@ -223,9 +235,14 @@
      the page is alive rather than hung. #}
   <div class="c" id="worktime" aria-hidden="true"></div>
 </div>
+{# What the overlay says, read aloud when it appears. A live region speaks
+   only when its text changes, and the overlay's text sat there hidden all
+   along, so screen readers said nothing. This one is filled on the spot. #}
+<div class="sr" id="worksaid" role="status" aria-live="polite"></div>
 
 <script>
-  // The phone menu closes when you tap anywhere else, or press Escape.
+  // The phone menu closes when you tap anywhere else, press Escape, or tab
+  // out of it.
   (function () {
     var menu = document.querySelector('details.menu');
     if (!menu) { return; }
@@ -233,7 +250,17 @@
       if (menu.open && !menu.contains(e.target)) { menu.open = false; }
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { menu.open = false; }
+      if (e.key !== 'Escape' || !menu.open) { return; }
+      var inside = menu.contains(document.activeElement);
+      menu.open = false;
+      // A link in the panel vanishes with it, and focus would fall back to
+      // the top of the page. Hand it to the button that opened the menu.
+      if (inside) { menu.querySelector('summary').focus(); }
+    });
+    menu.addEventListener('focusout', function (e) {
+      if (menu.open && e.relatedTarget && !menu.contains(e.relatedTarget)) {
+        menu.open = false;
+      }
     });
   })();
 
@@ -343,16 +370,48 @@
     var head = document.getElementById('workhead');
     var note = document.getElementById('worknote');
     var time = document.getElementById('worktime');
+    var said = document.getElementById('worksaid');
     var tick = null;
+    // The overlay's own words are for an analysis, which is most of what it
+    // covers. Anything else that does not bring its own words is named by
+    // where it leads, so a screen or a routine never claims to be running
+    // the strategies.
+    var HEAD = head.textContent, NOTE = note.textContent.replace(/\s+/g, ' ');
+    var KINDS = [
+      [/\/research$/, 'Researching the business',
+       'Reading its filings, its valuation and its price history.'],
+      [/\/screener$/, 'Screening',
+       'Fetching each company\'s numbers and checking them against the filters.'],
+      [/\/workflow\/[^\/]+$/, 'Running the routine',
+       'Doing each step in turn. The results are listed when it is done.']
+    ];
+
+    function words(src) {
+      var where = '';
+      if (src) {
+        try {
+          where = new URL(src.getAttribute(src.tagName === 'FORM' ? 'action' : 'href')
+                          || '', location.href).pathname;
+        } catch (e) {}
+      }
+      for (var i = 0; i < KINDS.length; i++) {
+        if (KINDS[i][0].test(where)) { return KINDS[i]; }
+      }
+      return [null, HEAD, NOTE];
+    }
 
     function show(ev) {
+      // Ctrl, Cmd, Shift or a middle click opens the link somewhere else and
+      // leaves this page where it is, under an overlay nothing would remove.
+      if (ev && ev.type === 'click' && (ev.button !== 0 || ev.ctrlKey ||
+          ev.metaKey || ev.shiftKey || ev.altKey)) { return; }
       var src = ev && ev.currentTarget;
-      if (src && src.getAttribute('data-working-title')) {
-        head.textContent = src.getAttribute('data-working-title');
-      }
-      if (src && src.getAttribute('data-working-note')) {
-        note.textContent = src.getAttribute('data-working-note');
-      }
+      var kind = words(src);
+      // Set every time, so the words of an earlier trigger, or of a page
+      // come back to with the back button, are not left on this one.
+      head.textContent = (src && src.getAttribute('data-working-title')) || kind[1];
+      note.textContent = (src && src.getAttribute('data-working-note')) || kind[2];
+      said.textContent = head.textContent + '. ' + note.textContent;
       var started = Date.now();
       var patience = src && src.getAttribute('data-working-slow');
       time.textContent = '';
@@ -362,7 +421,10 @@
         time.textContent = secs + 's';
         // Said once, at the point where a wait starts to feel like a failure.
         // It is also true: the result is shared, so the next person waits none.
-        if (patience && secs === 12) { note.textContent = patience; }
+        if (patience && secs === 12) {
+          note.textContent = patience;
+          said.textContent = patience;
+        }
       }, 1000);
       el.classList.add('on');
     }
@@ -374,6 +436,7 @@
     window.addEventListener('pageshow', function () {
       clearInterval(tick);
       el.classList.remove('on');
+      said.textContent = '';
     });
   })();
 

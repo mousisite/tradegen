@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set active = 'trades' %}
-{% block title %}Trades · Orenth{% endblock %}
+{% block title %}Journal · Orenth{% endblock %}
 {% block content %}
 
 <div class="pagehead">
@@ -110,7 +110,8 @@
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th>
           <th class="r">Stop</th><th class="r">Target</th><th class="r">Now</th>
-          <th class="r">Open R</th><th>State</th><th class="r">Close it</th><th></th>
+          <th class="r">Open R</th><th>State</th><th class="r">Close it</th>
+          <th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for t in open_trades %}
@@ -164,8 +165,8 @@
     </div>
     {% else %}
       <div class="blank">
-        Nothing open. Analyse an instrument and use
-        <b>Log this as a paper trade</b> on the result, or add one by hand above.
+        Nothing open. When an analysis says buy or short, use
+        <b>Log this as a paper trade</b> on it, or add one by hand above.
       </div>
     {% endif %}
   </div>
@@ -183,7 +184,8 @@
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th>
           <th class="r">Stop</th><th class="r">Exit</th><th>Why</th>
-          <th class="r">R</th><th class="r">Cash</th><th class="r">Closed</th><th></th>
+          <th class="r">R</th><th class="r">Cash</th><th class="r">Closed</th>
+          <th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for t in closed %}

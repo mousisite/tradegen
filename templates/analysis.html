@@ -24,7 +24,7 @@
 <div class="card" style="margin-bottom:var(--s3)">
   <div class="instrument">
     <div class="who">
-      <span class="sym">{{ r.bars.symbol }}</span>
+      <h1 class="sym">{{ r.bars.symbol }}</h1>
       <span class="name">{{ r.bars.name }}</span>
     </div>
     <div class="price">
@@ -64,6 +64,8 @@
   {% if plain.hold %}<p class="prose">{{ plain.hold }}</p>{% endif %}
   <p class="prose faint" style="font-size:var(--t-xs)">
     Everything below this box is the same answer with the workings shown.
+    <a href="{{ url_for('backtests') }}">How the strategies are tested</a> ·
+    <a href="{{ url_for('record') }}">How past calls turned out</a>
   </p>
 </div>
 {% endif %}
@@ -129,11 +131,17 @@
         {{ plan.position.risk_amount|money }} budgeted. Position sizing that
         only counts the stop understates what a bad morning does.</p>
     {% endif %}
-    {% if r.run_id %}
+    {# Only a call to act now is a trade. A wait has not filled, and logging it
+       would put a price the market never reached into the journal. #}
+    {% if r.run_id and a in ('BUY', 'SHORT') %}
       <form action="{{ url_for('take_trade') }}" method="post" style="margin-top:var(--s3)">
         <input type="hidden" name="run_id" value="{{ r.run_id }}">
         <button class="btn quiet sm" type="submit">Log this as a paper trade</button>
       </form>
+    {% elif r.run_id and a == 'WAIT' %}
+      <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
+        A wait is not a trade yet, so there is nothing to log. To hear when the
+        price reaches {{ plan.entry|price }}, set the entry alert further down.</p>
     {% endif %}
   </div>
 </div>
@@ -263,7 +271,7 @@
         <tbody>
         {% for s in ranked[:12] %}
           <tr>
-            <td>{{ s.name.replace('_',' ')|capitalize }}</td>
+            <td>{{ s.name|strategy }}</td>
             <td class="soft">{{ s.family.replace('_',' ') }}</td>
             <td>{{ lean(s.score) }}</td>
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
@@ -296,7 +304,7 @@
         <tbody>
         {% for st in best + worst %}
           <tr>
-            <td>{{ st.name.replace('_',' ')|capitalize }}</td>
+            <td>{{ st.name|strategy }}</td>
             <td class="soft">{{ st.family.replace('_',' ') }}</td>
             <td class="r fig soft">{{ st.n }}</td>
             <td class="r fig">{{ st.hit_rate|pct }}</td>
