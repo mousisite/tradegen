@@ -53,6 +53,49 @@ class StrategyStat:
     sum_r: float = 0.0         # net of costs
     sum_r_gross: float = 0.0   # before costs
     sum_bars: float = 0.0
+    # What a standard error on sum_r needs. Trades a few bars apart share most
+    # of their bars and win or lose together, so the spread of the results is
+    # not enough on its own. These sums cover every pair of trades whose
+    # windows overlap, so spread() can allow for it without keeping every
+    # trade.
+    sum_r2: float = 0.0
+    pairs: int = 0
+    sum_pair_r: float = 0.0    # r_a + r_b, over overlapping pairs
+    sum_pair_rr: float = 0.0   # r_a * r_b, over overlapping pairs
+    recent: List[Tuple[int, float]] = field(default_factory=list, repr=False)
+
+    def note(self, bar: int, r: float, horizon: int) -> None:
+        """Count one more trade's R, taken at `bar`, for spread()."""
+        self.sum_r2 += r * r
+        while self.recent and bar - self.recent[0][0] >= horizon:
+            self.recent.pop(0)
+        for _, other in self.recent:
+            self.pairs += 1
+            self.sum_pair_r += r + other
+            self.sum_pair_rr += r * other
+        self.recent.append((bar, r))
+
+    def spread(self) -> Optional[Tuple[float, float]]:
+        """(variance of sum_r, separate trades), allowing for overlap.
+
+        The variance is the trades' own spread plus twice how each overlapping
+        pair moved together, never less than the trades' own: overlap cannot
+        make a sample worth more than its count. Every overlapping pair counts
+        in full, the Hansen-Hodrick rule for windows of a known length. Down-
+        weighting pairs by how little they share, as a Bartlett kernel does,
+        left the standard error about a sixth too small on random prices;
+        counted in full, it came within a tenth of the true spread for dense
+        and sparse strategies alike. The standard error of the average R is
+        the square root over n. Separate trades is the count this evidence is
+        worth once overlap is allowed for. None below two trades.
+        """
+        if self.n < 2:
+            return None
+        mean = self.sum_r / self.n
+        own = max(self.sum_r2 - self.n * mean * mean, 0.0)
+        shared = self.sum_pair_rr - mean * self.sum_pair_r + mean * mean * self.pairs
+        var = max(own, own + 2.0 * shared)
+        return var, (self.n * own / var if var > 0 else float(self.n))
 
     @property
     def hit_rate(self) -> Optional[float]:
@@ -185,6 +228,7 @@ def measure_strategies(ctx: Context, stop_atr: float, target_atr: float,
                 st.sum_r += r_mult
                 st.sum_r_gross += r_mult + cost_r
                 st.sum_bars += held
+                st.note(i, r_mult, horizon)
 
         report.samples += 1
 

@@ -6,6 +6,7 @@ the strategy pages used to mislead, and says how.
 import calendar
 import csv
 import io
+import math
 import os as _os
 import sqlite3
 import sys as _sys
@@ -22,9 +23,11 @@ import numpy as np  # noqa: E402
 c, DB = harness.isolated_web("record")
 
 import web  # noqa: E402
-from bot import public  # noqa: E402
+from bot import calibrate, config, public  # noqa: E402
 from bot import database as db  # noqa: E402
+from bot.learning import StrategyStat, measure_strategies  # noqa: E402
 from bot.market import Bars  # noqa: E402
+from bot.strategies import build_context  # noqa: E402
 
 # Sign-in required, so every page here is fetched as a visitor would see it.
 web.app.config["AUTH_MODE"] = "google"
@@ -328,6 +331,97 @@ try:
     check("a coin's says how a coin's call is made", "first check after midnight" in page)
 
     # -----------------------------------------------------------------------
+    head("A STRATEGY'S RESULT CARRIES ITS MARGIN OF ERROR")
+    # -----------------------------------------------------------------------
+    # A trade every third day, held up to ten, shares most of its days with
+    # the next. The pages ranked 33 strategies by figures about one standard
+    # error from zero, and called every sampled day a "signal".
+    near, far = StrategyStat("x", "f", "all"), StrategyStat("y", "f", "all")
+    for k in range(64):
+        r_ = 1.5 if (k // 8) % 2 == 0 else -1.0
+        for st, step in ((near, 3), (far, 30)):
+            st.n += 1
+            st.sum_r += r_
+            st.note(k * step, r_, 10)
+    var_near, sep_near = near.spread()
+    var_far, sep_far = far.spread()
+    check("trades that overlap and move together count as fewer separate ones",
+          sep_near < 0.6 * near.n and var_near > var_far, (sep_near, var_near, var_far))
+    check("trades that never overlap count in full", abs(sep_far - far.n) < 1e-9, sep_far)
+
+    report = SimpleNamespace(overall={"x": near, "y": far})
+    stored = public.tests(report)
+    check("a stored test carries its spread and separate trades",
+          len(stored["x"]) == 5 and stored["x"][:3] == [64, near.wins, round(near.sum_r, 3)])
+    old = public._figures([50, 10, -1.5])
+    check("a test stored before that shows no range, and counts every trade",
+          old["se"] is None and old["separate"] == 50 and old["verdict"] is None)
+
+    rows_ = [{"symbol": "NVDA", "name": "NVIDIA",
+              "tests": {"x": [60, 30, 6.0, 400.0, 30.0], "y": [60, 30, 6.0, 60.0, 55.0]},
+              "baseline": [370, 100, 18.5, 900.0, 160.0]}]
+    check("a strategy with too few separate trades is left out, however many in all",
+          not public.strategy_results(rows_, "x") and public.strategy_results(rows_, "y"))
+    two = [{"symbol": "AMD", "name": "AMD", "tests": {"y": [100, 40, 20.0, 100.0, 90.0]},
+            "baseline": [370, 100, -3.7, 900.0, 160.0]}] + rows_
+    summary = public.strategy_summary(public.strategy_results(two, "y"))
+    check("pooled over stocks, its margin adds up theirs",
+          abs(summary["se"] - math.sqrt(160.0) / 160) < 1e-9
+          and abs(summary["kept"] - 26.0 / 160) < 1e-9, summary)
+    check("and is only called a gain when the whole margin is above zero",
+          summary["verdict"] == 1 and public._verdict(0.02, 0.03) == 0
+          and public._verdict(-0.2, 0.05) == -1)
+    check("beside buying every day on the same stocks, weighted the same way",
+          abs(summary["base"] - (100 * -0.01 + 60 * 0.05) / 160) < 1e-9, summary["base"])
+
+    # Buying on every tested day takes the same days the strategies were
+    # tested on.
+    rng = np.random.RandomState(3)
+    n = 900
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.02, n)))
+    prev = np.concatenate([[100.0], close[:-1]])
+    ts = np.array([1_600_000_000 + k * DAY for k in range(n)], dtype=np.int64)
+    walk = Bars(symbol="T", name="T", asset_class="equity", currency="USD", exchange="T",
+                interval="1d", timestamp=ts, open=prev,
+                high=np.maximum(prev, close) * 1.01, low=np.minimum(prev, close) * 0.99,
+                close=close, volume=np.full(n, 1e6), session_id=ts // DAY,
+                market_open=False)
+    ctx = build_context(walk)
+    cfg = config.load()
+    rep = measure_strategies(ctx, 1.5, 2.25, 10, 3, 2.0, weights=cfg["strategy_weights"])
+    base = public.buy_every_day(ctx, 1.5, 2.25, 10, 3, 2.0)
+    check("buying every day is tested on the same days as the strategies",
+          base[0] == rep.samples == len(calibrate.sample_points(ctx, 10, 3, 1500)),
+          (base[0], rep.samples))
+    check("and carries a margin of its own", len(base) == 5 and base[3] > 0)
+
+    for sym, kept, var, base_kept in (("NVDA", 12.0, 150.0, 40.0), ("AMD", -2.0, 150.0, -5.0)):
+        snap = {"symbol": sym, "name": public.NAMES[sym], "action": "WAIT", "at": int(time.time()),
+                "tests": {"rsi_reversion": [120, 40, kept, var, 60.0],
+                          "trend_stack": [300, 90, 3.0, 400.0, 120.0]},
+                "baseline": [370, 110, base_kept, 900.0, 160.0]}
+        public.save_verdict(conn, snap)
+    page = text("/backtests")
+    check("the strategy list shows buying on every tested day among them",
+          "Buying on every tested day" in page and "no strategy" in page)
+    check("with each result's margin, and days tested rather than signals",
+          "±" in page and "Days tested" in page and "Signals" not in page)
+    check("and warns that one or two can clear it by luck",
+          "one or two can look this good by luck alone" in page)
+    check("its count of strategies leaves the shaded row out",
+          "2 strategies, back-tested every day" in page)
+    page = text("/backtest/rsi-reversion")
+    check("a strategy's page sets each stock beside buying every day there",
+          "Buying every day" in page and "+0.11R" in page)
+    check("and says plainly when the result cannot be told from luck",
+          "cannot be told apart from luck" in page)
+    check("and how many separate trades its days are worth",
+          "worth about 120 separate trades" in page)
+    check("the method says every third day, and what the margin means",
+          "every third trading day" in page and "margin of error" in page
+          and "separate trades on a stock is" in page)
+
+    # -----------------------------------------------------------------------
     head("THE BACKGROUND CHECK, END TO END")
     # -----------------------------------------------------------------------
     # The real engine on made-up bars: no network, no calendar.
@@ -352,6 +446,9 @@ try:
     engine.fetch_bars = lambda s, iv: live
     catalysts.fetch = _no_calendar
     snap = web._public_snapshot("NVDA")
+    check("the check stores each strategy's spread, and buying every day",
+          snap["baseline"] and len(snap["baseline"]) == 5
+          and snap["tests"] and all(len(v) == 5 for v in snap["tests"].values() if v[0] >= 2))
     check("and whether the market was open, and the session of the price",
           snap["market_open"] is False
           and time.strftime("%a %d %b", time.gmtime(snap["price_day"] * DAY)) == "Fri 06 Nov")

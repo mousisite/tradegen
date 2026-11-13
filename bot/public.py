@@ -20,6 +20,7 @@ import bisect
 import csv
 import io
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -238,7 +239,8 @@ def _price_day(bars) -> Optional[int]:
 
 
 def tests(report) -> Dict[str, List]:
-    """Each strategy's back-test on one instrument: [times, worked, R kept].
+    """Each strategy's back-test on one instrument:
+    [times, worked, R kept, variance of R kept, separate trades].
 
     Kept with the popular snapshot rather than read from strategy_stats,
     because that table also takes the numbers from anyone's own run, under
@@ -246,8 +248,46 @@ def tests(report) -> Dict[str, List]:
     """
     if report is None:
         return {}
-    return {s.name: [s.n, s.wins, round(s.sum_r, 3)]
-            for s in report.overall.values()}
+    return {s.name: _test_entry(s) for s in report.overall.values()}
+
+
+def _test_entry(stat) -> List:
+    """One back-test as stored: the counts, then the spread when measured.
+
+    The variance of R kept and the separate trades allow for trades that
+    overlap in time (learning.StrategyStat.spread), and are what the margin
+    of error on a strategy page comes from.
+    """
+    entry = [stat.n, stat.wins, round(stat.sum_r, 3)]
+    spread = stat.spread() if hasattr(stat, "spread") else None
+    if spread is not None:
+        entry += [round(spread[0], 3), round(spread[1], 1)]
+    return entry
+
+
+def buy_every_day(ctx, stop_atr: float, target_atr: float, horizon: int,
+                  stride: int = 3, cost_bps: float = 0.0,
+                  max_samples: int = 1500) -> Optional[List]:
+    """A buy on every day the strategies were tested on, whatever they said.
+
+    The same days, stop, target, holding time and costs as
+    learning.measure_strategies (whose cap on days is also 1500), stored like
+    a strategy's test. Over years when a stock rose, buying it on any day
+    kept money too, so a strategy that mostly bought shows skill only by
+    beating this, not by beating zero.
+    """
+    from .calibrate import sample_points, simulate_trade
+    from .learning import StrategyStat
+    stat = StrategyStat(name="buy_every_day", family="", regime="all")
+    for i in sample_points(ctx, horizon, stride, max_samples):
+        res = simulate_trade(ctx, i, 1, stop_atr, target_atr, horizon, cost_bps)
+        if res is None:
+            continue
+        stat.n += 1
+        stat.wins += 1 if res[0] else 0
+        stat.sum_r += res[1]
+        stat.note(i, res[1], horizon)
+    return _test_entry(stat) if stat.n else None
 
 
 # --- the popular list --------------------------------------------------------
@@ -308,35 +348,89 @@ def strategy_from_slug(text: str) -> Optional[str]:
     return name if name in BY_NAME else None
 
 
+def _verdict(kept: float, se: Optional[float]) -> Optional[int]:
+    """1 when the whole 95% range is above zero, -1 when it is all below,
+    0 when it straddles zero, None when no range was measured."""
+    if se is None:
+        return None
+    return 1 if kept - 2 * se > 0 else -1 if kept + 2 * se < 0 else 0
+
+
+def _figures(entry) -> Dict:
+    """One stored back-test, [times, worked, R kept, variance, separate], as figures.
+
+    Tests stored before the spread was measured have only the first three:
+    they show no range, and count every trade as separate, until the next
+    check stores them again.
+    """
+    n, wins, kept_sum = int(entry[0]), int(entry[1]), float(entry[2])
+    var = float(entry[3]) if len(entry) > 3 and entry[3] is not None else None
+    separate = float(entry[4]) if len(entry) > 4 and entry[4] is not None else float(n)
+    kept = kept_sum / n if n else 0.0
+    se = math.sqrt(var) / n if var is not None and n else None
+    return {"n": n, "wins": wins, "kept": kept, "kept_sum": kept_sum, "var": var,
+            "se": se, "verdict": _verdict(kept, se), "separate": separate}
+
+
 def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
-    """How one strategy did on each popular instrument, best first."""
+    """How one strategy did on each popular instrument, best first, with
+    what buying on every tested day kept there ("base")."""
     out = []
     for v in rows:
-        n, wins, kept = (v.get("tests") or {}).get(name, (0, 0, 0.0))
-        if n >= MIN_TRADES:
-            out.append({"symbol": v["symbol"], "name": v["name"], "n": n,
-                        "wins": wins, "kept": kept / n})
+        entry = (v.get("tests") or {}).get(name)
+        if not entry:
+            continue
+        fig = _figures(entry)
+        if fig["separate"] < MIN_TRADES:
+            continue
+        base = _figures(v["baseline"]) if v.get("baseline") else None
+        out.append(dict(fig, symbol=v["symbol"], name=v["name"],
+                        base=base["kept"] if base else None))
     return sorted(out, key=lambda r: -r["kept"])
+
+
+def baseline_results(rows: List[Dict]) -> List[Dict]:
+    """Buying on every tested day, on each popular instrument."""
+    out = []
+    for v in rows:
+        if v.get("baseline"):
+            fig = _figures(v["baseline"])
+            if fig["separate"] >= MIN_TRADES:
+                out.append(dict(fig, symbol=v["symbol"], name=v["name"]))
+    return out
 
 
 def strategy_summary(results: List[Dict]) -> Dict:
     """One strategy across every instrument it was tested on.
 
     Kept is pooled over trades, not averaged over instruments, so a symbol
-    with twenty trades does not count as much as one with three hundred.
+    with twenty trades does not count as much as one with three hundred. Its
+    margin of error adds up the instruments' as if they moved apart; stocks
+    that move together make the true one wider. "base" is what buying on
+    every tested day kept on the same instruments, weighted the same way.
     """
     n = sum(r["n"] for r in results)
+    kept = sum(r["kept_sum"] for r in results) / n if n else 0.0
+    var = (sum(r["var"] for r in results)
+           if results and all(r["var"] is not None for r in results) else None)
+    se = math.sqrt(var) / n if var is not None and n else None
+    based = [r for r in results if r.get("base") is not None]
+    base = (sum(r["base"] * r["n"] for r in based) / n
+            if n and based and len(based) == len(results) else None)
     return {"tested": len(results),
             "paid": sum(1 for r in results if r["kept"] > 0),
-            "n": n, "wins": sum(r["wins"] for r in results),
-            "kept": sum(r["kept"] * r["n"] for r in results) / n if n else 0.0}
+            "n": n, "wins": sum(r["wins"] for r in results), "kept": kept,
+            "se": se, "verdict": _verdict(kept, se), "base": base,
+            "separate": sum(r["separate"] for r in results)}
 
 
 def symbol_results(snap: Optional[Dict]) -> List[Dict]:
     """Every strategy tested on one instrument, best first."""
-    out = [{"strategy": name, "n": n, "wins": wins, "kept": kept / n}
-           for name, (n, wins, kept) in ((snap or {}).get("tests") or {}).items()
-           if n >= MIN_TRADES]
+    out = []
+    for name, entry in ((snap or {}).get("tests") or {}).items():
+        fig = _figures(entry)
+        if fig["separate"] >= MIN_TRADES:
+            out.append(dict(fig, strategy=name))
     return sorted(out, key=lambda r: -r["kept"])
 
 
