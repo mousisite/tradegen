@@ -1778,32 +1778,28 @@ def ideas():
     cfg = _cfg()
 
     result = None
-    preparing = False
     asked = (request.args.get("market") or request.args.get("horizon")
              or request.args.get("risk"))
-    if g.demo and asked:
-        # The example reads a scan made in the background at most once an
-        # hour, so visitors cannot make the server run 150-instrument scans.
-        if horizon == "short":
-            return _locked("Create an account to scan for short holds",
-                           "The example scans daily bars. With an account you "
-                           "can scan for holds of a few days on hourly bars.",
-                           examples=False)
-        result = _demo_shortlist(market, horizon, risk)
-        preparing = result is None
-        if result is not None and result.get("scanned_at"):
-            result = dict(result, age=time.time() - result["scanned_at"])
-    elif asked:
+    if g.demo and asked and horizon == "short":
+        return _locked("Create an account to scan for short holds",
+                       "The example scans daily bars. With an account you "
+                       "can scan for holds of a few days on hourly bars.",
+                       examples=False)
+    if asked:
         try:
-            result = ideas_mod.find(market, horizon, cfg, risk)
-            # Scans are shared between everyone asking the same question, so
-            # this one may have run minutes ago. The page says so rather than
-            # presenting a stale list as this second's answer.
-            if result.get("scanned_at"):
-                result = dict(result, age=time.time() - result["scanned_at"])
+            # The scan runs in the background; the page waits a few seconds
+            # for it and otherwise shows how far it has got.
+            result = (_demo_shortlist(market, horizon, risk) if g.demo else
+                      ideas_mod.find(market, horizon, cfg, risk,
+                                     wait=ideas_mod.PAGE_WAIT))
         except Exception as exc:
             return render_template("error.html", symbol="",
                                    message="The scan failed: %s" % exc), 502
+        # Scans are shared between everyone asking the same question, so
+        # this one may have run minutes ago. The page says so rather than
+        # presenting a stale list as this second's answer.
+        if result.get("scanned_at"):
+            result = dict(result, age=time.time() - result["scanned_at"])
 
     # Visitors included: an example that showed more than a free account would
     # make signing up look like a downgrade.
@@ -1814,7 +1810,7 @@ def ideas():
             result = dict(result, passed=result["passed"][:keep],
                           watch=result["watch"][:keep], limited_total=total)
 
-    return render_template("ideas.html", result=result, preparing=preparing,
+    return render_template("ideas.html", result=result,
                            market=market if market in ideas_mod.MARKETS else "stocks",
                            horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
                            risk=risk if risk in ideas_mod.RISKS else "balanced",
@@ -1822,42 +1818,15 @@ def ideas():
                            risks=ideas_mod.RISKS)
 
 
-# The example account's scans, one per market, refreshed at most hourly and
-# only when a visitor actually asks for one.
+# The example account's scans: the house settings, and reused for an hour,
+# so visitors cannot make the server run a 150-instrument scan each.
 DEMO_SCAN_TTL = 60 * 60.0
-_demo_scans: Dict[str, Dict] = {}
-_demo_scan_lock = threading.Lock()
 
 
-def _refresh_demo_scan(market: str) -> None:
-    try:
-        cfg = config_mod.load(app.config.get("CFG_PATH"))
-        scan = ideas_mod._scan(market, "1d", cfg, ideas_mod.MAX_SCANNED)
-        with _demo_scan_lock:
-            _demo_scans[market].update(scan=scan, at=time.time())
-    except Exception:
-        pass
-    finally:
-        with _demo_scan_lock:
-            _demo_scans[market]["busy"] = False
-
-
-def _demo_shortlist(market: str, horizon: str, risk: str) -> Optional[Dict]:
-    market = market if market in ideas_mod.MARKETS else "stocks"
-    horizon = horizon if horizon in ideas_mod.HORIZONS else "medium"
-    risk = risk if risk in ideas_mod.RISKS else "balanced"
-    with _demo_scan_lock:
-        slot = _demo_scans.setdefault(market, {"scan": None, "at": 0.0,
-                                               "busy": False})
-        stale = slot["scan"] is None or time.time() - slot["at"] > DEMO_SCAN_TTL
-        if stale and not slot["busy"]:
-            slot["busy"] = True
-            threading.Thread(target=_refresh_demo_scan, args=(market,),
-                             daemon=True).start()
-        scan = slot["scan"]
-    if scan is None:
-        return None
-    return ideas_mod._shortlist(scan, horizon, risk)
+def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
+    cfg = config_mod.load(app.config.get("CFG_PATH"))
+    return ideas_mod.find(market, horizon, cfg, risk, wait=ideas_mod.PAGE_WAIT,
+                          ttl=DEMO_SCAN_TTL)
 
 
 @app.route("/screener", methods=["GET"])

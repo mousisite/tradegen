@@ -238,7 +238,7 @@ try:
     # Find shows a free account the top of each list.
     real_find = web.ideas_mod.find
 
-    def fake_find(market, horizon, cfg, risk):
+    def fake_find(market, horizon, cfg, risk, **_kw):
         row = {"symbol": "X", "action": "BUY", "price": 10.0, "entry": 10.0,
                "stop": 9.0, "target": 12.0, "probability": 0.4, "samples": 100,
                "reliable": True, "gap_multiple": 1.5, "expectancy": 0.2}

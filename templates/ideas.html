@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% set active = 'ideas' %}
 {% block title %}Find something · Orenth{% endblock %}
+{# While a scan runs the page reloads itself every few seconds, so the
+   progress and the list fill in without anyone pressing anything. #}
+{% block head_extra %}{% if result and result.running %}<meta http-equiv="refresh" content="6">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
@@ -59,12 +62,22 @@
   </p>
 </div>
 
-{% if preparing %}
-  <div class="plainbox" style="margin-top:var(--s3)">
-    <span class="eyebrow">Getting ready</span>
-    <p class="prose">The example scan is being run right now: every instrument
-      on the list, back-tested. It takes about a minute. Refresh this page in a
-      moment, or create an account to run your own whenever you like.</p>
+{% if result and result.running %}
+  {% set looked = result.looked_at or 0 %}
+  {% set total = result.asked_for_now or result.asked_for or 0 %}
+  <div class="plainbox scanning" role="status" aria-live="polite" style="margin-top:var(--s3)">
+    <span class="eyebrow">{{ 'Refreshing' if result.refreshing else 'Still checking' }}</span>
+    <p class="lead" style="margin:0">{{ looked }} of {{ total }} looked at so far.</p>
+    <div class="meter" style="margin:var(--s2) 0"><i style="width:{{ ((looked / total * 100) if total else 0)|round(1) }}%"></i></div>
+    <p class="prose" style="margin:0">
+      {% if result.refreshing %}
+        Below is the last finished scan, from {{ (result.age or 0)|int // 60 }}
+        minute(s) ago, while a fresh one runs.
+      {% else %}
+        The list below is only what has been checked so far. It is not ranked
+        yet and will change as the rest come in.
+      {% endif %}
+      This page updates itself every few seconds.</p>
   </div>
 {% endif %}
 
@@ -73,7 +86,9 @@
 <div class="plainbox" style="margin-top:var(--s3)">
   <span class="eyebrow">In plain words</span>
   <p class="lead">
-    {% if result.passed %}
+    {% if result.partial %}
+      {% if result.passed %}So far, {{ result.passed|length }} worth a look.{% else %}Nothing so far.{% endif %}
+    {% elif result.passed %}
       {{ result.passed|length }} worth a look right now.
     {% else %}
       Nothing worth buying today.
@@ -95,7 +110,7 @@
 {% if result.passed %}
 <section>
   <div class="sechead">
-    <h2>Ready now</h2>
+    <h2>{{ 'So far, not ranked' if result.partial else 'Ready now' }}</h2>
     <span class="count">{{ result.passed|length }}</span>
     <span class="tail">a setup is firing and it has paid off before</span>
   </div>
@@ -112,7 +127,7 @@
         <tbody>
         {% for r in result.passed %}
           <tr>
-            <td class="r fig"><b>{{ r.rank }}</b></td>
+            <td class="r fig"><b>{{ r.rank or '—' }}</b></td>
             <td><b>{{ r.symbol }}</b></td>
             <td><span class="chip {{ 'long' if r.action == 'BUY'
                  else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
@@ -142,7 +157,8 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      Ranked 1 to {{ result.passed|length }} by {{ result.ranked_as }}. Number 1
+      {% if result.partial %}Not ranked until every instrument has been looked
+      at.{% else %}Ranked 1 to {{ result.passed|length }} by {{ result.ranked_as }}.{% endif %} Number 1
       is the best on that measure, not the safest and not a recommendation.
       "Worked before" counts how many times this same setup reached its target
       before its stop, on this instrument's own history. "Gap risk" is how much
@@ -242,10 +258,15 @@
 {% endif %}
 
 <p class="legal">
-  Looked at {{ result.scanned }} instruments on {{ result.interval }} bars in
-  {{ "%.0f"|format(result.seconds) }} seconds{% if result.age and result.age > 45 %},
-  and this scan ran {{ result.age|int // 60 }} minute(s) ago. Prices have moved
-  since{% endif %}.
+  {% if result.partial %}So far, analysed {{ result.scanned }} of
+  {{ result.asked_for }} instruments on {{ result.interval }} bars.
+  {% else %}Analysed {{ result.scanned }} of the {{ result.asked_for }} instruments
+  on its list, on {{ result.interval }} bars, in {{ "%.0f"|format(result.seconds) }}
+  seconds{% if result.age and result.age > 45 %}, and this scan ran
+  {{ result.age|int // 60 }} minute(s) ago. Prices have moved since{% endif %}.
+  {% endif %}
+  {% if result.failed %}Could not read {{ result.failed|length }}:
+  {{ result.failed|join(', ') }}.{% endif %}
   {{ result.avoided }} had no setup at all.
   A list can be empty, and often is. That is the app working, not failing.
 </p>

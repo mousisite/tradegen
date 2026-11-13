@@ -19,6 +19,7 @@ the thing that has most often worked, not the thing that moved most today.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -141,14 +142,25 @@ MAX_SCANNED = 150
 # waiting, often to be told nothing cleared the bar.
 CACHE_TTL = 300
 
-# Longer than the slowest scan measured (hourly crypto, ~45s).
+# How long a caller that wants the finished answer (a test, the terminal)
+# waits for it. Longer than the slowest scan measured.
 SCAN_WAIT = 150.0
 
-# Cloudflare sits in front of the site and abandons any request that has not
-# answered within 100 seconds, showing the visitor its own error page. The
-# scan stops well short of that and reports how far it got, so the worst case
-# is a shorter list that says it is shorter, never an error screen.
-SCAN_BUDGET = 60.0
+# A scan runs in a background thread, not inside the page request: Cloudflare
+# abandons any request that has not answered within 100 seconds, and a full
+# list on a slow data source takes longer than that. It used to stop at 60
+# seconds and show what it had, which is how a scan of 54 out of 150 came to
+# be ranked as if it were the whole market. Now the page shows progress, and
+# this is only the backstop for a data source that has stopped answering.
+SCAN_BUDGET = 15 * 60.0
+
+# How long the page itself waits for a scan before showing its progress
+# instead. A scan already cached, or a short list, finishes inside this.
+PAGE_WAIT = 12.0
+
+# Finished scans no longer asked for are dropped after this, so per-person
+# settings cannot grow the store without limit.
+JOB_KEEP = 3 * 3600.0
 
 # The months horizon then reads the filings of whatever cleared the bar. The
 # two budgets together stay under Cloudflare's limit with room for the page
@@ -338,9 +350,56 @@ def _accounts_hold_up(symbol: str) -> Optional[Dict]:
             "strength": strength.value if strength.usable else None}
 
 
+# --- background scans ------------------------------------------------------
+#
+# One job per question (market, bar interval, settings, list length), shared
+# by everyone asking it. A second person asking while it runs joins it rather
+# than starting another. The finished scan is reused until it is older than
+# the cache window; after that the next request starts a fresh one and, while
+# it runs, shows the last finished one with its age.
+
+_JOBS: Dict[str, Dict] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _job(key: str, market: str, interval: str, cfg: Dict, limit: int,
+         ttl: float) -> Dict:
+    """The job for this question: fresh and finished, running, or new."""
+    now = time.time()
+    with _JOBS_LOCK:
+        for old_key in [k for k, j in _JOBS.items()
+                        if not j["running"] and now - j["started"] > JOB_KEEP]:
+            del _JOBS[old_key]
+        job = _JOBS.get(key)
+        if job is not None and (job["running"] or (
+                job["scan"] is not None and now - job["scan"]["scanned_at"] < ttl)):
+            return job
+        previous = None
+        if job is not None:
+            previous = job["scan"] or job["previous"]
+        job = {"running": True, "rows": [], "failed": [], "done": 0, "total": 0,
+               "started": now, "scan": None, "previous": previous, "error": None,
+               "finished": threading.Event()}
+        _JOBS[key] = job
+    threading.Thread(target=_run, args=(job, market, interval, cfg, limit),
+                     daemon=True, name="orenth-scan").start()
+    return job
+
+
+def _run(job: Dict, market: str, interval: str, cfg: Dict, limit: int) -> None:
+    try:
+        job["scan"] = _scan(market, interval, cfg, limit, job=job)
+    except Exception as exc:                # the page says so; the server lives on
+        job["error"] = str(exc) or type(exc).__name__
+    finally:
+        job["running"] = False
+        job["finished"].set()
+
+
 def find(market: str = "stocks", horizon: str = "medium",
          cfg: Optional[Dict] = None, risk: str = "balanced",
-         limit: int = MAX_SCANNED, progress=None) -> Dict:
+         limit: int = MAX_SCANNED, progress=None, wait: float = SCAN_WAIT,
+         ttl: float = CACHE_TTL) -> Dict:
     """What cleared the bar, for this market, holding period and appetite.
 
     The slow part, analysing every instrument, depends only on the market and
@@ -348,9 +407,14 @@ def find(market: str = "stocks", horizon: str = "medium",
     the three risk appetites, and between the weeks and months horizons, which
     both read daily bars. Changing appetite re-filters a scan that already
     exists instead of repeating a thirty-second one.
+
+    The scan runs in the background. wait is how long to wait for it to
+    finish; if it is still running after that, the answer says so: either the
+    last finished scan with its age, or what has been looked at so far,
+    marked as not yet the whole list. complete is True only for a scan that
+    looked at everything it set out to.
     """
     from . import config as config_mod
-    from . import upstream
 
     cfg = cfg or config_mod.load()
     market = market if market in MARKETS else "stocks"
@@ -366,21 +430,49 @@ def find(market: str = "stocks", horizon: str = "medium",
         .encode("utf-8")).hexdigest()[:12]
     key = "ideas:%s:%s:%s:%d" % (market, interval, fingerprint, limit)
 
-    # The wait has to outlast the scan itself. A waiter that gives up early
-    # runs the whole scan a second time.
-    scan = upstream.cached(
-        key, lambda: _scan(market, interval, cfg, limit, progress),
-        ttl=CACHE_TTL, wait=SCAN_WAIT)
-    return _shortlist(scan, horizon, risk)
+    if progress is not None:
+        # The terminal: one person, watching it go, so no shared job.
+        return dict(_shortlist(_scan(market, interval, cfg, limit, progress),
+                               horizon, risk), running=False)
+
+    job = _job(key, market, interval, cfg, limit, ttl)
+    if wait and job["running"]:
+        job["finished"].wait(wait)
+    scan, running = job["scan"], job["running"]
+    if scan is not None and not running:
+        return dict(_shortlist(scan, horizon, risk), running=False)
+    if not running and job["error"]:
+        raise RuntimeError(job["error"])
+    status = {"running": True, "looked_at": job["done"], "asked_for_now": job["total"],
+              "started_at": job["started"]}
+    if job["previous"] is not None:
+        # A finished scan from earlier is a better answer than a part-done
+        # one, as long as it says how old it is.
+        return dict(_shortlist(job["previous"], horizon, risk), refreshing=True, **status)
+    with _JOBS_LOCK:
+        partial = {"market": market, "interval": interval,
+                   "rows": list(job["rows"]), "failed": list(job["failed"]),
+                   "asked_for": job["total"] or min(limit, MAX_SCANNED),
+                   "cut_short": False, "seconds": time.time() - job["started"],
+                   "scanned_at": job["started"]}
+    return dict(_shortlist(partial, horizon, risk, partial=True), **status)
 
 
 def _scan(market: str, interval: str, cfg: Dict, limit: int,
-          progress=None) -> Dict:
-    """Analyse every instrument on the list once. Always the slow path."""
+          progress=None, job: Optional[Dict] = None) -> Dict:
+    """Analyse every instrument on the list once. Always the slow path.
+
+    Each instrument ends up in exactly one place: rows (read and analysed),
+    failed (the data source gave nothing usable), or not looked at because
+    the budget ran out (cut_short). The three always add up to asked_for.
+    """
     started = time.time()
     symbols = _universe(market, min(limit, MAX_SCANNED))
+    if job is not None:
+        job["total"] = len(symbols)
 
     rows: List[Dict] = []
+    failed: List[str] = []
     cut_short = False
     # Concurrent because each one is mostly waiting on the network, and the
     # shared cache means overlapping symbols cost one request between them.
@@ -391,8 +483,17 @@ def _scan(market: str, interval: str, cfg: Dict, limit: int,
             row = future.result()
             if row:
                 rows.append(row)
+            else:
+                failed.append(futures[future])
+            if job is not None:
+                with _JOBS_LOCK:
+                    if row:
+                        job["rows"].append(row)
+                    else:
+                        job["failed"].append(futures[future])
+                    job["done"] += 1
             if progress:
-                progress("Looked at %d of %d" % (len(rows), len(symbols)))
+                progress("Looked at %d of %d" % (len(rows) + len(failed), len(symbols)))
     except FuturesTimeout:
         cut_short = True
     finally:
@@ -401,12 +502,18 @@ def _scan(market: str, interval: str, cfg: Dict, limit: int,
         pool.shutdown(wait=False, cancel_futures=True)
 
     return {"market": market, "interval": interval, "rows": rows,
-            "asked_for": len(symbols), "cut_short": cut_short,
+            "failed": sorted(failed), "asked_for": len(symbols),
+            "cut_short": cut_short,
             "seconds": time.time() - started, "scanned_at": time.time()}
 
 
-def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
-    """Filter and rank a finished scan for one horizon and appetite. Cheap."""
+def _shortlist(scan: Dict, horizon: str, risk: str, partial: bool = False) -> Dict:
+    """Filter and rank a scan for one horizon and appetite. Cheap.
+
+    partial is a scan still running: nothing gets a rank, because a "number 1"
+    of the part looked at so far is not number 1 of the list, and the filings
+    are not read yet, because the list will change.
+    """
     # Copies, because the scan is shared. A rank or a dropped reason written
     # here for one request must not turn up in somebody else's list.
     rows = [dict(r) for r in scan["rows"]]
@@ -427,7 +534,7 @@ def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
     # long option additionally reads the filings. Anything that fails is moved
     # out with the reason attached rather than silently dropped.
     dropped: List[Dict] = []
-    if HORIZONS[horizon].get("needs_sound_accounts") and passed:
+    if HORIZONS[horizon].get("needs_sound_accounts") and passed and not partial:
         verdicts = _check_accounts(
             [c["symbol"] for c in passed if c.get("asset_class") != "crypto"])
         kept = []
@@ -459,7 +566,7 @@ def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
     # Placed last, so the numbers run 1..N over what actually survives rather
     # than leaving gaps where something was dropped further up.
     for place, row in enumerate(passed, 1):
-        row["rank"] = place
+        row["rank"] = None if partial else place
 
     # A positive edge measured over years does not mean a setup is firing
     # today, and on most days none is. Without this second tier the page would
@@ -489,6 +596,9 @@ def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
         "scanned": len(rows),
         "asked_for": scan["asked_for"],
         "cut_short": scan["cut_short"],
+        "failed": list(scan.get("failed") or []),
+        "partial": partial,
+        "complete": not partial and not scan["cut_short"],
         "passed": passed,
         "watch": watch[:10],
         "dropped": dropped,
@@ -499,23 +609,31 @@ def _shortlist(scan: Dict, horizon: str, risk: str) -> Dict:
         "warning": HORIZONS[horizon]["warning"],
         "summary": _summary(len(rows), passed, len(avoided), len(thin), horizon,
                             len(watch), risk, wrong_shape,
-                            scan["cut_short"], scan["asked_for"]),
+                            scan["cut_short"], scan["asked_for"],
+                            len(scan.get("failed") or []), partial),
     }
 
 
 def _summary(scanned: int, passed: List[Dict], avoided: int, thin: int,
              horizon: str, watching: int = 0, risk: str = "balanced",
              wrong_shape: int = 0, cut_short: bool = False,
-             asked_for: int = 0) -> str:
+             asked_for: int = 0, failed: int = 0, partial: bool = False) -> str:
+    if partial:
+        return ("Still checking: %d of %d looked at so far. What is below is "
+                "only those, not ranked, and will change as the rest come in."
+                % (scanned + failed, asked_for))
     text = _verdict(scanned, passed, avoided, thin, horizon, watching, risk,
                     wrong_shape)
+    if failed:
+        text += (" %d could not be read from the data source, so they are "
+                 "not in any list." % failed)
     if cut_short:
         # Said plainly, because a partial list read as a complete one is the
         # quiet kind of overstatement this app exists to avoid.
-        text += (" It stopped after %d of the %d instruments on its list, to "
-                 "finish inside the time a page is allowed. The rest were not "
-                 "looked at, so something worth seeing may be missing."
-                 % (scanned, asked_for))
+        text += (" It stopped after %d of the %d instruments on its list, "
+                 "because the data source stopped answering in time. The rest "
+                 "were not looked at, so something worth seeing may be missing."
+                 % (scanned + failed, asked_for))
     return text
 
 

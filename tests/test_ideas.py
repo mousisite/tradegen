@@ -324,6 +324,94 @@ check("an unanswered filing is labelled unchecked, not dropped",
       [r.get("accounts") for r in _listed["passed"]] == ["unchecked"],
       [r.get("accounts") for r in _listed["passed"]])
 
+print()
+print("=" * 72)
+print("A SCAN RUNS IN THE BACKGROUND, AND A PART-DONE ONE SAYS SO")
+print("=" * 72)
+import threading as _threading
+
+_real_universe, _real_look = ideas._universe, ideas._look_at
+_gate = _threading.Event()
+_asked = []
+
+
+def _fake_universe(market, limit):
+    return ["S%02d" % i for i in range(10)]
+
+
+def _fake_look(symbol, interval, cfg):
+    _asked.append(symbol)
+    if symbol >= "S04":
+        _gate.wait(10)                       # the rest wait until released
+    if symbol in ("S03", "S07"):
+        return None                          # the data source gave nothing
+    return row(symbol=symbol, asset_class="crypto", gap_multiple=1.2,
+               expectancy=0.3 - int(symbol[1:]) * 0.01, price=1.0)
+
+
+ideas._universe, ideas._look_at = _fake_universe, _fake_look
+_cfg_bg = {"background-test": 1}
+try:
+    _part = ideas.find("crypto", "medium", _cfg_bg, "balanced", wait=1.0)
+    check("a scan that is not finished comes back at once, marked running",
+          _part["running"] and _part["partial"] and not _part["complete"], _part.get("summary"))
+    check("it says how far it has got",
+          _part["looked_at"] == 4 and _part["asked_for_now"] == 10
+          and "Still checking: 4 of 10" in _part["summary"], _part["summary"])
+    check("and ranks nothing, because part of a list is not the list",
+          all(r["rank"] is None for r in _part["passed"]))
+    _again = ideas.find("crypto", "medium", _cfg_bg, "wild", wait=0)
+    check("a second person asking joins the same scan rather than starting another",
+          _asked.count("S00") == 1 and _again["running"], _asked)
+    _gate.set()
+    _done = ideas.find("crypto", "medium", _cfg_bg, "balanced", wait=10)
+    check("once finished it is complete and ranked",
+          _done["complete"] and not _done["running"]
+          and [r["rank"] for r in _done["passed"]] == list(range(1, len(_done["passed"]) + 1)))
+    check("every instrument is accounted for: read, or could not be read",
+          _done["scanned"] + len(_done["failed"]) == _done["asked_for"] == 10
+          and _done["failed"] == ["S03", "S07"], (_done["scanned"], _done["failed"]))
+    check("and the summary names how many could not be read",
+          "2 could not be read" in _done["summary"], _done["summary"])
+    _asked.clear()
+    _gate.clear()
+    _stale = ideas.find("crypto", "medium", _cfg_bg, "balanced", wait=0.5, ttl=0)
+    check("an old scan is shown with its age while a fresh one runs",
+          _stale["running"] and _stale.get("refreshing") and _stale["complete"]
+          and len(_stale["passed"]) == len(_done["passed"]))
+    _gate.set()
+    ideas.find("crypto", "medium", _cfg_bg, "balanced", wait=10)
+
+    def _boom(market, limit):
+        raise RuntimeError("no list today")
+    ideas._universe = _boom
+    try:
+        ideas.find("stocks", "medium", _cfg_bg, "balanced", wait=5)
+        _raised = False
+    except RuntimeError as exc:
+        _raised = "no list today" in str(exc)
+    check("a scan that fails says so instead of showing an empty list", _raised)
+
+    ideas._universe = _fake_universe
+    _gate.clear()
+    import web as _web
+    _web_cfg = _web._cfg
+    _web._cfg = lambda: {"background-page": 1}
+    _real_wait = ideas.PAGE_WAIT
+    ideas.PAGE_WAIT = 0.5
+    try:
+        _page = c.get("/ideas?market=crypto&horizon=medium&risk=balanced").data.decode("utf-8", "replace")
+    finally:
+        _web._cfg = _web_cfg
+        ideas.PAGE_WAIT = _real_wait
+        _gate.set()
+    check("the page shows progress and updates itself while the scan runs",
+          "Still checking" in _page and 'http-equiv="refresh"' in _page
+          and "not ranked" in _page.lower(), _page[:0])
+finally:
+    _gate.set()
+    ideas._universe, ideas._look_at = _real_universe, _real_look
+
 import sys as _exit_sys
 print()
 print("%d failure(s)" % len(fails))
