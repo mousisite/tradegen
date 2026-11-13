@@ -49,6 +49,9 @@ SUITES = [
     ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),
     ("test_trade_chart.py",  False, "the analysis page's candle chart and plan levels"),
     ("test_method.py",       False, "odds per side, gap fills, overlap, the BUY bar, plain words"),
+    ("test_record.py",       False, "the public track record, splits, and the strategy tests' margins"),
+    ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
+    ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
 ]
 
 TIMEOUT = 900
