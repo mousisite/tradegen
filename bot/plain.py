@@ -48,6 +48,12 @@ _WHAT_IT_MEANS = {
     "SHORT": "The app thinks this is more likely to fall than rise.",
 }
 
+# A WAIT on the short side is waiting to bet on a fall. Explained as a buy, it
+# told a beginner to buy at a price the app meant to sell at, with the stop on
+# the wrong side.
+_SHORT_WAIT = "Do not short yet. The app expects a fall, but not from today's price."
+_FALLING_AVOID = "Leave this one alone. The signals point to a fall."
+
 
 def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     """The trade plan, said plainly.
@@ -58,11 +64,26 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     action = (plan.action or "").upper()
     currency = getattr(bars, "currency", "USD")
     points: List[str] = []
+    short_side = (getattr(plan, "direction", 0) or 0) < 0 and action in ("WAIT", "SHORT")
+    why_avoid = getattr(plan, "avoid_reason", "") or ""
+    # The odds are measured on the side the signals lean. When that is down and
+    # the plan is not a short, every count below is a record of betting on a
+    # fall, and must not read as a record of buying.
+    fall_odds = ((getattr(plan, "odds_direction", 0) or 0) < 0
+                 and not short_side and action != "SHORT")
 
     headline = _WHAT_IT_MEANS.get(action, "The app has no clear view here.")
+    if action == "WAIT" and short_side:
+        headline = _SHORT_WAIT
+    elif action == "AVOID" and why_avoid == "bearish_no_shorts":
+        headline = _FALLING_AVOID
 
     # What to do, concretely.
-    if action == "WAIT" and plan.entry:
+    if action == "WAIT" and plan.entry and short_side:
+        points.append(
+            "Watch for the price to rise to %s. That is where the app would "
+            "bet on a fall." % _money(plan.entry, currency))
+    elif action == "WAIT" and plan.entry:
         points.append(
             "Watch for the price to reach %s. That is the app's buy price."
             % _money(plan.entry, currency))
@@ -72,12 +93,26 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         points.append(
             "Shorting means betting the price falls. It is riskier than buying "
             "because losses have no limit. Most beginners should skip it.")
+    elif action == "AVOID" and why_avoid == "bearish_no_shorts":
+        points.append(
+            "The signals point down. The record below is how often a bet on "
+            "the price falling worked here. Buying is the opposite bet, and "
+            "shorting is switched off, so the answer is: do not buy.")
+    elif action == "AVOID" and why_avoid == "negative_record":
+        points.append(
+            "Setups like this one have lost money here once trading fees are "
+            "paid. That is a normal answer, not a broken one.")
     elif action == "AVOID":
         points.append(
             "There is no setup here worth the trading fees right now. That is "
             "a normal answer, not a broken one.")
 
-    if plan.stop and plan.entry:
+    if plan.stop and plan.entry and short_side:
+        points.append(
+            "If the price kept rising to %s instead, the plan says get out. "
+            "That is the point where the idea was wrong."
+            % _money(plan.stop, currency))
+    elif plan.stop and plan.entry:
         points.append(
             "If you bought and the price fell to %s, the plan says get out. "
             "That is the point where the idea was wrong."
@@ -94,26 +129,55 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         sure = ("The app looked at %d times this same setup happened before. "
                 "It worked %d of those times."
                 % (plan.prob_samples, worked))
+        if fall_odds:
+            sure += (" Here, worked means a bet on the price falling paid off, "
+                     "because that is the way the signals lean.")
 
         # Saying only how often it worked invites the wrong conclusion, because
         # a loss here is usually not the whole stop: most trades that miss the
         # target are closed part-way rather than stopped out. Winning a third
         # of the time is fine when the wins are three times the size of the
         # losses, and that is the sentence a person needs in order to judge it.
-        if plan.avg_win_r and plan.avg_loss_r:
-            win_x = plan.avg_win_r
-            lose_x = abs(plan.avg_loss_r)
+        avg_win = getattr(plan, "avg_win_r", None)
+        avg_loss = getattr(plan, "avg_loss_r", None)
+        if avg_win and avg_loss:
+            win_x = avg_win
+            lose_x = abs(avg_loss)
             sure += (" When it worked it made about %.1f times what you put at "
                      "risk. When it did not, it usually lost about %.0f%% of "
                      "what you put at risk, not all of it, because the trade "
                      "is closed rather than left to run." % (win_x, lose_x * 100))
+            # Those wins were made with the tested target. A plan whose target
+            # was pulled in to a level in the way, or whose stop sits further
+            # off, aims for something else, and a win of "1.5 times" would be
+            # a promise this plan does not make.
+            mine = getattr(plan, "reward_risk", None)
+            tested = getattr(plan, "tested_reward_risk", None)
+            if (not fall_odds and mine and tested
+                    and abs(mine / tested - 1.0) > 0.10):
+                sure += (" This plan's own target is %s, about %.1f times what "
+                         "it puts at risk, so a win would be %s than those were."
+                         % ("nearer" if mine < tested else "further",
+                            mine, "smaller" if mine < tested else "bigger"))
 
         if plan.breakeven_rate:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
-            if worked <= needed:
+            if fall_odds:
+                sure += (" A bet on a fall needed to work %d of those %d times "
+                         "to come out even. That is the record for a fall, not "
+                         "a reason to buy." % (needed, plan.prob_samples))
+            elif worked <= needed:
                 sure += (" To come out even it needed to work %d of those %d "
                          "times, so this has not been shown to make money."
                          % (needed, plan.prob_samples))
+            elif (getattr(plan, "prob_low", None) is not None
+                  and plan.prob_low <= plan.breakeven_rate):
+                # Ahead of the line, but by less than chance alone moves a
+                # count this size. Saying only "it cleared that bar" next to a
+                # call to wait made the wait look like a mistake.
+                sure += (" To come out even it only needed to work %d of those "
+                         "%d times. It cleared that bar, but not by enough to "
+                         "rule out luck." % (needed, plan.prob_samples))
             else:
                 sure += (" To come out even it only needed to work %d of those "
                          "%d times, so it cleared that bar."

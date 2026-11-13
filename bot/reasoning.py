@@ -356,6 +356,7 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         out["Measured risk"] = block
 
     if plan is not None:
+        from .strategies import REGISTRY
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}
         if plan.entry:
@@ -363,16 +364,27 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
             block["stop"] = "%.4g" % plan.stop
             block["first target"] = "%.4g" % plan.target1
             block["reward to risk"] = "%.2f" % (plan.reward_risk or 0)
-        out["Technical plan (34-strategy engine)"] = block
+        out["Technical plan (%d-strategy engine)" % len(REGISTRY)] = block
 
     if calibration is not None and calibration.hit_rate is not None:
+        side = getattr(calibration, "direction", 0)
         out["Back-tested odds for this setup"] = {
+            # The odds are one side's record; a bearish call's are of betting
+            # on a fall, and a reader of the brief must not take them for a
+            # record of buying.
+            "side measured": ("long trades" if side > 0 else
+                              "short trades, a bet on the price falling" if side < 0
+                              else "both sides pooled"),
             "hit rate": "%.0f%%" % (calibration.hit_rate * 100),
             "sample size": "%d comparable setups" % calibration.bucket_samples,
             "expectancy after costs": "%+.3fR per trade" % (calibration.expectancy_r or 0),
             "break-even needed": "%.0f%%" % (calibration.breakeven * 100),
             "trading cost": "%.2fR per round trip" % calibration.cost_r,
         }
+        base = getattr(calibration, "baseline_expectancy", None)
+        if base is not None:
+            out["Back-tested odds for this setup"][
+                "same side taken on every day, no signal"] = "%+.3fR per trade" % base
 
     if sentiment is not None and (sentiment.n_news or sentiment.n_social):
         out["News and social"] = {

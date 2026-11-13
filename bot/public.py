@@ -437,10 +437,20 @@ def _walk(bars, start: int, entry: float, stop: float, target: float,
 
     Same rule as the back-tests: the stop is checked before the target inside
     a bar, because the order within a day is unknown and guessing the kind
-    order flatters the result. (None, None) while the bars run out first.
+    order flatters the result. The open is the one price whose place is known,
+    since it came first: a day that opened below the stop sold there, not at
+    the stop, and one that opened above the target reached it. (None, None)
+    while the bars run out first.
     """
     n = len(bars.close)
+    opens = getattr(bars, "open", None)
     for k in range(start, min(start + horizon, n)):
+        if opens is not None:
+            first = float(opens[k])
+            if first <= stop:
+                return "stop", first
+            if first >= target:
+                return "target", target
         if float(bars.low[k]) <= stop:
             return "stop", stop
         if float(bars.high[k]) >= target:
@@ -517,14 +527,48 @@ def _median(values: List[float]) -> Optional[float]:
     return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
 
 
+def _separate_tests(rows) -> int:
+    """How many of these calls are separate tests of the method.
+
+    A call is scored over the next ten trading days, and the next day's call
+    on the same stock shares nine of them: the two settle together far more
+    often than not. Per stock, a call counts only once the last counted one's
+    days have run out. Different stocks are still counted apart, though on a
+    day the whole market moves they settle alike, so the true range is wider
+    still.
+    """
+    last: Dict[str, int] = {}
+    count = 0
+    for r in sorted(rows, key=lambda r: r["at"]):
+        days = int(r["horizon"] or 10)
+        if not r["symbol"].endswith("-USD"):
+            days = (days * 7 + 4) // 5          # trading days in calendar time
+        prev = last.get(r["symbol"])
+        if prev is None or int(r["at"]) - prev >= days * 86400:
+            last[r["symbol"]] = int(r["at"])
+            count += 1
+    return count
+
+
 def _stats(rows, costs: Dict[str, float]) -> Dict:
     """One kind of call: counts, right rate with its 95% range, and what a buy
-    after these calls did, after costs."""
+    after these calls did, after costs.
+
+    The range is computed on the calls that are separate tests, not on every
+    call: counted as independent, a run of daily calls on one stock made the
+    range one and a half to two times too narrow, and "beyond the margin of
+    error" came too easily. The right rate itself is still over every call."""
     from .calibrate import wilson_interval
     out = _tally(rows)
     out["total"] = len(rows)
     out["scored"] = out["right"] + out["wrong"] + out["flat"]
-    out["lo"], out["hi"] = wilson_interval(out["right"], out["decided"])
+    decided = [r for r in rows if r["outcome"] in ("right", "wrong")]
+    out["separate"] = _separate_tests(decided)
+    if out["decided"]:
+        n_eff = float(max(1, min(out["separate"], out["decided"])))
+        out["lo"], out["hi"] = wilson_interval(out["rate"] * n_eff, n_eff)
+    else:
+        out["lo"], out["hi"] = None, None
     results = [_buy_result(r, costs) for r in rows if r["outcome"]]
     moves = [x["move"] for x in results]
     rs = [x["r"] for x in results]

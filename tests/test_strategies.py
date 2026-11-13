@@ -125,10 +125,14 @@ print("=" * 72)
 # lowering that threshold would only trade one arbitrary number for another.
 #
 # What must hold is the other direction: a market entry is only ever issued on
-# a positive measured record over a reliable sample. These pin that.
+# a record that shows an edge, not merely a positive average. On random prices
+# a positive average over a reliable-sized sample called about one in
+# fourteen a buy. These pin that.
 from bot import engine as _eng
 from bot import plain as _plain
 from bot import ideas as _ideas
+from bot import catalysts as _cat
+from bot.market import Bars as _Bars
 
 _cfg_short = dict(_cfg)
 _cfg_short["allow_shorts"] = True
@@ -147,12 +151,57 @@ for _sym in _ideas._universe("stocks", 40)[:40]:
 _entries = [(s, p, c) for s, p, c in _calls if p.action in ("BUY", "SHORT")]
 print("   %d instruments, %d of them a market entry" % (len(_calls), len(_entries)))
 
-check("the app is able to say buy at all", len(_entries) > 0,
-      "every call was WAIT or AVOID, which means the threshold is unreachable")
 
-_unearned = [s for s, p, c in _entries
-             if c.expectancy_r is None or c.expectancy_r <= 0 or not c.reliable]
-check("every market entry rests on a positive measured record",
+def _edge_series(seed, n=1250, leg=60, drift=0.005, vol=0.01, into=40, dip=4):
+    """Rises and falls in turn: buying on any day earns little, buying when
+    the trend signals lean up earns a lot. A real edge, carried by the signals
+    rather than by drift, ending on a pullback and a turn inside a rise."""
+    rng = np.random.RandomState(seed)
+    k = np.arange(n)
+    sign = np.where(((k - (n - into)) // leg) % 2 == 0, 1.0, -1.0)
+    rets = sign * drift + rng.normal(0.0, vol, n)
+    rets[-dip - 1:-1] = -0.012 + rng.normal(0.0, vol * 0.2, dip)
+    rets[-1] = 0.02
+    close = 100.0 * np.exp(np.cumsum(rets))
+    prev = np.concatenate([[100.0], close[:-1]])
+    op = prev * np.exp(rng.normal(0.0, vol * 0.2, n))
+    hi = np.maximum(op, close) * np.exp(np.abs(rng.normal(0.0, vol * 0.3, n)))
+    lo = np.minimum(op, close) * np.exp(-np.abs(rng.normal(0.0, vol * 0.3, n)))
+    op[-1] = lo[-1] = close[-2] * 0.998
+    hi[-1] = close[-1] = max(close[-1], hi[-2] * 1.002)
+    t0 = 1_600_000_000 - (1_600_000_000 % 86400) + 52200
+    ts = np.array([t0 + j * 86400 for j in range(n)], dtype=np.int64)
+    return _Bars(symbol="EDGE", name="Edge", asset_class="equity", currency="USD",
+                 exchange="TEST", interval="1d", timestamp=ts, open=op, high=hi,
+                 low=lo, close=close, volume=np.exp(rng.normal(15.0, 0.3, n)),
+                 session_id=((ts - 18000) // 86400).astype(np.int64),
+                 gmt_offset=-18000, prev_close=float(close[-2]), live_price=None,
+                 market_open=False, last_bar_time="", meta={})
+
+
+# Real prices may or may not hold a demonstrated edge on any given day, so
+# whether BUY is reachable is asked of prices that do hold one, through the
+# same pipeline and the house settings, with only the download replaced.
+_saved = (_eng.resolve, _eng.fetch_bars, _cat.fetch)
+_edge_calls = []
+try:
+    for _seed in range(4):
+        _bars = _edge_series(_seed)
+        _eng.resolve = lambda s: {"symbol": s, "name": s}
+        _eng.fetch_bars = lambda s, iv, _b=_bars: _b
+        _cat.fetch = lambda s: (_ for _ in ()).throw(RuntimeError("offline"))
+        _edge_calls.append(_eng.analyse("EDGE", _cfg, interval="1d",
+                                        with_news=False, record=False))
+finally:
+    _eng.resolve, _eng.fetch_bars, _cat.fetch = _saved
+_edge_buys = [r for r in _edge_calls if r.plan.action == "BUY"]
+print("   %d of %d series with a real edge called BUY"
+      % (len(_edge_buys), len(_edge_calls)))
+check("the app is able to say buy at all", len(_edge_buys) >= 2,
+      "a real edge was not called BUY: %s" % [r.plan.action for r in _edge_calls])
+
+_unearned = [s for s, p, c in _entries if not c.demonstrated]
+check("every market entry rests on a record that shows an edge",
       not _unearned, _unearned)
 
 _mislabelled = [s for s, p, c in _entries

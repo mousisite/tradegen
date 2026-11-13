@@ -95,6 +95,11 @@ class Bars:
     market_open: bool = True
     last_bar_time: str = ""
     meta: dict = field(default_factory=dict)
+    # Daily bars only: each bar's dividend factor (adjusted close over close),
+    # 1.0 for the latest. Prices stay as traded, because stops, alerts and the
+    # public record compare them with prices people saw; the back-test reads
+    # this so an ex-dividend drop is not scored as a loss on a long.
+    dividend_factor: Optional[np.ndarray] = None
 
     def __len__(self) -> int:
         return len(self.close)
@@ -269,6 +274,34 @@ def _classify(instrument_type: str) -> str:
     return "other"
 
 
+def _still_forming(start: int, step: int, interval: str, asset: str,
+                   regular: dict, gmt: int, now: int) -> bool:
+    """Whether the bar that opened at `start` is still being traded.
+
+    A bar is stamped with the time it opened. An intraday bar, and a coin's
+    round-the-clock day, lasts exactly its interval, so it is over once that
+    much time has passed. A stock's daily bar is stamped at the session's open
+    but lasts only the session, six and a half hours, not 24. Read the same
+    way, the session that closed at 4pm counted as unfinished until the next
+    morning's open, so every evening and overnight analysis ran on the session
+    before, with today's close as its price.
+
+    So for daily bars off crypto the exchange's own trading hours decide: the
+    bar of the session Yahoo describes is forming only until that session
+    closes, and a bar from an earlier day is finished. A bar dated after the
+    session described cannot be placed, and keeps the length-of-a-day rule.
+    """
+    s_start, s_end = regular.get("start"), regular.get("end")
+    if interval == "1d" and asset != "crypto" and s_start and s_end:
+        bar_day = (start + gmt) // 86400
+        session_day = (int(s_start) + gmt) // 86400
+        if bar_day < session_day:
+            return False
+        if bar_day == session_day:
+            return now < int(s_end)
+    return start + step > now
+
+
 def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None) -> Bars:
     """Download an OHLCV series and clean it into aligned NumPy arrays."""
     interval = interval.lower()
@@ -309,6 +342,49 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     o, h, l, c, v = col("open"), col("high"), col("low"), col("close"), col("volume")
     t = np.array(ts, dtype=np.int64)
 
+    gmt = int(meta.get("gmtoffset") or 0)
+    asset = _classify(meta.get("instrumentType"))
+    regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
+    now = int(time.time())
+    step = _INTERVAL_SEC.get(interval, 300)
+
+    # After the close Yahoo sometimes sends the finished session's daily bar
+    # with everything but its close, and that close is the quote it reports
+    # for the same session. Dropped for want of a close, the bar took the
+    # session with it, and the evening's analysis ran on the day before. Only
+    # a session that is over is filled, and only from a quote stamped on its
+    # own day.
+    quoted, quoted_at = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
+    if (interval == "1d" and len(c) and np.isnan(c[-1]) and quoted and quoted_at
+            and (int(quoted_at) + gmt) // 86400 == (int(t[-1]) + gmt) // 86400
+            and not _still_forming(int(t[-1]), step, interval, asset, regular,
+                                   gmt, now)):
+        c[-1] = float(quoted)
+        if np.isfinite(h[-1]):
+            h[-1] = max(h[-1], c[-1])
+        if np.isfinite(l[-1]):
+            l[-1] = min(l[-1], c[-1])
+
+    # Each daily bar's dividend factor. Yahoo's close is already adjusted for
+    # splits but not for dividends, so a stock paying 3% a year shows a small
+    # drop on every ex-date that no trade could have avoided, and back-tested
+    # longs were charged it as a loss (shorts were paid it). The factor lets
+    # the back-test count the dividend without rewriting the traded prices.
+    factor = None
+    if interval == "1d":
+        adj = (((res.get("indicators") or {}).get("adjclose") or [{}])[0]
+               .get("adjclose"))
+        if adj:
+            vals = list(adj) + [None] * (len(ts) - len(adj))
+            a = np.array([np.nan if x is None else float(x) for x in vals[:len(ts)]],
+                         dtype=float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                factor = np.where((a > 0) & (c > 0), a / c, np.nan)
+            # The newest bar is never adjusted: a dividend only rescales the
+            # bars before its ex-date.
+            if not np.isfinite(factor[-1]):
+                factor[-1] = 1.0
+
     # Yahoo interleaves null bars for halts and illiquid periods. Drop any bar
     # without a close, then fill the remaining OHLC gaps from that close so the
     # indicator maths never sees a NaN mid-series.
@@ -320,6 +396,15 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     h = np.where(np.isnan(h), np.maximum(o, c), h)
     l = np.where(np.isnan(l), np.minimum(o, c), l)
     v = np.nan_to_num(v, nan=0.0)
+    if factor is not None:
+        factor = factor[keep]
+        # A missing factor borrows the next known one: no dividend is assumed
+        # to have gone ex on a day the source left blank.
+        for k in range(len(factor) - 2, -1, -1):
+            if not np.isfinite(factor[k]):
+                factor[k] = factor[k + 1]
+        if not np.isfinite(factor[-1]):
+            factor = None
 
     # Yahoo appends a synthetic session-close bar with zero volume and zero
     # range (O==H==L==C). Left in place it deflates ATR and zeroes RVOL, which
@@ -332,22 +417,23 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     # The newest remaining bar may still be forming: partial volume and a close
     # that keeps moving. Signals computed on it flicker between runs. Split it
     # off as the live price and evaluate everything else on completed bars.
-    step = _INTERVAL_SEC.get(interval, 300)
-    if len(t) > 2 and (int(t[-1]) + step) > int(time.time()):
+    live_start = None
+    if len(t) > 2 and _still_forming(int(t[-1]), step, interval, asset, regular,
+                                     gmt, now):
         live = float(c[-1])
+        live_start = int(t[-1])
         t, o, h, l, c, v = t[:-1], o[:-1], h[:-1], l[:-1], c[:-1], v[:-1]
+    if factor is not None:
+        factor = factor[:len(t)]
+        factor = factor / factor[-1]
 
-    gmt = int(meta.get("gmtoffset") or 0)
     session = ((t + gmt) // 86400).astype(np.int64)
 
     # Crypto never closes; equities do. Knowing which lets the report say
     # plainly that a reading is from the previous session rather than live.
-    asset = _classify(meta.get("instrumentType"))
     if asset == "crypto":
         is_open = True
     else:
-        regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
-        now = int(time.time())
         is_open = bool(regular.get("start", 0) <= now <= regular.get("end", 0))
 
     stamp = time.strftime("%Y-%m-%d %H:%M", time.gmtime(int(t[-1]) + gmt))
@@ -355,8 +441,24 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     # Derive the reference close from our own bars. Yahoo's chartPreviousClose
     # is the close before the *whole requested range*, so on a 60-day pull it
     # reports a two-month change and labels it as the daily move.
+    #
+    # The previous close belongs to the session before the live price's, not
+    # before the last completed bar's. When the live price is from a newer day
+    # than every completed bar (a daily bar split off while the market trades,
+    # the first bar of a session, or a quote whose bar never came), the newest
+    # completed bar closed the session before it. Counting back from the
+    # completed bars instead reached a second session back: "down 1.91%" on a
+    # day that was up 0.36%.
+    if live_start is not None:
+        live_day = (live_start + gmt) // 86400
+    elif live is None and quoted_at:
+        live_day = (int(quoted_at) + gmt) // 86400
+    else:
+        live_day = None
     prev_sessions = np.unique(session)
-    if len(prev_sessions) >= 2:
+    if live_day is not None and live_day > session[-1]:
+        prior_close = float(c[-1])
+    elif len(prev_sessions) >= 2:
         prior_mask = session == prev_sessions[-2]
         prior_close = float(c[prior_mask][-1])
     else:
@@ -377,4 +479,5 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
         market_open=is_open,
         last_bar_time=stamp,
         meta=meta,
+        dividend_factor=factor,
     )

@@ -416,24 +416,53 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
 
     if composite is None:
         return
-    detail = "Composite signal of %+.2f across 34 strategies in a %s market." % (
-        composite, regime or "mixed")
+    # Counted from the registry: a typed-in number said 34 on one page and 33
+    # on the next.
+    from .strategies import REGISTRY
+    count = len(REGISTRY)
+    # The odds are measured on the side the call takes, which follows the
+    # composite. A bearish setup's record is of betting on a fall: one that
+    # paid is evidence for the bear case, not the bull case, and one that lost
+    # says the signals' calls for a fall have not worked here.
+    side = t.get("side")
+    if side is None:
+        side = 1 if composite > 0 else (-1 if composite < 0 else 0)
+    kind = "Short setups" if side < 0 else "Setups"
+    detail = "Composite signal of %+.2f across %d strategies in a %s market." % (
+        composite, count, regime or "mixed")
     if expectancy is not None and samples:
-        detail += (" Setups scoring like this have returned %+.3fR on %d "
-                   "comparable historical cases." % (expectancy, samples))
+        detail += (" %s scoring like this have returned %+.3fR on %d "
+                   "comparable historical cases." % (kind, expectancy, samples))
 
     if composite > 0.25:
         bull.points.append(Point("Price action is constructive", detail,
                                  [Evidence("Technical composite", "%+.2f" % composite,
-                                           "34-strategy back-test", "", stamp,
+                                           "%d-strategy back-test" % count, "", stamp,
                                            "medium" if samples else "weak")], 0.9))
     elif composite < -0.25:
         bear.points.append(Point("Price action is weak", detail,
                                  [Evidence("Technical composite", "%+.2f" % composite,
-                                           "34-strategy back-test", "", stamp,
+                                           "%d-strategy back-test" % count, "", stamp,
                                            "medium" if samples else "weak")], 0.9))
 
-    if expectancy is not None and samples and samples > 100:
+    if expectancy is not None and samples and samples > 100 and side < 0:
+        if expectancy > 0.05:
+            bear.points.append(Point(
+                "Bets on a fall have paid here",
+                "Shorting setups scored like this one returned %+.3fR per trade "
+                "across %d comparable cases on this instrument, after costs."
+                % (expectancy, samples),
+                [Evidence("Measured expectancy, short side", "%+.3fR" % expectancy,
+                          "back-test on this instrument", "", stamp, "strong")], 1.2))
+        elif expectancy < -0.10:
+            bull.points.append(Point(
+                "Calls for a fall have not paid here",
+                "Shorting setups scored like this one returned %+.3fR per trade "
+                "across %d comparable cases on this instrument, after costs."
+                % (expectancy, samples),
+                [Evidence("Measured expectancy, short side", "%+.3fR" % expectancy,
+                          "back-test on this instrument", "", stamp, "strong")], 0.8))
+    elif expectancy is not None and samples and samples > 100:
         if expectancy < -0.10:
             bear.points.append(Point(
                 "This setup has lost money here",
