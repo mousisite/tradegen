@@ -74,8 +74,13 @@ WORKFLOWS: Dict[str, Dict] = {
 
 def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
         progress: Optional[Callable[[str], None]] = None,
-        user: int = 1) -> RunReport:
-    """Run a named workflow on one person's watchlist, positions and alerts."""
+        user: int = 1, check_alerts: Optional[Callable] = None) -> RunReport:
+    """Run a named workflow on one person's watchlist, positions and alerts.
+
+    check_alerts(conn, user) checks that person's alerts and returns what
+    alerts.check returns. The web app passes its own, which can also work out
+    a call and send the alert emails; without one, alerts.check is used.
+    """
     cfg = cfg or config_mod.load()
     started = int(time.time())
     report = RunReport(name=WORKFLOWS.get(name, {}).get("label", name),
@@ -96,7 +101,7 @@ def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
 
     conn = db.connect(db_path)
     try:
-        handler(conn, cfg, report, step, db_path, user)
+        handler(conn, cfg, report, step, db_path, user, check_alerts)
     finally:
         conn.close()
 
@@ -114,11 +119,16 @@ def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
 # The routines
 # ---------------------------------------------------------------------------
 
-def _check_alerts(conn, report: RunReport, step, user=1) -> None:
+def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> None:
     step("Checking alerts")
-    result = alerts_mod.check(conn)
+    # Only the person running the routine: their alerts, their report. Firing
+    # someone else's would switch it off without its owner ever being told.
+    if check_alerts is not None:
+        result = check_alerts(conn, user)
+    else:
+        result = alerts_mod.check(conn, user=user)
     if not result["checked"]:
-        report.steps.append(Step("Alerts", "No alerts are set.", "ok"))
+        report.steps.append(Step("Alerts", "No alerts are switched on.", "ok"))
         return
     if result["fired"]:
         for hit in result["fired"]:
@@ -176,11 +186,12 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
         report.steps.append(Step("Portfolio", note, "ok"))
 
 
-def _positions(conn, cfg, report, step, db_path, user=1) -> None:
+def _positions(conn, cfg, report, step, db_path, user=1, check_alerts=None) -> None:
     _check_positions(conn, cfg, report, step, user)
 
 
-def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
+def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
+               check_alerts=None) -> None:
     rows = db.watchlist(conn, user=user)
     if not rows:
         report.steps.append(Step(
@@ -188,28 +199,30 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
             "re-analysed automatically.", "ok"))
         return
 
-    # What the bot said last time, so only genuine changes get reported.
-    previous = {}
-    for row in rows:
-        last = db.recent_runs(conn, symbol=row["symbol"], limit=1, user=user)
-        if last:
-            previous[row["symbol"]] = last[0]["action"]
-
     changed = 0
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
         step("Analysing %s" % symbol)
         try:
+            # Recorded as this person's, so it is the "before" next time.
             result = engine.analyse(symbol, cfg, interval=interval,
                                     with_news=False, record=True,
-                                    db_path=db_path, source="workflow")
+                                    db_path=db_path, user=user, source="workflow")
         except (DataError, Exception) as exc:
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
             continue
 
         db.watch_touch(conn, symbol, user=user)
-        was = previous.get(symbol)
+        # What this person was told before this run, for the same instrument
+        # and bar size, so only genuine changes get reported. An hourly look
+        # is not the daily call, and the run just recorded is not "before".
+        last = conn.execute(
+            "SELECT action FROM runs WHERE symbol=? AND interval=? AND user_id=? "
+            "AND id<>? ORDER BY ts DESC, id DESC LIMIT 1",
+            (result.bars.symbol.upper(), result.bars.interval, int(user),
+             result.run_id or -1)).fetchone()
+        was = last["action"] if last else None
         now = result.plan.action
         if was and was != now:
             changed += 1
@@ -229,8 +242,9 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
                        else "None of the %d watched instruments changed." % len(rows))
 
 
-def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
-    _check_alerts(conn, report, step, user)
+def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
+             check_alerts=None) -> None:
+    _check_alerts(conn, report, step, user, check_alerts)
     _check_positions(conn, cfg, report, step, user)
 
     rows = db.watchlist(conn, user=user)
@@ -265,7 +279,8 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
         "ok"))
 
 
-def _hunt(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
+def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
+          check_alerts=None) -> None:
     preset = screener_mod.PRESETS["quality_value"]
     step("Screening for quality at a reasonable price")
     try:
@@ -288,7 +303,7 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
         try:
             result = engine.analyse(candidate.symbol, cfg, interval=cfg["interval"],
                                     with_news=False, record=True, db_path=db_path,
-                                    source="workflow")
+                                    user=user, source="workflow")
         except Exception as exc:
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))

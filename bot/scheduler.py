@@ -39,6 +39,9 @@ class Scheduler:
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Guards the two lists below. The loop's thread writes them while page
+        # requests read them, and reading a deque while it changes raises.
+        self._record = threading.Lock()
 
         self.started_at: Optional[float] = None
         self.last_run: Optional[float] = None
@@ -57,6 +60,9 @@ class Scheduler:
             if self._thread is not None and self._thread.is_alive():
                 return False
             self._stop.clear()
+            # stop() and set_interval() leave this set. Cleared, so a loop
+            # started again waits an interval like a new one does.
+            self._wake.clear()
             self.started_at = time.time()
             self._thread = threading.Thread(target=self._loop, name=self._name,
                                             daemon=True)
@@ -124,26 +130,28 @@ class Scheduler:
             self.runs += 1
             self.last_run = time.time()
             self.last_error = ""
-            for entry in fired:
-                entry["at"] = self.last_run
-                self.recent_fires.appendleft(entry)
-            self.history.appendleft({
-                "at": started,
-                "ok": True,
-                "seconds": self.last_run - started,
-                "checked": result.get("checked", 0),
-                "fired": len(fired),
-                "errors": len(result.get("errors") or []),
-                "triggered": triggered,
-            })
+            with self._record:
+                for entry in fired:
+                    entry["at"] = self.last_run
+                    self.recent_fires.appendleft(entry)
+                self.history.appendleft({
+                    "at": started,
+                    "ok": True,
+                    "seconds": self.last_run - started,
+                    "checked": result.get("checked", 0),
+                    "fired": len(fired),
+                    "errors": len(result.get("errors") or []),
+                    "triggered": triggered,
+                })
         except BaseException as exc:               # a loop must not die
             self.failures += 1
             self.last_error = "%s: %s" % (type(exc).__name__, exc)
             try:
-                self.history.appendleft({"at": started, "ok": False,
-                                         "seconds": time.time() - started,
-                                         "detail": self.last_error,
-                                         "triggered": triggered})
+                with self._record:
+                    self.history.appendleft({"at": started, "ok": False,
+                                             "seconds": time.time() - started,
+                                             "detail": self.last_error,
+                                             "triggered": triggered})
             except Exception:
                 pass
             if self._on_error is not None:
@@ -155,6 +163,9 @@ class Scheduler:
     # -- what the page needs to say ----------------------------------------
 
     def status(self) -> Dict:
+        with self._record:
+            history = list(self.history)[:10]
+            fires = list(self.recent_fires)[:10]
         return {
             "running": self.running,
             "interval": self._interval,
@@ -166,10 +177,17 @@ class Scheduler:
             "runs": self.runs,
             "failures": self.failures,
             "last_error": self.last_error,
-            "history": list(self.history)[:10],
-            "recent_fires": list(self.recent_fires)[:10],
+            "history": history,
+            "recent_fires": fires,
         }
 
     def unseen_fires(self, since: float) -> List[Dict]:
-        """Alerts that fired after a given moment, newest first."""
-        return [f for f in self.recent_fires if f.get("at", 0) > since]
+        """Alerts that fired after a given moment, newest first.
+
+        Only what this process has seen since it started. What people are
+        told is read from the alert history in the database instead, which a
+        restart does not empty.
+        """
+        with self._record:
+            fires = list(self.recent_fires)
+        return [f for f in fires if f.get("at", 0) > since]

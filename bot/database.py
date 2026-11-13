@@ -234,7 +234,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     wanted = {
         "strategy_stats": [("sum_r_gross", "REAL NOT NULL DEFAULT 0")],
         # state: the last call seen by a call alert, e.g. WAIT, so a change
-        # can be noticed. last_error: why the last check of it failed.
+        # can be noticed; for any other alert, whether its condition was met
+        # at the last look ("met" or "clear"), so one that keeps watching
+        # fires when it becomes true rather than on every check.
+        # last_error: why the last check of it failed.
         "alerts": [("state", "TEXT"), ("last_error", "TEXT"),
                    ("last_error_ts", "INTEGER")],
         # When the background check last told the owner this position had
@@ -624,9 +627,25 @@ def stats(conn: sqlite3.Connection, user: Optional[int] = None) -> Dict:
 # Watchlist
 # ---------------------------------------------------------------------------
 
+# Longer than any real ticker, and short enough that a pasted paragraph is
+# refused. Notes are cut rather than refused: a long note is not a mistake.
+MAX_SYMBOL = 20
+MAX_NOTE = 200
+
+
+def _symbol(symbol: str) -> str:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("No instrument given.")
+    if len(sym) > MAX_SYMBOL:
+        raise ValueError("That is too long for a ticker. Type the ticker, for example AAPL.")
+    return sym
+
+
 def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
               note: str = "", user: int = 1) -> None:
-    sym, uid, now = symbol.upper(), int(user), int(time.time())
+    sym, uid, now = _symbol(symbol), int(user), int(time.time())
+    note = (note or "")[:MAX_NOTE]
     conn.execute(
         "INSERT OR REPLACE INTO watchlist "
         "(symbol, interval, added_ts, note, last_run, user_id) VALUES "
@@ -662,23 +681,38 @@ def watch_touch(conn: sqlite3.Connection, symbol: str,
 # Alerts
 # ---------------------------------------------------------------------------
 
+# The most alerts one account can keep, on any plan. Each is checked every
+# few minutes and each fire is stored, so there has to be a ceiling somewhere.
+MAX_ALERTS = 200
+
+
 def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
               threshold: Optional[float] = None, interval: str = "1d",
               note: str = "", repeat: bool = False, user: int = 1) -> int:
-    """Create an alert. Validation lives here so every caller gets it."""
-    from .alerts import KINDS
-    if kind not in KINDS:
-        raise ValueError("Unknown alert type %r." % kind)
-    if KINDS[kind]["needs_threshold"] and threshold is None:
-        raise ValueError("%s needs a value to compare against." % KINDS[kind]["label"])
-    if threshold is not None and KINDS[kind]["unit"] == "price" and threshold <= 0:
-        raise ValueError("A price alert needs a positive price.")
+    """Create an alert. Validation lives here so every caller gets it.
+
+    A percent threshold is a fraction: 0.05 is 5%.
+    """
+    from .alerts import DAILY_ONLY, KINDS, problem
+    why = problem(kind, threshold)
+    if why:
+        raise ValueError(why)
+    sym = _symbol(symbol)
+    held = conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=?",
+                        (int(user),)).fetchone()[0]
+    if held >= MAX_ALERTS:
+        raise ValueError("You have %d alerts, the most one account can keep. "
+                         "Delete some you no longer need first." % held)
+    if not KINDS[kind]["needs_threshold"]:
+        threshold = None
+    if kind in DAILY_ONLY:
+        interval = "1d"
 
     cur = conn.execute(
         "INSERT INTO alerts (symbol, kind, threshold, interval, note, active, "
         "created_ts, repeat, user_id) VALUES (?,?,?,?,?,1,?,?,?)",
-        (symbol.upper(), kind, threshold, interval, note, int(time.time()),
-         1 if repeat else 0, int(user)))
+        (sym, kind, threshold, interval or "1d", (note or "")[:MAX_NOTE],
+         int(time.time()), 1 if repeat else 0, int(user)))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -704,16 +738,28 @@ def alert_list(conn: sqlite3.Connection, active_only: bool = False,
 
 
 def alert_fire(conn: sqlite3.Connection, alert_id: int, value: float,
-               note: str, user: Optional[int] = None) -> None:
-    """Record that an alert's condition was met."""
-    row = conn.execute("SELECT repeat FROM alerts WHERE id=?", (alert_id,)).fetchone()
-    keep_active = bool(row and row["repeat"])
-    conn.execute(
-        "UPDATE alerts SET triggered_ts=?, trigger_value=?, trigger_note=?, "
-        "active=?, last_checked=? WHERE id=?",
-        (int(time.time()), value, note, 1 if keep_active else 0,
-         int(time.time()), alert_id))
+               note: str, user: Optional[int] = None,
+               state: Optional[str] = None, was: Optional[str] = None) -> bool:
+    """Record that an alert's condition was met. True if this call recorded it.
+
+    A one-off alert switches itself off; one set to keep watching stays on.
+    Given a state, the update goes through only while the alert is still on
+    and still in the state the caller read (was), so when two checks overlap
+    one fire is recorded and told once, not twice.
+    """
+    now = int(time.time())
+    sql = ("UPDATE alerts SET triggered_ts=?, trigger_value=?, trigger_note=?, "
+           "active=CASE WHEN repeat=1 THEN 1 ELSE 0 END, last_checked=?, "
+           "last_error=NULL, last_error_ts=NULL, state=COALESCE(?, state) "
+           "WHERE id=? AND active=1")
+    args = [now, value, note, now, state, alert_id]
+    if state is not None:
+        sql += " AND COALESCE(state, '') = ?"
+        args.append(was or "")
+    sql, args = _own(sql, args, user)
+    fired = conn.execute(sql, args).rowcount == 1
     conn.commit()
+    return fired
 
 
 def alert_checked(conn: sqlite3.Connection, alert_id: int,
@@ -749,20 +795,25 @@ def alert_set_active(conn: sqlite3.Connection, alert_id: int, active: bool,
 
 def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[float],
                note: str, user: Optional[int] = None) -> None:
-    """Change an alert's value and note. Its condition stays what it was."""
-    from .alerts import KINDS
+    """Change an alert's value and note. Its condition stays what it was.
+
+    A new value is a new question, so the alert forgets whether the old one
+    was met: if the new one already is, the next check says so.
+    """
+    from .alerts import KINDS, problem
     sql, args = _own("SELECT kind FROM alerts WHERE id=?", [alert_id], user)
     row = conn.execute(sql, args).fetchone()
     if row is None:
         raise ValueError("No alert with id %d" % alert_id)
     spec = KINDS.get(row["kind"], {})
-    if spec.get("needs_threshold") and threshold is None:
-        raise ValueError("%s needs a value to compare against." % spec["label"])
-    if threshold is not None and spec.get("unit") == "price" and threshold <= 0:
-        raise ValueError("A price alert needs a positive price.")
-    sql, args = _own("UPDATE alerts SET threshold=?, note=? WHERE id=?",
+    why = problem(row["kind"], threshold)
+    if why:
+        raise ValueError(why)
+    sql, args = _own("UPDATE alerts SET threshold=?, note=?, state=CASE WHEN "
+                     "? THEN state ELSE NULL END WHERE id=?",
                      [threshold if spec.get("needs_threshold") else None,
-                      note[:200], alert_id], user)
+                      (note or "")[:MAX_NOTE], 1 if spec.get("call") else 0,
+                      alert_id], user)
     conn.execute(sql, args)
     conn.commit()
 
@@ -814,6 +865,35 @@ def event_list(conn: sqlite3.Connection, user: int, limit: int = 20) -> List[sql
                              "ORDER BY ts DESC, id DESC LIMIT ?", (int(user), limit)))
 
 
+def events_after(conn: sqlite3.Connection, user: int, after: Optional[int] = None,
+                 since: Optional[float] = None, limit: int = 20) -> List[sqlite3.Row]:
+    """One person's events after a point, newest first, for a page to announce.
+
+    after is the id of the last event a page has seen. Ids only grow, so it
+    is a better place-marker than a time, which two events can share. since
+    is a time, to the second, for a page that has no marker yet.
+    """
+    conn.executescript(_EVENTS)
+    sql, args = "SELECT * FROM alert_events WHERE user_id=?", [int(user)]
+    if after is not None:
+        sql += " AND id > ?"
+        args.append(int(after))
+    if since is not None:
+        sql += " AND ts >= ?"
+        args.append(int(since))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    return list(conn.execute(sql, args))
+
+
+def event_cursor(conn: sqlite3.Connection, user: int) -> int:
+    """The id of one person's newest event, or 0 when there is none."""
+    conn.executescript(_EVENTS)
+    row = conn.execute("SELECT MAX(id) FROM alert_events WHERE user_id=?",
+                       (int(user),)).fetchone()
+    return int(row[0] or 0)
+
+
 def event_emailed(conn: sqlite3.Connection, event_ids: List[int],
                   error: str = "") -> None:
     """Record whether the email for these events went out."""
@@ -827,11 +907,20 @@ def event_emailed(conn: sqlite3.Connection, event_ids: List[int],
 
 def alert_reset(conn: sqlite3.Connection, alert_id: int,
                 user: Optional[int] = None) -> None:
-    """Re-arm a fired alert."""
+    """Re-arm a fired alert, as if it had just been set.
+
+    A call alert keeps the call it last saw, so the next change from that
+    call fires. Any other forgets that its condition was met, so if it still
+    is, the next check says so again.
+    """
+    from .alerts import CALL_KINDS
     sql, args = _own("UPDATE alerts SET active=1, triggered_ts=NULL, "
-                     "trigger_value=NULL, trigger_note=NULL WHERE id=?",
-                     [alert_id], user)
-    conn.execute(sql, args)
+                     "trigger_value=NULL, trigger_note=NULL, state=CASE WHEN kind IN "
+                     "(%s) THEN state ELSE NULL END WHERE id=?"
+                     % ",".join("?" * len(CALL_KINDS)),
+                     list(CALL_KINDS) + [alert_id], user)
+    if conn.execute(sql, args).rowcount == 0:
+        raise ValueError("No alert with id %d" % alert_id)
     conn.commit()
 
 
