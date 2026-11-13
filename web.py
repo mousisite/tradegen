@@ -832,11 +832,132 @@ def index():
                                          user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
+        stored = _attention_stored(conn, uid())
     finally:
         conn.close()
     return render_template("index.html", runs=runs, open_trades=open_trades,
                            summary=summary, counts=counts,
+                           attention=_attention(stored, open_trades),
                            has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
+
+
+# The signed-in front page starts with what needs the person now. It is built
+# from what is already saved: their own records, and the popular checks the
+# background job has already run. Nothing here analyses or scans anything, so
+# the page stays as quick as the rest. The one thing fetched is the price of
+# each open position, the way the journal fetches it, and the page waits only
+# so long for that.
+ATTENTION_DAYS = 3          # an alert that fired this recently is still news
+DASHBOARD_WAIT = 4.0        # seconds the page waits for open positions' prices
+POPULAR_FRESH = 24 * 3600   # a popular check older than this is not today's
+ATTENTION_SHOWN = 6         # rows per list before "and N more"
+WATCH_SHOWN = 8
+
+
+def _quote_day(snap: Dict) -> str:
+    """The session a popular check's price is from, when not the check's own day.
+
+    On a weekend a stock's price is Friday's close, and "checked 3h ago" on its
+    own would pass that off as a price three hours old.
+    """
+    day, at = snap.get("price_day"), snap.get("at")
+    if day is None or not at or int(day) >= int(at) // 86400:
+        return ""
+    return time.strftime("%d %b", time.gmtime(int(day) * 86400)).lstrip("0")
+
+
+def _latest_runs(conn, me: int, symbols) -> Tuple[Dict, Dict]:
+    """This person's latest run of each symbol: by (symbol, interval), and overall."""
+    symbols = sorted(set(symbols))
+    by_pair: Dict = {}
+    by_symbol: Dict = {}
+    if not symbols:
+        return by_pair, by_symbol
+    # With one MAX() in the query, SQLite takes the other columns from the
+    # row that holds it: the latest run of each pair.
+    rows = conn.execute(
+        "SELECT symbol, interval, action, price, market_open, MAX(ts) AS ts "
+        "FROM runs WHERE user_id=? AND symbol IN (%s) GROUP BY symbol, interval"
+        % ",".join("?" * len(symbols)), [int(me)] + symbols).fetchall()
+    for row in rows:
+        by_pair[(row["symbol"], row["interval"])] = row
+        best = by_symbol.get(row["symbol"])
+        if best is None or row["ts"] > best["ts"]:
+            by_symbol[row["symbol"]] = row
+    return by_pair, by_symbol
+
+
+def _attention_stored(conn, me: int) -> Dict:
+    """The front page's first section, as far as the database has it."""
+    now = time.time()
+    fired = [dict(e) for e in db_mod.event_list(conn, me, limit=30)
+             if e["ts"] >= now - ATTENTION_DAYS * 86400]
+    popular = {v["symbol"]: v for v in public_mod.verdicts(conn) if v.get("at")}
+    fresh = [v for v in popular.values() if now - v["at"] <= POPULAR_FRESH]
+    watched = db_mod.watchlist(conn, user=me)
+    shown = watched[:WATCH_SHOWN]
+    by_pair, by_symbol = _latest_runs(conn, me, [w["symbol"] for w in shown])
+    watch = []
+    for w in shown:
+        symbol, interval = w["symbol"], w["interval"] or "1d"
+        # The public check is a daily one, so it answers only a daily watch.
+        snap = popular.get(symbol) if interval == "1d" else None
+        own = by_pair.get((symbol, interval)) or by_symbol.get(symbol)
+        item = {"symbol": symbol, "interval": interval}
+        if snap and snap.get("action"):
+            item.update(call=snap["action"], at=snap["at"], price=snap.get("price"),
+                        public=True, quote_day=_quote_day(snap),
+                        slug=public_mod.slug(symbol))
+        elif own is not None and own["action"]:
+            item.update(call=own["action"], at=own["ts"], price=own["price"],
+                        public=False, run_interval=own["interval"],
+                        closed=not own["market_open"])
+        watch.append(item)
+    return {"fired": fired, "watch": watch,
+            "watch_more": max(0, len(watched) - len(shown)),
+            "checked": bool(fresh),
+            "buys": [dict(v, quote_day=_quote_day(v), slug=public_mod.slug(v["symbol"]),
+                          short=public_mod.short(v["symbol"]))
+                     for v in fresh if v.get("action") == "BUY"]}
+
+
+def _marks_within(open_trades, wait: float):
+    """_mark_to_market's answer, and whether it was still not back after wait."""
+    if not open_trades:
+        return {}, False
+    done: Dict = {}
+    worker = threading.Thread(target=lambda: done.update(_mark_to_market(open_trades)),
+                              name="orenth-front-page-prices", daemon=True)
+    worker.start()
+    worker.join(wait)
+    if worker.is_alive():
+        # Left to finish on its own: what it fetches is kept for a minute, so
+        # the journal or the next look at this page gets it straight away.
+        return {}, True
+    return done, False
+
+
+def _attention(stored: Dict, open_trades) -> Dict:
+    """What needs the person now: stops and targets, alerts, watchlist, BUYs."""
+    marks, late = _marks_within(open_trades, DASHBOARD_WAIT)
+    positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
+                 if (marks.get(t["id"]) or {}).get("status") in ("past stop",
+                                                                 "past target")]
+    crossed = {p["trade"]["id"] for p in positions
+               if p["mark"]["status"] == "past stop"}
+    # The background check writes a crossed stop into the alert history as
+    # well. A position listed as past its stop is not said a second time.
+    fired = [e for e in stored["fired"]
+             if not (e["kind"] == "stop_breach" and e["trade_id"] in crossed)]
+    buys = stored["buys"]
+    return {"positions": positions, "late": late, "crossed": len(crossed),
+            "fired": fired[:ATTENTION_SHOWN],
+            "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
+            "watch": stored["watch"], "watch_more": stored["watch_more"],
+            "buys": buys[:ATTENTION_SHOWN],
+            "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
+            "checked": stored["checked"],
+            "any": bool(positions or fired or stored["watch"] or buys)}
 
 
 def _safe_back(raw, fallback):
@@ -1045,7 +1166,8 @@ def _mark_one(trade):
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
         status = "past target"
-    return {"price": price, "r": r_now, "status": status}
+    return {"price": price, "r": r_now, "status": status,
+            "as_of": alerts_mod.as_of(bars)}
 
 
 def _mark_to_market(open_trades):
