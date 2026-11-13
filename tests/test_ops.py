@@ -213,6 +213,95 @@ kept_after = len([f for f in _os.listdir(folder)
 print("   %d backups before pruning, %d after" % (kept_before, kept_after))
 check("pruning keeps only the newest few", kept_after == 2, kept_after)
 
+# The CSVs hold the same people's data as the copy. They used to be kept for
+# ever, slowly filling the disk the database is on.
+import time as _time
+
+sets = tempfile.mkdtemp(prefix="stockbot-backup-sets-")
+taken = []
+for index in range(3):
+    taken.append(_os.path.basename(backup_mod.take(sets, with_csv=True)))
+    _time.sleep(0.05)
+per_copy = len([f for f in _os.listdir(sets) if f.endswith(".csv")]) // 3
+backup_mod.prune(sets, 1)
+left = sorted(_os.listdir(sets))
+newest = taken[-1][len("stockbot-"):-len(".db")]
+print("   left after pruning to one: %s" % left)
+check("each backup writes its own CSVs", per_copy >= 4, per_copy)
+check("pruning removes a backup's CSVs with its database copy",
+      len([f for f in left if f.endswith(".csv")]) == per_copy, left)
+check("what is left all belongs to the newest backup",
+      all(newest in f for f in left), left)
+
+age = backup_mod.newest_age(sets)
+check("the newest backup's age is known", age is not None and age < 60, age)
+check("with a recent backup the next one waits until it is due",
+      backup_mod.first_run_in(sets, 3600.0) > 3000)
+check("with none, the first runs soon after start",
+      backup_mod.first_run_in(tempfile.mkdtemp(), 3600.0) == 300.0)
+check("with only an old one, the first runs soon after start",
+      backup_mod.first_run_in(sets, 30.0) == 300.0)
+
+real_free = backup_mod._free_bytes
+backup_mod._free_bytes = lambda path: 1024
+try:
+    before = sorted(_os.listdir(sets))
+    backup_mod.take(sets, with_csv=True)
+    check("a backup that would fill the disk is refused", False, "it was taken")
+except OSError as exc:
+    check("a backup that would fill the disk is refused", True)
+    check("and says so plainly", "disk space" in str(exc), exc)
+    check("and writes nothing", sorted(_os.listdir(sets)) == before)
+finally:
+    backup_mod._free_bytes = real_free
+
+print()
+print("=" * 72)
+print("THE HEALTH CHECK")
+print("=" * 72)
+
+import shutil as _shutil
+import sqlite3 as _sqlite3
+import types as _types
+
+healthy = c.get("/healthz")
+check("a healthy server answers 200", healthy.status_code == 200)
+check("and says so, and nothing else",
+      healthy.get_json() == {"ok": True, "service": "stockbot"}, healthy.get_json())
+
+real_connect = web.db_mod.connect
+
+
+def unreadable(path=None):
+    # Only the health check's own read fails; signing the request in works.
+    if _sys._getframe(1).f_code.co_name == "healthcheck":
+        raise _sqlite3.OperationalError("database is locked: /data/stockbot.db")
+    return real_connect(path)
+
+
+web.db_mod.connect = unreadable
+try:
+    broken = c.get("/healthz")
+finally:
+    web.db_mod.connect = real_connect
+check("a database it cannot read is a 503", broken.status_code == 503)
+check("which says only that it is not ok", broken.get_json() == {"ok": False},
+      broken.get_json())
+check("never the error itself", b"locked" not in broken.data
+      and b"/data" not in broken.data)
+
+real_usage = _shutil.disk_usage
+_shutil.disk_usage = lambda path: _types.SimpleNamespace(
+    total=1 << 30, used=(1 << 30) - (1 << 20), free=1 << 20)
+try:
+    short = c.get("/healthz")
+finally:
+    _shutil.disk_usage = real_usage
+check("a nearly full disk is reported",
+      "disk" in short.get_json().get("detail", ""), short.get_json())
+check("without failing the check: a restart frees no space",
+      short.status_code == 200 and short.get_json().get("ok") is True)
+
 print()
 print("=" * 72)
 print("THE USAGE VIEW")

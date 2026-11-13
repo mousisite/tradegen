@@ -20,8 +20,9 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -41,7 +42,12 @@ _LAST_CALL = [0.0]
 _MIN_GAP = 0.12          # EDGAR asks for under ~10 requests a second
 
 _TICKER_CACHE: Optional[Dict[str, int]] = None
-_FACTS_CACHE: Dict[int, "CompanyFacts"] = {}
+# Companies' parsed filings, most recently used last. Bounded, because each is
+# close to a megabyte and the server has half a gigabyte; and refreshed daily,
+# because a company files new figures without the server restarting.
+_FACTS_CACHE: "OrderedDict[int, Tuple[float, CompanyFacts]]" = OrderedDict()
+_FACTS_MAX = 64
+_FACTS_TTL = 24 * 3600.0
 _CACHE_LOCK = threading.Lock()
 
 # The XBRL tag for a given idea changes between companies and over time, so
@@ -124,6 +130,25 @@ def _year_of(date_str: str) -> Optional[int]:
         return int(str(date_str)[:4])
     except (TypeError, ValueError):
         return None
+
+
+def _fiscal_year(end: str) -> Optional[int]:
+    """The year a period's figures are labelled with.
+
+    The calendar year it ended in, except that a period ending in the first
+    week of January belongs to the year before. Companies on 52 or 53 week
+    years end on the Saturday nearest 31 December, which is sometimes 1 or 2
+    January, and the plain calendar year then gave two fiscal years the same
+    label: one replaced the other, and the years after it were labelled wrong.
+    """
+    year = _year_of(end)
+    if year is None:
+        return None
+    try:
+        month, day = int(str(end)[5:7]), int(str(end)[8:10])
+    except (TypeError, ValueError):
+        return year
+    return year - 1 if month == 1 and day <= 7 else year
 
 
 def _span_days(start: Optional[str], end: str) -> Optional[int]:
@@ -313,9 +338,12 @@ class CompanyFacts:
         if len(rows) < 3:
             return None
         first, last = rows[0]["value"], rows[-1]["value"]
-        span = len(rows) - 1
+        # Per year of time that passed, not per row: a year missing from the
+        # filings would otherwise squeeze the growth of two into one.
+        days = _span_days(rows[0]["end"], rows[-1]["end"])
+        span = days / 365.25 if days else len(rows) - 1
         # A sign change makes a growth rate meaningless rather than merely large.
-        if first is None or last is None or first <= 0 or last <= 0:
+        if first is None or last is None or first <= 0 or last <= 0 or span <= 0:
             return None
         return (last / first) ** (1.0 / span) - 1.0
 
@@ -327,8 +355,10 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
         return None
 
     with _CACHE_LOCK:
-        if cik in _FACTS_CACHE:
-            return _FACTS_CACHE[cik]
+        hit = _FACTS_CACHE.get(cik)
+        if hit is not None and time.time() - hit[0] < _FACTS_TTL:
+            _FACTS_CACHE.move_to_end(cik)
+            return hit[1]
 
     data = _get(_FACTS_URL % cik)
     if not isinstance(data, dict):
@@ -361,7 +391,7 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
                 # different "2025" revenues and a nonsense growth rate. The
                 # period end is the only reliable marker of which year a number
                 # belongs to.
-                period_year = _year_of(end)
+                period_year = _fiscal_year(end)
                 span = _span_days(row.get("start"), end)
 
                 # Duration concepts (revenue, income) must cover a full year to
@@ -400,7 +430,10 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
                 break        # first tag that produced data wins
 
     with _CACHE_LOCK:
-        _FACTS_CACHE[cik] = facts
+        _FACTS_CACHE[cik] = (time.time(), facts)
+        _FACTS_CACHE.move_to_end(cik)
+        while len(_FACTS_CACHE) > _FACTS_MAX:
+            _FACTS_CACHE.popitem(last=False)
     return facts
 
 

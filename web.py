@@ -131,22 +131,48 @@ def _harden(response):
     return response
 
 
+# Free space below which the health check says the disk is low. The database
+# and its backups share one small disk, and a full one stops every write.
+LOW_DISK = 100 * 1024 * 1024
+_LOW_DISK_SAID = [0.0]
+
+
 @app.route("/healthz")
 def healthcheck():
     """Liveness, for whatever is watching the process.
 
-    Deliberately cheap and unauthenticated: it touches the database to prove
-    the process is actually able to serve, and returns nothing about anyone.
+    Deliberately cheap and unauthenticated: it reads the database to prove the
+    process is actually able to serve, and returns nothing about anyone. A
+    read never waits for a writer, so a long write cannot fail the check.
     """
+    import shutil
+
+    path = app.config.get("DB_PATH") or db_mod.default_path()
     try:
-        conn = db_mod.connect(app.config.get("DB_PATH"))
+        conn = db_mod.connect(path)
         try:
-            conn.execute("SELECT 1").fetchone()
+            conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
         finally:
             conn.close()
-    except Exception as exc:
-        return jsonify({"ok": False, "detail": str(exc)[:200]}), 503
-    return jsonify({"ok": True, "service": "stockbot"})
+    except Exception:
+        # Why goes to the log; the check itself is public.
+        app.logger.exception("Health check could not read the database")
+        return jsonify({"ok": False}), 503
+    out = {"ok": True, "service": "stockbot"}
+    try:
+        free = shutil.disk_usage(os.path.dirname(path)).free
+    except OSError:
+        free = None
+    # Said, not failed: restarting the instance would not free any space, and
+    # the site still reads while it is short.
+    if free is not None and free < LOW_DISK:
+        out["detail"] = "The data disk is nearly full."
+        if time.time() - _LOW_DISK_SAID[0] > 3600:
+            _LOW_DISK_SAID[0] = time.time()
+            from bot import monitoring
+            monitoring.note("The data disk is nearly full",
+                            free_mb=int(free / (1024 * 1024)))
+    return jsonify(out)
 
 
 # Pages reachable without being signed in. Everything else needs an account
@@ -517,6 +543,12 @@ _CACHE_TTL = 90.0
 # quarter hour, however many of them there are.
 DEMO_TTL = 15 * 60.0
 _CACHE_LOCK = threading.Lock()
+# Analyses running right now, by cache key, so a second request for the same
+# one waits for it instead of starting its own.
+_RUNNING: Dict[Tuple, Dict] = {}
+# Longer than an analysis takes, news included. A waiter that gave up sooner
+# would start its own copy, which is what waiting is there to prevent.
+_RUNNING_WAIT = 150.0
 
 INTERVALS = [("5m", "5 minutes"), ("15m", "15 minutes"), ("30m", "30 minutes"),
              ("1h", "1 hour"), ("1d", "Daily")]
@@ -563,15 +595,29 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     # account was served to the next person who asked for the same ticker.
     key = (symbol.upper(), interval, bool(with_news), _settings_key(cfg))
     me = uid()
-    now = time.time()
-    with _CACHE_LOCK:
-        hit = _CACHE.get(key)
-        if hit and (now - hit[0]) < (ttl or _CACHE_TTL):
-            result, runs = hit[1], hit[2]
-            mine = runs.get(me)
-        else:
+    owned = None
+    while True:
+        with _CACHE_LOCK:
+            hit = _CACHE.get(key)
+            if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
+                break
             hit = None
+            running = _RUNNING.get(key)
+            if running is None:
+                owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
+                break
+        # The same analysis is already running for another request. Its answer
+        # is this one's too, and running a second copy beside it on half a CPU
+        # only makes both slower.
+        if not running["done"].wait(_RUNNING_WAIT):
+            break                        # stuck: run one here rather than fail
+        if running["error"] is not None:
+            raise running["error"]
+        # Finished: the answer is in the cache now, so look again.
+
     if hit is not None:
+        result, runs = hit[1], hit[2]
+        mine = runs.get(me)
         # The analysis is shared; the record of having run it is not. Each
         # person gets a run of their own, so it is in their history and
         # "take this trade", which only opens your own runs, works for them.
@@ -586,17 +632,31 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     # same analysis whoever asked for it, and recomputing it per person would
     # be pure waste. Only the record of having run it belongs to someone, and
     # that is written inside engine.analyse before the result is cached.
-    result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
-                            source="web", db_path=app.config.get("DB_PATH"),
-                            user=me, record=record)
-    with _CACHE_LOCK:
-        _CACHE[key] = (time.time(), result,
-                       {me: result.run_id} if result.run_id else {})
-        # Keep the cache from growing without bound in a long session.
-        if len(_CACHE) > 40:
-            oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
-            _CACHE.pop(oldest, None)
-    return result
+    try:
+        result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
+                                source="web", db_path=app.config.get("DB_PATH"),
+                                user=me, record=record)
+        with _CACHE_LOCK:
+            _CACHE[key] = (time.time(), result,
+                           {me: result.run_id} if result.run_id else {})
+            # Keep the cache from growing without bound in a long session.
+            if len(_CACHE) > 40:
+                oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
+                _CACHE.pop(oldest, None)
+        return result
+    except Exception as exc:
+        # Those waiting get the same answer, failure included: asking again at
+        # once would only fail again, one after another.
+        if owned is not None:
+            owned["error"] = exc
+        raise
+    finally:
+        # Only now, with the answer in the cache, are the waiters let go.
+        if owned is not None:
+            with _CACHE_LOCK:
+                if _RUNNING.get(key) is owned:
+                    _RUNNING.pop(key, None)
+            owned["done"].set()
 
 
 def _record_cached_run(result: engine.Analysis, user: int) -> Optional[int]:

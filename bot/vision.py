@@ -130,7 +130,9 @@ def read_chart(image_path, model: Optional[str] = None,
     data, media_type = _load_image_bytes(image_path)
     encoded = base64.standard_b64encode(data).decode("ascii")
 
-    client = anthropic.Anthropic(api_key=key)
+    # Bounded, because this runs inside the upload's request: the SDK's own
+    # default is ten minutes, three times.
+    client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
     try:
         resp = client.messages.create(
             model=model or os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL),

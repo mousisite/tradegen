@@ -16,8 +16,11 @@ Everything else is configured through the environment. See DEPLOY.md.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import socket
 import sys
+import threading
 
 # The bundled runtime is an embeddable build, whose ._pth deliberately keeps the
 # script's own directory off sys.path. Every entry point has to put it back or
@@ -41,14 +44,32 @@ def main(argv=None) -> int:
                         default=int(os.environ.get("WEB_THREADS", "8")))
     args = parser.parse_args(argv)
 
+    # Errors the app handles, and failures in the background jobs, are written
+    # to the log, and the host keeps whatever the process prints. Without this
+    # they went nowhere, and the first sign of a broken job was a user.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # One line per Claude request is noise; its failures still come through.
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+
+    # A backstop for any network call made without its own timeout. Without
+    # one, a source that stops answering holds a request thread for ever, and
+    # there are only a handful of them.
+    socket.setdefaulttimeout(30)
+
     # Imported here so that --help works even if something below is missing.
     from waitress import serve
 
     import web
+    from bot import database as db_mod
     from bot import monitoring, scheduler as scheduler_mod
 
     # Before anything else, so a failure during start-up is reported too.
     monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
+
+    # Once, on this one thread, before anything else can open the database:
+    # new columns are added here rather than raced for by the first requests.
+    db_mod.migrate(web.app.config.get("DB_PATH"))
 
     cfg = web.config_mod.load(web.app.config.get("CFG_PATH"))
     loop = web.start_alert_loop(cfg)
@@ -69,10 +90,13 @@ def main(argv=None) -> int:
     print("    error reports  %s" % monitoring.status()["detail"])
 
     def _backup_failed(exc):
-        """A silent backup failure is the worst kind: loud in the log as well."""
+        """A silent backup failure is the worst kind: loud in the log as well.
+
+        The scheduler has already logged it with its traceback, which is also
+        what reaches error reporting; this is the line to search the log for.
+        """
         print("  BACKUP FAILED: %s: %s" % (type(exc).__name__, exc))
         sys.stdout.flush()
-        monitoring.note("Backup failed: %s" % exc)
 
     # A backup nobody runs is not a backup. This runs one on a timer inside the
     # server, keeps the most recent few, and verifies each before keeping it.
@@ -83,7 +107,6 @@ def main(argv=None) -> int:
 
         target = (os.environ.get("STOCKBOT_BACKUP_DIR") or "").strip()
         if not target:
-            from bot import database as db_mod
             target = os.path.join(os.path.dirname(db_mod.default_path()), "backups")
 
         def take_one():
@@ -111,12 +134,25 @@ def main(argv=None) -> int:
             sys.stdout.flush()
             return {"checked": 1, "fired": []}
 
+        every = every_hours * 3600.0
         backups = scheduler_mod.Scheduler(
-            take_one, interval_seconds=every_hours * 3600.0,
+            take_one, interval_seconds=every,
             name="stockbot-backups",
             on_error=_backup_failed)
         backups.start()
-        print("    backups        every %g hours into %s" % (every_hours, target))
+        # The scheduler's own first run is a whole interval away, and a deploy
+        # restarts that wait, so the first one is brought forward when due.
+        first = backup_mod.first_run_in(target, every)
+        when = ""
+        if first < every - 60:
+            soon = threading.Timer(first, backups.check_now)
+            soon.daemon = True
+            soon.start()
+            when = ", the next in %s" % ("%d minutes" % round(first / 60.0)
+                                        if first < 5400 else
+                                        "%.1f hours" % (first / 3600.0))
+        print("    backups        every %g hours into %s%s"
+              % (every_hours, target, when))
     else:
         print("    backups        off")
     print()

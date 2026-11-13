@@ -191,6 +191,113 @@ check("an unexpected result shape is survived", weird.running)
 check("and is recorded rather than dropped", weird.status()["runs"] == 1)
 weird.stop()
 
+# A background job has no page to show its errors on, so they go to the log.
+import logging
+
+
+class Caught(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+caught = Caught()
+logging.getLogger(scheduler_mod.__name__).addHandler(caught)
+try:
+    noisy = scheduler_mod.Scheduler(explode, interval_seconds=60, name="test-boom")
+    noisy._run_once()
+    skipped = scheduler_mod.Scheduler(
+        lambda: {"checked": 2, "errors": [
+            "AAPL: no data", "user 3: refused for someone@example.com"]},
+        interval_seconds=60, name="test-skips")
+    skipped._run_once()
+finally:
+    logging.getLogger(scheduler_mod.__name__).removeHandler(caught)
+failed = [r for r in caught.records if r.levelno == logging.ERROR]
+check("a failed job is logged as an error",
+      failed and "test-boom" in failed[0].getMessage())
+check("with the traceback that explains it",
+      failed and failed[0].exc_info is not None
+      and "boom" in str(failed[0].exc_info[1]))
+partly = [r.getMessage() for r in caught.records if r.levelno == logging.WARNING]
+check("what a run skipped is logged too",
+      partly and "2 items failed" in partly[0] and "AAPL: no data" in partly[0],
+      partly)
+check("without the addresses in it",
+      partly and "someone@example.com" not in partly[0], partly)
+
+print()
+print("=" * 72)
+print("ONE ANALYSIS FOR EVERYONE ASKING AT ONCE")
+print("=" * 72)
+
+import threading
+import types
+from flask import g
+from bot.market import DataError
+
+real_analyse = web.engine.analyse
+ran = []
+
+
+def slow_analyse(symbol, cfg, **_):
+    ran.append(symbol)
+    time.sleep(0.5)
+    if symbol == "NOPE":
+        raise DataError("There is no instrument called NOPE.")
+    return types.SimpleNamespace(symbol=symbol, run_id=None)
+
+
+same_cfg = config_mod.load()
+
+
+def asks(symbol, out):
+    with web.app.test_request_context("/analyse"):
+        g.user = types.SimpleNamespace(id=1, is_local=True)
+        try:
+            out.append(web.cached_analysis(symbol, "1d", same_cfg, with_news=False))
+        except DataError as exc:
+            out.append(exc)
+
+
+def at_once(symbol, count=6):
+    out = []
+    threads = [threading.Thread(target=asks, args=(symbol, out))
+               for _ in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    return out
+
+
+web.engine.analyse = slow_analyse
+try:
+    web._CACHE.clear()
+    began = time.time()
+    got = at_once("ACME")
+    print("   6 requests, %d analyses, %.2fs" % (ran.count("ACME"), time.time() - began))
+    check("six requests for the same analysis run it once",
+          ran.count("ACME") == 1, ran)
+    check("and all six get its answer",
+          len(got) == 6 and all(r is got[0] for r in got), got)
+
+    failed = at_once("NOPE")
+    check("a failure is shared rather than repeated",
+          ran.count("NOPE") == 1, ran)
+    check("everyone waiting is told why",
+          len(failed) == 6 and all(isinstance(e, DataError) for e in failed), failed)
+    check("nothing is left marked as running", not web._RUNNING, web._RUNNING)
+    at_once("NOPE", 1)
+    check("and a failure is not kept: the next request tries again",
+          ran.count("NOPE") == 2, ran)
+finally:
+    web.engine.analyse = real_analyse
+    web._CACHE.clear()
+
 loop.stop()
 check("the alert loop stops cleanly", not loop.running)
 web.ALERTS = None

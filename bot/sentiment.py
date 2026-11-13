@@ -209,7 +209,10 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     try:
         url = "%s?q=%s&hl=en-US&gl=US&ceid=US:en" % (
             _GOOGLE_NEWS, requests.utils.quote('"%s" stock OR crypto' % query))
-        feed = feedparser.parse(url)
+        # Fetched here rather than by feedparser, which waits with no time
+        # limit at all, inside the request of whoever opened the page.
+        r = requests.get(url, headers=_HEADERS, timeout=10)
+        feed = feedparser.parse(r.content if r.status_code == 200 else b"")
         for e in feed.entries[:limit]:
             items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
                               source=(e.get("source", {}) or {}).get("title", "Google News"),
@@ -312,7 +315,9 @@ def _score_with_claude(items: List[Item], symbol: str) -> bool:
         "the numbered scores.\n\nItems:\n%s" % (symbol, numbered)
     )
     try:
-        client = anthropic.Anthropic(api_key=key)
+        # The SDK would otherwise wait ten minutes, three times, inside a page
+        # request. A failure here only means the word list scores the items.
+        client = anthropic.Anthropic(api_key=key, timeout=20.0, max_retries=1)
         resp = client.messages.create(
             model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
             max_tokens=1200,
