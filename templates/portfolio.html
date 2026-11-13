@@ -18,7 +18,25 @@
   </div>
 {% else %}
 
-<div class="card">
+{% if view.breached %}
+  {# The one thing on this page that needs doing today, so it comes first. #}
+  <div class="card breach" role="alert">
+    <span class="eyebrow">Stop breached · action required</span>
+    <ul class="list">
+      {% for p in view.breached %}
+        <li><b>{{ p.symbol }}</b> is at {{ p.price|price }}, past its stop of
+          {{ p.stop|price }}: {{ p.open_pnl|money }}{% if p.open_r is not none %}
+          ({{ p.open_r|signed }}R){% endif %}.</li>
+      {% endfor %}
+    </ul>
+    <p class="prose" style="margin:0">A stop in the journal is a plan, not an
+      order. Unless you placed a stop order with your broker, these are still
+      open. Close them in the <a href="{{ url_for('trades') }}">journal</a>, or
+      set a new stop on purpose.</p>
+  </div>
+{% endif %}
+
+<div class="card" {% if view.breached %}style="margin-top:var(--s3)"{% endif %}>
   <div class="figs">
     <div class="f"><div class="k">Account</div>
       <div class="v fig">{{ view.account|money }}</div></div>
@@ -30,9 +48,17 @@
     <div class="f"><div class="k">Open P&amp;L</div>
       <div class="v fig {{ 'gain' if view.open_pnl > 0 else 'loss' }}">
         {{ view.open_pnl|money }}</div></div>
-    <div class="f"><div class="k">At risk</div>
+    <div class="f"><div class="k">Still at risk</div>
       <div class="v fig loss">{{ view.total_risk|money }}</div>
-      <div class="n">if every stop hit</div></div>
+      <div class="n">to the stops ahead, with costs</div></div>
+    <div class="f"><div class="k">Planned risk</div>
+      <div class="v fig">{{ view.planned_risk|money }}</div>
+      <div class="n">entry to stop, at the start</div></div>
+    {% if view.breached %}
+    <div class="f"><div class="k">Past their stop</div>
+      <div class="v fig loss">{{ view.breached|length }}</div>
+      <div class="n">{{ view.breached_pnl|money }} open</div></div>
+    {% endif %}
     <div class="f"><div class="k">Concentration</div>
       <div class="v fig">{{ "%.1f"|format(1 / view.concentration)
           if view.concentration else '—' }}</div>
@@ -82,7 +108,7 @@
               {{ p.open_pnl|money }}</td>
             <td class="r fig {{ 'gain' if (p.open_r or 0) > 0 else 'loss' }}">
               {{ p.open_r|signed if p.open_r is not none else '—' }}</td>
-            <td class="r fig">{{ p.risk_remaining|money }}</td>
+            <td class="r fig">{% if p.breached %}<span class="chip short">Past stop</span>{% elif p.price is none %}—{% else %}{{ p.risk_remaining|money }}{% endif %}</td>
             <td class="r fig soft">{{ (p.notional|abs / view.gross_exposure)|pct
                 if view.gross_exposure else '—' }}</td>
             <td class="r fig soft">{{ "%.2f"|format(p.beta) if p.beta is not none else '—' }}</td>

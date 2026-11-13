@@ -802,7 +802,8 @@ def take_trade():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         run_id = int(request.form["run_id"])
-        row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        sql, args = db_mod._own("SELECT * FROM runs WHERE id=?", [run_id], uid())
+        row = conn.execute(sql, args).fetchone()
         if row is None or not row["entry"] or not row["stop"]:
             return render_template("error.html", symbol="",
                                    message="That analysis has no entry and stop "
@@ -1930,7 +1931,8 @@ def portfolio():
     finally:
         conn.close()
 
-    view = portfolio_mod.build(rows, cfg["account_size"])
+    view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
+        kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
     shocks = {pct: portfolio_mod.what_if(view, pct)
               for pct in (-0.05, -0.10, -0.20)} if view.positions else {}
     return render_template("portfolio.html", view=view, cfg=cfg,

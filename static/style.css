@@ -658,6 +658,11 @@ ul.list.ok li::marker { color: var(--gain); }
   .pairs dd { text-align: left; padding-top: 2px; }
 }
 
+/* ---------- a stop that has been crossed ---------- */
+
+.card.breach { border-color: var(--loss); background: var(--loss-wash); }
+.card.breach .eyebrow { color: var(--loss); font-weight: 600; }
+
 /* ---------- section jump bar ---------- */
 
 .jump { position: sticky; top: 60px; z-index: 38; display: flex; gap: 6px;

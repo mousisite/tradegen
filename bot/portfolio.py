@@ -40,6 +40,9 @@ class Position:
     open_pnl: float = 0.0
     open_r: Optional[float] = None
     risk_remaining: float = 0.0
+    planned_risk: float = 0.0
+    exit_cost: float = 0.0
+    breached: bool = False
     status: str = "open"
     beta: Optional[float] = None
     volatility: Optional[float] = None
@@ -47,6 +50,11 @@ class Position:
     @property
     def risk_per_unit(self) -> float:
         return abs(self.entry - self.stop)
+
+    @property
+    def stop_valid(self) -> bool:
+        """A stop at the entry measures nothing, so R cannot be worked out."""
+        return self.risk_per_unit > 0
 
 
 @dataclass
@@ -57,6 +65,10 @@ class PortfolioView:
     cash: float = 0.0
     open_pnl: float = 0.0
     total_risk: float = 0.0
+    planned_risk: float = 0.0
+    exit_costs: float = 0.0
+    breached: List[Position] = field(default_factory=list)
+    breached_pnl: float = 0.0
     gross_exposure: float = 0.0
     net_exposure: float = 0.0
     by_sector: Dict[str, float] = field(default_factory=dict)
@@ -69,8 +81,44 @@ class PortfolioView:
     failed: List[str] = field(default_factory=list)
 
 
-def build(rows, account: float, with_correlation: bool = True) -> PortfolioView:
-    """Mark open positions to market and describe the resulting exposure."""
+def mark(p: Position, cost_bps: float = 0.0) -> None:
+    """Mark one priced position: P&L, R, and what is still at risk.
+
+    Three risk figures, because they answer different questions:
+      planned_risk    what the plan put at risk on day one, entry to stop.
+      risk_remaining  what a stop hit from today's price would still cost.
+      breached        the price is already past the stop. A stop in the
+                      journal is a plan, not an order: unless one was placed
+                      with a broker, the position is still open and the loss
+                      is whatever the price says, not "nothing left at risk".
+    exit_cost is the trading cost of getting out, from the cost settings, so a
+    stop hit costs what it would really cost.
+    """
+    p.notional = p.price * p.quantity
+    p.open_pnl = (p.price - p.entry) * p.direction * p.quantity
+    p.open_r = ((p.price - p.entry) * p.direction / p.risk_per_unit
+                if p.stop_valid else None)
+    # Positive when the stop sits below a long's entry (or above a short's).
+    # Zero when it has been moved past the entry to lock in a profit.
+    p.planned_risk = max(0.0, (p.entry - p.stop) * p.direction) * p.quantity
+    p.exit_cost = abs(p.notional) * cost_bps / 10000.0 / 2.0
+    p.breached = (p.price - p.stop) * p.direction <= 0
+    if p.breached:
+        p.status = "stop_breached"
+        p.risk_remaining = 0.0
+    else:
+        # Distance from here to the stop, not from the entry: a position in
+        # profit with a trailed stop risks less than it did on day one.
+        p.risk_remaining = (p.price - p.stop) * p.direction * p.quantity
+
+
+def build(rows, account: float, with_correlation: bool = True,
+          cost_bps: Optional[Dict[str, float]] = None) -> PortfolioView:
+    """Mark open positions to market and describe the resulting exposure.
+
+    cost_bps maps an asset class ("equity", "crypto", other) to its round-trip
+    cost in basis points; half of it is charged to get out of each position.
+    """
     view = PortfolioView(account=account)
     if not rows:
         view.cash = account
@@ -88,27 +136,22 @@ def build(rows, account: float, with_correlation: bool = True) -> PortfolioView:
 
     _enrich(positions, view)
 
+    costs = cost_bps or {}
     for p in positions:
         if p.price is None:
             continue
-        p.notional = p.price * p.quantity
-        p.open_pnl = (p.price - p.entry) * p.direction * p.quantity
-        if p.risk_per_unit > 0:
-            p.open_r = (p.price - p.entry) * p.direction / p.risk_per_unit
-        # Risk still on the table: distance from here to the stop, not from
-        # the entry. A position in profit with a stop below entry risks less
-        # than it did on day one, and a naive sum would overstate the danger.
-        if p.direction > 0:
-            remaining = max(0.0, p.price - p.stop)
-        else:
-            remaining = max(0.0, p.stop - p.price)
-        p.risk_remaining = remaining * p.quantity
+        mark(p, costs.get(p.asset_class, costs.get("other", 0.0)))
 
     priced = [p for p in positions if p.price is not None]
     view.positions = positions
     view.invested = sum(p.notional for p in priced)
     view.open_pnl = sum(p.open_pnl for p in priced)
-    view.total_risk = sum(p.risk_remaining for p in priced)
+    view.breached = [p for p in priced if p.breached]
+    view.breached_pnl = sum(p.open_pnl for p in view.breached)
+    view.total_risk = sum(p.risk_remaining + p.exit_cost
+                          for p in priced if not p.breached)
+    view.planned_risk = sum(p.planned_risk for p in priced)
+    view.exit_costs = sum(p.exit_cost for p in priced)
     view.gross_exposure = sum(abs(p.notional) for p in priced)
     view.net_exposure = sum(p.notional * p.direction for p in priced)
     view.cash = max(0.0, account - view.invested)
@@ -186,10 +229,40 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         % (exposure_pct, len(priced), "" if len(priced) == 1 else "s",
            "{:,.0f}".format(view.cash)))
 
+    # Said first and loudest: a breached stop is the one thing on this page
+    # that needs doing today, and "nothing at risk" would hide it.
+    for p in view.breached:
+        view.warnings.append(
+            "Stop breached on %s: %s now against a stop of %s, a loss of %s "
+            "(%s). The stop in the journal is a plan, not an order, so unless "
+            "you placed a stop order with your broker this position is still "
+            "open. Close it or set a new stop."
+            % (p.symbol, _px(p.price), _px(p.stop),
+               "{:,.0f}".format(-p.open_pnl) if p.open_pnl < 0 else "nothing yet",
+               "%.2fR" % p.open_r if p.open_r is not None else "R unknown"))
+        if p.open_r is not None and p.open_r < -1.05:
+            view.warnings.append(
+                "%s has lost more than its planned risk (%.2fR against 1R), "
+                "which is what a gap through the stop does." % (p.symbol, p.open_r))
+
+    unbreached = [p for p in priced if not p.breached]
     risk_pct = view.total_risk / account * 100
-    view.observations.append(
-        "If every stop were hit from here, the loss would be %s, or %.1f%% of the account."
-        % ("{:,.0f}".format(view.total_risk), risk_pct))
+    if unbreached:
+        view.observations.append(
+            "If every stop still ahead were hit from here, the positions above "
+            "their stops would lose a further %s, or %.1f%% of the account, "
+            "including about %s in trading costs to get out."
+            % ("{:,.0f}".format(view.total_risk), risk_pct,
+               "{:,.0f}".format(sum(p.exit_cost for p in unbreached))))
+    if view.planned_risk:
+        view.observations.append(
+            "The plans put %s at risk when the positions were opened, entry to stop."
+            % "{:,.0f}".format(view.planned_risk))
+    for p in priced:
+        if not p.stop_valid:
+            view.warnings.append(
+                "%s has its stop at the entry price, so its risk cannot be "
+                "measured. Set a real stop in the journal." % p.symbol)
     if risk_pct > 6:
         view.warnings.append(
             "Total open risk is %.1f%% of the account. A correlated bad week "
@@ -242,15 +315,16 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
             view.warnings.append(
                 "%s is %.0f%% of the account on its own."
                 % (p.symbol, abs(p.notional) / account * 100))
-        if p.open_r is not None and p.open_r < -0.9:
-            view.warnings.append(
-                "%s is at or past its stop, showing %.2fR. It should already "
-                "be closed." % (p.symbol, p.open_r))
 
     if view.failed:
         view.warnings.append(
             "No price available for %s, so those holdings are excluded from "
             "every figure above." % ", ".join(sorted(set(view.failed))))
+
+
+def _px(value: float) -> str:
+    from .market import format_price
+    return format_price(value)
 
 
 def what_if(view: PortfolioView, shock_pct: float) -> Dict:
