@@ -134,7 +134,11 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
     prompt = _PROMPT.format(facts=_facts_block(payload))
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        # Bounded, because this runs inside the research page's request: the
+        # SDK's own default is ten minutes, three times. Longer than the other
+        # calls, because this answer is the longest one asked for.
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
+                                     timeout=40.0, max_retries=1)
         response = client.messages.create(
             model=chosen, max_tokens=_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}])

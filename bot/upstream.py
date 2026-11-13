@@ -45,10 +45,18 @@ COOLDOWN = 60.0
 # is a message.
 THRESHOLD = 3
 
+# Most answers kept at once. One parsed price history can be over a megabyte,
+# the server has half a gigabyte, and the cache is only here to collapse the
+# repeats of a single page view, which never need more than a few dozen.
+MAX_ENTRIES = 100
+
 _lock = threading.Lock()
 _cache: Dict[str, Tuple[float, object]] = {}
 _inflight: Dict[str, threading.Event] = {}
 _breakers: Dict[str, Dict] = {}
+# The longest reuse any caller has asked for. An entry older than that can
+# never be returned again, so it is let go rather than kept until pushed out.
+_max_ttl = 0.0
 
 
 def _plainly(seconds: int) -> str:
@@ -153,9 +161,11 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
     is the stampede this exists to prevent, and it does it at the worst moment:
     the defect is invisible until two people ask at once.
     """
+    global _max_ttl
     now = time.time()
 
     with _lock:
+        _max_ttl = max(_max_ttl, float(ttl))
         hit = _cache.get(key)
         if hit and (now - hit[0]) < ttl:
             return hit[1]
@@ -186,15 +196,26 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
             check(host)
         result = fetch()
         with _lock:
-            _cache[key] = (time.time(), result)
-            if len(_cache) > 400:
-                oldest = min(_cache, key=lambda k: _cache[k][0])
-                _cache.pop(oldest, None)
+            _store(key, result)
         return result
     finally:
         with _lock:
             _inflight.pop(key, None)
         event.set()
+
+
+def _store(key: str, result: object) -> None:
+    """Keep an answer and let go of what can no longer be served. Lock held."""
+    now = time.time()
+    _cache[key] = (now, result)
+    # Expired entries used to stay until four hundred others pushed them out,
+    # which at a megabyte or more each could outgrow the whole server.
+    for old in [k for k, (at, _) in _cache.items() if now - at >= _max_ttl]:
+        if old != key:
+            del _cache[old]
+    while len(_cache) > MAX_ENTRIES:
+        del _cache[min((k for k in _cache if k != key),
+                       key=lambda k: _cache[k][0])]
 
 
 def stats() -> Dict:
@@ -216,7 +237,9 @@ def stats() -> Dict:
 
 def reset() -> None:
     """Forget everything. For tests, and for a deliberate retry after a pause."""
+    global _max_ttl
     with _lock:
         _cache.clear()
         _inflight.clear()
         _breakers.clear()
+        _max_ttl = 0.0

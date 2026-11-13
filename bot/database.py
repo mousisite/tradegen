@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -200,8 +201,20 @@ def default_path() -> str:
     return os.path.join(root, "data", "stockbot.db")
 
 
+# Files this process has already given their schema, keyed by path. Per file,
+# because tests and scripts open several databases in one process.
+_PREPARED: set = set()
+_PREPARE_LOCK = threading.Lock()
+
+
 def connect(path: Optional[str] = None) -> sqlite3.Connection:
-    """Open the database, creating it and its schema when absent."""
+    """Open the database, creating it and its schema when absent.
+
+    The schema is created and brought up to date the first time this process
+    opens a file, not on every call. Every request opens a connection, and the
+    migrations write, so running them each time made every page and the health
+    check wait for the write lock behind whatever else was writing.
+    """
     path = path or default_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # The web server is threaded, so two requests can want the database at once.
@@ -210,18 +223,85 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    # WAL keeps a long analysis run from blocking a concurrent journal read.
+    if not _prepared(path):
+        try:
+            with _PREPARE_LOCK:
+                if not _prepared(path):
+                    _prepare(conn)
+                    _PREPARED.add(_key(path))
+        except BaseException:
+            conn.close()
+            raise
+    return conn
+
+
+def migrate(path: Optional[str] = None) -> None:
+    """Create the schema and bring an older file up to date, now.
+
+    serve.py calls this once at start-up, before any other thread exists, so a
+    new column is added by one thread rather than raced for by the first few
+    requests. Scripts and tests need not call it: connect() does the same work
+    the first time it meets a file.
+    """
+    path = path or default_path()
+    with _PREPARE_LOCK:
+        _PREPARED.discard(_key(path))
+    connect(path).close()
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _prepared(path: str) -> bool:
+    # An empty file is a new database, or one deleted and opened again since,
+    # and needs its schema whatever this process remembers about the path.
+    try:
+        return _key(path) in _PREPARED and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def _prepare(conn: sqlite3.Connection) -> None:
+    """Create every table and add every column this version expects.
+
+    Safe to run again, and safe when two processes start at the same moment:
+    each step creates what is missing or finds it already there.
+    """
+    # WAL keeps a long analysis run from blocking a concurrent journal read. It
+    # is a property of the file, so it is set here rather than per connection.
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(_SCHEMA)
     _migrate(conn)
     # Accounts come after the main schema, because giving existing rows an
     # owner means altering tables the script above has just made sure exist.
     from . import accounts as accounts_mod
-    accounts_mod.ensure_schema(conn)
+    from . import public as public_mod
+    _allowing_race(conn, accounts_mod.ensure_schema)
+    # The public pages add columns of their own, and doing it here means they
+    # exist before the first request rather than being added by several at once.
+    _allowing_race(conn, public_mod.ensure_schema)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                  (str(SCHEMA_VERSION),))
     conn.commit()
-    return conn
+
+
+def _allowing_race(conn: sqlite3.Connection, ensure) -> None:
+    """Run another module's schema step, allowing for a process racing it.
+
+    Those steps look for a column and add it when it is missing. When another
+    process starting at the same moment adds it in between, SQLite calls the
+    new column a duplicate, which means the work is done: the step is run again
+    and finds it there.
+    """
+    for attempt in range(5):
+        try:
+            ensure(conn)
+            return
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower() or attempt == 4:
+                raise
+            conn.rollback()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -241,12 +321,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # crossed its stop, so it is said once, not every five minutes.
         "trades": [("breach_noticed", "INTEGER")],
     }
-    for table, columns in wanted.items():
-        existing = {row["name"] for row in
-                    conn.execute("PRAGMA table_info(%s)" % table)}
-        for column, spec in columns:
-            if column not in existing:
-                conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, spec))
+    # Looking and adding happen inside one write transaction, so a second
+    # process starting at the same moment waits here and then finds the
+    # columns already there instead of adding them a second time.
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for table, columns in wanted.items():
+            existing = {row[1] for row in
+                        conn.execute("PRAGMA table_info(%s)" % table)}
+            for column, spec in columns:
+                if column in existing:
+                    continue
+                try:
+                    conn.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                                 % (table, column, spec))
+                except sqlite3.OperationalError as exc:
+                    # Added by someone else first: the outcome that was wanted.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------

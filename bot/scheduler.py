@@ -14,10 +14,18 @@ from this file.
 from __future__ import annotations
 
 import dataclasses
+import logging
+import re
 import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Dict, List, Optional
+
+log = logging.getLogger(__name__)
+
+# A job's error text can quote an address it failed to send to. The log is
+# for finding faults, not for keeping people's addresses.
+_ADDRESS = re.compile(r"[^\s@<>\"'(),;:]+@[^\s@<>\"'(),;:]+")
 
 
 class Scheduler:
@@ -136,6 +144,7 @@ class Scheduler:
                 "errors": len(result.get("errors") or []),
                 "triggered": triggered,
             })
+            self._log_errors(result.get("errors"))
         except BaseException as exc:               # a loop must not die
             self.failures += 1
             self.last_error = "%s: %s" % (type(exc).__name__, exc)
@@ -146,11 +155,36 @@ class Scheduler:
                                          "triggered": triggered})
             except Exception:
                 pass
+            # A background job has no page to show its failure on, so the log
+            # is where it is seen, with the traceback that explains it. Error
+            # reporting, when it is on, picks up anything logged as an error.
+            try:
+                log.error("%s failed", self._name,
+                          exc_info=(type(exc), exc, exc.__traceback__))
+            except Exception:
+                pass
             if self._on_error is not None:
                 try:
                     self._on_error(exc)
                 except Exception:
                     pass
+
+    def _log_errors(self, errors) -> None:
+        """Write down the items a run could not do, which it otherwise drops.
+
+        A job that skips a bad symbol or an unsendable email still succeeds, and
+        before this the only trace of what it skipped was a count.
+        """
+        if not errors:
+            return
+        try:
+            shown = "; ".join(_ADDRESS.sub("[address]", str(e))[:200]
+                              for e in list(errors)[:5])
+            log.warning("%s: %d item%s failed: %s%s", self._name, len(errors),
+                        "" if len(errors) == 1 else "s", shown,
+                        " ..." if len(errors) > 5 else "")
+        except Exception:
+            pass                        # writing it down must not fail the run
 
     # -- what the page needs to say ----------------------------------------
 

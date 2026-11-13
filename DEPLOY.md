@@ -228,6 +228,12 @@ credentials are stripped before anything is sent, and failures the app already
 handles (an unknown ticker, a rate limit) are never reported, so the alerts
 stay meaningful.
 
+Without Sentry, errors still reach the server log (the Logs tab on Render):
+a background job that failed (alert checks, the popular pages, the weekly
+email, backups) with its traceback, the items a job skipped and why, a health
+check that could not read the database, and a data disk running low. With
+Sentry on, everything logged as an error is reported there too.
+
 **`STOCKBOT_ADMIN_EMAIL`** — your Google address. It unlocks `/usage`, which
 shows what people actually do: how many came back on a second day, which
 instruments they look at, whether they pick intraday or daily bars. That last
@@ -235,7 +241,11 @@ one answers the positioning question better than any opinion can. Without this
 set, nobody can see that page on a deployment, including you.
 
 Backups run automatically every 12 hours once deployed, are verified before
-being kept, and prune to the newest eight. Nothing to configure.
+being kept, and prune to the newest eight. Each is a copy of the database and
+four CSV exports, and pruning deletes them together. A deploy restarts the
+server, so when the newest backup is older than the interval, the next one runs
+a few minutes after start rather than twelve hours later. They live on the same
+disk as the database: see "Back it up" below for the copy you keep elsewhere.
 
 ---
 
@@ -290,9 +300,29 @@ scale and will hold hundreds of users without complaint. What it will not
 survive is two machines mounting the same disk, so keep the instance count at
 one. `fly.toml` already sets `min_machines_running = 1` and no autoscaling.
 
-**Back it up, and not by copying the file.** Nothing backs up the volume for
-you, and the journal and the accumulated strategy record are the only things
-here that cannot be rebuilt.
+**Back it up, and not by copying the file.** The journal and the accumulated
+strategy record are the only things here that cannot be rebuilt.
+
+The automatic backups sit on the same 1 GB disk as the database. They cover a
+bad write or a mistake, not losing the disk or the account. Render also keeps
+daily snapshots of the disk for a few days (check its disk documentation for the
+current terms), but those stay with Render too. So keeping a copy somewhere else
+is a step for you, the operator, and it is the one that matters most:
+
+- Every week or so, download the newest `stockbot-<date>.db` from
+  `/data/backups` (over the host's SSH access, as in the commands below) and
+  keep it off the platform: your own machine plus one cloud drive is enough.
+- Run `python backup.py --verify <the file>` on the copy you downloaded.
+- Each copy is the size of the database, and eight are kept. At 1 GB that is
+  comfortable while the database is under about 100 MB; after that, set
+  `STOCKBOT_BACKUP_KEEP` lower or make the disk larger. A backup that would
+  leave less than 50 MB free is not taken, and the log says so.
+- The CSVs are a convenience, not a full copy: the analysis history holds the
+  latest 5,000 runs and the theses the latest 1,000, across all users. The
+  `.db` file is the backup.
+- Backups hold every account's data. A deleted account is gone from them once
+  the last copy taken before the deletion is pruned, about four days at the
+  defaults, and from any copy you downloaded only when you delete that.
 
 Do not `cat` or `cp` the database. It runs in WAL mode, so at any moment some
 committed data lives in the `-wal` file rather than the main one; a copy taken

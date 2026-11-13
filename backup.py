@@ -20,11 +20,24 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
 import sqlite3
 import sys
 import time
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# One backup is a database copy and, optionally, its CSV exports, all carrying
+# the same stamp: stockbot-<stamp>.db and stockbot-<dataset>-<stamp>.csv.
+_STAMP = r"\d{4}-\d{2}-\d{2}-\d{6}(?:-\d+)?"
+_COPY = re.compile(r"^stockbot-(%s)\.db$" % _STAMP)
+_PART = re.compile(r"^stockbot-(?:[a-z_]+-)?(%s)\.(?:db|db-wal|db-shm|csv)$" % _STAMP)
+
+# Free space a backup must leave behind. Backups live on the same disk as the
+# live database, and a backup that fills it stops every write the site makes.
+HEADROOM = 50 * 1024 * 1024
 
 
 def _size(path: str) -> str:
@@ -34,6 +47,10 @@ def _size(path: str) -> str:
             return "%.0f %s" % (n, unit) if unit == "bytes" else "%.1f %s" % (n, unit)
         n /= 1024.0
     return "%d bytes" % n
+
+
+def _free_bytes(path: str) -> int:
+    return shutil.disk_usage(path).free
 
 
 def take(out_dir: str, with_csv: bool = False) -> str:
@@ -48,6 +65,14 @@ def take(out_dir: str, with_csv: bool = False) -> str:
         raise FileNotFoundError("There is no database at %s yet." % source_path)
 
     os.makedirs(out_dir, exist_ok=True)
+    # Refused rather than attempted: a copy that fills the disk breaks the live
+    # database it was meant to protect.
+    size = sum(os.path.getsize(p) for p in (source_path, source_path + "-wal")
+               if os.path.exists(p))
+    if _free_bytes(out_dir) < size + HEADROOM:
+        raise OSError("There is not enough free disk space for another backup, "
+                      "so none was taken. Delete old backups, keep fewer, or "
+                      "make the disk larger.")
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     target_path = os.path.join(out_dir, "stockbot-%s.db" % stamp)
 
@@ -75,11 +100,17 @@ def take(out_dir: str, with_csv: bool = False) -> str:
         # A database is only readable by this program. The CSVs are readable by
         # anything, which matters if the worst case is that this app is gone.
         from bot import export as export_mod
-        conn = db_mod.connect(target_path)
+        # Named with the copy's own stamp, suffix included, so prune() can
+        # delete them together with it.
+        taken = _COPY.match(os.path.basename(target_path)).group(1)
+        # A plain connection, because the copy is only read here; connect()
+        # would also bring its schema up to date, which writes to the backup.
+        conn = sqlite3.connect(target_path)
+        conn.row_factory = sqlite3.Row
         try:
             for name in export_mod.DATASETS:
                 built = export_mod.build(conn, name, "csv")
-                path = os.path.join(out_dir, "stockbot-%s-%s.csv" % (name, stamp))
+                path = os.path.join(out_dir, "stockbot-%s-%s.csv" % (name, taken))
                 with open(path, "w", encoding="utf-8", newline="") as fh:
                     fh.write(built["body"])
                 print("  %-9s %s  (%d rows)" % (name, path, built["count"]))
@@ -124,20 +155,56 @@ def verify(path: str) -> bool:
         return False
 
 
+def _copies(out_dir: str) -> list:
+    """The database copies in a folder, newest first."""
+    if not os.path.isdir(out_dir):
+        return []
+    return sorted((os.path.join(out_dir, f) for f in os.listdir(out_dir)
+                   if _COPY.match(f)), key=os.path.getmtime, reverse=True)
+
+
 def prune(out_dir: str, keep: int) -> None:
-    """Delete all but the newest few, so this can run on a timer."""
+    """Delete all but the newest few, so this can run on a timer.
+
+    A backup's CSV exports go with its database copy. They hold the same
+    people's data, so keeping them would keep a deleted account's trades and
+    notes for ever, and they would slowly fill the disk the database is on.
+    """
     if keep <= 0 or not os.path.isdir(out_dir):
         return
-    found = sorted(
-        (os.path.join(out_dir, f) for f in os.listdir(out_dir)
-         if f.startswith("stockbot-") and f.endswith(".db")),
-        key=os.path.getmtime, reverse=True)
-    for old in found[keep:]:
+    kept = {_COPY.match(os.path.basename(p)).group(1)
+            for p in _copies(out_dir)[:keep]}
+    for name in sorted(os.listdir(out_dir)):
+        part = _PART.match(name)
+        if part is None or part.group(1) in kept:
+            continue
         try:
-            os.remove(old)
-            print("  removed old backup %s" % os.path.basename(old))
+            os.remove(os.path.join(out_dir, name))
+            print("  removed old backup %s" % name)
         except OSError as exc:
-            print("  could not remove %s: %s" % (old, exc))
+            print("  could not remove %s: %s" % (name, exc))
+
+
+def newest_age(out_dir: str) -> Optional[float]:
+    """Seconds since the newest backup in a folder was taken, or None."""
+    found = _copies(out_dir)
+    return max(0.0, time.time() - os.path.getmtime(found[0])) if found else None
+
+
+def first_run_in(out_dir: str, every_seconds: float,
+                 soon: float = 300.0) -> float:
+    """How long after a start the first scheduled backup should run.
+
+    The timer waits a whole interval after the server starts, and every deploy
+    restarts it, so on a day of deploys no backup ran at all. When one is due,
+    because there is none or the newest is older than the interval, it runs a
+    few minutes after start, clear of everything else starting up. Otherwise it
+    runs when the newest one comes due.
+    """
+    age = newest_age(out_dir)
+    if age is None or age >= every_seconds:
+        return soon
+    return max(soon, every_seconds - age)
 
 
 def main(argv=None) -> int:
@@ -166,6 +233,10 @@ def main(argv=None) -> int:
     except FileNotFoundError as exc:
         print("  %s" % exc)
         print("  Nothing to back up yet. Run the app once first.")
+        print()
+        return 1
+    except OSError as exc:
+        print("  %s" % exc)
         print()
         return 1
     print()

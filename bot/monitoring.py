@@ -22,9 +22,12 @@ them wrong is worse than having no monitoring at all:
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 _enabled = False
 _reason = "not initialised"
@@ -149,15 +152,23 @@ def status() -> Dict[str, Any]:
 
 
 def note(message: str, **context) -> None:
-    """Record something worth knowing that is not an exception."""
+    """Record something worth knowing that is not an exception.
+
+    Always written to the server log, so it is seen even with error reporting
+    off; sent to Sentry as well when that is on.
+    """
+    shown = {k: v for k, v in context.items() if not _SECRETISH.search(k)}
+    log.warning("%s%s", message,
+                "".join("  %s=%s" % (k, v) for k, v in shown.items()))
     if not _enabled:
         return
     try:
         import sentry_sdk
-        with sentry_sdk.push_scope() as scope:
-            for key, value in context.items():
-                if not _SECRETISH.search(key):
-                    scope.set_extra(key, value)
-        sentry_sdk.capture_message(message, level="warning")
+        # The message is sent inside the scope, or the context set on it is
+        # thrown away before it is attached.
+        with sentry_sdk.new_scope() as scope:
+            for key, value in shown.items():
+                scope.set_extra(key, value)
+            sentry_sdk.capture_message(message, level="warning")
     except Exception:
         pass
