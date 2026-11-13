@@ -1088,69 +1088,137 @@ def close_trade():
     return redirect(url_for("trades"))
 
 
+class _NoTrade(ValueError):
+    """A recorded analysis with no trade in it to log, said for the person."""
+
+
+def _paper_size(row, cfg: Dict) -> Dict:
+    """The paper position a recorded plan opens, by the journal's sizing rule.
+
+    One rule for the review page and for logging the trade, so the size, the
+    money at risk and its share of the account that are confirmed are the
+    ones written down. Only a BUY or a SHORT is a trade. A WAIT names a price
+    the market has not reached yet, so logging it would record a fill that
+    never happened and count its make-believe gain or loss in the hit rate
+    and expectancy.
+    """
+    if row is None or not row["entry"] or not row["stop"]:
+        raise _NoTrade("That analysis has no entry and stop to trade.")
+    action = (row["action"] or "").upper()
+    if action == "WAIT":
+        raise _NoTrade("That analysis said WAIT. Nothing has filled yet, so "
+                       "there is no trade to log. Set its entry alert to hear "
+                       "when the price gets there, and add the trade by hand "
+                       "in the journal if you take it.")
+    if action not in ("BUY", "SHORT"):
+        raise _NoTrade("That analysis said %s: there is no trade in it to "
+                       "simulate." % (action or "nothing"))
+    entry, stop = float(row["entry"]), float(row["stop"])
+    # The side is where the stop sits, which the plan keeps in step with
+    # the call: below the entry for a BUY, above it for a SHORT.
+    direction = 1 if stop < entry else -1
+    per_unit = abs(entry - stop)
+    account = float(cfg["account_size"])
+    qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
+               if per_unit > 0 else 0)
+    cap = account * cfg["max_position_pct"] / 100.0
+    capped = qty_raw * entry > cap
+    if capped:
+        qty_raw = cap / entry
+    crypto = row["asset_class"] == "crypto"
+    qty = round(qty_raw, 6) if crypto else float(int(qty_raw))
+    if qty <= 0:
+        raise _NoTrade("Account too small for one unit at this stop distance.")
+    target = float(row["target1"]) if row["target1"] else None
+    return {"direction": direction, "entry": entry, "stop": stop,
+            "target": target, "per_unit": per_unit, "quantity": qty,
+            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
+                              else "{:,.0f}".format(qty)),
+            "notional": qty * entry, "risk": qty * per_unit,
+            "risk_pct": (qty * per_unit / account * 100.0) if account else 0.0,
+            "account": account, "capped": capped,
+            "reward_risk": (abs(target - entry) / per_unit
+                            if target and per_unit > 0 else None)}
+
+
+def _own_run(conn, run_id: int):
+    """One of the signed-in person's own recorded analyses, or None."""
+    sql, args = db_mod._own("SELECT * FROM runs WHERE id=?", [run_id], uid())
+    return conn.execute(sql, args).fetchone()
+
+
+def _logged_from(conn, run_id: int):
+    """The open journal trade already made from this run, if there is one."""
+    return conn.execute("SELECT * FROM trades WHERE run_id=? AND user_id=? AND "
+                        "status='open' ORDER BY id LIMIT 1",
+                        (run_id, uid())).fetchone()
+
+
+@app.route("/trades/simulate")
+def simulate_trade():
+    """Show the paper trade a plan would open, before anything is written.
+
+    Read from the stored run and the person's settings only: no price is
+    fetched and nothing is analysed, so it opens at once, and Confirm logs
+    exactly what it shows.
+    """
+    try:
+        run_id = int(request.args.get("run_id") or "")
+    except ValueError:
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        row = _own_run(conn, run_id)
+        if row is None:
+            abort(404)
+        logged = _logged_from(conn, run_id)
+    finally:
+        conn.close()
+    cfg = _cfg()
+    try:
+        size = _paper_size(row, cfg)
+    except _NoTrade as exc:
+        return render_template("error.html", symbol="", message=str(exc)), 400
+    # Back to the analysis it came from. Without a page to go back to, the
+    # journal, rather than the analysis again: opening that would run it,
+    # and on a free account a new day's look at it costs one of the day's.
+    back = (_referrer_path() if request.referrer else "") or url_for("trades")
+    age = max(0, int(time.time()) - int(row["ts"] or 0))
+    return render_template(
+        "simulate.html", run=row, size=size, cfg=cfg, back=back, logged=logged,
+        words=charts_mod.bar_words(row["interval"] or "1d"),
+        # A plan's entry is the price when it was analysed; the journal logs
+        # that price, so a plan older than this says the price may have moved.
+        stale=age > (3600 if (row["interval"] or "1d") == "1d" else 900))
+
+
 @app.route("/trades/take", methods=["POST"])
 def take_trade():
-    """Open a paper position from a recorded plan.
-
-    Only a BUY or a SHORT is a trade. A WAIT names a price the market has not
-    reached yet, so logging it would record a fill that never happened and
-    count its make-believe gain or loss in the hit rate and expectancy.
-    """
+    """Open a paper position from a recorded plan, as the review page showed it."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         run_id = int(request.form["run_id"])
-        sql, args = db_mod._own("SELECT * FROM runs WHERE id=?", [run_id], uid())
-        row = conn.execute(sql, args).fetchone()
-        if row is None or not row["entry"] or not row["stop"]:
-            return render_template("error.html", symbol="",
-                                   message="That analysis has no entry and stop "
-                                           "to trade."), 400
-
-        cfg = _cfg()
-        action = (row["action"] or "").upper()
-        # symbol="" on these, because the error page's advice about mistyped
+        row = _own_run(conn, run_id)
+        # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
-        if action == "WAIT":
-            return render_template(
-                "error.html", symbol="",
-                message="That analysis said WAIT. Nothing has filled yet, so "
-                        "there is no trade to log. Set its entry alert to hear "
-                        "when the price gets there, and add the trade by hand "
-                        "in the journal if you take it."), 400
-        if action not in ("BUY", "SHORT"):
-            return render_template("error.html", symbol="",
-                                   message="That analysis said %s: there is no "
-                                           "trade in it to simulate."
-                                           % (action or "nothing")), 400
-        entry, stop = float(row["entry"]), float(row["stop"])
-        # The side is where the stop sits, which the plan keeps in step with
-        # the call: below the entry for a BUY, above it for a SHORT.
-        direction = 1 if stop < entry else -1
-        per_unit = abs(entry - stop)
-        account = cfg["account_size"]
-        qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
-                   if per_unit > 0 else 0)
-        cap = account * cfg["max_position_pct"] / 100.0
-        if qty_raw * entry > cap:
-            qty_raw = cap / entry
-        qty = round(qty_raw, 6) if row["asset_class"] == "crypto" else float(int(qty_raw))
-        if qty <= 0:
-            return render_template("error.html", symbol="",
-                                   message="Account too small for one unit at "
-                                           "this stop distance."), 400
-
+        size = _paper_size(row, _cfg())
+        if _logged_from(conn, run_id) is not None:
+            # Confirm pressed twice: the first press already logged it.
+            return redirect(url_for("trades", logged=1))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
-                          direction=direction, entry=entry, stop=stop,
-                          target1=row["target1"], target2=row["target2"],
-                          quantity=qty, risk_amount=qty * per_unit,
-                          run_id=run_id, account="paper",
+                          direction=size["direction"], entry=size["entry"],
+                          stop=size["stop"], target1=row["target1"],
+                          target2=row["target2"], quantity=size["quantity"],
+                          risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid())
     except (ValueError, KeyError) as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    # The journal opens on its form for trades entered by hand, so it says
+    # first that the confirmed one went in, and where to find it.
+    return redirect(url_for("trades", logged=1))
 
 
 @app.route("/trades/open", methods=["POST"])

@@ -152,12 +152,13 @@
         only counts the stop understates what a bad morning does.</p>
     {% endif %}
     {# Only a call to act now is a trade. A wait has not filled, and logging it
-       would put a price the market never reached into the journal. #}
+       would put a price the market never reached into the journal. The button
+       opens a review of the trade first; nothing is written until it is
+       confirmed there. #}
     {% if r.run_id and a in ('BUY', 'SHORT') %}
-      <form action="{{ url_for('take_trade') }}" method="post" style="margin-top:var(--s3)">
-        <input type="hidden" name="run_id" value="{{ r.run_id }}">
-        <button class="btn quiet sm" type="submit">Log this as a paper trade</button>
-      </form>
+      <div style="margin-top:var(--s3)">
+        <a class="btn quiet sm" href="{{ url_for('simulate_trade', run_id=r.run_id) }}">Log this as a paper trade</a>
+      </div>
     {% elif r.run_id and a == 'WAIT' %}
       <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
         A wait is not a trade yet, so there is nothing to log. To hear when the
