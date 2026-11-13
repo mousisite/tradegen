@@ -1660,7 +1660,10 @@ def _brand():
     return {"site_base": base,
             "site_name": "Orenth",
             "site_logo": base + url_for("static", filename="logo.png"),
-            "same_as": SAME_AS}
+            "same_as": SAME_AS,
+            # One source for every page that counts the strategies.
+            "strategy_count": len(strategies_mod.REGISTRY),
+            "daily_strategy_count": len(strategies_mod.daily_strategy_names())}
 
 
 @app.context_processor
@@ -2256,7 +2259,7 @@ def _house_method() -> dict:
 
 @app.route("/backtests")
 def backtests():
-    """All 34 strategies, back-tested on the popular list, for search."""
+    """Every strategy that fires on daily bars, back-tested on the popular list."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = public_mod.verdicts(conn)

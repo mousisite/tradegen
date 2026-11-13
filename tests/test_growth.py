@@ -195,6 +195,11 @@ try:
     page = c.get("/backtests").data.decode("utf-8", "replace")
     check("the list ranks tested strategies, leaving out too few trades",
           "RSI reversion" in page and "Trend stack" not in page)
+    from bot import strategies as _strats
+    _all, _daily = len(_strats.REGISTRY), len(_strats.daily_strategy_names())
+    check("every count of the strategies comes from the registry",
+          _daily == _all - 1 and ("of Orenth's %d" % _all) in page
+          and ("running %d strategies" % _all) in page, (_all, _daily))
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
     check("a stock page says which strategies worked there",
           "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)

@@ -201,7 +201,7 @@
 <div class="overlay" id="working" role="status" aria-live="polite">
   <div class="spin" aria-hidden="true"></div>
   <div class="a" id="workhead">Analysing</div>
-  <div class="b" id="worknote">Fetching data, running 34 strategies, and
+  <div class="b" id="worknote">Fetching data, running {{ strategy_count }} strategies, and
     back-testing each one against this instrument's own history.</div>
   {# A counter rather than a progress bar. The work happens inside one blocking
      request, so the page has nothing to measure and a bar would be invented.

@@ -1089,8 +1089,20 @@ FAMILIES: Tuple[str, ...] = (TREND, REVERSION, BREAKOUT, VOLUME, STRUCTURE, PATT
 BASE_WEIGHTS: Dict[str, float] = {s.name: s.base_weight for s in REGISTRY}
 
 
+# Strategies that read the inside of a trading session, so they can never
+# fire on daily bars, where a session is one bar. Every page that counts the
+# strategies takes the number from here and REGISTRY, never from a typed-in
+# figure, so "34" and "33" cannot drift apart again.
+INTRADAY_ONLY: Tuple[str, ...] = ("opening_range_break",)
+
+
 def strategy_names() -> List[str]:
     return [s.name for s in REGISTRY]
+
+
+def daily_strategy_names() -> List[str]:
+    """The strategies that can fire on daily bars."""
+    return [s.name for s in REGISTRY if s.name not in INTRADAY_ONLY]
 
 
 # ---------------------------------------------------------------------------

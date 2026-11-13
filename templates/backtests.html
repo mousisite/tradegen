@@ -1,15 +1,18 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
-{% set page_blurb = (table|length or 34) ~ " trading strategies (RSI, MACD, Bollinger, breakouts and more) back-tested on popular stocks and coins, after trading costs. See which ones actually kept money. Not financial advice." %}
-{% block title %}Which trading strategies work? {{ table|length or 34 }} back-tested on stocks and crypto · Orenth{% endblock %}
+{% set page_blurb = (table|length or daily_strategy_count) ~ " trading strategies (RSI, MACD, Bollinger, breakouts and more) back-tested on popular stocks and coins, after trading costs. See which ones actually kept money. Not financial advice." %}
+{% block title %}Which trading strategies work? {{ table|length or daily_strategy_count }} back-tested on stocks and crypto · Orenth{% endblock %}
 {% block og_title %}Which trading strategies work? · Orenth{% endblock %}
 {% block head_extra %}{% if not table %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
   <h1>Which trading strategies actually work?</h1>
-  <p>{{ table|length or 34 }} strategies, back-tested every day on popular stocks and coins,
-    after trading costs. Best first. Tap one to see every stock.</p>
+  <p>{{ table|length or daily_strategy_count }} strategies, back-tested every day on popular stocks and coins,
+    after trading costs. Best first. Tap one to see every stock.
+    {% if strategy_count > daily_strategy_count %}The other {{ strategy_count - daily_strategy_count }}
+    of Orenth's {{ strategy_count }} read the inside of a trading day, so they only
+    fire on hourly or shorter bars and are not in this daily test.{% endif %}</p>
 </div>
 
 <div class="card pad0">
@@ -44,7 +47,7 @@
 
 <section class="card closing" style="margin-top:var(--s4)">
   <p class="lead">Check any stock or coin, free.</p>
-  <p class="prose">Orenth runs all 34 on whatever you are looking at, and says
+  <p class="prose">Orenth runs all {{ strategy_count }} on whatever you are looking at, and says
     so when none of them has an edge.</p>
   <div class="cta">
     {% if not current_user or demo %}
