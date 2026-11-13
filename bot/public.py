@@ -109,9 +109,18 @@ CREATE TABLE IF NOT EXISTS calls (
     how         TEXT,
     exit_price  REAL,
     settled     INTEGER,
+    price_day   INTEGER,
+    excluded    TEXT,
     UNIQUE (symbol, day)
 );
 """
+
+# Columns added after the table first shipped. Existing databases get them by
+# ALTER, never by rebuilding the table: the record is not to be rewritten.
+#   price_day  the exchange-local trading day the quoted price belongs to,
+#              so one market quote is one call however many days look at it.
+#   excluded   why a call is left out of the scores. Set, never deleted.
+_CALL_COLUMNS = (("price_day", "INTEGER"), ("excluded", "TEXT"))
 
 
 class ShareError(RuntimeError):
@@ -120,6 +129,18 @@ class ShareError(RuntimeError):
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
+    added = [name for name, kind in _CALL_COLUMNS if name not in have]
+    for name, kind in _CALL_COLUMNS:
+        if name in added:
+            conn.execute("ALTER TABLE calls ADD COLUMN %s %s" % (name, kind))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_calls_quote "
+                 "ON calls(symbol, price_day)")
+    if added:
+        # The first time the columns exist, the repeats written before them
+        # are marked. Idempotent, so running it again changes nothing.
+        mark_repeats(conn)
+    conn.commit()
 
 
 def short(symbol: str) -> str:
@@ -176,7 +197,23 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
             "stop": price - stop_atr * atr if atr > 0 else None,
             "target": price + target_atr * atr if atr > 0 else None,
             "horizon": int(horizon),
+            "price_day": _price_day(bars),
             "at": int(time.time())}
+
+
+def _price_day(bars) -> Optional[int]:
+    """The exchange-local trading day the quoted price belongs to.
+
+    Not the calendar day the check ran: on a Saturday, a Sunday and the early
+    hours (UTC) of a Monday an American stock's quote is still Friday's close.
+    """
+    meta = getattr(bars, "meta", None) or {}
+    gmt = int(getattr(bars, "gmt_offset", 0) or 0)
+    when = meta.get("regularMarketTime")
+    if when:
+        return (int(when) + gmt) // 86400
+    ids = getattr(bars, "session_id", None)
+    return int(ids[-1]) if ids is not None and len(ids) else None
 
 
 def tests(report) -> Dict[str, List]:
@@ -329,21 +366,69 @@ HOW_WORDS = {"target": "rose to the target", "stop": "fell to the stop",
              "up": "ended higher", "down": "ended lower", "flat": "went nowhere"}
 
 
+# Two calls on one symbol with exactly the same price inside this window are
+# the same market quote seen twice, not two observations.
+REPEAT_WINDOW = 5 * 86400
+
+
 def record_call(conn: sqlite3.Connection, snap: Dict) -> bool:
-    """Write today's call down, once per symbol per day. True if it was new."""
+    """Write a call down, once per symbol per market quote. True if it was new.
+
+    Keyed on the trading day of the price as well as the calendar day: a
+    weekend or holiday sees the last session's close again, and writing it
+    down again would count one observation two or three times.
+    """
     if not (snap.get("action") and snap.get("price") and snap.get("stop")
             and snap.get("target")):
         return False
     ensure_schema(conn)
+    symbol, price = snap["symbol"], float(snap["price"])
+    price_day = snap.get("price_day")
+    if price_day is not None and conn.execute(
+            "SELECT 1 FROM calls WHERE symbol=? AND price_day=? AND excluded IS NULL",
+            (symbol, int(price_day))).fetchone():
+        return False
+    # Calls written before price_day existed have none, so the quote itself
+    # is compared too.
+    if conn.execute("SELECT 1 FROM calls WHERE symbol=? AND price=? AND at>=? "
+                    "AND excluded IS NULL",
+                    (symbol, price, int(snap["at"]) - REPEAT_WINDOW)).fetchone():
+        return False
     day = time.strftime("%Y-%m-%d", time.gmtime(snap["at"]))
     cur = conn.execute(
         "INSERT OR IGNORE INTO calls (symbol, day, action, price, stop, target, "
-        "horizon, at) VALUES (?,?,?,?,?,?,?,?)",
-        (snap["symbol"], day, snap["action"], float(snap["price"]),
-         float(snap["stop"]), float(snap["target"]), int(snap.get("horizon") or 10),
-         int(snap["at"])))
+        "horizon, at, price_day) VALUES (?,?,?,?,?,?,?,?,?)",
+        (symbol, day, snap["action"], price, float(snap["stop"]),
+         float(snap["target"]), int(snap.get("horizon") or 10), int(snap["at"]),
+         int(price_day) if price_day is not None else None))
     conn.commit()
     return cur.rowcount == 1
+
+
+def mark_repeats(conn: sqlite3.Connection) -> int:
+    """Mark calls that repeat an earlier call's market quote. Returns how many.
+
+    Before calls were keyed by the price's trading day, an American stock's
+    Friday close was written down on Saturday, Sunday and early Monday (UTC):
+    three calls from one quote, all scored alike. The later ones are marked
+    with the reason and left in place, so the record stays checkable and
+    nothing is quietly deleted. The earliest call of each run is kept.
+    """
+    kept: Dict[str, sqlite3.Row] = {}
+    marked = 0
+    for row in conn.execute("SELECT id, symbol, day, price, at FROM calls "
+                            "WHERE excluded IS NULL ORDER BY symbol, at").fetchall():
+        prev = kept.get(row["symbol"])
+        if (prev is not None and prev["price"] == row["price"]
+                and row["at"] - prev["at"] <= REPEAT_WINDOW):
+            conn.execute("UPDATE calls SET excluded=? WHERE id=?",
+                         ("Repeats the %s call: the same market quote, seen again "
+                          "on a day the market was closed." % prev["day"], row["id"]))
+            marked += 1
+            continue
+        kept[row["symbol"]] = row
+    conn.commit()
+    return marked
 
 
 def _walk(bars, start: int, entry: float, stop: float, target: float,
@@ -409,28 +494,105 @@ def _tally(rows) -> Dict:
     return out
 
 
-def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = None) -> Dict:
-    """The whole record: tallies for everyone, for buys, for the rest, and the
-    latest settled calls."""
+def _cost(symbol: str, costs: Dict[str, float]) -> float:
+    """Round-trip trading cost as a fraction of the price."""
+    kind = "crypto" if symbol.endswith("-USD") else "equity"
+    return float(costs.get(kind, 0.0))
+
+
+def _buy_result(row, costs: Dict[str, float]) -> Dict[str, float]:
+    """What the pretend buy behind a scored call returned, after costs."""
+    cost = _cost(row["symbol"], costs)
+    move = row["exit_price"] / row["price"] - 1.0 - cost
+    risk = row["price"] - row["stop"]
+    r = (row["exit_price"] - row["price"] - row["price"] * cost) / risk if risk > 0 else 0.0
+    return {"move": move, "r": r}
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _stats(rows, costs: Dict[str, float]) -> Dict:
+    """One kind of call: counts, right rate with its 95% range, and what a buy
+    after these calls did, after costs."""
+    from .calibrate import wilson_interval
+    out = _tally(rows)
+    out["total"] = len(rows)
+    out["scored"] = out["right"] + out["wrong"] + out["flat"]
+    out["lo"], out["hi"] = wilson_interval(out["right"], out["decided"])
+    results = [_buy_result(r, costs) for r in rows if r["outcome"]]
+    moves = [x["move"] for x in results]
+    rs = [x["r"] for x in results]
+    wins = [r for r in rs if r > 0]
+    losses = [r for r in rs if r <= 0]
+    out.update(mean_move=sum(moves) / len(moves) if moves else None,
+               median_move=_median(moves),
+               mean_r=sum(rs) / len(rs) if rs else None,
+               avg_win_r=sum(wins) / len(wins) if wins else None,
+               avg_loss_r=sum(losses) / len(losses) if losses else None)
+    return out
+
+
+CLASSES = (("BUY", "When it said BUY"), ("WAIT", "When it said WAIT"),
+           ("AVOID", "When it said AVOID"), ("SHORT", "When it said SHORT"))
+
+
+def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = None,
+           costs: Optional[Dict[str, float]] = None) -> Dict:
+    """The whole record, each kind of call scored on its own.
+
+    There is no single headline "% right": a WAIT or AVOID is right whenever a
+    buy would have lost, and with the stop nearer than the target a buy loses
+    more often than it wins, so pooling them flatters the total. Instead every
+    kind is set against the baseline, how often a buy at any of these calls
+    worked, which is what saying the same thing every day would have scored.
+    costs are round-trip fractions by asset kind, e.g. {"equity": 0.0002}.
+    """
     ensure_schema(conn)
-    now = now or time.time()
+    costs = costs or {}
     rows = conn.execute("SELECT * FROM calls ORDER BY at").fetchall()
-    settled = [dict(r) for r in rows if r["outcome"]]
-    settled.sort(key=lambda r: -r["settled"])
-    return {"total": len(rows),
-            "first_at": rows[0]["at"] if rows else None,
-            "all": _tally(rows),
-            "buy": _tally([r for r in rows if r["action"] == "BUY"]),
-            "hold": _tally([r for r in rows if r["action"] in ("WAIT", "AVOID")]),
-            "month": _tally([r for r in rows if r["at"] >= now - 30 * 86400]),
-            "latest": settled[:limit]}
+    counted = [r for r in rows if not r["excluded"]]
+    excluded = [dict(r) for r in rows if r["excluded"]]
+    scored = [r for r in counted if r["outcome"]]
+    decided = [r for r in scored if r["how"] != "flat"]
+    buy_worked = sum(1 for r in decided if r["how"] in ("target", "up"))
+    # The baseline scores every call as if it had said BUY.
+    base = _stats([dict(r, outcome=(None if r["how"] is None else
+                                    "right" if r["how"] in ("target", "up") else
+                                    "flat" if r["how"] == "flat" else "wrong"))
+                   for r in counted], costs)
+    classes = []
+    for action, label in CLASSES:
+        group = [r for r in counted if r["action"] == action]
+        if group:
+            stats = _stats(group, costs)
+            # Chance level for this kind of call: what saying it every time
+            # would have scored over the same calls.
+            stats["chance"] = ((buy_worked / len(decided)) if action == "BUY" else
+                               (1 - buy_worked / len(decided))) if decided else None
+            classes.append(dict(stats, action=action, label=label))
+    latest = sorted((dict(r) for r in scored), key=lambda r: -(r["settled"] or 0))
+    return {"total": len(counted),
+            "first_at": counted[0]["at"] if counted else None,
+            "all": _tally(counted),
+            "scored": len(scored),
+            "classes": classes,
+            "baseline": base,
+            "buy_worked": (buy_worked / len(decided)) if decided else None,
+            "excluded": excluded,
+            "latest": latest[:limit]}
 
 
 def symbol_record(conn: sqlite3.Connection, symbol: str, limit: int = 6) -> Dict:
     """One stock's latest settled calls, and how many are still waiting."""
     ensure_schema(conn)
-    rows = conn.execute("SELECT * FROM calls WHERE symbol=? ORDER BY at DESC",
-                        (symbol,)).fetchall()
+    rows = conn.execute("SELECT * FROM calls WHERE symbol=? AND excluded IS NULL "
+                        "ORDER BY at DESC", (symbol,)).fetchall()
     return {"latest": [dict(r) for r in rows if r["outcome"]][:limit],
             "open": sum(1 for r in rows if not r["outcome"]),
             "tally": _tally(rows)}

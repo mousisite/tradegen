@@ -2329,12 +2329,14 @@ def backtest_page(name):
 @app.route("/record")
 def record():
     """How every past public call turned out, for anyone to check."""
+    method = _house_method()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        rec = public_mod.record(conn)
+        rec = public_mod.record(conn, costs={"equity": method["equity"] / 100.0,
+                                             "crypto": method["crypto"] / 100.0})
     finally:
         conn.close()
-    return render_template("record.html", rec=rec, method=_house_method(),
+    return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
                            short=public_mod.short, slug=public_mod.slug,
                            how_words=public_mod.HOW_WORDS)

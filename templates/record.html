@@ -1,26 +1,27 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
-{% set a = rec.all %}
-{% if a.decided %}
-  {% set page_blurb = "Orenth makes a call on " ~ popular_count ~ " popular stocks and coins every day, then scores it " ~ method.days ~ " trading days later. So far: right " ~ a.right ~ " times, wrong " ~ a.wrong ~ ". Every call is listed. Not financial advice." %}
+{% if rec.scored %}
+  {% set page_blurb = "A forward test, scored in public: Orenth makes a call on " ~ popular_count ~ " popular stocks and coins each market day, then checks it " ~ method.days ~ " trading days later. " ~ rec.scored ~ " calls scored so far, each kind against what chance would score. Not financial advice." %}
 {% endif %}
 {% block title %}Orenth's track record: how its calls turned out · Orenth{% endblock %}
 {% block og_title %}How Orenth's calls turned out · Orenth{% endblock %}
-{% block head_extra %}{% if not a.decided %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block head_extra %}{% if not rec.scored %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
-  <span class="eyebrow">Scored every day</span>
+  <span class="eyebrow">Forward test · scored every day</span>
   <h1>How Orenth's calls turned out</h1>
-  <p>Every day Orenth makes a call on {{ popular_count }} popular stocks and
-    coins. {{ method.days }} trading days later it checks what the price did
-    and writes the result here, right or wrong. Nothing is left out.</p>
+  <p>Each market day Orenth makes a call on {{ popular_count }} popular stocks
+    and coins. {{ method.days }} trading days later it checks what the price
+    did. These are real calls made at the time, scored with a pretend trade:
+    no real money was traded.</p>
 </div>
 
 {% macro times(n) %}{{ n }} time{{ '' if n == 1 else 's' }}{% endmacro %}
 {% macro result(r) %}
   <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span>
 {% endmacro %}
+{% macro move(x) %}{% if x is not none %}<span class="fig {{ 'gain' if x > 0 else 'loss' if x < 0 else '' }}">{{ (x * 100)|signed(1) }}%</span>{% else %}—{% endif %}{% endmacro %}
 
 {% if not rec.total %}
   <div class="plainbox">
@@ -28,7 +29,7 @@
     <p class="prose">The first calls are written down with the next daily
       check. Results appear {{ method.days }} trading days after that.</p>
   </div>
-{% elif not a.decided %}
+{% elif not rec.scored %}
   <div class="plainbox">
     <span class="eyebrow">Collecting</span>
     <p class="lead">{{ rec.total }} calls written down since {{ rec.first_at|day }}.</p>
@@ -37,24 +38,40 @@
   </div>
 {% else %}
   <div class="plainbox">
-    <span class="eyebrow">All calls so far</span>
-    <p class="lead">It was right {{ times(a.right) }} and wrong {{ times(a.wrong) }}:
-      {{ a.rate|pct(0) }} right.</p>
-    <p class="prose">{{ a.flat }} went nowhere and {{ a.open }} {{ 'is' if a.open == 1 else 'are' }}
-      still waiting for {{ 'its' if a.open == 1 else 'their' }} {{ method.days }} days.
-      {{ rec.total }} calls since {{ rec.first_at|day }}.</p>
+    <span class="eyebrow">So far</span>
+    <p class="lead">{{ rec.scored }} calls scored, {{ rec.all.open }} still waiting
+      for their {{ method.days }} days.</p>
+    <p class="prose">{{ rec.total }} calls since {{ rec.first_at|day }}. Each kind
+      of call is scored on its own below, because they are not the same bet.
+      {% if rec.buy_worked is not none %}Over the same calls, a buy at the
+      call's price worked {{ rec.buy_worked|pct(0) }} of the time and lost
+      {{ (1 - rec.buy_worked)|pct(0) }}: that is what calling BUY, or calling
+      AVOID, on every one of them would have scored. A kind of call shows skill
+      only if it clearly beats that.{% endif %}</p>
   </div>
 
   <div class="plans" style="margin-top:var(--s3)">
-    {% for label, t in [("When it said BUY", rec.buy), ("When it said WAIT or AVOID", rec.hold)] %}
+    {% for c in rec.classes %}
       <div class="card">
-        <span class="eyebrow">{{ label }}</span>
-        {% if t.decided %}
-          <p class="lead" style="margin:0">{{ t.rate|pct(0) }} right</p>
-          <p class="prose">Right {{ times(t.right) }}, wrong {{ times(t.wrong) }}{% if t.flat %},
-            {{ t.flat }} went nowhere{% endif %}.</p>
+        <span class="eyebrow">{{ c.label }}</span>
+        {% if c.decided %}
+          <p class="lead" style="margin:0">Right {{ c.rate|pct(0) }}
+            <span class="soft" style="font-size:var(--t-sm)">(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }})</span></p>
+          <p class="prose" style="margin:0">Right {{ times(c.right) }}, wrong
+            {{ times(c.wrong) }}{% if c.flat %}, {{ c.flat }} went nowhere{% endif %}.
+            {% if c.open %}{{ c.open }} still waiting.{% endif %}</p>
+          {% if c.chance is not none %}
+            <p class="prose" style="margin:0">Chance level: {{ c.chance|pct(0) }}.
+              {% if c.lo > c.chance %}Above it, beyond the margin of error.
+              {% elif c.hi < c.chance %}Below it, beyond the margin of error.
+              {% else %}Not yet distinguishable from chance.{% endif %}</p>
+          {% endif %}
+          <p class="prose faint" style="margin:0;font-size:var(--t-xs)">A buy after
+            these calls moved {{ move(c.mean_move) }} on average (median
+            {{ move(c.median_move) }}), after costs{% if c.mean_r is not none %}:
+            {{ c.mean_r|signed(2) }}R a trade{% endif %}.</p>
         {% else %}
-          <p class="prose">Nothing decided yet{% if t.open %}: {{ t.open }} waiting{% endif %}.</p>
+          <p class="prose">Nothing scored yet{% if c.open %}: {{ c.open }} waiting{% endif %}.</p>
         {% endif %}
       </div>
     {% endfor %}
@@ -67,7 +84,7 @@
         <table>
           <thead><tr>
             <th>Stock</th><th>It said</th><th>Result</th><th>What the price did</th>
-            <th class="r">Move</th><th>Day</th>
+            <th class="r">Move</th><th>Called</th>
           </tr></thead>
           <tbody>
           {% for r in rec.latest %}
@@ -91,23 +108,57 @@
 <div class="card" style="margin-top:var(--s3)">
   <span class="eyebrow">How it is scored</span>
   <ul class="list">
-    <li>Each stock's call is written down once a day, with the price at the time.</li>
+    <li>Each stock's call is written down once per market quote, with the
+      price at the time. A weekend or a holiday shows the last session's
+      price again, so it does not count as a new call.</li>
     <li>Then we pretend to buy at that price, with the same stop and target
       the app uses everywhere: {{ method.stop }} ATR below and {{ method.target }} ATR
       above. ATR is how much the price usually moves in a day.</li>
     <li>If it said <b>BUY</b>, it was right when the price reached the target
-      before the stop, or ended at least half a day's move higher after
-      {{ method.days }} trading days. It was wrong when the stop was hit first,
-      or the price ended lower.</li>
+      before the stop, or after {{ method.days }} trading days had risen by at
+      least half the distance to the stop. It was wrong when the stop was hit
+      first, or the price had fallen by that much.</li>
     <li>If it said <b>WAIT</b> or <b>AVOID</b>, the same pretend buy is scored the
       other way round: right when that buy would have lost, wrong when it
-      would have made money.</li>
+      would have made money. Because the stop is nearer than the target, a
+      buy loses more often than it wins, so these are compared with chance,
+      not with 50%.</li>
     <li>A price that ended about where it started counts as neither.</li>
-    <li>Calls are never edited or removed.</li>
+    <li>The 95% range is how far the right rate could be from its true value
+      on this many calls. Calls on the same stock a day apart share most of
+      their {{ method.days }} days, so they are not fully separate tests and
+      the true range is wider.</li>
+    <li>Moves are after trading costs: {{ method.equity }}% a round trip for
+      stocks, {{ method.crypto }}% for crypto.</li>
+    <li>Calls are never edited or removed. One left out of the scores stays
+      listed below, with the reason.</li>
   </ul>
-  <p class="prose faint" style="font-size:var(--t-xs)">Past results do not promise
-    future ones. This is software output, not financial advice.</p>
+  <p class="prose faint" style="font-size:var(--t-xs)">This is a forward test
+    of software calls, not a record of real trades or money. Past results do
+    not promise future ones. This is software output, not financial advice.</p>
 </div>
+
+{% if rec.excluded %}
+<details class="card" style="margin-top:var(--s3)">
+  <summary><b>{{ rec.excluded|length }} call{{ '' if rec.excluded|length == 1 else 's' }}
+    left out of the scores</b>, and why</summary>
+  <div class="tablewrap" style="margin-top:var(--s2)">
+    <table>
+      <thead><tr><th>Stock</th><th>Day</th><th>It said</th><th>Why it is left out</th></tr></thead>
+      <tbody>
+      {% for r in rec.excluded %}
+        <tr>
+          <td><b>{{ short(r.symbol) }}</b></td>
+          <td class="soft" style="white-space:nowrap">{{ r.day }}</td>
+          <td>{{ r.action }}</td>
+          <td class="soft">{{ r.excluded }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
 
 <section class="card closing" style="margin-top:var(--s4)">
   <p class="lead">Check any stock or coin, free.</p>

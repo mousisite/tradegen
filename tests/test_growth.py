@@ -278,16 +278,30 @@ try:
     rec = public.record(conn)
     check("the record adds up", (rec["all"]["right"], rec["all"]["wrong"], rec["all"]["flat"],
                                  rec["all"]["open"]) == (2, 1, 1, 1), rec["all"])
-    check("and splits buys from the rest",
-          rec["buy"]["right"] == 1 and rec["hold"]["right"] == 1 and rec["hold"]["wrong"] == 1)
+    kinds = {c["action"]: c for c in rec["classes"]}
+    check("and scores each kind of call on its own",
+          (kinds["BUY"]["right"], kinds["BUY"]["flat"], kinds["AVOID"]["wrong"],
+           kinds["WAIT"]["right"]) == (1, 1, 1, 1), kinds.keys())
+    # Buys after these calls: NVDA target (worked), AMD target (worked),
+    # TSLA stop (lost), AAPL flat. Two of three decided buys worked.
+    check("against chance: what calling it every time would have scored",
+          abs(kinds["BUY"]["chance"] - 2 / 3) < 1e-9
+          and abs(kinds["AVOID"]["chance"] - 1 / 3) < 1e-9, kinds["BUY"]["chance"])
+    check("with a 95% range on the right rate",
+          kinds["BUY"]["lo"] is not None and kinds["BUY"]["lo"] < 1.0 <= kinds["BUY"]["hi"] + 1e-9)
+    check("and what a buy after the calls did, after costs",
+          kinds["BUY"]["mean_move"] is not None and kinds["BUY"]["mean_move"] > 0)
     mine = public.symbol_record(conn, "NVDA")
     check("one stock's own record is there too",
           len(mine["latest"]) == 1 and mine["latest"][0]["how"] == "target")
     conn.close()
 
     page = c.get("/record").data.decode("utf-8", "replace")
-    check("the record page says the score in plain words",
-          "right 2 times and wrong 1 time" in page and "67% right" in page)
+    check("the record page has no pooled headline score",
+          "4 calls scored" in page and "% right" not in page.split("When it said")[0])
+    check("each kind is set against chance",
+          "When it said BUY" in page and "Chance level" in page
+          and "Not yet distinguishable from chance" in page)
     check("lists every settled call with what the price did",
           "rose to the target" in page and "fell to the stop" in page
           and "went nowhere" in page and "/stock/amd" in page)
@@ -299,6 +313,39 @@ try:
     check("the sitemap lists the record", "/record</loc>" in sitemap)
 
     conn = db.connect(DB)
+    fri = call("VOO", "AVOID", 500.0, 5.0)
+    fri.update(price_day=20000)
+    check("a quote is written down once", public.record_call(conn, fri))
+    sat = dict(fri, at=fri["at"] + DAY)
+    check("the same Friday quote seen on Saturday is not a new call",
+          not public.record_call(conn, sat))
+    mon = dict(fri, at=fri["at"] + 3 * DAY, price=505.0, price_day=20003)
+    check("Monday's new quote is", public.record_call(conn, mon))
+    # Repeats written by the old rule, before price_day existed: same quote,
+    # three calendar days. Marked, never deleted, and the earliest is kept.
+    for k in range(3):
+        conn.execute("INSERT INTO calls (symbol, day, action, price, stop, target, "
+                     "horizon, at) VALUES ('QQQ', ?, 'AVOID', 400.0, 394.0, 409.0, 10, ?)",
+                     ("2026-01-1%d" % k, T + k * DAY))
+    conn.commit()
+    check("old repeats are marked", public.mark_repeats(conn) == 2)
+    check("and marking twice changes nothing", public.mark_repeats(conn) == 0)
+    kept = conn.execute("SELECT day FROM calls WHERE symbol='QQQ' AND excluded IS NULL").fetchall()
+    check("the earliest call of a repeat run is the one kept",
+          [r[0] for r in kept] == ["2026-01-10"], [r[0] for r in kept])
+    check("nothing was deleted",
+          conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='QQQ'").fetchone()[0] == 3)
+    rec = public.record(conn)
+    check("left-out calls are counted apart, with their reason",
+          len(rec["excluded"]) == 2 and "same market quote" in rec["excluded"][0]["excluded"])
+    conn.close()
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("and listed on the page", "left out of the scores" in page
+          and "Repeats the 2026-01-10 call" in page)
+    check("the scoring rule on the page matches the code: half the stop distance",
+          "half the distance to the stop" in page and "half a day" not in page)
+
+    conn = db.connect(DB)
     fetched = []
 
     def rising(symbol):
@@ -306,8 +353,8 @@ try:
         return path([310, 320, 330, 340])
 
     def analyse_with_levels(symbol):
-        s = call(symbol, "BUY", 300.0, 3.0)
-        s["at"] = T + DAY                                  # the next day's call
+        s = call(symbol, "BUY", 301.0, 3.0)                # the next day's quote
+        s["at"] = T + DAY
         return s
 
     public.refresh(conn, analyse_with_levels, now=time.time() + public.MAX_AGE + 1,
