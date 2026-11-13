@@ -82,8 +82,17 @@ def main(argv=None) -> int:
           % (args.host, args.port, args.threads))
     if public:
         print("    public address %s" % public)
+    # The ways in that are actually set up. A public deployment asks people to
+    # sign in even when none is, and saying "Google" then sent the operator
+    # looking for a fault in Google sign-in rather than for the missing keys.
+    ways = [name for name, ready in (("Google", web.auth_mod.configured()),
+                                     ("email code", web.codes_mod.email_ready()),
+                                     ("text code", web.codes_mod.phone_ready()))
+            if ready]
     print("    sign-in        %s"
-          % ("Google" if web.auth_required() else "off, single local account"))
+          % ("off, single local account" if not web.auth_required() else
+             ", ".join(ways) if ways else
+             "required, but no way to sign in is set up"))
     print("    alert checks   %s"
           % ("every %g minutes" % cfg.get("alert_check_minutes", 5)
              if loop else "off"))
