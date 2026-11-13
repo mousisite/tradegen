@@ -58,7 +58,7 @@
             <label for="f-{{ key }}">{{ spec.label }}
               {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
             <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
-                   step="any" value="{{ filters.get(key, '') if not filters.get(key) is none else '' }}"
+                   step="any" value="{{ typed.get(key, '') }}"
                    placeholder="{{ 'percent' if spec.unit == 'pct' else
                                    'dollars' if spec.unit == 'usd' else
                                    'multiple' if spec.unit == 'x' else 'any' }}">
@@ -70,7 +70,8 @@
     <p class="prose" style="margin-top:var(--s3)">
       Filters marked slower need full company fundamentals, which is one request
       per candidate. Those run only on names that already passed everything else.
-      Percentages can be typed either way: 15 and 0.15 both mean fifteen percent.
+      Type percentages as whole numbers: 15 for 15%, 0.5 for half a percent,
+      -3 for down 3%.
     </p>
   </div>
 </section>
@@ -81,7 +82,11 @@
     <h2>Results</h2>
     <span class="count">{{ result.passed|length }} passed</span>
     <span class="tail">{{ result.scanned }} scanned from {{ result.universe }},
-      {{ result.rejected }} rejected</span>
+      {{ result.rejected }} rejected{% if result.not_checked %},
+      {{ result.not_checked }} not checked{% endif %}{% if result.unread %},
+      {{ result.unread|length }} could not be read{% endif %}{% if result.not_shown %},
+      {{ result.not_shown }} more not listed{% endif %}{% if checked_at and result.scanned %}.
+      Quotes read at {{ checked_at }}{% endif %}</span>
   </div>
 
   {% if result.filters %}
@@ -112,7 +117,7 @@
             <td><b>{{ c.symbol }}</b>
               <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
             <td class="r fig">{{ c.price|price }}</td>
-            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
             <td class="r fig">{{ "%.1fB"|format(c.market_cap/1000000000)
                 if c.market_cap else '—' }}</td>
@@ -135,6 +140,10 @@
         </tbody>
       </table>
     </div>
+    {% elif not result.scanned %}
+      <div class="blank">Nothing could be screened just now.</div>
+    {% elif result.unread and not result.rejected %}
+      <div class="blank">Nothing could be judged: the figures could not be read just now.</div>
     {% else %}
       <div class="blank">Nothing passed these filters.</div>
     {% endif %}

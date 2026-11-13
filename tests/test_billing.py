@@ -276,6 +276,42 @@ try:
         finally:
             web._demo_shortlist = real_demo
             sign_in(free)
+
+        # The counts in the free box are the uncut ones, one per list, and
+        # only a scan that read its whole list is called "the full scan".
+        import html as _html
+        import re as _re
+
+        def words(body):
+            body = _re.sub(r"<script.*?</script>", "", body, flags=_re.S)
+            return _re.sub(r"\s+", " ", _html.unescape(_re.sub(r"<[^>]+>", " ", body)))
+
+        def fake_running(market, horizon, cfg, risk, **_kw):
+            found = fake_find(market, horizon, cfg, risk)
+            return dict(found, passed=[dict(r, rank=None) for r in found["passed"]],
+                        passed_total=8, watch_total=14, watch_shown=5,
+                        partial=True, running=True, complete=False,
+                        looked_at=60, asked_for_now=150)
+
+        def fake_done(market, horizon, cfg, risk, **_kw):
+            return dict(fake_find(market, horizon, cfg, risk), passed_total=8,
+                        watch_total=5, watch_shown=5, complete=True, running=False)
+
+        web.ideas_mod.find = fake_running
+        text = words(c.get("/ideas?market=stocks&horizon=medium&risk=balanced").data.decode())
+        check("while a scan runs, the free box says 'so far', never 'the full scan'",
+              "So far this scan has found 8 worth a look and 14 worth watching" in text
+              and "The full scan found" not in text and "So far, 8 worth a look" in text,
+              text[text.find("Free plan"):text.find("Free plan") + 160])
+        check("and does not promise all of a list Pro also shortens",
+              "Pro shows all of them" not in text
+              and "the 5 strongest worth watching" in text)
+        web.ideas_mod.find = fake_done
+        text = words(c.get("/ideas?market=stocks&horizon=medium&risk=balanced").data.decode())
+        check("a finished scan's free box counts each list on its own",
+              "The full scan found 8 worth a look and 5 worth watching" in text,
+              text[text.find("Free plan"):text.find("Free plan") + 160])
+        check("and the lead agrees with it", "Showing 3 of 8 worth a look" in text)
     finally:
         web.ideas_mod.find = real_find
 

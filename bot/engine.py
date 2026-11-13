@@ -79,12 +79,17 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             record: bool = True, db_path: Optional[str] = None,
             user: int = 1,
             progress: Optional[Callable[[str], None]] = None,
-            source: str = "engine") -> Analysis:
+            source: str = "engine", resolve_symbol: bool = True,
+            with_calendar: bool = True) -> Analysis:
     """Run the full pipeline for one instrument.
 
     `progress` is called with a short status string at each stage, so a caller
     can show something while the user waits. It is optional and ignored when
     absent.
+
+    `resolve_symbol` and `with_calendar` are for a caller that already holds
+    an exact ticker and never reads the earnings calendar, such as the Find
+    scan: each is one more request to the data source per instrument.
     """
     started = time.time()
 
@@ -94,9 +99,15 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
 
     interval = interval or cfg["interval"]
 
-    step("Resolving %s" % symbol)
-    info = resolve(symbol)
-    resolved, name = info["symbol"], info.get("name") or info["symbol"]
+    if resolve_symbol:
+        step("Resolving %s" % symbol)
+        info = resolve(symbol)
+        resolved, name = info["symbol"], info.get("name") or info["symbol"]
+    else:
+        # Used exactly as given. The search behind resolve() falls back to a
+        # fuzzy match, which helps a person who mistyped and is wrong for a
+        # ticker read off the data source's own list.
+        resolved = name = (symbol or "").strip().upper()
 
     step("Fetching market data")
     bars = fetch_bars(resolved, interval)
@@ -140,8 +151,8 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     from concurrent.futures import ThreadPoolExecutor
     from . import catalysts as catalysts_mod
 
-    pool = ThreadPoolExecutor(max_workers=2)
-    calendar_job = pool.submit(catalysts_mod.fetch, bars.symbol)
+    pool = ThreadPoolExecutor(max_workers=2) if with_calendar else None
+    calendar_job = pool.submit(catalysts_mod.fetch, bars.symbol) if pool else None
 
     if with_news:
         step("Reading news and social")
@@ -151,12 +162,17 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         sentiment = Sentiment(0.0, 0.0, 0.0, 0, 0, 0, 0, "skipped",
                               notes=["Sentiment analysis was skipped."])
 
-    try:
-        calendar = calendar_job.result(timeout=12)
-    except Exception:
-        calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
-    finally:
-        pool.shutdown(wait=False)
+    if calendar_job is None:
+        calendar = catalysts_mod.Calendar(
+            symbol=bars.symbol, available=False,
+            notes=["The calendar was not read for this analysis."])
+    else:
+        try:
+            calendar = calendar_job.result(timeout=12)
+        except Exception:
+            calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
+        finally:
+            pool.shutdown(wait=False)
 
     step("Deciding")
     plan = decide(ctx, bars, signals, composite, regime, calib, sentiment,
