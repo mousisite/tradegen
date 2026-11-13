@@ -46,10 +46,41 @@ check("the plan's three prices are drawn and labelled",
 ys = [float(v) for v in re.findall(r'y1="([\d.]+)"', svg)]
 check("a target far above the candles widens the range rather than being dropped",
       "Target 140.00" in svg and min(ys) >= 0)
-check("it says when the price was set", "price as of 11 Nov 21:00 UTC" in svg)
+# Said in the title and on the latest price's dot, not along the bottom, where
+# on a phone it ran into the first candle's date.
+check("it says when the price was set, on the latest price",
+      "<title>Now 101.00, as of 11 Nov 21:00 UTC</title>" in svg)
+check("the bottom labels are the first and last candles' dates",
+      ">%s</text>" % day(times[30]) in svg and ">%s</text>" % day(times[-1]) in svg
+      and "price as of" not in svg)
 check("volume is drawn underneath", svg.count('opacity="0.35"') == 90)
 check("the label for the screen reader says what it is",
       'aria-label="Daily price, as of 11 Nov 21:00 UTC"' in svg)
+
+print()
+print("--- the interval decides the title and the labels ---")
+HOUR = 3600
+hourly = [T0 + HOUR * k for k in range(120)]
+svg_h = charts.trade_chart(hourly, opens, highs, lows, closes, vols, interval="1h",
+                           as_of="12 Nov 15:00 UTC", last=101.0)
+check("an hourly chart says hourly", 'aria-label="Hourly price, as of 12 Nov 15:00 UTC"' in svg_h)
+stamp = time.strftime("%d %b %H:%M", time.gmtime(hourly[-1])).lstrip("0")
+check("and names each candle by its date and time, in UTC",
+      "<title>%s UTC  open" % stamp in svg_h)
+check("with the last candle's time along the bottom",
+      ">%s UTC</text>" % stamp in svg_h)
+for interval, word in (("5m", "5-minute"), ("15m", "15-minute"), ("1d", "Daily")):
+    drawn = charts.trade_chart(hourly, opens, highs, lows, closes, interval=interval)
+    check("a %s chart is titled %s price" % (interval, word),
+          'aria-label="%s price"' % word in drawn)
+daily = charts.trade_chart(times, opens, highs, lows, closes)
+check("a daily chart, given no labels, names candles by date alone",
+      ">%s</text>" % day(times[-1]) in daily and ":00 UTC" not in daily)
+narrow = charts.trade_chart(times, opens, highs, lows, closes, vols, width=340,
+                            height=260, bars=40,
+                            levels={"Buy at": 98.0, "Stop": 94.0, "Target": 140.0})
+check("the narrow drawing for a phone has 40 candles", narrow.count("<title>") == 40)
+check("and keeps the plan's prices", "Target 140.00" in narrow and "Stop 94.00" in narrow)
 check("too few candles draws nothing",
       charts.trade_chart(times[:5], opens[:5], highs[:5], lows[:5], closes[:5]) == "")
 broken = list(closes)
