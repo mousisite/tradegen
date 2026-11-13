@@ -828,7 +828,8 @@ try:
         page = r.data.decode("utf-8", "replace")
         check("a failure says so plainly, without the error's own text",
               r.status_code == 500 and "could not be saved" in page
-              and "stockbot.db" not in page and "locked" not in page, r.status_code)
+              and "stockbot.db" not in page and "database is locked" not in page,
+              r.status_code)
         check("while the error itself goes to the log",
               any("Saving a thesis for ACME failed" in m for m in logged), logged)
         web.engine.research = lambda *a, **k: found

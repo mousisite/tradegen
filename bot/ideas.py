@@ -389,6 +389,9 @@ def _analyse(symbol: str, interval: str, cfg: Dict) -> Optional[Dict]:
         "samples": plan.prob_samples,
         "reliable": plan.prob_reliable,
         "expectancy": plan.expectancy_r,
+        # Which side that record is for. The odds are measured for the side
+        # the call leans to, so a bearish call's expectancy is a short's.
+        "odds_direction": getattr(plan, "odds_direction", 0) or 0,
         "breakeven": plan.breakeven_rate,
         "reward_risk": plan.reward_risk,
         "asset_class": result.bars.asset_class,
@@ -916,9 +919,12 @@ def _shortlist(scan: Dict, horizon: str, risk: str, partial: bool = False,
     # accounts is listed with the reason; calling either "nothing firing"
     # would be false.
     elsewhere = {r["symbol"] for r in passed} | {r["symbol"] for r in dropped}
+    # And only a record for buying: a bearish name's expectancy is a short's,
+    # and "paid off before" read as a reason to buy it would be backwards.
     watch = [r for r in rows
              if r["action"] not in ACTIONABLE
              and r["symbol"] not in elsewhere
+             and (r.get("odds_direction") or 1) > 0
              and (r.get("expectancy") or 0) > 0
              and (r.get("samples") or 0) >= 30]
     watch.sort(key=lambda r: -(r["expectancy"] or 0))

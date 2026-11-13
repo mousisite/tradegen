@@ -626,7 +626,9 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
             if mine is not None:
                 with _CACHE_LOCK:
                     runs[me] = mine
-        return dataclasses.replace(result, run_id=mine)
+        if dataclasses.is_dataclass(result):
+            return dataclasses.replace(result, run_id=mine)
+        return result
 
     # The cache key is deliberately not per user: an analysis of AAPL is the
     # same analysis whoever asked for it, and recomputing it per person would
