@@ -482,11 +482,13 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             continue
         try:
             row = _after_splits(conn, row, bars)
-        except DataError:
+        except DataError as exc:
             # A split cannot be ruled out just now, and a level read in the
             # wrong shares fires falsely: this alert waits for the next round.
             db.alert_failed(conn, int(row["id"]),
                             "the share split history could not be read just now.")
+            errors.append({"symbol": row["symbol"],
+                           "error": "split history: %s" % str(exc)[:100]})
             continue
         is_call = row["kind"] in CALL_KINDS
         call = calls.get(key) if is_call else None

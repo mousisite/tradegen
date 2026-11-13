@@ -993,15 +993,20 @@ def _attention(stored: Dict, open_trades) -> Dict:
     # well. A position listed as past its stop is not said a second time.
     fired = [e for e in stored["fired"]
              if not (e["kind"] == "stop_breach" and e["trade_id"] in crossed)]
+    # Marked "no data" (no price, or a split that could not be ruled out):
+    # not checked, so the page must not say it is not past its stop.
+    unchecked = sum(1 for t in open_trades
+                    if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
     return {"positions": positions, "late": late, "crossed": len(crossed),
+            "unchecked": unchecked,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
             "watch": stored["watch"], "watch_more": stored["watch_more"],
             "buys": buys[:ATTENTION_SHOWN],
             "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
             "checked": stored["checked"],
-            "any": bool(positions or fired or stored["watch"] or buys)}
+            "any": bool(positions or fired or unchecked or stored["watch"] or buys)}
 
 
 def _safe_back(raw, fallback):
@@ -1283,16 +1288,24 @@ def _run_split(row) -> float:
     if (not made or time.time() - made < 3600 or row["asset_class"] == "crypto"
             or (row["symbol"] or "").upper().endswith("-USD")):
         return 1.0
+    refused = _NoTrade("Could not check %s for a share split since this plan "
+                       "was made, so its prices cannot yet be set beside "
+                       "today's. Try again in a minute." % row["symbol"])
     try:
         # Fresh daily bars hold any split in the last three months, the
         # whole history any older one; a copy of it kept from before today
         # cannot hide today's split.
         bars = market_mod.fetch_bars(row["symbol"], "1d", lookback="3mo")
+    except (market_mod.DataThrottled, market_mod.DataUnavailable):
+        raise refused
+    except DataError:
+        # Too young for three months of daily bars, or no longer listed:
+        # the whole history is all there is to go on.
+        bars = None
+    try:
         return market_mod.split_factor_since(row["symbol"], made, bars)
     except DataError:
-        raise _NoTrade("Could not check %s for a share split since this plan "
-                       "was made, so its prices cannot yet be set beside "
-                       "today's. Try again in a minute." % row["symbol"])
+        raise refused
 
 
 def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
@@ -1703,11 +1716,15 @@ def research():
 
     reviews = []
     for row in saved:
-        now_price = _thesis_price(row, analysis.bars)[0]
-        reviews.append((row, thesis_mod.review(
-            {"price": row["price"], "balance": row["balance"],
-             "created": row["created_ts"]}, now_price) if now_price else
-            {"usable": False, "reason": "Could not price %s today." % row["symbol"]}))
+        now_price, split = _thesis_price(row, analysis.bars)
+        look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
+                                   "created": row["created_ts"]}, now_price)
+                if now_price else
+                {"usable": False, "reason": "Could not price %s today." % row["symbol"]})
+        reviews.append((row, dict(
+            look, now=now_price,
+            quoted=analysis.bars.last_price if split != 1.0 else None,
+            split_words=market_mod.split_words(split) if split != 1.0 else "")))
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,

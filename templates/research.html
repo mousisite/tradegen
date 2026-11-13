@@ -764,12 +764,17 @@
           <tr>
             <td class="soft">{{ row['created_ts']|ago }}</td>
             <td class="r fig">{{ row['price']|price }}</td>
-            <td class="r fig">{{ r.price|price }}</td>
-            <td class="r fig {{ 'gain' if rev.move > 0 else 'loss' }}">{{ rev.move|pct(1) }}</td>
+            {# Today's price in the shares the thesis was saved in, so it
+               sits beside "Price then"; after a split it says so. #}
+            <td class="r fig">{{ rev.now|price if rev.now else '—' }}
+              {% if rev.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted
+                {{ rev.quoted|price }} today, after a {{ rev.split_words }} split</div>{% endif %}</td>
+            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}">
+              {{ rev.move|pct(1) if rev.usable else '—' }}</td>
             <td class="fig">{{ row['balance']|signed }}</td>
-            <td><span class="chip {{ 'long' if rev.outcome == 'right so far'
+            <td>{% if rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
                  else 'short' if rev.outcome == 'wrong so far' else 'mute' }}">
-              {{ rev.outcome }}</span></td>
+              {{ rev.outcome }}</span>{% else %}<span class="faint">{{ rev.reason }}</span>{% endif %}</td>
             <td class="r">
               <form method="post" action="{{ url_for('delete_thesis') }}"
                     onsubmit="return confirm('Delete this saved thesis?');">

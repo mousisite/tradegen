@@ -19,7 +19,7 @@
     <span class="tail">read from what is saved</span>
   </div>
 
-  {% if att.positions or att.fired or att.late %}
+  {% if att.positions or att.fired or att.late or att.unchecked %}
   <div class="card{{ ' breach' if att.crossed }}">
     {% if att.positions %}
       <span class="eyebrow">Open positions</span>
@@ -50,9 +50,14 @@
       <p class="prose">The prices of your open positions did not come back in
         time, so their stops are not checked here.
         <a href="{{ url_for('trades') }}">The journal</a> checks them.</p>
+    {% elif att.unchecked %}
+      <p class="prose">{{ att.unchecked }} of your open positions could not be
+        checked just now, so whether {{ 'it is' if att.unchecked == 1 else 'they are' }}
+        past {{ 'its stop' if att.unchecked == 1 else 'their stops' }} is not said here.
+        <a href="{{ url_for('trades') }}">The journal</a> tries again.</p>
     {% endif %}
     {% if att.fired %}
-      <span class="eyebrow"{% if att.positions or att.late %} style="margin-top:var(--s3)"{% endif %}>Alerts in the last three days</span>
+      <span class="eyebrow"{% if att.positions or att.late or att.unchecked %} style="margin-top:var(--s3)"{% endif %}>Alerts in the last three days</span>
       <ul class="list">
         {% for e in att.fired %}
           <li>{% if e.kind == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e.message }}

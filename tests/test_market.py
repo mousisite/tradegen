@@ -551,6 +551,20 @@ try:
           market.splits_since("XYZ", t_now - 30 * DAYS, recent) == [(t_now - 2 * DAYS, 10.0)])
     market.split_history = down
     check("and a coin asks for none", market.splits_since("BTC-USD", 0, None) == [])
+
+    # The bars can list a split dated before their first kept bar: a blank
+    # opening bar is dropped, its split event is not. The history lists it
+    # too, and it is one split, not two (a 1-for-10 read as 1-for-100).
+    t0 = t_now - 4 * DAYS
+    blank_open = types.SimpleNamespace(
+        timestamp=np.array([t0 + 900 + k * 900 for k in range(20)]), splits=[(t0, 0.1)])
+    market.split_history = lambda s: [(t0, 0.1)]
+    check("a split both the bars and the history list is counted once",
+          abs(market.split_factor_since("PNY", t0 - 30 * DAYS, blank_open) - 0.1) < 1e-12,
+          market.splits_since("PNY", t0 - 30 * DAYS, blank_open))
+    market.split_history = lambda s: [(t0 - 60, 0.1)]
+    check("even when the two answers date it a minute apart",
+          abs(market.split_factor_since("PNY", t0 - 30 * DAYS, blank_open) - 0.1) < 1e-12)
 finally:
     market.split_history = real_hist
 

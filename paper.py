@@ -216,7 +216,7 @@ def cmd_check(args, conn) -> int:
     for col, width, just in (("#", 3, "right"), ("symbol", 8, "left"),
                              ("side", 5, "left"), ("entry", 10, "right"),
                              ("now", 10, "right"), ("R", 6, "right"),
-                             ("age", 4, "right"), ("status", 11, "left")):
+                             ("age", 4, "right"), ("status", 13, "left")):
         table.add_column(col, width=width, justify=just, no_wrap=True)
 
     # Fetch every instrument at once. One at a time, twenty positions is five
@@ -233,6 +233,7 @@ def cmd_check(args, conn) -> int:
         fetched = dict(pool.map(grab, open_trades))
 
     alerts = []
+    notes = []
     for t in open_trades:
         bars = fetched.get(t["id"])
         if bars is None:
@@ -253,6 +254,12 @@ def cmd_check(args, conn) -> int:
                           "[yellow]no split data[/]")
             continue
         price = bars.last_price * split
+        if split != 1.0:
+            from bot.market import split_words
+            notes.append("#%d %s split %s since it was opened: its prices here are "
+                         "in the shares it was opened with (quoted %s today)."
+                         % (t["id"], t["symbol"], split_words(split),
+                            format_price(bars.last_price)))
         direction = int(t["direction"])
         entry, stop = float(t["entry"]), float(t["stop"])
         risk = abs(entry - stop)
@@ -295,6 +302,8 @@ def cmd_check(args, conn) -> int:
 
     console.print(Panel(table, title="Open positions marked to market",
                         border_style="cyan"))
+    for note in notes:
+        console.print("[dim]%s[/]" % note)
     if alerts:
         lines = ["#%d %s is at or beyond its %s" % (
             i, s, "stop" if "STOP" in st else "target") for i, s, st in alerts]

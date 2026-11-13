@@ -770,8 +770,18 @@ def splits_since(symbol: str, since: int, bars=None) -> List[Tuple[int, float]]:
             raise
         except DataError:
             history = []
+
+        def listed(when: int, ratio: float) -> bool:
+            # The same split already in the bars' own list: the bars can list
+            # one dated before their first kept bar (a blank opening bar is
+            # dropped, its split event is not), and the two answers may date
+            # it a little apart. Counted twice, a 1-for-10 became 1-for-100.
+            return any(abs(when - w) < 86400 and abs(ratio - r) <= 1e-9 * max(1.0, r)
+                       for w, r in have)
+
         have = [(int(w), float(r)) for w, r in history
-                if first is None or int(w) < first] + have
+                if (first is None or int(w) < first)
+                and not listed(int(w), float(r))] + have
     return sorted((when, ratio) for when, ratio in have if when > since and ratio > 0)
 
 

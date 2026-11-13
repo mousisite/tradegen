@@ -412,12 +412,67 @@ try:
           and abs(got[0]["stop"] - 95.0) < 1e-9 and abs(got[0]["target1"] - 110.0) < 1e-9,
           [dict(x) for x in got])
     market_mod.fetch_bars = fake_bars
+    # A listing too young for three months of daily bars, or one gone: the
+    # whole history decides, and the plan can still be confirmed.
+    young = add_run(alice, "ZZYOUNG", "BUY", ts=NOW - 2 * 3600)
+    check("a plan on a young listing, over an hour old, can still be reviewed",
+          c.get("/trades/simulate?run_id=%d" % young).status_code == 200)
     check("an unknown run is not found", c.get("/trades/simulate?run_id=999999").status_code == 404)
     check("nor is a run that is not a number", c.get("/trades/simulate?run_id=x").status_code == 404)
     sign_in(c, bob)
     check("Bob cannot review Alice's run", c.get("/trades/simulate?run_id=%d" % buy).status_code == 404)
     check("nor log it", c.post("/trades/take", data={"run_id": short}).status_code == 400)
     check("and drawing the review never started an analysis", not started, started)
+
+    # A position that could not be checked is said to be so: the page does
+    # not claim it is not past its stop.
+    sign_in(c, alice)
+    conn = db.connect(DB)
+    gone = db.open_trade(conn, "ZZGONE", "1d", 1, 100.0, 95.0, 110.0, quantity=1,
+                         user=alice.id)
+    conn.close()
+    body = " ".join(text(c.get("/")).split())
+    check("a position that could not be checked is not called fine",
+          "could not be checked just now" in body
+          and "None of your open positions is past its stop" not in body, body[:600])
+    conn = db.connect(DB)
+    conn.execute("DELETE FROM trades WHERE id=?", (gone,))
+    conn.commit()
+    conn.close()
+
+    # A saved thesis that cannot be priced just now (a split that cannot be
+    # ruled out) is said, and the research page stands.
+    real_research = web.engine.research
+    long_ago = [NOW - 60 * 86400 + k * 3000 for k in range(3)]
+    stand_in = NS(symbol="ZZRES", name="Res Corp", last_price=101.0, interval="15m",
+                  close=[101.0] * 3, timestamp=long_ago, splits=[], meta={},
+                  market_open=True, last_bar_time="", asset_class="equity",
+                  currency="USD")
+
+    def history_down(symbol):
+        raise market_mod.DataUnavailable("the source did not answer")
+
+    web.cached_analysis = lambda *a, **k: NS(bars=stand_in)
+    web.engine.research = lambda symbol, price, cfg, **k: web.engine.Research(
+        symbol=symbol, price=price)
+    market_mod.split_history = history_down
+    web._RESEARCH_CACHE.clear()
+    conn = db.connect(DB)
+    conn.execute("INSERT INTO theses (symbol, created_ts, price, balance, verdict, user_id) "
+                 "VALUES (?,?,?,?,?,?)", ("ZZRES", NOW - 90 * 86400, 100.0, 0.4,
+                                          "lean bull", alice.id))
+    conn.commit()
+    conn.close()
+    try:
+        r = c.get("/research?symbol=ZZRES&interval=15m")
+        page = r.data.decode("utf-8", "replace")
+    finally:
+        web.cached_analysis = must_not_run("an analysis")
+        web.engine.research = real_research
+        market_mod.split_history = lambda symbol: []
+        web._RESEARCH_CACHE.clear()
+    check("a saved thesis that cannot be priced just now leaves the research page standing",
+          r.status_code == 200 and "Could not price ZZRES today" in page, r.status_code)
 
     print()
     print("=" * 72)

@@ -324,6 +324,8 @@ try:
     check("and a price alert from before them waits, saying why",
           held_back not in fired_ids(res) and kept["active"] == 1
           and "split history" in (kept["last_error"] or ""), dict(kept))
+    check("and the check reports it, so a routine does not say all is well",
+          any("split history" in e["error"] for e in res["errors"]), res["errors"])
     db.alert_delete(conn, held_back, user=alice.id)
     conn.execute("UPDATE trades SET breach_noticed=1 WHERE id=?", (waits,))
     conn.commit()
