@@ -46,10 +46,13 @@ PRICE = {"AAA": 100.0, "BBB": 50.0, "CCC": 20.0}
 SERIES = {}
 # Every (symbol, bar size) asked for, to see which bars a check used.
 ASKED = []
+# And how much history each ask wanted, as (symbol, bar size, lookback).
+LOOKED = []
 
 
-def bars_for(symbol, interval="1d"):
+def bars_for(symbol, interval="1d", lookback=None):
     ASKED.append((symbol, interval))
+    LOOKED.append((symbol, interval, lookback))
     if symbol in SERIES:
         return SERIES[symbol](interval)
     if symbol not in PRICE:
@@ -398,7 +401,8 @@ try:
             cn.close()
 
     # Slow prices, so both checks have read the alert before either fires it.
-    alerts.fetch_bars = lambda s, i="1d": (time.sleep(0.4), bars_for(s, i))[1]
+    alerts.fetch_bars = lambda s, i="1d", lookback=None: (time.sleep(0.4),
+                                                          bars_for(s, i, lookback))[1]
     try:
         runners = [threading.Thread(target=one_check) for _ in range(2)]
         for t in runners:
@@ -559,6 +563,46 @@ try:
     msg = {f.alert_id: f.message for f in alerts.check(conn, user=carol.id)["fired"]}.get(young, "")
     check("with under a year of history it says how far back it looked",
           msg and "52-week" not in msg and "the data goes back no further" in msg, msg)
+
+    # What a "1y" download holds: trading days from a year ago to yesterday.
+    weekdays = [d for d in range(LAST - 364 * DAY, LAST + 1, DAY)
+                if time.gmtime(d).tm_wday < 5]
+    year = daily([50.0] * len(weekdays), [51.0] * len(weekdays))
+    year.timestamp = np.array(weekdays, dtype=np.int64)
+    year_alert = db.alert_add(conn, "YYY", "near_52w_high", threshold=0.05, user=carol.id)
+    SERIES["YYY"] = lambda interval: year
+    msg = {f.alert_id: f.message for f in alerts.check(conn, user=carol.id)["fired"]}.get(
+        year_alert, "")
+    check("a year of daily bars, all the check now downloads, is read as a whole year",
+          "its 52-week high of 51" in msg, msg)
+    conn.close()
+
+    print()
+    print("=" * 72)
+    print("EACH CHECK DOWNLOADS ONLY THE HISTORY IT READS")
+    print("=" * 72)
+    # Five years of daily bars, or sixty days of five-minute ones, every five
+    # minutes, used to be fetched for readings that never look past a year.
+    from bot import market
+    conn = db.connect(DB)
+    short = db.alert_add(conn, "EEE", "rsi_above", threshold=99, interval="5m", user=carol.id)
+    del LOOKED[:]
+    alerts.check(conn, user=carol.id)
+    asked = {(s, i): lb for s, i, lb in LOOKED}
+    check("a daily alert asks for a year of bars", asked.get(("EEE", "1d")) == "1y", asked)
+    check("a five-minute one for a few days of them", asked.get(("EEE", "5m")) == "5d", asked)
+    del LOOKED[:]
+    PRICE["SSS"] = 10.0
+    db.open_trade(conn, "SSS", "1d", 1, entry=12.0, stop=11.0, target1=15.0,
+                  quantity=1, user=carol.id)
+    alerts.check_stops(conn, user=carol.id)
+    check("and a crossed-stop check the same year a daily alert asks for, so the two share "
+          "one download", ("SSS", "1d", "1y") in LOOKED, LOOKED)
+    check("every bar size has its lookback, within what the source serves for it",
+          set(alerts.LOOKBACK) == set(market._MAX_RANGE)
+          and all(alerts.LOOKBACK[i] in ("5d", "1mo", "1y") for i in alerts.LOOKBACK)
+          and alerts.LOOKBACK["1m"] == "5d", alerts.LOOKBACK)
+    db.alert_delete(conn, short, user=carol.id)
     conn.close()
 
     print()
