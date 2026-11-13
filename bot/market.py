@@ -86,6 +86,15 @@ class DataThrottled(DataError):
         self.seconds = max(1, int(round(seconds)))
 
 
+class DataUnavailable(DataError):
+    """The source did not answer: it timed out, could not be reached, or
+    answered with a server error.
+
+    Like a refusal it is a wait, not a ticker that does not exist, so pages
+    say so rather than suggest checking the ticker. Nothing says how long.
+    """
+
+
 def format_price(value, currency: str = "") -> str:
     """Render a price readably across the full range of instrument prices.
 
@@ -249,7 +258,7 @@ def _fetch(url: str, params: dict, tries: int = _TRIES) -> dict:
             raise DataError("The market data source could not be used: it does "
                             "not serve that range of bars (HTTP 422).")
         last = "it answered with an error (HTTP %d)" % r.status_code
-    raise DataError("The market data source could not be used: %s." % last)
+    raise DataUnavailable("The market data source could not be used: %s." % last)
 
 
 def _get(url: str, params: dict, tries: int = _TRIES) -> dict:
@@ -448,6 +457,8 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
         # "404" in the text once reported a rate limit on 4043.T as a ticker
         # that does not exist. Its own words already say how long to wait.
         raise
+    except DataUnavailable as exc:
+        raise DataUnavailable("could not fetch %s: %s" % (symbol, exc))
     except DataError as exc:
         raise DataError("could not fetch %s: %s" % (symbol, exc))
 
@@ -674,8 +685,66 @@ def split_factor(bars, since: int) -> float:
 def split_words(factor: float) -> str:
     """A split's ratio as people say it: 10-for-1, 3-for-2, 1-for-10."""
     from fractions import Fraction
-    ratio = Fraction(factor).limit_denominator(1000)
+    # A wide limit: two reverse splits can combine to 1-for-2000.
+    ratio = Fraction(factor).limit_denominator(10 ** 6)
     return "%d-for-%d" % (ratio.numerator, ratio.denominator)
+
+
+# How often a symbol's whole split history is asked for.
+SPLIT_HISTORY_TTL = 12 * 3600
+
+
+def split_history(symbol: str) -> List[Tuple[int, float]]:
+    """Every split the source lists for a symbol, oldest first, as (when, ratio).
+
+    Bars.splits holds only the splits inside the range fetched, so a price
+    stored before an older one (a year-old position read with a year of
+    bars, a 15-minute trade read with sixty days) could not be set beside
+    today's quote. This asks for the whole history at a coarse bar size, a
+    small answer, and keeps it for twelve hours.
+    """
+    def fetch():
+        payload = _fetch(_CHART.format(sym=symbol),
+                         {"range": "max", "interval": "3mo", "events": "split"})
+        results = (payload.get("chart") or {}).get("result") or []
+        return _splits(results[0]) if results else []
+    try:
+        return upstream.cached("splits|" + symbol, fetch, ttl=SPLIT_HISTORY_TTL,
+                               host=_HOST)
+    except upstream.Throttled as exc:
+        raise DataThrottled(str(exc), exc.seconds)
+
+
+def splits_since(symbol: str, since: int, bars=None) -> List[Tuple[int, float]]:
+    """The splits after `since`, oldest first, as (when, ratio).
+
+    From the bars when they reach back that far, since the splits inside
+    their range are then all of them; otherwise from the whole history. A
+    coin has none to look up. If the history cannot be had, the bars' own
+    are the best there is.
+    """
+    since = int(since)
+    have = list(getattr(bars, "splits", None) or ())
+    stamps = getattr(bars, "timestamp", None)
+    # Bars that carry no times (stand-ins) cannot say how far back they
+    # reach, so theirs are all there is; with no bars, the history is asked.
+    timed = stamps is not None and len(stamps) > 0
+    reaches = (bars is not None and not timed) or (timed and int(stamps[0]) <= since)
+    if not reaches and not (symbol or "").upper().endswith("-USD"):
+        try:
+            have = split_history(symbol)
+        except DataError:
+            pass
+    return [(int(when), float(ratio)) for when, ratio in have
+            if int(when) > since and ratio and float(ratio) > 0]
+
+
+def split_factor_since(symbol: str, since: int, bars=None) -> float:
+    """split_factor over every split since `since`, not only those in the bars."""
+    factor = 1.0
+    for _when, ratio in splits_since(symbol, since, bars):
+        factor *= ratio
+    return factor
 
 
 def _splits(res: dict) -> List[Tuple[int, float]]:

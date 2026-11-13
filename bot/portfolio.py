@@ -19,7 +19,7 @@ import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
-from .market import DataError, fetch_bars, split_factor, split_words
+from .market import DataError, fetch_bars, split_factor_since, split_words
 
 
 @dataclass
@@ -236,7 +236,7 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             # After a split Yahoo quotes today's, ten times fewer dollars a
             # share after a ten-for-one: read as is, a long looked 90% down and
             # past its stop. The quote is turned back into those shares.
-            p.split = split_factor(bars, p.opened)
+            p.split = split_factor_since(p.symbol, p.opened, bars)
             p.price = bars.last_price * p.split
             p.asset_class = bars.asset_class
             p.touched_at, p.touched = stop_touched(bars, p.opened, p.stop / p.split,

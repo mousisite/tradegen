@@ -351,8 +351,15 @@ try:
 
     report = SimpleNamespace(overall={"x": near, "y": far})
     stored = public.tests(report)
-    check("a stored test carries its spread and separate trades",
-          len(stored["x"]) == 5 and stored["x"][:3] == [64, near.wins, round(near.sum_r, 3)])
+    spread = public.spreads(report)
+    # Three figures, the shape the version before this one reads, so rolling
+    # back does not break the strategy pages; the spread is kept beside them.
+    check("a stored test keeps the three figures the version before reads",
+          stored["x"] == [64, near.wins, round(near.sum_r, 3)], stored["x"])
+    check("and its spread and separate trades beside them",
+          spread["x"] == [round(var_near, 3), round(sep_near, 1)]
+          and public._figures(stored["x"], spread["x"])["separate"] == round(sep_near, 1),
+          spread.get("x"))
     old = public._figures([50, 10, -1.5])
     check("a test stored before that shows no range, and counts every trade",
           old["se"] is None and old["separate"] == 50 and old["verdict"] is None)
@@ -448,7 +455,9 @@ try:
     snap = web._public_snapshot("NVDA")
     check("the check stores each strategy's spread, and buying every day",
           snap["baseline"] and len(snap["baseline"]) == 5
-          and snap["tests"] and all(len(v) == 5 for v in snap["tests"].values() if v[0] >= 2))
+          and snap["tests"] and all(len(v) == 3 for v in snap["tests"].values())
+          and all(len(snap["spread"].get(k, ())) == 2
+                  for k, v in snap["tests"].items() if v[0] >= 2))
     check("and whether the market was open, and the session of the price",
           snap["market_open"] is False
           and time.strftime("%a %d %b", time.gmtime(snap["price_day"] * DAY)) == "Fri 06 Nov")
@@ -518,7 +527,7 @@ try:
     check("a blank day older than the wait is scored but does not count",
           public.settle_calls(conn, "CCC-USD", coin_bars(flat, [16])) == 1
           and row(conn, "CCC-USD", "outcome")[0] is not None
-          and "no prices for" in (row(conn, "CCC-USD", "excluded")[0] or ""),
+          and "never filled in" in (row(conn, "CCC-USD", "excluded")[0] or ""),
           row(conn, "CCC-USD", "outcome", "excluded")[:])
 
     # The call itself waits while the newest finished day is blank.
@@ -526,6 +535,38 @@ try:
           public._blank_yesterday(coin_bars(flat, [28]))
           and not public._blank_yesterday(coin_bars(flat, [20]))
           and not public._blank_yesterday(coin_bars(flat, [])))
+    # Production bars end at the newest finished day: fetch_bars splits the
+    # forming day off into the live price.
+    finished = SimpleNamespace(timestamp=stamps[:-1], rebuilt=[stamps[-2]])
+    older = SimpleNamespace(timestamp=stamps[:-1], rebuilt=[stamps[-3]])
+    check("bars that end yesterday: a blank yesterday holds the call back",
+          public._blank_yesterday(finished))
+    check("but a blank day before it does not, once yesterday is in",
+          not public._blank_yesterday(older))
+
+    # Whether a call counts must not depend on how it did. A call an early
+    # stop settled, before the blank day, is marked like the rest once the
+    # source has had its three days to fill the day in.
+    falls2 = list(flat)
+    falls2[7] = 90.0
+    public.record_call(conn, call("EEE-USD", "AVOID", 100.0, 2.0, stamps[5] + 3600,
+                                  price_day=1, market_open=True))
+    settled = public.settle_calls(conn, "EEE-USD", coin_bars(falls2, []))
+    marked = public.mark_calls(conn, "EEE-USD", coin_bars(falls2, [10]))
+    check("a call an early stop settled is marked too, once a day in its window stays blank",
+          settled == 1 and marked == 1
+          and "never filled in" in (row(conn, "EEE-USD", "excluded")[0] or ""),
+          row(conn, "EEE-USD", "outcome", "how", "excluded")[:])
+    public.record_call(conn, call("FFF-USD", "AVOID", 100.0, 2.0, stamps[15] + 3600,
+                                  price_day=1, market_open=True))
+    check("and a call whose window misses the blank day is not",
+          public.mark_calls(conn, "FFF-USD", coin_bars(flat, [10])) == 0)
+
+    snap_ = {"samples": 312, "worked": 150, "separate": 104}
+    check("the picture card keeps the counts to the one line it has room for",
+          "overlap" in public.counts_line(snap_)
+          and "overlap" not in public.counts_line(snap_, short=True))
+
     real_due = public.due
     public.due = lambda conn, now=None: ["DDD-USD"]
     snap = call("DDD-USD", "BUY", 100.0, 2.0, int(time.time()), price_day=2,

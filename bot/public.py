@@ -252,7 +252,22 @@ def tests(report) -> Dict[str, List]:
     """
     if report is None:
         return {}
-    return {s.name: _test_entry(s) for s in report.overall.values()}
+    # Three figures, the shape the version before this one reads: rolled
+    # back to, it still opens the strategy pages. The spread is kept apart.
+    return {s.name: _test_entry(s)[:3] for s in report.overall.values()}
+
+
+def spreads(report) -> Dict[str, List]:
+    """Each strategy's [variance of R kept, separate trades], where measured,
+    kept beside tests() in the popular snapshot under "spread"."""
+    if report is None:
+        return {}
+    out = {}
+    for s in report.overall.values():
+        entry = _test_entry(s)
+        if len(entry) > 3:
+            out[s.name] = entry[3:5]
+    return out
 
 
 def _test_entry(stat) -> List:
@@ -360,16 +375,18 @@ def _verdict(kept: float, se: Optional[float]) -> Optional[int]:
     return 1 if kept - 2 * se > 0 else -1 if kept + 2 * se < 0 else 0
 
 
-def _figures(entry) -> Dict:
-    """One stored back-test, [times, worked, R kept, variance, separate], as figures.
+def _figures(entry, spread=None) -> Dict:
+    """One stored back-test, [times, worked, R kept], as figures.
 
-    Tests stored before the spread was measured have only the first three:
-    they show no range, and count every trade as separate, until the next
-    check stores them again.
+    spread is its [variance, separate trades], stored apart (spreads()); an
+    entry of five figures, as buying every day is stored, carries its own.
+    Tests stored without one show no range, and count every trade as
+    separate, until the next check stores them again.
     """
     n, wins, kept_sum = int(entry[0]), int(entry[1]), float(entry[2])
-    var = float(entry[3]) if len(entry) > 3 and entry[3] is not None else None
-    separate = float(entry[4]) if len(entry) > 4 and entry[4] is not None else float(n)
+    extra = list(spread) if spread else list(entry[3:5])
+    var = float(extra[0]) if len(extra) > 0 and extra[0] is not None else None
+    separate = float(extra[1]) if len(extra) > 1 and extra[1] is not None else float(n)
     kept = kept_sum / n if n else 0.0
     se = math.sqrt(var) / n if var is not None and n else None
     return {"n": n, "wins": wins, "kept": kept, "kept_sum": kept_sum, "var": var,
@@ -384,7 +401,7 @@ def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
         entry = (v.get("tests") or {}).get(name)
         if not entry:
             continue
-        fig = _figures(entry)
+        fig = _figures(entry, (v.get("spread") or {}).get(name))
         if fig["separate"] < MIN_TRADES:
             continue
         base = _figures(v["baseline"]) if v.get("baseline") else None
@@ -431,8 +448,9 @@ def strategy_summary(results: List[Dict]) -> Dict:
 def symbol_results(snap: Optional[Dict]) -> List[Dict]:
     """Every strategy tested on one instrument, best first."""
     out = []
+    spread = (snap or {}).get("spread") or {}
     for name, entry in ((snap or {}).get("tests") or {}).items():
-        fig = _figures(entry)
+        fig = _figures(entry, spread.get(name))
         if fig["separate"] >= MIN_TRADES:
             out.append(dict(fig, strategy=name))
     return sorted(out, key=lambda r: -r["kept"])
@@ -484,15 +502,29 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
     return {"checked": checked, "errors": errors}
 
 
-def _blank_yesterday(bars) -> bool:
-    """True when the newest finished day is one the source left blank.
+def blank_day(bars, now: Optional[float] = None) -> Optional[int]:
+    """The newest finished day, when it is one the source left blank; else None.
 
-    Only a day between two known ones is ever rebuilt, so the newest bar is
-    never one, and the day before it is the newest finished day.
+    A coin's daily bar starts at midnight UTC, so its day is over a day
+    later. fetch_bars splits the forming day off into the live price, which
+    makes the newest bar the newest finished day; checked by the clock, so
+    the answer is right whether the forming day was split off or not. Only
+    that day counts: an older blank day no longer holds a call back.
     """
-    blank = getattr(bars, "rebuilt", None) or ()
-    stamps = getattr(bars, "timestamp", ())
-    return len(stamps) >= 2 and any(int(b) >= int(stamps[-2]) for b in blank)
+    blank = {int(b) for b in getattr(bars, "rebuilt", None) or ()}
+    stamps = getattr(bars, "timestamp", None)
+    if not blank or stamps is None or not len(stamps):
+        return None
+    now = time.time() if now is None else now
+    for t in reversed([int(x) for x in stamps[-2:]]):
+        if t + 86400 <= now:
+            return t if t in blank else None
+    return None
+
+
+def _blank_yesterday(bars) -> bool:
+    """True when the newest finished day is one the source left blank."""
+    return blank_day(bars) is not None
 
 
 # --- the track record --------------------------------------------------------
@@ -522,9 +554,30 @@ SAME_AS = {"VOO": "SPY"}
 # A coin day the source left blank is rebuilt with its true open and close
 # but only an estimate of its range (see market.py). A call whose window
 # reaches one waits this long for the source to fill it in, usually an hour
-# or two. If it never does, the call is scored on the estimate and marked as
-# not counting, with the reason, like any other call that cannot count.
+# or two. If it never does, every call whose window holds that day is marked
+# as not counting, scored or not, with the reason (mark_calls): marking only
+# the ones still open kept those an early stop or target had settled and
+# dropped the rest, so which calls counted depended on what the price did.
 BLANK_WAIT_DAYS = 3
+
+
+def _blank_reason(when) -> str:
+    return ("The source never filled in the prices for %s, a day inside its "
+            "window, so no call over that day counts, however it turned out."
+            % _date(when))
+
+
+def _blank_error(bars, row, start: int, now: float) -> Optional[str]:
+    """Why a call cannot count: a day in its window the source never filled."""
+    blank = {int(b) for b in getattr(bars, "rebuilt", None) or ()}
+    if not blank:
+        return None
+    stamps = bars.timestamp
+    for k in range(start, min(start + int(row["horizon"] or 10), len(stamps))):
+        when = int(stamps[k])
+        if when in blank and now - when >= BLANK_WAIT_DAYS * 86400:
+            return _blank_reason(when)
+    return None
 
 
 def _is_coin(symbol: str) -> bool:
@@ -644,6 +697,9 @@ def mark_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
       each run is kept.
     * Scored across a stock split before splits were allowed for (see
       _split_error).
+    * Its window holds a coin day the source never filled in, once it has had
+      BLANK_WAIT_DAYS to (see _blank_error). Scored or not, by the data
+      alone, so which calls count does not depend on how they turned out.
 
     A call whose next bar has not happened yet is left for a later run.
     Marked calls stay in place with their result, and the page lists them.
@@ -658,6 +714,7 @@ def mark_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
     n = len(stamps)
     first: Dict[int, sqlite3.Row] = {}
     marked = 0
+    now = time.time()
     for row in conn.execute("SELECT * FROM calls WHERE symbol=? AND excluded IS NULL "
                             "ORDER BY at, id", (symbol,)).fetchall():
         start = bisect.bisect_right(stamps, int(row["at"]))   # settle_calls' first bar
@@ -670,7 +727,8 @@ def mark_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
                       "no market session between them." % _date(earlier["at"]))
         else:
             first[start] = row
-            reason = _split_error(bars, row, start)
+            reason = _split_error(bars, row, start) or _blank_error(bars, row,
+                                                                     start, now)
         if reason:
             conn.execute("UPDATE calls SET excluded=? WHERE id=? AND excluded IS NULL",
                          (reason, row["id"]))
@@ -762,9 +820,7 @@ def settle_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
             elif now - int(bars.timestamp[first_blank]) < BLANK_WAIT_DAYS * 86400:
                 continue
             else:
-                excluded = ("The source has no prices for %s, a day inside its "
-                            "window, so its range there is an estimate and the "
-                            "result may be wrong." % _date(bars.timestamp[first_blank]))
+                excluded = _blank_reason(bars.timestamp[first_blank])
         exit_price *= f
         conn.execute("UPDATE calls SET outcome=?, how=?, exit_price=?, settled=? "
                      "WHERE id=?", (judge(row["action"], how), how, exit_price,
@@ -1079,12 +1135,14 @@ def _wrap(text: str, font, width: int, lines: int) -> List[str]:
     return out
 
 
-def counts_line(snap: Dict) -> str:
+def counts_line(snap: Dict, short: bool = False) -> str:
+    """The page's line about past examples. short leaves out the overlap
+    sentence, for the picture card, which has room for one line only."""
     if not snap.get("samples"):
         return "Too few past examples to count."
     line = ("Found this setup %d times before. It worked %d of them."
             % (snap["samples"], snap["worked"]))
-    if snap.get("separate"):
+    if snap.get("separate") and not short:
         line += (" Many overlap in time, so together they are worth about %d "
                  "separate tests." % snap["separate"])
     return line
@@ -1141,7 +1199,7 @@ def render_card(snap: Dict) -> bytes:
     for line in _wrap(snap.get("headline", ""), headline, WIDTH - 2 * MARGIN, 2):
         pen.text((MARGIN, y), line, font=headline, fill=INK)
         y += 56
-    pen.text((MARGIN, max(y + 30, 470)), counts_line(snap),
+    pen.text((MARGIN, max(y + 30, 470)), counts_line(snap, short=True),
              font=_font("inter-400.ttf", 30), fill=INK)
 
     pen.text((MARGIN, 556), "orenth.app", font=_font("inter-600.ttf", 30),

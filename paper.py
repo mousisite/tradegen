@@ -35,7 +35,7 @@ from rich.table import Table
 
 from bot import config as config_mod
 from bot import database as db
-from bot.market import DataError, fetch_bars, format_price
+from bot.market import DataError, fetch_bars, format_price, split_factor_since
 from bot.portfolio import stop_touched
 
 console = Console()
@@ -241,7 +241,11 @@ def cmd_check(args, conn) -> int:
                           "[yellow]no data[/]")
             continue
 
-        price = bars.last_price
+        # In the shares the trade was opened with, as its entry and stop
+        # are: after a split the quote and the bars are in today's.
+        opened = int(t["ts_opened"])
+        split = split_factor_since(t["symbol"], opened, bars)
+        price = bars.last_price * split
         direction = int(t["direction"])
         entry, stop = float(t["entry"]), float(t["stop"])
         risk = abs(entry - stop)
@@ -252,15 +256,14 @@ def cmd_check(args, conn) -> int:
         # that started after the trade did. The bar it opened in is left out,
         # because part of that bar's range may have traded before the entry,
         # and a low from before you bought is not your stop being hit.
-        opened = int(t["ts_opened"])
         after = bars.timestamp > opened
         status = "open"
         target = t["target1"]
-        if stop_touched(bars, opened, stop, direction)[0] is not None:
+        if stop_touched(bars, opened, stop / split, direction)[0] is not None:
             status = "[red]STOP HIT[/]"
         elif target and after.any():
-            if (float(bars.high[after].max()) >= float(target) if direction > 0
-                    else float(bars.low[after].min()) <= float(target)):
+            if (float(bars.high[after].max()) * split >= float(target) if direction > 0
+                    else float(bars.low[after].min()) * split <= float(target)):
                 status = "[green]TARGET HIT[/]"
 
         # Fall back to the live price. No bars print while a market is closed,

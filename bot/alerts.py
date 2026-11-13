@@ -24,7 +24,8 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from . import indicators as ind
-from .market import DataError, fetch_bars, format_price, split_factor, split_words
+from .market import (DataError, fetch_bars, format_price, split_factor_since,
+                     split_words, splits_since)
 
 KINDS: Dict[str, Dict] = {
     "price_above": {"label": "Price rises above", "needs_threshold": True,
@@ -526,8 +527,10 @@ def _after_splits(conn, row, bars):
     a ten-for-one fired at once at 101, and a "rises above 1,100" could never
     fire. The level is divided by the split once: the split's time is kept on
     the alert so it is never applied twice, and the owner is told in the
-    alert history. Any other kind of alert is in percent or points and needs
-    nothing.
+    alert history. The splits come from the symbol's whole history when the
+    alert's own bars do not reach back to when its level was set, so one left
+    paused or unchecked past its short window is still moved. Any other kind
+    of alert is in percent or points and needs nothing.
     """
     from . import database as db
 
@@ -538,8 +541,7 @@ def _after_splits(conn, row, bars):
     except (KeyError, IndexError):
         done = 0
     since = max(int(row["created_ts"] or 0), done)
-    later = [(int(when), float(ratio)) for when, ratio in getattr(bars, "splits", None) or ()
-             if int(when) > since and ratio and float(ratio) > 0]
+    later = splits_since(row["symbol"], since, bars)
     if not later:
         return row
     factor = 1.0
@@ -594,25 +596,47 @@ def check_stops(conn, user=None) -> Dict:
             continue
         # The stop is in the shares of the day it opened; after a split the
         # quote is in today's, and read as is a long looked far past its stop.
-        split = split_factor(bars, int(row["ts_opened"]))
+        # Over the trade's whole life: a year of bars can miss an older split.
+        opened = int(row["ts_opened"])
+        split = split_factor_since(row["symbol"], opened, bars)
         quote = float(bars.last_price)
         price, stop, side = quote * split, float(row["stop"]), int(row["direction"])
-        if (price - stop) * side > 0:
+        # Past the stop now, or traded through it since opening and come back:
+        # the journal marks both as stopped (portfolio.stop_touched), so the
+        # owner is told of both.
+        from .portfolio import stop_touched
+        touched_at, touched = stop_touched(bars, opened, stop / split, side)
+        past_now = (price - stop) * side <= 0
+        if not past_now and touched_at is None:
             continue
         said = format_price(price)
         if split != 1.0:
             said = ("%s (%s in the shares you opened with, after a %s split)"
                     % (format_price(quote), format_price(price), split_words(split)))
-        message = ("%s is at %s, past the stop of %s on your %s position. "
-                   "The journal does not close it for you: close it, or set a "
-                   "new stop on purpose." % (row["symbol"], said,
-                                             format_price(stop),
-                                             "long" if side > 0 else "short"))
+        side_word = "long" if side > 0 else "short"
+        if past_now:
+            message = ("%s is at %s, past the stop of %s on your %s position. "
+                       "The journal does not close it for you: close it, or set a "
+                       "new stop on purpose." % (row["symbol"], said,
+                                                 format_price(stop), side_word))
+        else:
+            when = time.strftime("%d %b", time.gmtime(touched_at)).lstrip("0")
+            message = ("%s traded at %s on %s, past the stop of %s on your %s "
+                       "position, and is at %s now. The journal counts the stop "
+                       "as hit and does not close it for you: close it, or set a "
+                       "new stop on purpose." % (row["symbol"],
+                                                 format_price(touched * split), when,
+                                                 format_price(stop), side_word, said))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
-        conn.execute("UPDATE trades SET breach_noticed=? WHERE id=?",
-                     (int(time.time()), int(row["id"])))
+        # Two checks at once (the loop and "Check them all now") both read the
+        # trade before either marked it. Only the one that marks it tells.
+        cur = conn.execute("UPDATE trades SET breach_noticed=? WHERE id=? "
+                           "AND breach_noticed IS NULL",
+                           (int(time.time()), int(row["id"])))
         conn.commit()
+        if cur.rowcount == 0:
+            continue
         if hit.user_id is not None:
             hit.event_id = db.event_add(conn, hit.user_id, "stop_breach", hit.symbol,
                                         message, price, hit.as_of, trade_id=hit.trade_id)

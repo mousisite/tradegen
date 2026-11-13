@@ -138,8 +138,10 @@ def fake_bars(symbol, interval="1d", lookback=None):
 
 real = {"bars": market_mod.fetch_bars, "analyse": web.engine.analyse,
         "cached": web.cached_analysis, "find": ideas_mod.find,
-        "screen": screener_mod.run}
+        "screen": screener_mod.run, "history": market_mod.split_history}
 market_mod.fetch_bars = fake_bars
+# No splits anywhere unless a check says so; and no request for them.
+market_mod.split_history = lambda symbol: []
 web.engine.analyse = must_not_run("an analysis")
 web.cached_analysis = must_not_run("an analysis")
 ideas_mod.find = must_not_run("a Find scan")
@@ -383,6 +385,25 @@ try:
     body = text(c.get("/trades/simulate?run_id=%d" % stale))
     check("a plan made hours ago warns that the price may have moved",
           "This plan was made 3h ago" in body and "not the price now" in body)
+    # A plan made before a split and confirmed after it: its prices are in
+    # the shares of its day, so they are divided by the split, shown so and
+    # logged so. Logged as made, the journal read them as a 90% fall.
+    market_mod.split_history = (lambda symbol: [(NOW - 86400, 10.0)]
+                                if symbol == "ZZSPLIT" else [])
+    before_split = add_run(alice, "ZZSPLIT", "BUY", entry=1000.0, stop=950.0, target=1100.0,
+                           ts=NOW - 3 * 86400)
+    body = text(c.get("/trades/simulate?run_id=%d" % before_split))
+    check("a plan made before a split is shown in today's shares, and says why",
+          "split 10-for-1 after this plan was made" in body, body[:400])
+    c.post("/trades/take", data={"run_id": before_split})
+    conn = db.connect(DB)
+    got = db.list_trades(conn, symbol="ZZSPLIT", user=alice.id)
+    conn.close()
+    check("and is logged in today's shares",
+          len(got) == 1 and abs(got[0]["entry"] - 100.0) < 1e-9
+          and abs(got[0]["stop"] - 95.0) < 1e-9 and abs(got[0]["target1"] - 110.0) < 1e-9,
+          [dict(x) for x in got])
+    market_mod.split_history = lambda symbol: []
     check("an unknown run is not found", c.get("/trades/simulate?run_id=999999").status_code == 404)
     check("nor is a run that is not a number", c.get("/trades/simulate?run_id=x").status_code == 404)
     sign_in(c, bob)
@@ -427,6 +448,7 @@ try:
     check("an old trade taken from a WAIT says so", "from your WAIT call" in body)
 finally:
     market_mod.fetch_bars = real["bars"]
+    market_mod.split_history = real["history"]
     web.engine.analyse = real["analyse"]
     web.cached_analysis = real["cached"]
     ideas_mod.find = real["find"]

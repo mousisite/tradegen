@@ -33,6 +33,12 @@
     again for a fresh plan.
   </div>
 {% endif %}
+{% if size.split_words %}
+  <div class="notice" style="margin-top:var(--s3)">
+    {{ run['symbol'] }} split {{ size.split_words }} after this plan was made, so
+    its prices are shown, and will be logged, in today's shares.
+  </div>
+{% endif %}
 
 <div class="cols b" style="margin-top:var(--s3)">
   <div>

@@ -33,7 +33,9 @@
             {% else %}
               at {{ m.price|price }}, at or past its target of {{ t['target1']|price }}.
             {% endif %}
-            <span class="faint">Price as of {{ m.as_of or 'an unknown time' }}.</span>
+            <span class="faint">Price as of {{ m.as_of or 'an unknown time' }}{% if m.split_words %},
+              in the shares you opened with: quoted {{ m.quoted|price }} today, after
+              a {{ m.split_words }} split{% endif %}.</span>
             <a href="{{ url_for('trades') }}">Open the journal</a></li>
         {% endfor %}
       </ul>

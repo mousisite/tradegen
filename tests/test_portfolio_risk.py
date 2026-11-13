@@ -269,14 +269,31 @@ def offline(*_a, **_k):
     raise RuntimeError("offline")
 
 
-real = (P.fetch_bars, P.fund.load, P.risk_mod.profile)
+from bot import market as M  # noqa: E402
+
+
+def no_history(symbol):
+    raise M.DataError("the source did not answer")
+
+
+# The bars here start after the position opened, so its split comes from the
+# symbol's whole history; and when that cannot be had, from the bars.
+real = (P.fetch_bars, P.fund.load, P.risk_mod.profile, M.split_history)
 P.fetch_bars, P.fund.load, P.risk_mod.profile = split_quote, offline, offline
+M.split_history = lambda symbol: [(split_at, 10.0)]
 try:
     v = P.build([{"id": 9, "symbol": "SPL", "direction": 1, "quantity": 2,
                   "entry": 1000, "stop": 950, "target1": 1200, "ts_opened": opened}],
                 account=10000, with_correlation=False)
+    M.split_history = no_history
+    fallback = P.build([{"id": 9, "symbol": "SPL", "direction": 1, "quantity": 2,
+                         "entry": 1000, "stop": 950, "target1": 1200,
+                         "ts_opened": opened}],
+                       account=10000, with_correlation=False)
 finally:
-    P.fetch_bars, P.fund.load, P.risk_mod.profile = real
+    P.fetch_bars, P.fund.load, P.risk_mod.profile, M.split_history = real
+check("with no history to hand, the split in the bars still counts",
+      close(fallback.positions[0].price, 1010.0), fallback.positions[0].price)
 spl = v.positions[0]
 check("it is priced in the shares it was opened with", close(spl.price, 1010.0), spl.price)
 check("so it is not past its stop", not spl.breached and not v.breached)

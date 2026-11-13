@@ -502,19 +502,35 @@ def _too_often(what: str):
                                    "while, then try again." % what), 429
 
 
+# Seconds to wait when the source did not answer and said nothing of when.
+UNAVAILABLE_RETRY = 60
+
+
+def _source_wait(exc) -> Optional[int]:
+    """Seconds to come back after, when the source turned a request away for
+    now or did not answer; None for any other failure."""
+    if isinstance(exc, market_mod.DataThrottled):
+        return int(exc.seconds)
+    if isinstance(exc, market_mod.DataUnavailable):
+        return UNAVAILABLE_RETRY
+    return None
+
+
 def _no_prices(exc: DataError, symbol: str = "", status: int = 404,
                message: str = ""):
     """The page for prices that could not be had.
 
-    When the source turned the request away for now (a rate limit, or an
-    outage), that is a 503 with Retry-After, and the page leaves out the advice
-    about tickers that do not exist: the ticker was fine, and that advice sent
-    people hunting for a typo. Anything else keeps the status the caller gives.
+    When the source turned the request away for now (a rate limit) or did not
+    answer (a timeout, an outage), that is a 503 with Retry-After, and the page
+    leaves out the advice about tickers that do not exist: the ticker was
+    fine, and that advice sent people hunting for a typo. Anything else keeps
+    the status the caller gives.
     """
-    if isinstance(exc, market_mod.DataThrottled):
+    wait = _source_wait(exc)
+    if wait is not None:
         page = app.make_response((render_template(
             "error.html", message=str(exc), symbol=symbol, throttled=True), 503))
-        page.headers["Retry-After"] = str(exc.seconds)
+        page.headers["Retry-After"] = str(wait)
         return page
     return render_template("error.html", message=message or str(exc),
                            symbol=symbol), status
@@ -740,6 +756,10 @@ def _signed(value, digits=2):
 def _strategy(name):
     """rsi_reversion as "RSI reversion", the name the public pages use too."""
     return public_mod.strategy_label(str(name or ""))
+
+
+# Whether a coin's newest finished day is one the source left blank.
+app.jinja_env.globals["blank_day"] = public_mod.blank_day
 
 
 @app.template_filter("day")
@@ -1177,9 +1197,11 @@ def _mark_one(trade):
     After a split Yahoo quotes today's shares, so the quote is turned back,
     and what it is today is said beside it.
     """
-    from bot.market import fetch_bars, split_factor, split_words
+    from bot.market import fetch_bars, split_factor_since, split_words
     bars = fetch_bars(trade["symbol"], trade["interval"] or "1d")
-    split = split_factor(bars, int(trade["ts_opened"]))
+    # Over the trade's whole life: an intraday chart reaches back sixty days,
+    # and a split older than that is not in its bars.
+    split = split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
     price = bars.last_price * split
     direction = int(trade["direction"])
     entry, stop = float(trade["entry"]), float(trade["stop"])
@@ -1245,7 +1267,25 @@ class _NoTrade(ValueError):
     """A recorded analysis with no trade in it to log, said for the person."""
 
 
-def _paper_size(row, cfg: Dict) -> Dict:
+def _run_split(row) -> float:
+    """Shares today per share on the day a plan was made: 10.0 after a ten-for-one.
+
+    A plan's prices are in the shares of its day. Confirmed after a split,
+    they were logged as if made today, and the journal and the stop check
+    then read them against a quote ten times smaller. A plan under an hour old
+    is not looked up: a split takes effect at a session's open, and one made
+    in the hour before that open and confirmed after it is the only miss.
+    """
+    made = int(row["ts"] or 0)
+    if not made or time.time() - made < 3600:
+        return 1.0
+    try:
+        return market_mod.split_factor_since(row["symbol"], made)
+    except Exception:
+        return 1.0
+
+
+def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
     """The paper position a recorded plan opens, by the journal's sizing rule.
 
     One rule for the review page and for logging the trade, so the size, the
@@ -1266,7 +1306,8 @@ def _paper_size(row, cfg: Dict) -> Dict:
     if action not in ("BUY", "SHORT"):
         raise _NoTrade("That analysis said %s: there is no trade in it to "
                        "simulate." % (action or "nothing"))
-    entry, stop = float(row["entry"]), float(row["stop"])
+    # In today's shares: a plan made before a split is divided by it.
+    entry, stop = float(row["entry"]) / split, float(row["stop"]) / split
     # The side is where the stop sits, which the plan keeps in step with
     # the call: below the entry for a BUY, above it for a SHORT.
     direction = 1 if stop < entry else -1
@@ -1282,9 +1323,15 @@ def _paper_size(row, cfg: Dict) -> Dict:
     qty = round(qty_raw, 6) if crypto else float(int(qty_raw))
     if qty <= 0:
         raise _NoTrade("Account too small for one unit at this stop distance.")
-    target = float(row["target1"]) if row["target1"] else None
+    target = float(row["target1"]) / split if row["target1"] else None
+    try:
+        second = row["target2"]
+    except (KeyError, IndexError):
+        second = None
     return {"direction": direction, "entry": entry, "stop": stop,
             "target": target, "per_unit": per_unit, "quantity": qty,
+            "target2": float(second) / split if second else None,
+            "split_words": market_mod.split_words(split) if split != 1.0 else "",
             "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
                               else "{:,.0f}".format(qty)),
             "notional": qty * entry, "risk": qty * per_unit,
@@ -1329,7 +1376,7 @@ def simulate_trade():
         conn.close()
     cfg = _cfg()
     try:
-        size = _paper_size(row, cfg)
+        size = _paper_size(row, cfg, _run_split(row))
     except _NoTrade as exc:
         return render_template("error.html", symbol="", message=str(exc)), 400
     # Back to the analysis it came from. Without a page to go back to, the
@@ -1354,14 +1401,14 @@ def take_trade():
         row = _own_run(conn, run_id)
         # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
-        size = _paper_size(row, _cfg())
+        size = _paper_size(row, _cfg(), _run_split(row) if row is not None else 1.0)
         if _logged_from(conn, run_id) is not None:
             # Confirm pressed twice: the first press already logged it.
             return redirect(url_for("trades", logged=1))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
                           direction=size["direction"], entry=size["entry"],
-                          stop=size["stop"], target1=row["target1"],
-                          target2=row["target2"], quantity=size["quantity"],
+                          stop=size["stop"], target1=size["target"],
+                          target2=size["target2"], quantity=size["quantity"],
                           risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid())
@@ -1645,7 +1692,7 @@ def research():
     for row in saved:
         reviews.append((row, thesis_mod.review(
             {"price": row["price"], "balance": row["balance"],
-             "created": row["created_ts"]}, analysis.bars.last_price)))
+             "created": row["created_ts"]}, _thesis_price(row, analysis.bars)[0])))
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
@@ -1657,6 +1704,23 @@ def research():
 THESES_PER_HOUR = 30
 # A note is a reminder to yourself, not an essay, and it is stored for good.
 NOTE_LIMIT = 1000
+
+
+def _thesis_price(row, bars):
+    """Today's price for a saved thesis, in the shares of the day it was saved,
+    and the split between: (price, factor).
+
+    After a ten-for-one the quote is in today's shares, and a thesis saved at
+    1,000 read 101 as a 90% fall and proposed "wrong".
+    """
+    if bars is None:
+        return None, 1.0
+    try:
+        split = market_mod.split_factor_since(row["symbol"],
+                                              int(row["created_ts"] or 0), bars)
+    except Exception:
+        split = 1.0
+    return float(bars.last_price) * split, split
 
 
 @app.route("/thesis/save", methods=["POST"])
@@ -1740,11 +1804,13 @@ def close_thesis():
         # Price it at close, not at whatever the user remembers. A thesis is
         # judged against the market, so the market supplies the number.
         try:
-            price = market_mod.fetch_bars(row["symbol"], "1d").last_price
+            bars = market_mod.fetch_bars(row["symbol"], "1d")
         except DataError as exc:
             return _no_prices(exc, row["symbol"], 502,
                               "Could not price %s to close the thesis: %s"
                               % (row["symbol"], exc))
+        # In the shares it was saved in, like the price it is set against.
+        price = _thesis_price(row, bars)[0]
 
         db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
     except (KeyError, ValueError) as exc:
@@ -2625,16 +2691,16 @@ def monitor():
     # Price each open thesis so the page can say how it is doing, and propose
     # the outcome the price supports. One quote per distinct symbol.
     judged = []
-    prices = {}
+    bars_of = {}
     for row in thesis_rows:
         sym = row["symbol"]
-        if sym not in prices:
+        if sym not in bars_of:
             try:
-                prices[sym] = market_mod.fetch_bars(sym, "1d").last_price
+                bars_of[sym] = market_mod.fetch_bars(sym, "1d")
             except Exception:
                 # One unpriceable symbol must not take the whole page down.
-                prices[sym] = None
-        price = prices[sym]
+                bars_of[sym] = None
+        price, split = _thesis_price(row, bars_of[sym])
         stored = {"price": row["price"], "balance": row["balance"],
                   "created": row["created_ts"]}
         look = (thesis_mod.review(stored, price) if price else
@@ -2642,7 +2708,10 @@ def monitor():
         proposed = (thesis_mod.suggested_outcome(stored, price)
                     if price and not row["outcome"] else None)
         judged.append({"row": row, "now": price, "review": look,
-                       "proposed": proposed})
+                       "proposed": proposed,
+                       "quoted": bars_of[sym].last_price if split != 1.0 else None,
+                       "split_words": (market_mod.split_words(split)
+                                       if split != 1.0 else "")})
 
     board = thesis_mod.scoreboard([dict(r) for r in thesis_rows])
 
@@ -2709,10 +2778,13 @@ def add_alert():
         # The same ticker an analysis would use: "btc" is Bitcoin, not the
         # fund listed as BTC, and " aapl" is AAPL.
         symbol = market_mod.normalise_symbol(request.form["symbol"])
+        # Pro is promised as many alerts as it likes; the ceiling keeps any
+        # other account's list in bounds.
         db_mod.alert_add(conn, symbol, kind, threshold,
                          request.form.get("interval") or "1d",
                          request.form.get("note", ""),
-                         request.form.get("repeat") == "1", user=uid())
+                         request.form.get("repeat") == "1", user=uid(),
+                         cap=None if _pro() else db_mod.MAX_ALERTS)
         events_mod.bump(conn, "alert_add")
     except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
@@ -2978,10 +3050,11 @@ def api_analyse():
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0")
     except DataError as exc:
-        if isinstance(exc, market_mod.DataThrottled):
-            answer = jsonify({"error": str(exc), "retry_after": exc.seconds})
+        wait = _source_wait(exc)
+        if wait is not None:
+            answer = jsonify({"error": str(exc), "retry_after": wait})
             answer.status_code = 503
-            answer.headers["Retry-After"] = str(exc.seconds)
+            answer.headers["Retry-After"] = str(wait)
             return answer
         return jsonify({"error": str(exc)}), 404
     _spend_view(symbol, interval)
@@ -3275,6 +3348,9 @@ def _public_snapshot(symbol: str) -> dict:
         stop_atr=cfg["stop_atr_multiple"], target_atr=cfg["target_atr_multiple"],
         horizon=horizon)
     snap["tests"] = public_mod.tests(result.strategy_report)
+    # Kept apart from the tests, whose three figures the previous version
+    # reads: rolled back to, it still opens the strategy pages.
+    snap["spread"] = public_mod.spreads(result.strategy_report)
     # The same pretend trade on every day the strategies were tested on, so
     # the strategy pages can set each one against it.
     snap["baseline"] = public_mod.buy_every_day(

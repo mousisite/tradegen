@@ -200,6 +200,11 @@ try:
     # today's quote.
     conn = db.connect(DB)
     split_at = LAST - 3 * DAY
+    # The symbol's whole split history, as the source would list it. Stand-in
+    # bars that do not reach back to a level's day send the look-up there.
+    real_history = web.market_mod.split_history
+    web.market_mod.split_history = (lambda symbol: [(split_at, 10.0)]
+                                    if symbol in ("SPL", "SP2") else [])
 
     def split_bars(interval="1d"):
         b = daily([100.0] * 30, live=101.0, interval=interval)
@@ -248,6 +253,116 @@ try:
     check("the journal marks it in the shares it was opened with",
           abs(mark["price"] - 1010.0) < 1e-9 and abs(mark["r"] - 0.2) < 1e-9
           and mark["status"] == "open" and mark["split_words"] == "10-for-1", mark)
+    check("a thesis saved before the split is priced in its own shares",
+          web._thesis_price({"symbol": "SPL", "created_ts": before}, split_bars())
+          == (1010.0, 10.0))
+
+    # A level typed after the split is in today's shares already, and is
+    # never divided again: paused through the split, edited, resumed.
+    edited = db.alert_add(conn, "SPL", "price_below", threshold=900.0, user=alice.id)
+    conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (before, edited))
+    conn.commit()
+    db.alert_set_active(conn, edited, False, user=alice.id)
+    alerts.check(conn, call_of=call_of)
+    db.alert_edit(conn, edited, 95.0, "", user=alice.id)
+    db.alert_set_active(conn, edited, True, user=alice.id)
+    out = alerts.check(conn, call_of=call_of)
+    check("a level typed after the split is left as typed",
+          conn.execute("SELECT threshold FROM alerts WHERE id=?", (edited,)).fetchone()[0] == 95.0
+          and edited not in fired_ids(out))
+    conn.execute("UPDATE alerts SET last_error='Moved from X' WHERE id=?", (edited,))
+    conn.commit()
+    db.alert_set_active(conn, edited, False, user=alice.id)
+    db.alert_set_active(conn, edited, True, user=alice.id)
+    check("resuming an alert clears what was kept from before the pause",
+          conn.execute("SELECT last_error FROM alerts WHERE id=?", (edited,)).fetchone()[0] is None)
+
+    # A 15-minute alert reads days of bars, not the week since the split.
+    SERIES["SP2"] = lambda interval="15m": daily([100.0] * 5, live=101.0, interval=interval)
+    short = db.alert_add(conn, "SP2", "price_below", threshold=900.0, interval="15m",
+                         user=alice.id)
+    conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (before, short))
+    conn.commit()
+    out = alerts.check(conn, call_of=call_of)
+    check("an alert whose bars do not reach the split still has it applied",
+          short not in fired_ids(out) and abs(conn.execute(
+              "SELECT threshold FROM alerts WHERE id=?", (short,)).fetchone()[0] - 90.0) < 1e-9)
+    web.market_mod.split_history = real_history
+
+    # A stop that traded and came back: the journal counts it as hit, so the
+    # owner is told, once.
+    def dipped(interval="1d"):
+        lows = [100.0] * 30
+        lows[25] = 94.0
+        return daily([100.0] * 30, lows=lows, live=99.0, interval=interval)
+
+    SERIES["TCH"] = dipped
+    dip = db.open_trade(conn, "TCH", "1d", 1, entry=100.0, stop=95.0, target1=110.0,
+                        quantity=1, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (LAST - 20 * DAY, dip))
+    conn.commit()
+    out = alerts.check_stops(conn)
+    said = [f.message for f in out["fired"] if f.trade_id == dip]
+    check("a stop that traded and came back is told, as the journal counts it",
+          len(said) == 1 and "traded at 94" in said[0], said)
+
+    # Two checks at once both read the trade before either marks it.
+    SERIES["OVL"] = lambda interval="1d": daily([100.0] * 30, live=90.0, interval=interval)
+    ovl = db.open_trade(conn, "OVL", "1d", 1, entry=100.0, stop=95.0, target1=110.0,
+                        quantity=1, user=alice.id)
+    real_fetch_bars = alerts.fetch_bars
+
+    def slow(symbol, interval="1d", lookback=None):
+        time.sleep(0.3)
+        return bars_for(symbol, interval, lookback)
+
+    alerts.fetch_bars = slow
+    told = []
+
+    def run_check():
+        k = db.connect(DB)
+        try:
+            told.append(alerts.check_stops(k))
+        finally:
+            k.close()
+
+    import threading as _threading
+    pair = [_threading.Thread(target=run_check) for _ in range(2)]
+    for th in pair:
+        th.start()
+    for th in pair:
+        th.join()
+    alerts.fetch_bars = real_fetch_bars
+    fired_ovl = sum(1 for res in told for f in res["fired"] if f.trade_id == ovl)
+    stored_ovl = conn.execute("SELECT COUNT(*) FROM alert_events WHERE trade_id=?",
+                              (ovl,)).fetchone()[0]
+    check("two checks at once tell a crossed stop once",
+          fired_ovl == 1 and stored_ovl == 1, (fired_ovl, stored_ovl))
+
+    # Pro is promised as many alerts as it likes; anyone else keeps 200.
+    many = person("many@example.com")
+    for k in range(db.MAX_ALERTS):
+        db.alert_add(conn, "AAA", "price_above", threshold=1000.0 + k, user=many.id)
+    try:
+        db.alert_add(conn, "AAA", "price_above", threshold=5000.0, user=many.id)
+        refused = False
+    except ValueError:
+        refused = True
+    check("an account not on Pro keeps at most 200 alerts", refused)
+    real_pro = web._pro
+    web._pro = lambda: True
+    sign_in(many)
+    try:
+        r = c.post("/monitor/alert/add", data={"symbol": "AAA", "kind": "price_above",
+                                               "threshold": "6000"})
+    finally:
+        web._pro = real_pro
+    check("but a Pro account is let past it",
+          r.status_code == 302 and conn.execute(
+              "SELECT COUNT(*) FROM alerts WHERE user_id=?", (many.id,)).fetchone()[0]
+          == db.MAX_ALERTS + 1, r.status_code)
+    conn.execute("DELETE FROM alerts WHERE user_id=?", (many.id,))
+    conn.commit()
     conn.close()
 
     print()
@@ -568,14 +683,24 @@ try:
     conn = db.connect(DB)
     held = conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=?", (carol.id,)).fetchone()[0]
     conn.close()
+    # The ceiling is for accounts not on Pro: the pricing page promises Pro
+    # as many alerts as it likes. While billing is off everyone has Pro.
     ceiling, db.MAX_ALERTS = db.MAX_ALERTS, held + 1
+    conn = db.connect(DB)
     try:
-        check("one account can keep alerts up to the ceiling", add().status_code == 302)
-        r = add()
-        check("and not past it, on any plan",
-              r.status_code == 400 and b"the most one account can keep" in r.data, r.status_code)
+        db.alert_add(conn, "AAPL", "price_above", threshold=1.0, user=carol.id)
+        try:
+            db.alert_add(conn, "AAPL", "price_above", threshold=2.0, user=carol.id)
+            stopped = False
+        except ValueError as exc:
+            stopped = "the most one account can keep" in str(exc)
+        check("an account not on Pro keeps alerts up to the ceiling, and not past it",
+              stopped)
+        check("Pro, as everyone is while billing is off, has no ceiling",
+              add().status_code == 302)
     finally:
         db.MAX_ALERTS = ceiling
+        conn.close()
 
     print()
     print("=" * 72)

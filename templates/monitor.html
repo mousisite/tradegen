@@ -375,7 +375,9 @@
             <td class="r fig">{{ row['price']|price }}</td>
             <td class="r fig">
               {{ (row['closed_price'] if row['closed_price'] else t.now)|price
-                 if (row['closed_price'] or t.now) else '—' }}</td>
+                 if (row['closed_price'] or t.now) else '—' }}
+              {% if t.split_words and not row['closed_price'] %}<div class="faint" style="font-size:var(--t-xs)">quoted
+                {{ t.quoted|price }} today, after a {{ t.split_words }} split</div>{% endif %}</td>
             <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' }}">
               {{ t.review.move|pct(1) if t.review.usable else '—' }}</td>
             <td>

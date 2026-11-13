@@ -415,6 +415,29 @@ try:
 finally:
     web.cached_analysis = _real[3]
 
+
+def timed_out(*_a, **_k):
+    raise web.market_mod.DataUnavailable("could not fetch AAPL: The market data source "
+                                         "could not be used: it took too long to answer.")
+
+
+# A source that does not answer is a wait too, not a missing ticker.
+web.cached_analysis = timed_out
+try:
+    r = c.get("/analyse?symbol=AAPL&interval=1d")
+    body = r.data.decode("utf-8", "replace")
+    check("a source that did not answer is a 503 with a time to come back",
+          r.status_code == 503 and r.headers.get("Retry-After") == "60"
+          and "took too long" in body, (r.status_code, r.headers.get("Retry-After")))
+    check("with no advice about tickers that do not exist",
+          "ticker does not exist" not in body)
+    r = c.get("/api/analyse?symbol=AAPL")
+    check("and the API says so in JSON",
+          r.status_code == 503 and (r.get_json() or {}).get("retry_after") == 60,
+          (r.status_code, r.data[:120]))
+finally:
+    web.cached_analysis = _real[3]
+
 r = c.post("/trades/take", data={"run_id": "999999"},
            headers={"Referer": "http://localhost/analyse?symbol=FAKE&interval=1d"})
 body = r.data.decode("utf-8", "replace")

@@ -319,8 +319,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # at the last look ("met" or "clear"), so one that keeps watching
         # fires when it becomes true rather than on every check.
         # last_error: why the last check of it failed.
-        # split_ts: the latest share split a price alert's level has been
-        # moved for, so a split is applied to it once.
+        # split_ts: the time up to which every share split is reflected in a
+        # price alert's level: the latest split it was moved for, or when its
+        # level was last typed. So a split is applied once, and never to a
+        # level typed after it.
         "alerts": [("state", "TEXT"), ("last_error", "TEXT"),
                    ("last_error_ts", "INTEGER"), ("split_ts", "INTEGER")],
         # When the background check last told the owner this position had
@@ -823,18 +825,24 @@ def watch_touch(conn: sqlite3.Connection, symbol: str,
 # Alerts
 # ---------------------------------------------------------------------------
 
-# The most alerts one account can keep, on any plan. Each is checked every
-# few minutes and each fire is stored, so there has to be a ceiling somewhere.
+# The most alerts an account not on Pro can keep. Each is stored, and each
+# fire, so there has to be a ceiling somewhere. Pro is promised as many as it
+# likes on the pricing page, so the web layer passes no cap for it.
 MAX_ALERTS = 200
+_CEILING = object()
 
 
 def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
               threshold: Optional[float] = None, interval: str = "1d",
-              note: str = "", repeat: bool = False, user: int = 1) -> int:
+              note: str = "", repeat: bool = False, user: int = 1,
+              cap=_CEILING) -> int:
     """Create an alert. Validation lives here so every caller gets it.
 
-    A percent threshold is a fraction: 0.05 is 5%.
+    A percent threshold is a fraction: 0.05 is 5%. cap is the most alerts the
+    account may hold: MAX_ALERTS unless given, None for no limit.
     """
+    if cap is _CEILING:
+        cap = MAX_ALERTS
     from .alerts import DAILY_ONLY, KINDS, problem
     why = problem(kind, threshold)
     if why:
@@ -842,7 +850,7 @@ def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
     sym = _symbol(symbol)
     held = conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=?",
                         (int(user),)).fetchone()[0]
-    if held >= MAX_ALERTS:
+    if cap is not None and held >= cap:
         raise ValueError("You have %d alerts, the most one account can keep. "
                          "Delete some you no longer need first." % held)
     if not KINDS[kind]["needs_threshold"]:
@@ -941,9 +949,17 @@ def alert_split(conn: sqlite3.Connection, alert_id: int, old: float, new: float,
 
 def alert_set_active(conn: sqlite3.Connection, alert_id: int, active: bool,
                      user: Optional[int] = None) -> None:
-    """Pause or resume an alert without losing what it last saw."""
-    sql, args = _own("UPDATE alerts SET active=? WHERE id=?",
-                     [1 if active else 0, alert_id], user)
+    """Pause or resume an alert without losing what it last saw.
+
+    Resuming clears what the page kept from before the pause, a failed check
+    or the note on an alert moved to a coin's own id: it asked to be resumed,
+    and the next check says again if anything is wrong.
+    """
+    if active:
+        sql, args = _own("UPDATE alerts SET active=1, last_error=NULL, "
+                         "last_error_ts=NULL WHERE id=?", [alert_id], user)
+    else:
+        sql, args = _own("UPDATE alerts SET active=0 WHERE id=?", [alert_id], user)
     if conn.execute(sql, args).rowcount == 0:
         raise ValueError("No alert with id %d" % alert_id)
     conn.commit()
@@ -957,7 +973,7 @@ def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[floa
     was met: if the new one already is, the next check says so.
     """
     from .alerts import KINDS, problem
-    sql, args = _own("SELECT kind FROM alerts WHERE id=?", [alert_id], user)
+    sql, args = _own("SELECT kind, threshold FROM alerts WHERE id=?", [alert_id], user)
     row = conn.execute(sql, args).fetchone()
     if row is None:
         raise ValueError("No alert with id %d" % alert_id)
@@ -965,11 +981,17 @@ def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[floa
     why = problem(row["kind"], threshold)
     if why:
         raise ValueError(why)
+    level = threshold if spec.get("needs_threshold") else None
+    # A level typed now is in today's shares, so no split before now may be
+    # applied to it: split_ts moves to now. A note alone leaves it, so a
+    # split not yet applied to the old level still is.
+    retyped = level is not None and (row["threshold"] is None
+                                     or float(row["threshold"]) != float(level))
     sql, args = _own("UPDATE alerts SET threshold=?, note=?, state=CASE WHEN "
-                     "? THEN state ELSE NULL END WHERE id=?",
-                     [threshold if spec.get("needs_threshold") else None,
-                      (note or "")[:MAX_NOTE], 1 if spec.get("call") else 0,
-                      alert_id], user)
+                     "? THEN state ELSE NULL END, split_ts=CASE WHEN ? THEN ? "
+                     "ELSE split_ts END WHERE id=?",
+                     [level, (note or "")[:MAX_NOTE], 1 if spec.get("call") else 0,
+                      1 if retyped else 0, int(time.time()), alert_id], user)
     conn.execute(sql, args)
     conn.commit()
 
@@ -1071,7 +1093,8 @@ def alert_reset(conn: sqlite3.Connection, alert_id: int,
     """
     from .alerts import CALL_KINDS
     sql, args = _own("UPDATE alerts SET active=1, triggered_ts=NULL, "
-                     "trigger_value=NULL, trigger_note=NULL, state=CASE WHEN kind IN "
+                     "trigger_value=NULL, trigger_note=NULL, last_error=NULL, "
+                     "last_error_ts=NULL, state=CASE WHEN kind IN "
                      "(%s) THEN state ELSE NULL END WHERE id=?"
                      % ",".join("?" * len(CALL_KINDS)),
                      list(CALL_KINDS) + [alert_id], user)

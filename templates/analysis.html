@@ -57,10 +57,10 @@
   </div>
   {# A coin day the source left blank, rebuilt from the days either side
      (market.py): its open and close are known, its range and volume are not. #}
-  {% set blank = r.bars.rebuilt|default([]) %}
-  {% if blank and r.bars.timestamp|length >= 2 and blank[-1] >= r.bars.timestamp[-2] %}
+  {% set blank = blank_day(r.bars) %}
+  {% if blank %}
     <p class="fine" style="margin:var(--s1) 0 0">The price source has not filled in
-      {{ blank[-1]|day }} yet. Its open and close are known, but its high, low and
+      {{ blank|day }} yet. Its open and close are known, but its high, low and
       volume are not, so readings that use volume can be off until it does,
       usually within two hours.</p>
   {% endif %}
