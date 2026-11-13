@@ -137,6 +137,135 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
 
 
 # ---------------------------------------------------------------------------
+# The trade, drawn on its own prices
+# ---------------------------------------------------------------------------
+
+def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[float],
+                lows: Sequence[float], closes: Sequence[float],
+                volumes: Sequence[float] = (), levels: Optional[Dict[str, float]] = None,
+                last: Optional[float] = None, as_of: str = "", day_label=None,
+                width: int = 720, height: int = 300, bars: int = 90) -> str:
+    """Daily candles with the plan's prices drawn across them.
+
+    For the analysis page, where the question is where today's price sits
+    against the entry, the stop and the target. Candles here, unlike the
+    research page's year-long line, because the last few months at this width
+    leave each one wide enough to read, and the stop only means something
+    against the size of a normal day's range.
+
+    levels maps a label ("Buy at", "Stop", "Target") to a price. A level far
+    outside the drawn range is kept, and the range is widened to show it,
+    because a target nobody can see on the chart reads as no target. Each
+    candle carries its date and prices as a tooltip. Nothing is drawn for a
+    series too short or too broken to draw honestly.
+    """
+    n = min(len(times), len(opens), len(highs), len(lows), len(closes))
+    rows = []
+    for k in range(max(0, n - bars), n):
+        o, h, l, c = (float(opens[k]), float(highs[k]), float(lows[k]), float(closes[k]))
+        if all(math.isfinite(x) for x in (o, h, l, c)) and h >= l:
+            v = float(volumes[k]) if k < len(volumes) and math.isfinite(float(volumes[k])) else 0.0
+            rows.append((int(times[k]), o, h, l, c, v))
+    if len(rows) < 10:
+        return ""
+
+    levels = {name: float(price) for name, price in (levels or {}).items()
+              if price is not None and math.isfinite(float(price)) and float(price) > 0}
+    low = min(min(r[3] for r in rows), *(levels.values() or [math.inf]))
+    high = max(max(r[2] for r in rows), *(levels.values() or [-math.inf]))
+    if last is not None and math.isfinite(last):
+        low, high = min(low, last), max(high, last)
+    if high <= low:
+        high, low = high * 1.01 + 0.01, low * 0.99 - 0.01
+
+    pad_left, pad_right, pad_top = 60, 86, 14
+    vol_h = 44 if any(r[5] > 0 for r in rows) else 0
+    gap = 10 if vol_h else 0
+    pad_bottom = 24
+    plot_w = width - pad_left - pad_right
+    price_h = height - pad_top - pad_bottom - vol_h - gap
+
+    step = _nice_step(high - low)
+    axis_low = math.floor(low / step) * step
+    axis_high = math.ceil(high / step) * step
+    span = axis_high - axis_low or 1.0
+    slot = plot_w / len(rows)
+    body = max(1.0, slot * 0.62)
+
+    def x_at(i):
+        return pad_left + slot * (i + 0.5)
+
+    def y_at(v):
+        return pad_top + price_h * (1 - (v - axis_low) / span)
+
+    title = "Daily price%s" % (", as of " + as_of if as_of else "")
+    parts = ['<svg class="chart trade" viewBox="0 0 %d %d" role="img" aria-label="%s">'
+             % (width, height, _escape(title))]
+
+    tick = axis_low
+    while tick <= axis_high + step * 0.001:
+        y = y_at(tick)
+        parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="var(--hairline)" '
+                     'stroke-width="1"/>' % (pad_left, y, width - pad_right, y))
+        parts.append('<text x="%d" y="%.1f" text-anchor="end" class="clab">%s</text>'
+                     % (pad_left - 8, y + 4, _escape(_price(tick))))
+        tick += step
+
+    day = day_label or (lambda ts: "")
+    peak = max(r[5] for r in rows) or 1.0
+    for i, (ts, o, h, l, c, v) in enumerate(rows):
+        up = c >= o
+        colour = "var(--gain)" if up else "var(--loss)"
+        x = x_at(i)
+        top, bottom = y_at(max(o, c)), y_at(min(o, c))
+        tip = "%s  open %s  high %s  low %s  close %s" % (
+            day(ts), _price(o), _price(h), _price(l), _price(c))
+        parts.append('<g><title>%s</title>' % _escape(tip.strip()))
+        parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>'
+                     % (x, y_at(h), x, y_at(l), colour))
+        parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
+                     % (x - body / 2, top, body, max(1.0, bottom - top),
+                        colour if not up else "var(--gain)"))
+        if vol_h:
+            vh = vol_h * (v / peak)
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
+                         'fill="var(--ink-3)" opacity="0.35"/>'
+                         % (x - body / 2, pad_top + price_h + gap + vol_h - vh, body, vh))
+        parts.append('</g>')
+
+    # The plan's prices, labelled at the right edge where the eye ends up.
+    styles = {"Stop": ("var(--loss)", "4 3"), "Target": ("var(--gain)", "4 3")}
+    placed = []
+    for name, price in sorted(levels.items(), key=lambda kv: -kv[1]):
+        colour, dash = styles.get(name, ("var(--accent-text)", "6 3"))
+        y = y_at(price)
+        label_y = y + 4
+        for other in placed:                 # keep labels from sitting on each other
+            if abs(label_y - other) < 12:
+                label_y = other + 12
+        placed.append(label_y)
+        parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="1.5" '
+                     'stroke-dasharray="%s"/>' % (pad_left, y, width - pad_right, y, colour, dash))
+        parts.append('<text x="%d" y="%.1f" class="clab lvl" style="fill:%s">%s %s</text>'
+                     % (width - pad_right + 6, label_y, colour, _escape(name), _escape(_price(price))))
+
+    if last is not None and math.isfinite(last):
+        parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--ink)"><title>%s</title></circle>'
+                     % (x_at(len(rows) - 1), y_at(last), _escape("Now " + _price(last))))
+
+    first_day, last_day = day(rows[0][0]), day(rows[-1][0])
+    if first_day:
+        parts.append('<text x="%d" y="%d" class="clab">%s</text>'
+                     % (pad_left, height - 6, _escape(first_day)))
+    if last_day or as_of:
+        parts.append('<text x="%d" y="%d" text-anchor="end" class="clab">%s</text>'
+                     % (width - pad_right, height - 6,
+                        _escape(("price as of " + as_of) if as_of else last_day)))
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Filed financials
 # ---------------------------------------------------------------------------
 
