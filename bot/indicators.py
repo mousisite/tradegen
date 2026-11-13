@@ -634,6 +634,29 @@ def accum_dist(high, low, close, volume) -> np.ndarray:
     return np.cumsum(mult * volume)
 
 
+def flow_share(line: np.ndarray, volume: np.ndarray, n: int) -> np.ndarray:
+    """How far a cumulative volume line moved over the last n bars, as a share
+    of the volume traded in them: -1 (all of it selling) to +1 (all buying).
+
+    OBV and the A/D line are running totals from whichever bar the download
+    happens to start on, so their level means nothing. Dividing a change by
+    that level gave a reading that moved when the five-year window slid by a
+    day; dividing by the volume actually traded gives the same answer however
+    much history came before.
+    """
+    x = np.asarray(line, dtype=float)
+    vol = np.nan_to_num(np.asarray(volume, dtype=float), nan=0.0)
+    out = _nan(len(x))
+    if len(x) <= n:
+        return out
+    total = np.concatenate([[0.0], np.cumsum(vol)])
+    traded = total[n + 1:] - total[1:-n]          # volume of bars i-n+1 .. i
+    change = x[n:] - x[:-n]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out[n:] = np.where(traded > 0, change / traded, np.nan)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Price structure helpers
 # ---------------------------------------------------------------------------
