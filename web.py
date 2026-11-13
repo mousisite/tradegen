@@ -183,7 +183,8 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "code_start", "code_verify", "pricing",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
-                    "email_stop", "backtests", "backtest_page", "record"}
+                    "email_stop", "backtests", "backtest_page", "record",
+                    "record_csv"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -2829,10 +2830,27 @@ def record():
                                              "crypto": method["crypto"] / 100.0})
     finally:
         conn.close()
+    # Calls made before a stock split are scored on split-adjusted prices only
+    # once the market data carries the split events, so the page says so
+    # only then.
+    splits = "splits" in {f.name for f in dataclasses.fields(market_mod.Bars)}
     return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
                            short=public_mod.short, slug=public_mod.slug,
-                           how_words=public_mod.HOW_WORDS)
+                           how_words=public_mod.HOW_WORDS, splits=splits)
+
+
+@app.route("/record.csv")
+def record_csv():
+    """Every public call, left-out ones included, as a file anyone can check."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        body = public_mod.calls_csv(conn)
+    finally:
+        conn.close()
+    return Response(body, mimetype="text/csv", headers={
+        "Content-Disposition": 'attachment; filename="orenth-record.csv"',
+        "Cache-Control": "public, max-age=900"})
 
 
 @app.route("/stock/<sym>/card.png")
