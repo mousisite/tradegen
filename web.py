@@ -183,7 +183,8 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "code_start", "code_verify", "pricing",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
-                    "email_stop", "backtests", "backtest_page", "record"}
+                    "email_stop", "backtests", "backtest_page", "record",
+                    "record_csv"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -2772,7 +2773,7 @@ def _house_method() -> dict:
     """The settings every public back-test runs on, said on the page."""
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     return {"stop": cfg["stop_atr_multiple"], "target": cfg["target_atr_multiple"],
-            "min": public_mod.MIN_TRADES,
+            "min": public_mod.MIN_TRADES, "stride": int(cfg["calibration_stride"]),
             "days": config_mod.horizon_for("1d", cfg),
             "equity": cfg["cost_bps_equity"] / 100.0,
             "crypto": cfg["cost_bps_crypto"] / 100.0}
@@ -2789,8 +2790,16 @@ def backtests():
     table = [dict(public_mod.strategy_summary(public_mod.strategy_results(rows, s.name)),
                   strategy=s.name, family=s.family)
              for s in strategies_mod.REGISTRY]
-    table = sorted((t for t in table if t["n"]), key=lambda t: -t["kept"])
-    return render_template("backtests.html", table=table, method=_house_method(),
+    table = [t for t in table if t["n"]]
+    tested = len(table)
+    # Buying on every tested day ranks among them, so each strategy reads
+    # against what the market's own drift paid, not against zero.
+    base = public_mod.strategy_summary(public_mod.baseline_results(rows))
+    if table and base["n"]:
+        table.append(dict(base, strategy="", family="", baseline=True))
+    table = sorted(table, key=lambda t: -t["kept"])
+    return render_template("backtests.html", table=table, tested=tested,
+                           method=_house_method(),
                            label_of=public_mod.strategy_label,
                            strategy_slug=public_mod.strategy_slug)
 
@@ -2829,10 +2838,27 @@ def record():
                                              "crypto": method["crypto"] / 100.0})
     finally:
         conn.close()
+    # Calls made before a stock split are scored on split-adjusted prices only
+    # once the market data carries the split events, so the page says so
+    # only then.
+    splits = "splits" in {f.name for f in dataclasses.fields(market_mod.Bars)}
     return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
                            short=public_mod.short, slug=public_mod.slug,
-                           how_words=public_mod.HOW_WORDS)
+                           how_words=public_mod.HOW_WORDS, splits=splits)
+
+
+@app.route("/record.csv")
+def record_csv():
+    """Every public call, left-out ones included, as a file anyone can check."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        body = public_mod.calls_csv(conn)
+    finally:
+        conn.close()
+    return Response(body, mimetype="text/csv", headers={
+        "Content-Disposition": 'attachment; filename="orenth-record.csv"',
+        "Cache-Control": "public, max-age=900"})
 
 
 @app.route("/stock/<sym>/card.png")
@@ -2970,11 +2996,17 @@ def _public_snapshot(symbol: str) -> dict:
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
                             db_path=app.config.get("DB_PATH"))
+    horizon = config_mod.horizon_for("1d", cfg)
     snap = public_mod.snapshot(
         result, plain_mod.explain_plan(result.plan, result.bars),
         stop_atr=cfg["stop_atr_multiple"], target_atr=cfg["target_atr_multiple"],
-        horizon=config_mod.horizon_for("1d", cfg))
+        horizon=horizon)
     snap["tests"] = public_mod.tests(result.strategy_report)
+    # The same pretend trade on every day the strategies were tested on, so
+    # the strategy pages can set each one against it.
+    snap["baseline"] = public_mod.buy_every_day(
+        result.context, cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
+        horizon, cfg["calibration_stride"], result.cost_bps)
     return snap
 
 

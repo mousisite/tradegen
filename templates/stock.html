@@ -82,18 +82,30 @@
 </section>
 {% endif %}
 
-{% if history and history.latest %}
+{% if history and (history.latest or history.on_record) %}
 <section style="margin-top:var(--s4)">
   <div class="sechead"><h2>Past calls on {{ short(symbol) }}</h2>
     <a class="tail" href="{{ url_for('record') }}">the whole record &rarr;</a></div>
+  {% if history.on_record %}{% set o = history.on_record %}
+    <p class="prose">The call on record for {{ o.session_at|day }} is
+      <b>{{ o.action }}</b> at {{ '$' if not snap or snap.currency == 'USD' }}{{ o.price|price }},
+      written down at {{ o.written }}.
+      {% if history.coin %}A coin's call is the first check after midnight
+      (UTC), at the price then.{% else %}It is the first check after the
+      market closed, at the closing price. This page is checked through the
+      day and can say something else later; only the call after the close is
+      scored.{% endif %}</p>
+  {% endif %}
+  {% if history.latest %}
   <ul class="list">
     {% for r in history.latest %}
-      <li>{{ r.at|day }}: said <b>{{ r.action }}</b>, the price {{ how_words[r.how] }}
+      <li>{{ r.session_at|day }}: said <b>{{ r.action }}</b>, the price {{ how_words[r.how] }}
         ({{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%).
         <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span></li>
     {% endfor %}
   </ul>
-  {% if history.open %}<p class="prose faint" style="font-size:var(--t-xs)">{{ history.open }} more
+  {% endif %}
+  {% if history.open %}<p class="prose faint" style="font-size:var(--t-xs)">{{ history.open }}
     still waiting to be scored.</p>{% endif %}
 </section>
 {% endif %}

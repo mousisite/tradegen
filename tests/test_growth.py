@@ -326,27 +326,39 @@ try:
           not public.record_call(conn, sat))
     mon = dict(fri, at=fri["at"] + 3 * DAY, price=505.0, price_day=20003)
     check("Monday's new quote is", public.record_call(conn, mon))
-    # Repeats written by the old rule, before price_day existed: same quote,
-    # three calendar days. Marked, never deleted, and the earliest is kept.
-    for k in range(3):
+    # Repeats written by the old rule, before price_day existed: the first
+    # check of each UTC day, before the open, so Saturday, Sunday and Monday
+    # all carried Friday's close, stored once as the bar's float and once as
+    # the two-decimal quote. Daily bars only on weekdays, stamped at the open.
+    fri9 = calendar.timegm((2026, 1, 9, 3, 0, 0, 0, 0, 0))
+    for k, price in enumerate((399.5, 400.0899963378906, 400.09, 400.09)):
         conn.execute("INSERT INTO calls (symbol, day, action, price, stop, target, "
-                     "horizon, at) VALUES ('QQQ', ?, 'AVOID', 400.0, 394.0, 409.0, 10, ?)",
-                     ("2026-01-1%d" % k, T + k * DAY))
+                     "horizon, at) VALUES ('QQQ', ?, 'AVOID', ?, 394.0, 409.0, 10, ?)",
+                     ("2026-01-%02d" % (9 + k), price, fri9 + k * DAY))
     conn.commit()
-    check("old repeats are marked", public.mark_repeats(conn) == 2)
-    check("and marking twice changes nothing", public.mark_repeats(conn) == 0)
-    kept = conn.execute("SELECT day FROM calls WHERE symbol='QQQ' AND excluded IS NULL").fetchall()
+    opens = [calendar.timegm((2026, 1, d, 14, 30, 0, 0, 0, 0)) for d in (8, 9, 12, 13)]
+    weekdays = SimpleNamespace(timestamp=opens, high=[401.0] * 4, low=[399.0] * 4,
+                               close=[400.0] * 4, gmt_offset=-18000)
+    check("old repeats are marked by the bars they are scored on, not by price",
+          public.mark_calls(conn, "QQQ", weekdays) == 2)
+    check("and marking twice changes nothing", public.mark_calls(conn, "QQQ", weekdays) == 0)
+    kept = conn.execute("SELECT day, price_day FROM calls WHERE symbol='QQQ' "
+                        "AND excluded IS NULL ORDER BY at").fetchall()
     check("the earliest call of a repeat run is the one kept",
-          [r[0] for r in kept] == ["2026-01-10"], [r[0] for r in kept])
+          [r[0] for r in kept] == ["2026-01-09", "2026-01-10"], [r[0] for r in kept])
+    check("and each kept call is dated by the session its price came from",
+          [time.strftime("%a", time.gmtime(r[1] * DAY)) for r in kept] == ["Thu", "Fri"],
+          [r[1] for r in kept])
     check("nothing was deleted",
-          conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='QQQ'").fetchone()[0] == 3)
+          conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='QQQ'").fetchone()[0] == 4)
     rec = public.record(conn)
     check("left-out calls are counted apart, with their reason",
-          len(rec["excluded"]) == 2 and "same market quote" in rec["excluded"][0]["excluded"])
+          len(rec["excluded"]) == 2
+          and "no market session between them" in rec["excluded"][0]["excluded"])
     conn.close()
     page = c.get("/record").data.decode("utf-8", "replace")
     check("and listed on the page", "left out of the scores" in page
-          and "Repeats the 2026-01-10 call" in page)
+          and "Scored on the same bars as the call written down on 10 Jan 2026" in page)
     check("the scoring rule on the page matches the code: half the stop distance",
           "half the distance to the stop" in page and "half a day" not in page)
 
@@ -358,7 +370,9 @@ try:
         return path([310, 320, 330, 340])
 
     def analyse_with_levels(symbol):
-        s = call(symbol, "BUY", 301.0, 3.0)                # the next day's quote
+        # The next day's session, closing at the price of the day before on
+        # MSFT: a new session, so a new call, however alike the two prices.
+        s = call(symbol, "BUY", 300.0, 3.0)
         s["at"] = T + DAY
         return s
 
