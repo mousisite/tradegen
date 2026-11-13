@@ -135,7 +135,9 @@
       afternoon; only the call after the close is scored.</li>
     <li>A coin trades all day. Its call is the first check after midnight
       (UTC), at the price then, and it is scored from the next day's prices,
-      so the rest of the day it was made is not counted.</li>
+      so the rest of the day it was made is not counted. When the price source
+      has not yet filled in the day before, that check is skipped and the next
+      one, six hours on, writes the call.</li>
     <li>Then we pretend to buy at that price, with fixed levels: a stop
       {{ method.stop }} ATR below and a target {{ method.target }} ATR above,
       the rule the strategy tests use. ATR is how much the price usually moves
@@ -201,7 +203,7 @@
 {% endif %}
 
 <section class="card closing" style="margin-top:var(--s4)">
-  <p class="lead">Check any stock or coin, free.</p>
+  <p class="lead">Analyse any stock or coin, free.</p>
   <p class="prose">The same check that made every call on this page, on
     whatever you are looking at.</p>
   <div class="cta">

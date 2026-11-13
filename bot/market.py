@@ -656,6 +656,28 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     )
 
 
+def split_factor(bars, since: int) -> float:
+    """How many of today's shares one share held since `since` has become.
+
+    Yahoo rescales prices from before a split by its ratio, so a price written
+    down before one (a journal entry, an alert's level) is that many times
+    today's quote. 1.0 when no split in the fetched range came after `since`:
+    one older than the range cannot be seen here.
+    """
+    factor = 1.0
+    for when, ratio in getattr(bars, "splits", None) or ():
+        if int(when) > int(since) and ratio and float(ratio) > 0:
+            factor *= float(ratio)
+    return factor
+
+
+def split_words(factor: float) -> str:
+    """A split's ratio as people say it: 10-for-1, 3-for-2, 1-for-10."""
+    from fractions import Fraction
+    ratio = Fraction(factor).limit_denominator(1000)
+    return "%d-for-%d" % (ratio.numerator, ratio.denominator)
+
+
 def _splits(res: dict) -> List[Tuple[int, float]]:
     """The splits Yahoo lists with a chart, as (when, new over old), oldest first."""
     out = []

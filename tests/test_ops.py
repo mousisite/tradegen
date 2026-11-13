@@ -83,6 +83,17 @@ check("one bar per year", bars.count("<rect") == 4, bars.count("<rect"))
 check("each bar names its value", bars.count("<title>") == 4)
 check("the first and last year are labelled", "2020" in bars and "2023" in bars)
 
+# The operator's analyses-per-day chart: days as epoch seconds, counts.
+import time  # noqa: E402
+days = charts.bar_chart([1794355200, 1794441600, 1794528000], [3.0, 12.0, 7.0],
+                        title="Analyses per day",
+                        label=lambda ts: time.strftime("%d %b", time.gmtime(ts)).lstrip("0"),
+                        fmt=lambda v: "%d" % round(v))
+check("a chart of days names them as dates, not seconds",
+      "1794355200" not in days and ">%s</text>" % time.strftime(
+          "%d %b", time.gmtime(1794355200)).lstrip("0") in days, days[:200])
+check("and says counts as counts, not percents", "%" not in days and ": 12</title>" in days)
+
 negative = charts.bar_chart([2020, 2021], [-50.0, 80.0])
 check("a loss year is drawn in the loss colour", "var(--loss)" in negative)
 check("one year alone draws nothing", charts.bar_chart([2020], [10.0]) == "")

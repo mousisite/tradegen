@@ -389,6 +389,32 @@ try:
 finally:
     web.cached_analysis = _real[3]
 
+
+def turned_away(*_a, **_k):
+    raise web.market_mod.DataThrottled("The market data source limits how often "
+                                       "this site may ask for prices.", 90)
+
+
+# A rate limit at the source was a 404 that told people their ticker might not
+# exist. It is a wait, and says how long: a 503 with Retry-After.
+web.cached_analysis = turned_away
+try:
+    for url in ("/analyse?symbol=AAPL&interval=1d", "/research?symbol=AAPL&interval=1d"):
+        r = c.get(url)
+        body = r.data.decode("utf-8", "replace")
+        check("a rate limit on %s is a 503 that says when to come back" % url.split("?")[0],
+              r.status_code == 503 and r.headers.get("Retry-After") == "90"
+              and "limits how often" in body, (r.status_code, r.headers.get("Retry-After")))
+        check("and gives no advice about tickers that do not exist",
+              "ticker does not exist" not in body)
+    r = c.get("/api/analyse?symbol=AAPL")
+    check("the API says the same in JSON",
+          r.status_code == 503 and r.headers.get("Retry-After") == "90"
+          and (r.get_json() or {}).get("retry_after") == 90,
+          (r.status_code, r.data[:120]))
+finally:
+    web.cached_analysis = _real[3]
+
 r = c.post("/trades/take", data={"run_id": "999999"},
            headers={"Referer": "http://localhost/analyse?symbol=FAKE&interval=1d"})
 body = r.data.decode("utf-8", "replace")

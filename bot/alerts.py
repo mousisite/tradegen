@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from . import indicators as ind
-from .market import DataError, fetch_bars, format_price
+from .market import DataError, fetch_bars, format_price, split_factor, split_words
 
 KINDS: Dict[str, Dict] = {
     "price_above": {"label": "Price rises above", "needs_threshold": True,
@@ -479,6 +479,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             db.alert_failed(conn, int(row["id"]), "No price: %s" % failed.get(
                 key, "the data source did not answer"))
             continue
+        row = _after_splits(conn, row, bars)
         is_call = row["kind"] in CALL_KINDS
         call = calls.get(key) if is_call else None
         if is_call and call is None:
@@ -518,6 +519,48 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             "when": int(time.time())}
 
 
+def _after_splits(conn, row, bars):
+    """A price alert set before a split, with its level moved into today's shares.
+
+    Yahoo rescales the history for a split, so a "falls below 900" set before
+    a ten-for-one fired at once at 101, and a "rises above 1,100" could never
+    fire. The level is divided by the split once: the split's time is kept on
+    the alert so it is never applied twice, and the owner is told in the
+    alert history. Any other kind of alert is in percent or points and needs
+    nothing.
+    """
+    from . import database as db
+
+    if row["kind"] not in ("price_above", "price_below") or not row["threshold"]:
+        return row
+    try:
+        done = int(row["split_ts"] or 0)
+    except (KeyError, IndexError):
+        done = 0
+    since = max(int(row["created_ts"] or 0), done)
+    later = [(int(when), float(ratio)) for when, ratio in getattr(bars, "splits", None) or ()
+             if int(when) > since and ratio and float(ratio) > 0]
+    if not later:
+        return row
+    factor = 1.0
+    for _when, ratio in later:
+        factor *= ratio
+    old = float(row["threshold"])
+    new = old / factor
+    if db.alert_split(conn, int(row["id"]), old, new, max(w for w, _r in later)):
+        owner = _owner(row)
+        if owner is not None:
+            db.event_add(conn, owner, "split", row["symbol"],
+                         "%s split %s. Your alert's level moved from %s to %s, "
+                         "the same price in today's shares."
+                         % (row["symbol"], split_words(factor), format_price(old),
+                            format_price(new)), new, as_of(bars),
+                         alert_id=int(row["id"]))
+    # Moved here or by a check running alongside: read it as it is now.
+    fresh = conn.execute("SELECT * FROM alerts WHERE id=?", (int(row["id"]),)).fetchone()
+    return fresh if fresh is not None else row
+
+
 def check_stops(conn, user=None) -> Dict:
     """Tell the owner, once, when an open journal position crosses its stop.
 
@@ -549,12 +592,20 @@ def check_stops(conn, user=None) -> Dict:
         bars = data.get(row["symbol"])
         if bars is None:
             continue
-        price, stop, side = float(bars.last_price), float(row["stop"]), int(row["direction"])
+        # The stop is in the shares of the day it opened; after a split the
+        # quote is in today's, and read as is a long looked far past its stop.
+        split = split_factor(bars, int(row["ts_opened"]))
+        quote = float(bars.last_price)
+        price, stop, side = quote * split, float(row["stop"]), int(row["direction"])
         if (price - stop) * side > 0:
             continue
+        said = format_price(price)
+        if split != 1.0:
+            said = ("%s (%s in the shares you opened with, after a %s split)"
+                    % (format_price(quote), format_price(price), split_words(split)))
         message = ("%s is at %s, past the stop of %s on your %s position. "
                    "The journal does not close it for you: close it, or set a "
-                   "new stop on purpose." % (row["symbol"], format_price(price),
+                   "new stop on purpose." % (row["symbol"], said,
                                              format_price(stop),
                                              "long" if side > 0 else "short"))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",

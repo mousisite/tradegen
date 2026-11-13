@@ -68,14 +68,16 @@
   <div class="sechead"><h2>Which strategies worked on {{ short(symbol) }}</h2>
     <a class="tail" href="{{ url_for('backtests') }}">all strategies &rarr;</a></div>
   <p class="prose">Each one back-tested on {{ short(symbol) }}'s own daily
-    prices, after trading costs.</p>
+    prices, after trading costs. The &plusmn; is each result's margin of error:
+    a result inside it cannot be told apart from luck.</p>
   {% for title, part in [("Did best", tested[:3]), ("Did worst", tested[-3:]|reverse)] %}
     <span class="eyebrow">{{ title }}</span>
     <ul class="list">
       {% for t in part %}
         <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:
           worked {{ t.wins }} of {{ t.n }} times, kept
-          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade</li>
+          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
+          <span class="faint">&plusmn;&thinsp;{{ '%.2f'|format(2 * t.se) }}R{% if t.verdict == 0 %}, within its margin{% endif %}</span>{% endif %}</li>
       {% endfor %}
     </ul>
   {% endfor %}

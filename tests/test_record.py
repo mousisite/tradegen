@@ -470,6 +470,82 @@ try:
 finally:
     conn.close()
 
+# ---------------------------------------------------------------------------
+head("A COIN DAY THE SOURCE LEFT BLANK")
+# ---------------------------------------------------------------------------
+# market.py rebuilds a blank coin day between two known ones: its open and
+# close are exact, its range is only what those two span. A stop or target
+# the real day touched can be missing from the estimate.
+conn = db.connect(DB)
+try:
+    today = int(time.time()) // DAY * DAY
+    stamps = [today - (29 - k) * DAY for k in range(30)]
+    flat = [100.0] * 30
+
+    def coin_bars(closes, blank):
+        out = bars_at(stamps, closes, swing=0.5, opens=closes, gmt=0)
+        out.rebuilt = [stamps[k] for k in blank]
+        return out
+
+    # A call 11 days ago: its ten days run to yesterday, and the day before
+    # yesterday is blank. The flat prices touch neither level.
+    public.record_call(conn, call("AAA-USD", "BUY", 100.0, 2.0, stamps[18] + 3600,
+                                  price_day=1, market_open=True))
+    waited = public.settle_calls(conn, "AAA-USD", coin_bars(flat, [27]))
+    check("a call whose window holds a blank day from this week waits for the source",
+          waited == 0 and row(conn, "AAA-USD", "outcome")[0] is None, waited)
+    check("and is scored once the source fills the day in",
+          public.settle_calls(conn, "AAA-USD", coin_bars(flat, [])) == 1
+          and row(conn, "AAA-USD", "outcome", "how", "excluded")[:]
+          == ("flat", "flat", None),
+          row(conn, "AAA-USD", "outcome", "how", "excluded")[:])
+
+    # A stop touched before the blank day is a fact, whatever the blank holds.
+    falls = list(flat)
+    falls[20] = 90.0
+    public.record_call(conn, call("BBB-USD", "BUY", 100.0, 2.0, stamps[18] + 3600,
+                                  price_day=1, market_open=True))
+    check("a stop touched before the blank day is scored at once",
+          public.settle_calls(conn, "BBB-USD", coin_bars(falls, [27])) == 1
+          and row(conn, "BBB-USD", "outcome", "how", "excluded")[:]
+          == ("wrong", "stop", None),
+          row(conn, "BBB-USD", "outcome", "how", "excluded")[:])
+
+    # A blank day the source never filled: scored on the estimate and kept
+    # out of the counts, with the reason on the page.
+    public.record_call(conn, call("CCC-USD", "AVOID", 100.0, 2.0, stamps[12] + 3600,
+                                  price_day=1, market_open=True))
+    check("a blank day older than the wait is scored but does not count",
+          public.settle_calls(conn, "CCC-USD", coin_bars(flat, [16])) == 1
+          and row(conn, "CCC-USD", "outcome")[0] is not None
+          and "no prices for" in (row(conn, "CCC-USD", "excluded")[0] or ""),
+          row(conn, "CCC-USD", "outcome", "excluded")[:])
+
+    # The call itself waits while the newest finished day is blank.
+    check("the newest finished day blank is noticed",
+          public._blank_yesterday(coin_bars(flat, [28]))
+          and not public._blank_yesterday(coin_bars(flat, [20]))
+          and not public._blank_yesterday(coin_bars(flat, [])))
+    real_due = public.due
+    public.due = lambda conn, now=None: ["DDD-USD"]
+    snap = call("DDD-USD", "BUY", 100.0, 2.0, int(time.time()), price_day=2,
+                market_open=True)
+    try:
+        public.refresh(conn, lambda sym: dict(snap), pause=0,
+                       bars=lambda sym: coin_bars(flat, [28]))
+        skipped = conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='DDD-USD'"
+                               ).fetchone()[0]
+        public.refresh(conn, lambda sym: dict(snap), pause=0,
+                       bars=lambda sym: coin_bars(flat, []))
+        written = conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='DDD-USD'"
+                               ).fetchone()[0]
+    finally:
+        public.due = real_due
+    check("a check while yesterday is blank writes no call, and the next one does",
+          (skipped, written) == (0, 1), (skipped, written))
+finally:
+    conn.close()
+
 print()
 print("%d failure(s)" % len(fails))
 print("RECORD OK" if not fails else "FAILURES: %s" % fails)

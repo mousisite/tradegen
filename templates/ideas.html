@@ -143,7 +143,7 @@
           <th>Instrument</th><th>Call</th><th class="r">Price</th>
           <th class="r">Buy at</th><th class="r">Get out at</th>
           <th class="r">Gap risk</th>
-          <th class="r">Worked before</th><th></th>
+          <th class="r">Worked before</th><th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for r in result.passed %}
@@ -220,7 +220,7 @@
   <div class="card pad0">
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Instrument</th><th>Why it was left out</th><th></th></tr></thead>
+        <thead><tr><th>Instrument</th><th>Why it was left out</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for r in result.dropped %}
           <tr>
@@ -255,7 +255,7 @@
       <table>
         <thead><tr>
           <th>Instrument</th><th class="r">Price</th>
-          <th class="r">Worked before</th><th>Why not today</th><th></th>
+          <th class="r">Worked before</th><th>Why not today</th><th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for r in result.watch %}

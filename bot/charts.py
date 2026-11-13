@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 def _nice_step(span: float, target_ticks: int = 4) -> float:
@@ -300,12 +300,19 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
 
 def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
               width: int = 340, height: int = 170,
-              title: str = "", money: bool = True) -> str:
+              title: str = "", money: bool = True,
+              label: Optional[Callable[[int], str]] = None,
+              fmt: Optional[Callable[[float], str]] = None) -> str:
     """One filed line item across the years, as bars.
 
     Bars rather than a line because these are separate annual measurements, not
     a continuous series, and a line between two audited figures implies values
     in between that were never reported.
+
+    label names each bar's key (a year by default) and fmt says each value
+    (money, or a fraction as a percent with money=False). The operator's
+    analyses-per-day chart passes both: its keys are days, given as epoch
+    seconds, and its values are counts.
     """
     pairs = [(int(y), float(v)) for y, v in zip(years, values)
              if v is not None and math.isfinite(float(v))]
@@ -330,7 +337,10 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
     slot = plot_w / len(pairs)
     bar_w = max(6.0, slot * 0.62)
     zero_y = y_at(0.0)
-    fmt = _money if money else (lambda v: "%.1f%%" % (v * 100))
+    if fmt is None:
+        fmt = _money if money else (lambda v: "%.1f%%" % (v * 100))
+    if label is None:
+        label = str
 
     parts = ['<svg class="chart" viewBox="0 0 %d %d" role="img" '
              'preserveAspectRatio="none" aria-label="%s">'
@@ -350,13 +360,13 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
         bar_h = abs(y_at(amount) - zero_y)
         colour = "var(--accent)" if amount >= 0 else "var(--loss)"
         parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
-                     'rx="2" fill="%s"><title>%d: %s</title></rect>'
-                     % (x, y, bar_w, max(bar_h, 1.0), colour, year,
-                        _escape(fmt(amount))))
+                     'rx="2" fill="%s"><title>%s: %s</title></rect>'
+                     % (x, y, bar_w, max(bar_h, 1.0), colour,
+                        _escape(label(year)), _escape(fmt(amount))))
         if index == 0 or index == len(pairs) - 1:
             parts.append('<text x="%.1f" y="%d" text-anchor="middle" '
-                         'class="clab">%d</text>'
-                         % (x + bar_w / 2, height - 6, year))
+                         'class="clab">%s</text>'
+                         % (x + bar_w / 2, height - 6, _escape(label(year))))
 
     parts.append("</svg>")
     return "".join(parts)

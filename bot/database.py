@@ -18,6 +18,7 @@ bars and manufacture confidence that was never earned.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -318,8 +319,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # at the last look ("met" or "clear"), so one that keeps watching
         # fires when it becomes true rather than on every check.
         # last_error: why the last check of it failed.
+        # split_ts: the latest share split a price alert's level has been
+        # moved for, so a split is applied to it once.
         "alerts": [("state", "TEXT"), ("last_error", "TEXT"),
-                   ("last_error_ts", "INTEGER")],
+                   ("last_error_ts", "INTEGER"), ("split_ts", "INTEGER")],
         # When the background check last told the owner this position had
         # crossed its stop, so it is said once, not every five minutes.
         "trades": [("breach_noticed", "INTEGER")],
@@ -344,10 +347,51 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     # Added by someone else first: the outcome that was wanted.
                     if "duplicate column name" not in str(exc).lower():
                         raise
+        _move_coin_alerts(conn)
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
+
+
+# Coin ids that alerts were saved under before market.normalise_symbol knew
+# Yahoo's own (November 2026), and the id each coin has there. ARB-USD and
+# XBT-USD are other coins at Yahoo (ARbit and XBIT); the rest hold no prices,
+# so alerts on them could never be checked. A fixed list rather than one read
+# from market.py, so this one-off change is a record of exactly what it does;
+# test_market.py checks that the two agree.
+COIN_IDS_MOVED = {
+    "ARB-USD": "ARB11841-USD", "XBT-USD": "BTC-USD", "SUI-USD": "SUI20947-USD",
+    "UNI-USD": "UNI7083-USD", "APT-USD": "APT21794-USD",
+    "PEPE-USD": "PEPE24478-USD", "MATIC-USD": "POL28321-USD",
+    "TON-USD": "GRAM-USD",
+}
+
+
+def _move_coin_alerts(conn: sqlite3.Connection) -> List[tuple]:
+    """Point alerts saved under an old coin id at the coin's id. Idempotent.
+
+    Each alert moved is paused and its remembered state cleared, and the
+    alerts page says why: its level may have been set while the site showed
+    another coin's price, so its owner checks it and resumes it. Nothing else
+    about it changes, every move is logged, and once moved there is nothing
+    left for a second run to find. Returns (id, old, new) for each move.
+    """
+    moved = []
+    marks = ",".join("?" * len(COIN_IDS_MOVED))
+    for row in conn.execute("SELECT id, symbol FROM alerts WHERE symbol IN (%s)"
+                            % marks, list(COIN_IDS_MOVED)).fetchall():
+        old, new = row[1], COIN_IDS_MOVED[row[1]]
+        why = ("Moved from %s, which at Yahoo is another coin or no coin, to %s, "
+               "Yahoo's id for the coin you named. Paused so you can check its "
+               "level, then resume it." % (old, new))
+        conn.execute("UPDATE alerts SET symbol=?, active=0, state=NULL, "
+                     "last_error=?, last_error_ts=? WHERE id=? AND symbol=?",
+                     (new, why, int(time.time()), row[0], old))
+        logging.getLogger(__name__).warning(
+            "alert %d moved from %s to %s and paused", row[0], old, new)
+        moved.append((row[0], old, new))
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +923,20 @@ def alert_failed(conn: sqlite3.Connection, alert_id: int, error: str) -> None:
                  "WHERE id=?", (int(time.time()), error[:200], int(time.time()),
                                 alert_id))
     conn.commit()
+
+
+def alert_split(conn: sqlite3.Connection, alert_id: int, old: float, new: float,
+                split_ts: int) -> bool:
+    """Move a price alert's level for a share split. True if this call moved it.
+
+    Only from the level read and only for a split newer than the last one
+    applied, so two checks running at once cannot divide it twice.
+    """
+    cur = conn.execute("UPDATE alerts SET threshold=?, split_ts=? WHERE id=? "
+                       "AND threshold=? AND (split_ts IS NULL OR split_ts < ?)",
+                       (new, int(split_ts), alert_id, old, int(split_ts)))
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def alert_set_active(conn: sqlite3.Connection, alert_id: int, active: bool,

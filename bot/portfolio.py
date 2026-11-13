@@ -19,7 +19,7 @@ import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
-from .market import DataError, fetch_bars
+from .market import DataError, fetch_bars, split_factor, split_words
 
 
 @dataclass
@@ -49,6 +49,8 @@ class Position:
     status: str = "open"
     beta: Optional[float] = None
     volatility: Optional[float] = None
+    # Shares today per share the day it opened: 10.0 after a ten-for-one.
+    split: float = 1.0
 
     @property
     def risk_per_unit(self) -> float:
@@ -164,6 +166,12 @@ def build(rows, account: float, with_correlation: bool = True,
     ]
 
     _enrich(positions, view)
+    for p in positions:
+        if p.split != 1.0:
+            view.observations.append(
+                "%s split %s since it was opened. Its prices here are in the "
+                "shares you opened with: today's quote times %g."
+                % (p.symbol, split_words(p.split), p.split))
 
     costs = cost_bps or {}
     for p in positions:
@@ -224,9 +232,17 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
     def grab(p: Position):
         try:
             bars = fetch_bars(p.symbol, "1d")
-            p.price = bars.last_price
+            # The journal's prices are in the shares of the day it opened.
+            # After a split Yahoo quotes today's, ten times fewer dollars a
+            # share after a ten-for-one: read as is, a long looked 90% down and
+            # past its stop. The quote is turned back into those shares.
+            p.split = split_factor(bars, p.opened)
+            p.price = bars.last_price * p.split
             p.asset_class = bars.asset_class
-            p.touched_at, p.touched = stop_touched(bars, p.opened, p.stop, p.direction)
+            p.touched_at, p.touched = stop_touched(bars, p.opened, p.stop / p.split,
+                                                   p.direction)
+            if p.touched is not None:
+                p.touched *= p.split
         except (DataError, Exception):
             view.failed.append(p.symbol)
             return

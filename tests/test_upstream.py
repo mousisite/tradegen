@@ -539,6 +539,46 @@ for t in threads:
 check("a waiter that gives up early does refetch, which is why wait matters",
       len(impatient) == 2, len(impatient))
 
+print()
+print("=" * 72)
+print("THE NEWS SEARCH SHARES YAHOO'S DOOR")
+print("=" * 72)
+# Yahoo's news search went round the breaker: a refusal there was not told to
+# it, and it kept asking while the price requests stood back.
+from types import SimpleNamespace  # noqa: E402
+from bot import sentiment  # noqa: E402
+
+real_get = sentiment.requests.get
+asked = []
+
+
+def fake_get(url, params=None, headers=None, timeout=None):
+    asked.append(url)
+    if url == sentiment._YAHOO_SEARCH:
+        return SimpleNamespace(status_code=429, headers={"Retry-After": "120"},
+                               content=b"", json=lambda: {})
+    return SimpleNamespace(status_code=404, headers={}, content=b"", json=lambda: {})
+
+
+sentiment.requests.get = fake_get
+try:
+    upstream.reset()
+    for _ in range(3):
+        sentiment.gather_news("AAPL", "Apple")
+    try:
+        upstream.check(sentiment._YAHOO_HOST)
+        closed = False
+    except upstream.Throttled:
+        closed = True
+    check("refusals on the news search close the door for Yahoo's prices too", closed)
+    del asked[:]
+    sentiment.gather_news("AAPL", "Apple")
+    check("and while it is closed the news search asks nothing",
+          sentiment._YAHOO_SEARCH not in asked, asked)
+finally:
+    sentiment.requests.get = real_get
+    upstream.reset()
+
 print("UPSTREAM OK" if not fails else "FAILURES: %s" % fails)
 
 import sys as _exit_sys

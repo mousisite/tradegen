@@ -134,8 +134,11 @@ def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
     """
     key = "yahoo|%s|%s" % (url, sorted((params or {}).items()))
     try:
+        # The wait outlasts the fetch at its slowest (three tries of fifteen
+        # seconds and a handshake), so callers asking the same thing wait
+        # for this answer instead of each asking again.
         return upstream.cached(key, lambda: _get_once(url, params, tries),
-                               host=_HOST)
+                               host=_HOST, wait=60.0)
     except upstream.Throttled as exc:
         raise YahooError(str(exc))
 
@@ -148,7 +151,10 @@ def _get_once(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
         query = dict(params or {})
         query["crumb"] = used
         try:
-            r = session.get(url, params=query, timeout=25)
+            # Five seconds to connect, ten to answer: it answers in well
+            # under one when it answers at all, and 25 a try let three tries
+            # outlast the time other callers wait for this one.
+            r = session.get(url, params=query, timeout=(5, 10))
         except requests.RequestException as exc:
             last = str(exc)
             time.sleep(0.5 * (attempt + 1))

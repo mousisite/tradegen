@@ -248,6 +248,43 @@ check("a worst-day gap from a price resting at the stop",
       close(gap["gap_price"], 95.0 * 0.9) and close(gap["gap_loss"], (100 - 85.5) * 10), gap)
 
 print()
+print("=" * 72)
+print("A POSITION OPENED BEFORE A TEN-FOR-ONE SPLIT")
+print("=" * 72)
+# Opened at 1,000 a share; the stock split ten for one; Yahoo now quotes 101
+# and has rescaled the history. Read as is, the long was 90% down and past
+# its stop.
+split_at = 1_700_000_000
+opened = split_at - 30 * 86400
+stamps = [opened + k * 86400 for k in range(1, 40)]
+
+
+def split_quote(symbol, interval="1d", lookback=None):
+    return _NS(last_price=101.0, asset_class="equity", timestamp=stamps,
+               low=[99.0] * len(stamps), high=[102.0] * len(stamps),
+               splits=[(split_at, 10.0)])
+
+
+def offline(*_a, **_k):
+    raise RuntimeError("offline")
+
+
+real = (P.fetch_bars, P.fund.load, P.risk_mod.profile)
+P.fetch_bars, P.fund.load, P.risk_mod.profile = split_quote, offline, offline
+try:
+    v = P.build([{"id": 9, "symbol": "SPL", "direction": 1, "quantity": 2,
+                  "entry": 1000, "stop": 950, "target1": 1200, "ts_opened": opened}],
+                account=10000, with_correlation=False)
+finally:
+    P.fetch_bars, P.fund.load, P.risk_mod.profile = real
+spl = v.positions[0]
+check("it is priced in the shares it was opened with", close(spl.price, 1010.0), spl.price)
+check("so it is not past its stop", not spl.breached and not v.breached)
+check("its open profit is what it is", close(spl.open_pnl, 20.0), spl.open_pnl)
+check("and the page says why its price is not today's quote",
+      any("split 10-for-1" in o for o in v.observations), v.observations)
+
+print()
 print("%d failure(s)" % len(fails))
 print("PORTFOLIO RISK OK" if not fails else "FAILURES: %s" % fails)
 _sys.exit(1 if fails else 0)

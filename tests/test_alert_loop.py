@@ -193,6 +193,65 @@ try:
 
     print()
     print("=" * 72)
+    print("A TEN-FOR-ONE SPLIT")
+    print("=" * 72)
+    # Before it, about 1,000 a share; after, about 100. Yahoo rescales the
+    # whole history, so every price stored before the split is ten times
+    # today's quote.
+    conn = db.connect(DB)
+    split_at = LAST - 3 * DAY
+
+    def split_bars(interval="1d"):
+        b = daily([100.0] * 30, live=101.0, interval=interval)
+        b.splits = [(split_at, 10.0)]
+        return b
+
+    SERIES["SPL"] = split_bars
+    before = split_at - 30 * DAY
+    below = db.alert_add(conn, "SPL", "price_below", threshold=900.0, user=alice.id)
+    above = db.alert_add(conn, "SPL", "price_above", threshold=1100.0, user=alice.id)
+    conn.execute("UPDATE alerts SET created_ts=? WHERE id IN (?, ?)", (before, below, above))
+    conn.commit()
+    out = alerts.check(conn, call_of=call_of)
+    check("a 'falls below 900' set before a ten-for-one does not fire at 101",
+          not any(f.alert_id in (below, above) for f in out["fired"]),
+          [f.message for f in out["fired"]])
+    level = {r["id"]: r["threshold"] for r in
+             conn.execute("SELECT id, threshold FROM alerts WHERE id IN (?, ?)", (below, above))}
+    check("both levels are moved into today's shares",
+          abs(level[below] - 90.0) < 1e-9 and abs(level[above] - 110.0) < 1e-9, level)
+    check("and the owner is told in the history",
+          any(e["kind"] == "split" and e["alert_id"] == below and "10-for-1" in e["message"]
+              for e in db.event_list(conn, alice.id, limit=50)))
+    alerts.check(conn, call_of=call_of)
+    check("a second check does not move them again",
+          conn.execute("SELECT threshold FROM alerts WHERE id=?", (below,)).fetchone()[0]
+          == level[below])
+    after = db.alert_add(conn, "SPL", "price_below", threshold=95.0, user=alice.id)
+    alerts.check(conn, call_of=call_of)
+    check("an alert set after the split is left as set",
+          conn.execute("SELECT threshold FROM alerts WHERE id=?", (after,)).fetchone()[0] == 95.0)
+    held = db.open_trade(conn, "SPL", "1d", 1, entry=1000.0, stop=950.0, target1=1200.0,
+                         quantity=2, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (before, held))
+    conn.commit()
+    out = alerts.check_stops(conn)
+    check("a long opened at 1,000 before the split is not past its stop at 101",
+          not any(f.trade_id == held for f in out["fired"]),
+          [f.message for f in out["fired"]])
+    real_fetch = web.market_mod.fetch_bars
+    web.market_mod.fetch_bars = bars_for
+    try:
+        mark = web._mark_one(conn.execute("SELECT * FROM trades WHERE id=?", (held,)).fetchone())
+    finally:
+        web.market_mod.fetch_bars = real_fetch
+    check("the journal marks it in the shares it was opened with",
+          abs(mark["price"] - 1010.0) < 1e-9 and abs(mark["r"] - 0.2) < 1e-9
+          and mark["status"] == "open" and mark["split_words"] == "10-for-1", mark)
+    conn.close()
+
+    print()
+    print("=" * 72)
     print("EMAIL")
     print("=" * 72)
     conn = db.connect(DB)

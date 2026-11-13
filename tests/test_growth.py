@@ -450,7 +450,7 @@ try:
     check("the Monitor page has one name", "<b>Monitor</b>" in page and "<b>Alerts</b>" not in page)
     check("and nothing promises to tell anyone anything", "get told" not in page)
     check("how it is tested, and how its calls turned out, are one tap away",
-          'href="/backtests">how the strategies are tested' in page
+          'href="/backtests#how-we-tested">how the strategies are tested' in page
           and 'href="/record">how past calls turned out' in page)
     check("every page has a skip link and one main landmark",
           page.count('<main id="main">') == 1 and 'href="#main">Skip to content' in page)

@@ -30,6 +30,8 @@ from typing import List, Optional
 import feedparser
 import requests
 
+from . import upstream
+
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
 
@@ -200,6 +202,10 @@ def lexicon_score(text: str) -> float:
     return max(-1.0, min(1.0, avg / 1.6))
 
 
+# The breaker's name for Yahoo, the same one bot/market.py and bot/yahoo.py use.
+_YAHOO_HOST = "Yahoo Finance"
+
+
 def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     """Pull recent headlines from Google News and Yahoo Finance."""
     items: List[Item] = []
@@ -222,9 +228,15 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
         pass
 
     try:
+        # Yahoo's news search shares the rate limit with its prices. It asks
+        # nothing while the source is refusing, and a refusal here is told to
+        # the shared breaker so the price requests stand back too.
+        upstream.check(_YAHOO_HOST)
         r = requests.get(_YAHOO_SEARCH, params={"q": base, "newsCount": 15, "quotesCount": 0},
                          headers=_HEADERS, timeout=15)
-        if r.status_code == 200:
+        if upstream.is_throttle(r.status_code):
+            upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r))
+        elif r.status_code == 200:
             for n in r.json().get("news", []):
                 pub = n.get("providerPublishTime")
                 age = (time.time() - pub) / 3600.0 if pub else 48.0

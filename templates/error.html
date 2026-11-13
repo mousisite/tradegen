@@ -5,7 +5,9 @@
 {# Every failure lands here, so the advice about tickers is kept for the two
    pages where one was typed in and may not exist. A share, a saved thesis or
    a paper trade starts from an analysis that already worked. #}
-{% set about_ticker = symbol and request.endpoint in ('analyse', 'research') %}
+{# A rate limit at the source says so in the message, and the ticker was fine. #}
+{% set about_ticker = symbol and not throttled
+     and request.endpoint in ('analyse', 'research') %}
 {# Back to the page they came from, when that is a page on this site. #}
 {% set back = request.referrer if request.referrer
      and request.referrer.startswith(request.host_url)

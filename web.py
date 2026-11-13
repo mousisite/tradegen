@@ -502,6 +502,24 @@ def _too_often(what: str):
                                    "while, then try again." % what), 429
 
 
+def _no_prices(exc: DataError, symbol: str = "", status: int = 404,
+               message: str = ""):
+    """The page for prices that could not be had.
+
+    When the source turned the request away for now (a rate limit, or an
+    outage), that is a 503 with Retry-After, and the page leaves out the advice
+    about tickers that do not exist: the ticker was fine, and that advice sent
+    people hunting for a typo. Anything else keeps the status the caller gives.
+    """
+    if isinstance(exc, market_mod.DataThrottled):
+        page = app.make_response((render_template(
+            "error.html", message=str(exc), symbol=symbol, throttled=True), 503))
+        page.headers["Retry-After"] = str(exc.seconds)
+        return page
+    return render_template("error.html", message=message or str(exc),
+                           symbol=symbol), status
+
+
 def _locked(headline: str, detail: str, examples=True):
     """The page a visitor sees when they reach past what the example can do."""
     return render_template(
@@ -1029,7 +1047,7 @@ def analyse():
                                  record=not g.demo,
                                  ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
-        return render_template("error.html", message=str(exc), symbol=symbol), 404
+        return _no_prices(exc, symbol, 404)
     except Exception as exc:                        # keep the app usable
         return render_template("error.html", message=str(exc), symbol=symbol), 500
     _spend_view(symbol, interval)
@@ -1153,10 +1171,16 @@ def trades():
 
 
 def _mark_one(trade):
-    """Current price, open R and state for a single position."""
-    from bot.market import fetch_bars
+    """Current price, open R and state for a single position.
+
+    In the shares of the day it opened, as its entry, stop and target are.
+    After a split Yahoo quotes today's shares, so the quote is turned back,
+    and what it is today is said beside it.
+    """
+    from bot.market import fetch_bars, split_factor, split_words
     bars = fetch_bars(trade["symbol"], trade["interval"] or "1d")
-    price = bars.last_price
+    split = split_factor(bars, int(trade["ts_opened"]))
+    price = bars.last_price * split
     direction = int(trade["direction"])
     entry, stop = float(trade["entry"]), float(trade["stop"])
     risk = abs(entry - stop)
@@ -1166,14 +1190,15 @@ def _mark_one(trade):
     status = "open"
     # A stop that traded and recovered was still hit: the plan said get out.
     touched_at, _touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
-                                                      stop, direction)
+                                                      stop / split, direction)
     if ((price <= stop) if direction > 0 else (price >= stop)) or touched_at:
         status = "past stop"
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
         status = "past target"
     return {"price": price, "r": r_now, "status": status,
-            "as_of": alerts_mod.as_of(bars)}
+            "as_of": alerts_mod.as_of(bars), "quoted": bars.last_price,
+            "split_words": split_words(split) if split != 1.0 else ""}
 
 
 def _mark_to_market(open_trades):
@@ -1579,7 +1604,7 @@ def research():
                                    record=not g.demo,
                                    ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
-        return render_template("error.html", message=str(exc), symbol=symbol), 404
+        return _no_prices(exc, symbol, 404)
     _spend_view(symbol, interval)
 
     # Keyed like the analysis it is built from: the thesis and the reasoning
@@ -1669,7 +1694,7 @@ def save_thesis():
             t.falsifiers, t.all_sources,
             (request.form.get("note") or "")[:NOTE_LIMIT], user=uid())
     except DataError as exc:
-        return render_template("error.html", message=str(exc), symbol=symbol), 400
+        return _no_prices(exc, symbol, 400)
     except Exception:
         # The text of an unexpected error can carry file paths or SQL, which
         # are for the log, not the page.
@@ -1717,9 +1742,9 @@ def close_thesis():
         try:
             price = market_mod.fetch_bars(row["symbol"], "1d").last_price
         except DataError as exc:
-            return render_template("error.html", symbol=row["symbol"],
-                                   message="Could not price %s to close the "
-                                           "thesis: %s" % (row["symbol"], exc)), 502
+            return _no_prices(exc, row["symbol"], 502,
+                              "Could not price %s to close the thesis: %s"
+                              % (row["symbol"], exc))
 
         db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
     except (KeyError, ValueError) as exc:
@@ -2191,10 +2216,14 @@ def usage():
 
     trend = ""
     if len(data["daily"]) > 1:
+        # Days come as epoch seconds and runs as counts: said as dates and
+        # whole numbers, not as the years and percents of a filed figure.
         trend = charts_mod.bar_chart(
             [d["day"] for d in data["daily"]],
             [float(d["runs"]) for d in data["daily"]],
-            width=720, height=180, title="Analyses per day", money=False)
+            width=720, height=180, title="Analyses per day",
+            label=lambda ts: time.strftime("%d %b", time.gmtime(ts)).lstrip("0"),
+            fmt=lambda v: "%d" % round(v))
 
     # Where the database actually sits, because the answer decides whether a
     # deploy keeps everyone's journal or silently deletes it, and nothing else
@@ -2949,6 +2978,11 @@ def api_analyse():
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0")
     except DataError as exc:
+        if isinstance(exc, market_mod.DataThrottled):
+            answer = jsonify({"error": str(exc), "retry_after": exc.seconds})
+            answer.status_code = 503
+            answer.headers["Retry-After"] = str(exc.seconds)
+            return answer
         return jsonify({"error": str(exc)}), 404
     _spend_view(symbol, interval)
 
@@ -3125,7 +3159,7 @@ def share():
     try:
         result = cached_analysis(symbol, interval, _cfg(), record=False)
     except DataError as exc:
-        return render_template("error.html", message=str(exc), symbol=symbol), 404
+        return _no_prices(exc, symbol, 404)
     _spend_view(symbol, interval)
     snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))

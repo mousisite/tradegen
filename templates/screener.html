@@ -4,7 +4,7 @@
 {% block content %}
 
 <div class="pagehead">
-  <h1>Find something worth analysing</h1>
+  <h1>Screen companies by their numbers</h1>
   <p>Start from a ready-made screen, or set your own filters. Every result shows
     the numbers that got it through, so you can check rather than trust.</p>
 </div>
@@ -109,7 +109,7 @@
           <th class="r">Market cap</th><th class="r">P/E</th>
           {% if result.deep %}<th class="r">ROE</th><th class="r">Margin</th>
           <th class="r">Growth</th><th class="r">Quality</th>{% endif %}
-          <th class="r">Off high</th><th></th>
+          <th class="r">Off high</th><th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for c in result.passed %}

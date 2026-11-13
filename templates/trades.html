@@ -142,7 +142,9 @@
             <td class="r fig loss">{{ t['stop']|price }}</td>
             <td class="r fig gain">{{ t['target1']|price }}
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
-            <td class="r fig">{{ m.price|price if m.price else '—' }}</td>
+            <td class="r fig">{{ m.price|price if m.price else '—' }}
+              {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
+                today, after a {{ m.split_words }} split</div>{% endif %}</td>
             <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}">
               {{ m.r|signed if m.r is not none else '—' }}</td>
             <td>

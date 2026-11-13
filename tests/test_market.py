@@ -476,6 +476,44 @@ check("the listing-first tickers are all coin tickers",
 
 from bot import public  # noqa: E402
 
+# Alerts saved under the old rule kept the old ids: ARB-USD is ARbit at
+# Yahoo, and SUI-USD and the like hold nothing. A one-off change at start-up
+# moves them, from a fixed list that must say what the rule says now.
+from bot import database as db  # noqa: E402
+import tempfile  # noqa: E402
+
+check("the fixed list of moved coin ids agrees with the rule",
+      all(market.normalise_symbol(old) == new for old, new in db.COIN_IDS_MOVED.items()),
+      [(old, market.normalise_symbol(old)) for old in db.COIN_IDS_MOVED
+       if market.normalise_symbol(old) != db.COIN_IDS_MOVED[old]])
+spot = _os.path.join(tempfile.mkdtemp(prefix="stockbot-test-coins-"), "x.db")
+conn = db.connect(spot)
+for sym in ("ARB-USD", "SUI-USD", "BTC-USD", "SUI"):
+    conn.execute("INSERT INTO alerts (symbol, kind, threshold, created_ts, state, user_id) "
+                 "VALUES (?, 'price_above', 1.0, 1, 'met', 1)", (sym,))
+conn.commit()
+conn.close()
+db.migrate(spot)
+conn = db.connect(spot)
+rows = {r["id"]: r for r in conn.execute("SELECT * FROM alerts")}
+check("an alert on ARbit's id now watches Arbitrum, paused, with the reason",
+      rows[1]["symbol"] == "ARB11841-USD" and rows[1]["active"] == 0
+      and rows[1]["state"] is None and "Moved from ARB-USD" in rows[1]["last_error"],
+      dict(rows[1]))
+check("one on an id with no prices is moved the same way",
+      rows[2]["symbol"] == "SUI20947-USD" and rows[2]["active"] == 0)
+check("Bitcoin's alert and a stock's are left alone",
+      (rows[3]["symbol"], rows[3]["active"], rows[3]["state"]) == ("BTC-USD", 1, "met")
+      and (rows[4]["symbol"], rows[4]["active"]) == ("SUI", 1))
+conn.execute("UPDATE alerts SET active=1 WHERE id=1")
+conn.commit()
+conn.close()
+db.migrate(spot)
+conn = db.connect(spot)
+check("a second start finds nothing to move, and leaves a resumed alert on",
+      conn.execute("SELECT active FROM alerts WHERE id=1").fetchone()[0] == 1)
+conn.close()
+
 shown = [(public.short(s), s) for s, _ in public.POPULAR if s.endswith("-USD")]
 check("every coin on the public pages opens by the ticker those pages show it as",
       shown and all(market.normalise_symbol(label) == s for label, s in shown),

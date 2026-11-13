@@ -195,6 +195,10 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
     samples = int(plan.prob_samples or 0)
     worked = (int(round(plan.probability * samples))
               if plan.probability is not None and samples else 0)
+    # How many separate tests those examples are worth: ones a few days apart
+    # share most of their bars and mostly settle alike.
+    n_eff = getattr(getattr(result, "calibration", None), "effective_samples", None)
+    separate = int(round(n_eff)) if n_eff and samples and n_eff < samples - 0.5 else None
     # The page leads with the counts, so the plain explanation's own opening
     # sentence saying the same thing is dropped rather than read twice.
     sure = plain.get("sure", "")
@@ -208,7 +212,7 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
             "headline": plain.get("headline", ""),
             "sure": sure,
             "points": list(plain.get("points") or [])[:3],
-            "samples": samples, "worked": worked,
+            "samples": samples, "worked": worked, "separate": separate,
             "reliable": bool(plan.prob_reliable),
             "price": float(bars.last_price),
             "currency": getattr(bars, "currency", "") or "USD",
@@ -454,6 +458,12 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
     check after the close and, given a way to fetch the daily bars, marks
     any calls that cannot count and scores this symbol's earlier calls whose
     time has come.
+
+    A coin's call is not written while the day before it is one the source
+    left blank and market.py rebuilt (Bars.rebuilt): its range and volume
+    are estimates, and the call would read them. The next check writes it,
+    six hours on. Whether a call is skipped depends only on the data, never
+    on the price, so it cannot pick the calls that flatter the record.
     """
     checked, errors = 0, []
     for n, symbol in enumerate(due(conn, now)):
@@ -463,14 +473,26 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
             snap = analyse(symbol)
             save_verdict(conn, snap)
             checked += 1
-            record_call(conn, snap)
-            if bars is not None:
-                daily = bars(symbol)
+            daily = bars(symbol) if bars is not None else None
+            if daily is None or not _blank_yesterday(daily):
+                record_call(conn, snap)
+            if daily is not None:
                 mark_calls(conn, symbol, daily)
                 settle_calls(conn, symbol, daily)
         except Exception as exc:           # a delisted ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
     return {"checked": checked, "errors": errors}
+
+
+def _blank_yesterday(bars) -> bool:
+    """True when the newest finished day is one the source left blank.
+
+    Only a day between two known ones is ever rebuilt, so the newest bar is
+    never one, and the day before it is the newest finished day.
+    """
+    blank = getattr(bars, "rebuilt", None) or ()
+    stamps = getattr(bars, "timestamp", ())
+    return len(stamps) >= 2 and any(int(b) >= int(stamps[-2]) for b in blank)
 
 
 # --- the track record --------------------------------------------------------
@@ -496,6 +518,13 @@ MATURE_DAYS = 17
 # Instruments that are one test, not two: both hold the S&P 500, and a call
 # on one settles exactly as the call on the other does.
 SAME_AS = {"VOO": "SPY"}
+
+# A coin day the source left blank is rebuilt with its true open and close
+# but only an estimate of its range (see market.py). A call whose window
+# reaches one waits this long for the source to fill it in, usually an hour
+# or two. If it never does, the call is scored on the estimate and marked as
+# not counting, with the reason, like any other call that cannot count.
+BLANK_WAIT_DAYS = 3
 
 
 def _is_coin(symbol: str) -> bool:
@@ -710,18 +739,39 @@ def settle_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
                         "ORDER BY at", (symbol,)).fetchall()
     done = 0
     n = len(bars.timestamp)
+    blank = {int(b) for b in getattr(bars, "rebuilt", None) or ()}
+    now = time.time()
     for row in rows:
         # The bar the call fell inside is skipped: part of it was already over.
         start = next((k for k in range(n) if int(bars.timestamp[k]) > row["at"]), n)
         f = _split_factor(bars, row["at"])
-        how, exit_price = _walk(bars, start, row["price"] / f, row["stop"] / f,
-                                row["target"] / f, row["horizon"])
+        entry, stop, target = row["price"] / f, row["stop"] / f, row["target"] / f
+        how, exit_price = _walk(bars, start, entry, stop, target, row["horizon"])
         if how is None:
             continue
+        excluded = None
+        first_blank = next((k for k in range(start, min(start + row["horizon"], n))
+                            if int(bars.timestamp[k]) in blank), None)
+        if first_blank is not None:
+            # A stop or target touched before the blank day is certain. From
+            # it on, the estimated range can miss a touch the real one had.
+            sure = (_walk(bars, start, entry, stop, target, first_blank - start)
+                    if first_blank > start else (None, None))
+            if sure[0] in ("stop", "target"):
+                how, exit_price = sure
+            elif now - int(bars.timestamp[first_blank]) < BLANK_WAIT_DAYS * 86400:
+                continue
+            else:
+                excluded = ("The source has no prices for %s, a day inside its "
+                            "window, so its range there is an estimate and the "
+                            "result may be wrong." % _date(bars.timestamp[first_blank]))
         exit_price *= f
         conn.execute("UPDATE calls SET outcome=?, how=?, exit_price=?, settled=? "
                      "WHERE id=?", (judge(row["action"], how), how, exit_price,
-                                    int(time.time()), row["id"]))
+                                    int(now), row["id"]))
+        if excluded:
+            conn.execute("UPDATE calls SET excluded=? WHERE id=? AND excluded IS NULL",
+                         (excluded, row["id"]))
         done += 1
     conn.commit()
     return done
@@ -1032,8 +1082,12 @@ def _wrap(text: str, font, width: int, lines: int) -> List[str]:
 def counts_line(snap: Dict) -> str:
     if not snap.get("samples"):
         return "Too few past examples to count."
-    return ("Found this setup %d times before. It worked %d of them."
+    line = ("Found this setup %d times before. It worked %d of them."
             % (snap["samples"], snap["worked"]))
+    if snap.get("separate"):
+        line += (" Many overlap in time, so together they are worth about %d "
+                 "separate tests." % snap["separate"])
+    return line
 
 
 def render_card(snap: Dict) -> bytes:
