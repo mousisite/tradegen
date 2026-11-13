@@ -48,6 +48,7 @@ SUITES = [
     ("test_portfolio_risk.py", False, "open risk, breached stops, shorts, gaps and costs"),
     ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),
     ("test_trade_chart.py",  False, "the analysis page's candle chart and plan levels"),
+    ("test_method.py",       False, "odds per side, gap fills, overlap, the BUY bar, plain words"),
 ]
 
 TIMEOUT = 900
