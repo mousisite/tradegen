@@ -36,6 +36,10 @@ _FALLBACK = {"NVDA": 180.0, "AAPL": 230.0, "TSLA": 330.0, "MSFT": 500.0,
 
 _lock = threading.Lock()
 
+# How old the example's positions may get before it is refilled at today's
+# prices.
+RESEED_AFTER = 7 * 86400
+
 
 def _price(symbol: str) -> float:
     try:
@@ -131,9 +135,19 @@ def user(conn: sqlite3.Connection) -> accounts_mod.User:
             row = conn.execute("SELECT * FROM users WHERE email=?",
                                (EMAIL,)).fetchone()
         found = accounts_mod.get_user(conn, int(row["id"]))
-        has_data = conn.execute("SELECT 1 FROM trades WHERE user_id=? LIMIT 1",
-                                (found.id,)).fetchone()
-        if has_data is None:
+        newest = conn.execute("SELECT MAX(ts_opened) FROM trades WHERE user_id=?",
+                              (found.id,)).fetchone()[0]
+        import time
+        if newest is not None and time.time() - newest > RESEED_AFTER:
+            # Its positions were priced when it was filled. A few weeks on,
+            # the market has moved and an example book that sits past its
+            # stops reads as the app's advice going wrong, so it is refilled
+            # at today's prices. Only the example's own rows are touched.
+            for table in accounts_mod.OWNED_TABLES:
+                conn.execute("DELETE FROM %s WHERE user_id=?" % table, (found.id,))
+            conn.commit()
+            newest = None
+        if newest is None:
             _seed(conn, found.id)
         return found
 

@@ -506,6 +506,21 @@ try:
     check("and recorded no analyses for the example",
           conn.execute("SELECT COUNT(*) FROM runs WHERE user_id=?",
                        (demo_user.id,)).fetchone()[0] == 0)
+    # An example book priced weeks ago drifts past its stops. It is refilled
+    # at today's prices once a week, and only its own rows are touched.
+    _others = conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
+                           (demo_user.id,)).fetchone()[0]
+    conn.execute("UPDATE trades SET ts_opened=ts_opened-? WHERE user_id=?",
+                 (_demo.RESEED_AFTER + 86400, demo_user.id))
+    conn.commit()
+    _demo.user(conn)
+    _newest = conn.execute("SELECT MAX(ts_opened) FROM trades WHERE user_id=?",
+                           (demo_user.id,)).fetchone()[0]
+    check("a stale example account is refilled at today's prices",
+          _newest is not None and time.time() - _newest < 600)
+    check("and nobody else's trades are touched",
+          conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
+                       (demo_user.id,)).fetchone()[0] == _others)
     conn.close()
 
     # Each of these would make the server analyse or scan something it has
