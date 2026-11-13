@@ -483,6 +483,46 @@ for symbol in ("AAPL", "DOGE-USD"):
               'class="plainbox"' in body)
 
 print()
+print("=" * 72)
+print("RESEARCH IS KEPT PER SET OF SETTINGS")
+print("=" * 72)
+
+# The thesis and the reasoning quote the plan's own stop and target, so
+# research cached by ticker alone showed one person's plan to the next.
+from bot import config as _config
+
+_real_research = web.engine.research
+built = []
+
+
+def _counting(symbol, price, cfg, **kw):
+    built.append((cfg.get("stop_atr_multiple"), kw.get("with_options")))
+    if not hasattr(_counting, "found"):
+        _counting.found = _real_research(symbol, price, cfg, **kw)
+    return _counting.found
+
+
+_kept_cfg = _config.load(harness.CFG_PATH)
+web.engine.research = _counting
+web._RESEARCH_CACHE.clear()
+try:
+    c.get("/research?symbol=AAPL&interval=1d")
+    c.get("/research?symbol=AAPL&interval=1d")
+    check("opening it twice with the same settings builds it once", len(built) == 1,
+          built)
+    _wider = dict(_kept_cfg, stop_atr_multiple=_kept_cfg["stop_atr_multiple"] * 2)
+    _config.save(_wider, harness.CFG_PATH)
+    c.get("/research?symbol=AAPL&interval=1d")
+    check("other settings get research built from their own plan",
+          len(built) == 2 and built[-1][0] == _wider["stop_atr_multiple"], built)
+    c.get("/research?symbol=AAPL&interval=1d&options=0")
+    check("and asking without options is not handed the copy with them",
+          len(built) == 3 and built[-1][1] is False, built)
+finally:
+    web.engine.research = _real_research
+    _config.save(_kept_cfg, harness.CFG_PATH)
+
+print()
 print("%d failure(s)" % len(fails))
 print("OPS OK" if not fails else "FAILURES: %s" % fails)
 

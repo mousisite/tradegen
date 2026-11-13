@@ -65,6 +65,106 @@ r = c.post("/analyse/image",
            content_type="multipart/form-data")
 check("non-image is rejected", r.status_code == 400 and "could not be read" in
       r.data.decode("utf-8", "replace"), "status %d" % r.status_code)
+
+print("\n--- screenshot upload safety ---")
+import struct
+import threading
+import time
+import zlib
+from bot.vision import ChartRead
+
+
+def claimed_png(width, height):
+    """A file of a few bytes whose header claims a vast image."""
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    return io.BytesIO(b"\x89PNG\r\n\x1a\n"
+                      + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0))
+                      + chunk(b"IDAT", zlib.compress(b"\x00" * 64)) + chunk(b"IEND", b""))
+
+
+def upload(client, image, fmt="PNG"):
+    data = io.BytesIO()
+    image.save(data, format=fmt)
+    data.seek(0)
+    return client.post("/analyse/image", data={"chart": (data, "c." + fmt.lower())},
+                       content_type="multipart/form-data")
+
+
+received = []
+
+
+def fake_read(png):
+    shown = Image.open(png)
+    received.append((isinstance(png, str), shown.size))
+    red, _green, blue = shown.convert("RGB").getpixel((0, 0))
+    time.sleep(0.3)       # long enough for a second upload to land meanwhile
+    return ChartRead(symbol="REDCO" if red > blue else "BLUECO")
+
+
+real_read = web.read_chart
+web.read_chart = fake_read
+try:
+    for width, height, label in ((6000, 5000, "30 million"), (20000, 20000, "400 million")):
+        started = time.time()
+        r = c.post("/analyse/image", data={"chart": (claimed_png(width, height), "b.png")},
+                   content_type="multipart/form-data")
+        check("a file claiming %s pixels is refused before it is decoded" % label,
+              r.status_code == 413 and "too large" in r.data.decode("utf-8", "replace")
+              and time.time() - started < 3, "status %d" % r.status_code)
+    check("and it never reaches the vision model", not received)
+
+    r = upload(c, Image.new("RGB", (3000, 2000), (200, 30, 30)))
+    check("a large real screenshot is read", r.status_code == 302
+          and "symbol=REDCO" in r.headers.get("Location", ""), "status %d" % r.status_code)
+    check("from memory, not from a file on disk", received and not received[-1][0])
+    check("shrunk to what the vision model uses",
+          received and max(received[-1][1]) <= web.MAX_EDGE, str(received[-1:]))
+    r = upload(c, Image.new("P", (2400, 1200), 3), "GIF")
+    check("a palette image is read too", r.status_code == 302,
+          "status %d" % r.status_code)
+    for fmt in ("JPEG", "WEBP", "BMP"):
+        r = upload(c, Image.new("RGB", (640, 360), (200, 30, 30)), fmt)
+        check("a %s screenshot is read" % fmt, r.status_code == 302,
+              "status %d" % r.status_code)
+
+    # Every upload used to go through one shared file, so two at once could
+    # read, or delete, each other's picture.
+    landed = {}
+
+    def send(colour):
+        r = upload(web.app.test_client(), Image.new("RGB", (800, 400), colour))
+        landed[colour] = r.headers.get("Location", "")
+
+    first = threading.Thread(target=send, args=((220, 20, 20),))
+    second = threading.Thread(target=send, args=((20, 20, 220),))
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    first.join()
+    second.join()
+    check("two uploads at once are each read from their own picture",
+          "REDCO" in landed.get((220, 20, 20), "")
+          and "BLUECO" in landed.get((20, 20, 220), ""), str(landed))
+finally:
+    web.read_chart = real_read
+
+from bot import vision  # noqa: E402
+
+try:
+    vision._load_image_bytes(claimed_png(6000, 5000))
+    check("the vision reader refuses an oversized image on its own too", False)
+except vision.VisionError as exc:
+    check("the vision reader refuses an oversized image on its own too",
+          "too large" in str(exc), str(exc))
+shot = io.BytesIO()
+Image.new("RGB", (2000, 1000), (20, 20, 220)).save(shot, format="PNG")
+shot.seek(0)
+data, kind = vision._load_image_bytes(shot)
+check("and reads a picture held in memory, shrunk for the model",
+      kind == "image/png" and max(Image.open(io.BytesIO(data)).size) <= vision.MAX_EDGE)
+
 os.environ.pop("ANTHROPIC_API_KEY", None)
 if had_key:
     os.environ["ANTHROPIC_API_KEY"] = had_key
@@ -130,6 +230,20 @@ if tid:
 
 r = c.post("/trades/delete", data={"trade_id": 99999})
 check("deleting a missing trade is rejected", r.status_code == 400)
+
+# Every typed field is a ticker, a number or a short note. Half a megabyte a
+# field let a few hundred posts fill the data disk.
+r = c.post("/trades/open", data={"symbol": "AAPL", "direction": "long",
+                                 "entry": "200", "stop": "195", "notes": "x" * 30000})
+body = r.data.decode("utf-8", "replace")
+check("a padded note is refused", r.status_code == 413, "status %d" % r.status_code)
+check("with a message about text, not about an image",
+      "more text than this form takes" in body and "12 MB" not in body)
+conn = db.connect(DB)
+try:
+    check("and nothing is stored", len(db.list_trades(conn)) == 0)
+finally:
+    conn.close()
 
 print("\n--- settings round trip ---")
 r = c.post("/settings", data={"account_size": "5000", "risk_per_trade_pct": "2",

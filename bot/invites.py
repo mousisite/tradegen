@@ -6,8 +6,9 @@ asked for a card and nothing renews. Weeks stack: two friends, two weeks.
 
 The reward is paid when the friend's account is created through the link,
 so it could be farmed with throwaway accounts. Each of those needs its own
-Google account or inbox, and an inviter's reward stops after MAX_REWARDS, so
-the most that farming can win is a few free weeks.
+Google account or inbox, since aliases of one inbox (me+1@, m.e@ on Gmail)
+earn nothing, and an inviter's reward stops after MAX_REWARDS, so the most
+that farming can win is a few free weeks.
 """
 from __future__ import annotations
 
@@ -16,6 +17,8 @@ import secrets
 import sqlite3
 import time
 from typing import Optional
+
+from . import codes
 
 BONUS_DAYS = 7
 MAX_REWARDS = 10
@@ -62,19 +65,30 @@ def _add_week(conn: sqlite3.Connection, user_id: int, now: int) -> None:
                  "WHERE id=?", (now, BONUS_DAYS * 86400, user_id))
 
 
+def _inbox_taken(conn: sqlite3.Connection, user_id: int, email: str) -> bool:
+    """Whether another account here already reaches this address's inbox."""
+    inbox = codes.inbox_of(email)
+    return any(codes.inbox_of(other["email"]) == inbox for other in
+               conn.execute("SELECT email FROM users WHERE id<>?", (user_id,)))
+
+
 def accept(conn: sqlite3.Connection, user_id: int, code: str,
            now: Optional[float] = None) -> bool:
     """Credit an invite to someone who has just joined. True if it counted.
 
-    Only a brand-new account counts, only once, and never your own link.
+    Only a brand-new account counts, only once, and never your own link. A
+    new address for an inbox that already has an account is not a new
+    person: that covers inviting yourself as me+1@ and an inviter's dozen
+    aliases alike.
     """
     now = int(now or time.time())
     who = inviter(conn, code)
-    row = conn.execute("SELECT created_ts, invited_by, provider, is_local "
+    row = conn.execute("SELECT created_ts, invited_by, provider, is_local, email "
                        "FROM users WHERE id=?", (user_id,)).fetchone()
     if who is None or row is None or who == user_id or row["invited_by"] \
             or row["is_local"] or row["provider"] == "demo" \
-            or now - int(row["created_ts"]) > FRESH:
+            or now - int(row["created_ts"]) > FRESH \
+            or _inbox_taken(conn, user_id, row["email"]):
         return False
     conn.execute("UPDATE users SET invited_by=? WHERE id=?", (who, user_id))
     _add_week(conn, user_id, now)

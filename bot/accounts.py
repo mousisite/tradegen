@@ -91,6 +91,7 @@ class User:
     is_local: bool = False
     plan: str = "free"
     plan_status: str = ""
+    plan_until: int = 0           # when the paid period ends, 0 if not known
     bonus_until: int = 0          # free Pro from invites, until this time
     weekly_email: bool = False
     alert_email: bool = False
@@ -116,6 +117,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 is_local=bool(row["is_local"]),
                 plan=row["plan"] if "plan" in keys else "free",
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
+                plan_until=row["plan_until"] if "plan_until" in keys else 0,
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
                 alert_email=bool(row["alert_email"]) if "alert_email" in keys
                 else False,
@@ -261,6 +263,14 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
                            "provider_id=?", (sub,)).fetchone()
     if row is None:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        # Matching by address is how an account made with an emailed code is
+        # joined to Google. An account already tied to another Google
+        # identity is different: its address has been given to someone new,
+        # and the old owner's journal is not theirs to take over.
+        if row is not None and sub and row["provider"] == "google" \
+                and row["provider_id"] and row["provider_id"] != sub:
+            raise ValueError("That email address belongs to a different Google "
+                             "account here. Sign in with that one instead.")
 
     if row is None:
         cur = conn.execute(
@@ -375,6 +385,15 @@ def user_for_session(conn: sqlite3.Connection, token: str) -> Optional[User]:
     return _row_to_user(row) if row else None
 
 
+def session_age(conn: sqlite3.Connection, token: str) -> Optional[int]:
+    """Seconds since this session began, or None for a token that is not one."""
+    if not token:
+        return None
+    row = conn.execute("SELECT created_ts FROM sessions WHERE token=?",
+                       (token,)).fetchone()
+    return int(time.time()) - int(row[0]) if row else None
+
+
 def end_session(conn: sqlite3.Connection, token: str) -> None:
     if token:
         conn.execute("DELETE FROM sessions WHERE token=?", (token,))
@@ -421,9 +440,22 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
-    from . import billing, public
+    from . import billing, codes, public
     billing.ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM plan_events WHERE user_id=?", (user_id,))
+    # Sign-in codes are filed under the address or number they went to, with
+    # the network address that asked for them, so they go with the account.
+    codes.ensure_schema(conn)
+    targets = [user.email]
+    if user.provider == "phone":
+        number = conn.execute("SELECT provider_id FROM users WHERE id=?",
+                              (user_id,)).fetchone()[0]
+        if number:
+            targets.append(number)
+    cur = conn.execute("DELETE FROM login_codes WHERE target IN (%s)"
+                       % ",".join("?" * len(targets)), targets)
+    removed["login_codes"] = cur.rowcount
     public.ensure_schema(conn)
     conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
     from .database import _EVENTS

@@ -15,8 +15,10 @@ API key never leave the machine.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from datetime import timedelta
 import hmac
+import io
 import json
 import os
 import sys
@@ -67,13 +69,18 @@ from bot import usage as usage_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
-from bot.vision import VisionError, read_chart
+from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 # Chart screenshots are small. This cap stops a huge upload from tying up the
 # single-process dev server.
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
+# Every typed field here is a ticker, a number or a short note. Flask's own
+# default lets each field carry half a megabyte, so a few hundred posts of
+# padded notes could fill the data disk. The screenshot upload sets a larger
+# limit for its own request, because the form reader holds file data to it.
+app.config["MAX_FORM_MEMORY_SIZE"] = 20_000
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -156,15 +163,30 @@ SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "10 October 2026"
+LEGAL_UPDATED = "12 November 2026"
+
+
+def _served_publicly() -> bool:
+    """Whether this runs behind a public address rather than on one machine.
+
+    Read from how it is deployed, not from which sign-in keys happen to be
+    set: both host configs set the proxy flag, and an https public address
+    means a TLS terminator in front.
+    """
+    public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().lower()
+    proxied = (os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
+    return public.startswith("https://") or proxied in ("1", "true", "yes")
 
 
 def auth_required() -> bool:
     """Whether this installation asks people to sign in.
 
-    Default is "auto": required exactly when Google credentials are present, so
-    running it on your own machine needs no login and nothing to configure, and
-    putting it on a server with credentials protects it without a second step.
+    Default is "auto": required when any way to sign in is configured, or
+    when the app is served publicly, so running it on your own machine needs
+    no login and nothing to configure. A public deployment whose sign-in keys
+    went missing used to fall back to the local account, which is the
+    operator, for every visitor. Now it shows the sign-in page saying what is
+    missing, unless auth_mode is set to "off" on purpose.
     """
     mode = app.config.get("AUTH_MODE")
     if mode is None:
@@ -175,7 +197,7 @@ def auth_required() -> bool:
         return True
     # Any configured way in means this is a shared installation.
     return (auth_mod.configured() or codes_mod.email_ready()
-            or codes_mod.phone_ready())
+            or codes_mod.phone_ready() or _served_publicly())
 
 
 # Addresses this app used to answer on. A link somebody saved still works, and
@@ -305,33 +327,151 @@ def _upgrade(reason: str):
     return _pricing_page(reason, 402)
 
 
+def _from_another_site() -> bool:
+    """Whether the browser says another site sent this request here.
+
+    Browsers set this header themselves and a page cannot change it. A link
+    on someone else's site arrives as a GET carrying the session cookie, so
+    without this it could spend a free account's looks for the day.
+    """
+    return request.headers.get("Sec-Fetch-Site", "") == "cross-site"
+
+
+# How long after signing in a link from elsewhere still counts as the page the
+# person signed in to reach. Google sends the browser back through its own
+# redirect, so that page arrives marked as coming from another site.
+SIGNED_IN_JUST_NOW = 120
+
+
+def _just_signed_in(conn) -> bool:
+    age = accounts_mod.session_age(conn, session.get(SESSION_KEY, ""))
+    return age is not None and age < SIGNED_IN_JUST_NOW
+
+
 def _allowance_left(symbol: str, interval: str) -> bool:
-    """Whether a free account has a look left today for this instrument."""
+    """Whether a free account may open this instrument now, taking the look if so.
+
+    The look is taken before the analysis runs, in one transaction with the
+    count, and handed back when the request ends if nothing was shown for
+    it. Checking first and counting afterwards let ten requests sent at once
+    all pass a limit of three.
+    """
     if g.demo or _pro():
         return True
+    item = "%s|%s" % (symbol.upper(), interval)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        return billing_mod.may_view(conn, g.user.id,
-                                    "%s|%s" % (symbol.upper(), interval))
+        if _from_another_site() and not _just_signed_in(conn) \
+                and not billing_mod.opened_today(conn, g.user.id, item):
+            g.allowance_refused = "elsewhere"
+            return False
+        taken = billing_mod.reserve_view(conn, g.user.id, item)
     finally:
         conn.close()
+    if taken == "new":
+        g.setdefault("views_pending", set()).add(item)
+    return bool(taken)
 
 
 def _spend_view(symbol: str, interval: str) -> None:
     """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
     if g.demo or _pro():
         return
+    item = "%s|%s" % (symbol.upper(), interval)
+    pending = g.get("views_pending") or set()
+    if item in pending:
+        pending.discard(item)       # shown, so the look taken for it stands
+        return
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        billing_mod.count_view(conn, g.user.id, "%s|%s" % (symbol.upper(), interval))
+        billing_mod.count_view(conn, g.user.id, item)
     finally:
         conn.close()
 
 
+@app.teardown_request
+def _return_unshown_views(_exc):
+    """Hand back looks taken for analyses that were never shown.
+
+    Runs however the request ended, so an unknown ticker or a failed data
+    source costs nothing, whichever page asked.
+    """
+    pending = g.get("views_pending")
+    user = g.get("user")
+    if not pending or user is None:
+        return
+    try:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            for item in pending:
+                billing_mod.release_view(conn, user.id, item)
+        finally:
+            conn.close()
+    except Exception:
+        # The page has already been answered; the cost of failing here is
+        # one look counted that should not have been.
+        app.logger.exception("Could not hand back an unused free look")
+
+
 def _allowance_used():
+    if g.get("allowance_refused") == "elsewhere":
+        return _pricing_page(
+            "You came here from a link on another site, so it was not opened: "
+            "that would have used one of today's free looks. Search for it on "
+            "the Analyse page to open it.")
     return _upgrade("You have looked at %d different instruments today, which "
                     "is the free allowance. It resets at midnight UTC, or Pro "
                     "has no limit." % billing_mod.free_limits()["analyses_per_day"])
+
+
+# Hourly budgets for the requests that cost money or a shared quota: a paid
+# call to read a screenshot, a full research run, a discount code checked
+# with Stripe. One process serves the site, so counting in memory is enough,
+# and a restart forgetting the counts only errs toward letting people in.
+_RATE: Dict[Tuple[str, str], list] = {}
+_RATE_LOCK = threading.Lock()
+RATE_WINDOW = 3600.0
+
+
+def _rate_limited(action: str, per_hour: int) -> bool:
+    """True when this account, or its network, has used its hourly budget.
+
+    Otherwise the attempt is counted and False is returned. A network gets
+    three accounts' worth, so a household is not refused for one person's
+    use, while one connection running many accounts still is. Your own
+    machine and the operator are never limited.
+    """
+    user = getattr(g, "user", None)
+    if user is not None and (user.is_local or _is_operator()):
+        return False
+    budgets = []
+    if user is not None:
+        budgets.append(("user:%d" % user.id, per_hour))
+    ip = _client_ip()
+    if ip:
+        budgets.append(("ip:" + ip, per_hour * 3))
+    now = time.time()
+    with _RATE_LOCK:
+        if len(_RATE) > 20000:
+            # Forget the idle rather than grow for ever.
+            for key in [k for k, v in _RATE.items()
+                        if not v or now - v[-1] >= RATE_WINDOW]:
+                del _RATE[key]
+        for who, most in budgets:
+            recent = [t for t in _RATE.get((action, who), ())
+                      if now - t < RATE_WINDOW]
+            _RATE[(action, who)] = recent
+            if len(recent) >= most:
+                return True
+        for who, _most in budgets:
+            _RATE[(action, who)].append(now)
+    return False
+
+
+def _too_often(what: str):
+    return render_template("error.html", symbol="",
+                           message="You have %s a lot in the last hour. Wait a "
+                                   "while, then try again." % what), 429
 
 
 def _locked(headline: str, detail: str, examples=True):
@@ -367,7 +507,8 @@ def uid() -> int:
 
 # An analysis takes several seconds. Re-rendering the same page, or hitting
 # refresh, should not re-run the whole pipeline and re-hammer the data source.
-_CACHE: Dict[Tuple[str, str], Tuple[float, engine.Analysis]] = {}
+# Each entry: when it was made, the analysis, and each person's run of it.
+_CACHE: Dict[Tuple, Tuple[float, engine.Analysis, Dict[int, int]]] = {}
 # Research costs several network round trips, so it gets its own cache.
 _RESEARCH_CACHE: Dict[Tuple, Tuple[float, object]] = {}
 _CACHE_TTL = 90.0
@@ -421,11 +562,25 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
     key = (symbol.upper(), interval, bool(with_news), _settings_key(cfg))
+    me = uid()
     now = time.time()
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
         if hit and (now - hit[0]) < (ttl or _CACHE_TTL):
-            return hit[1]
+            result, runs = hit[1], hit[2]
+            mine = runs.get(me)
+        else:
+            hit = None
+    if hit is not None:
+        # The analysis is shared; the record of having run it is not. Each
+        # person gets a run of their own, so it is in their history and
+        # "take this trade", which only opens your own runs, works for them.
+        if mine is None and record:
+            mine = _record_cached_run(result, me)
+            if mine is not None:
+                with _CACHE_LOCK:
+                    runs[me] = mine
+        return dataclasses.replace(result, run_id=mine)
 
     # The cache key is deliberately not per user: an analysis of AAPL is the
     # same analysis whoever asked for it, and recomputing it per person would
@@ -433,14 +588,33 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     # that is written inside engine.analyse before the result is cached.
     result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
                             source="web", db_path=app.config.get("DB_PATH"),
-                            user=uid(), record=record)
+                            user=me, record=record)
     with _CACHE_LOCK:
-        _CACHE[key] = (time.time(), result)
+        _CACHE[key] = (time.time(), result,
+                       {me: result.run_id} if result.run_id else {})
         # Keep the cache from growing without bound in a long session.
         if len(_CACHE) > 40:
             oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
             _CACHE.pop(oldest, None)
     return result
+
+
+def _record_cached_run(result: engine.Analysis, user: int) -> Optional[int]:
+    """Write a run of a cached analysis to one person's history."""
+    try:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            return db_mod.record_run(conn, result.bars, result.plan,
+                                     result.signals, result.composite,
+                                     result.regime, result.calibration,
+                                     result.sentiment, source="web", user=user)
+        finally:
+            conn.close()
+    except Exception:
+        # As in engine.analyse: a database problem must never cost the
+        # person the analysis they asked for.
+        app.logger.exception("Could not record a run of a cached analysis")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -601,9 +775,14 @@ def _safe_back(raw, fallback):
     """A redirect target from a form field, restricted to this app.
 
     A bare "//host" or "https://host" in a redirect is an open redirect, so only
-    a single-slash relative path is accepted.
+    a single-slash relative path is accepted. Control characters and
+    backslashes are refused too: the Location header drops a tab or newline,
+    so "/<tab>/host" left the server as "//host", and browsers read a
+    backslash as a slash.
     """
     if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return fallback
+    if any(ch < " " or ch in "\x7f\\" for ch in raw):
         return fallback
     return raw
 
@@ -921,6 +1100,17 @@ def strategies():
                            rank_by=rank_by, symbol=symbol, seen=seen)
 
 
+# The formats screenshots actually come in. Pillow opens many more, and each
+# extra decoder is more code an uploaded file can reach. A phone's multi-
+# picture JPEG is opened by the JPEG reader.
+_SCREENSHOT_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP")
+# Decoding briefly takes about four bytes a pixel. One at a time keeps the
+# worst case well inside the server's memory however many arrive together.
+_DECODING = threading.BoundedSemaphore(1)
+# Each read is a paid call to the vision model.
+IMAGE_READS_PER_HOUR = 20
+
+
 @app.route("/analyse/image", methods=["POST"])
 def analyse_image():
     """Read a chart screenshot and analyse whatever instrument it shows.
@@ -929,6 +1119,10 @@ def analyse_image():
     that runs on live data, because a screenshot may already be minutes stale
     by the time it is uploaded.
     """
+    # The form reader takes an upload in 64 KB pieces and holds each to the
+    # limit for typed fields, which would refuse any real screenshot. The
+    # picture itself is still capped by MAX_CONTENT_LENGTH.
+    request.max_form_memory_size = 256 * 1024
     upload = request.files.get("chart")
     if upload is None or not upload.filename:
         return render_template("error.html", symbol="",
@@ -939,36 +1133,69 @@ def analyse_image():
                                message="Reading a chart image needs an Anthropic "
                                        "API key, and none is set."), 400
 
-    tmp_dir = os.path.join(config_mod.project_root(), "data")
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, "_upload.png")
+    # A free account with no looks left could not open what the picture shows,
+    # so it is not read at all rather than paid for and then refused.
+    if not _pro():
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            used = billing_mod.views_today(conn, uid())
+        finally:
+            conn.close()
+        if used >= billing_mod.free_limits()["analyses_per_day"]:
+            return _allowance_used()
+    if _rate_limited("image", IMAGE_READS_PER_HOUR):
+        return _too_often("read screenshots")
 
+    from PIL import Image
+    if not _DECODING.acquire(timeout=20):
+        return render_template("error.html", symbol="",
+                               message="Several screenshots are being read just "
+                                       "now. Try again in a moment."), 503
+    too_big = False
     try:
         # Re-encode through Pillow rather than trusting the upload: it both
         # validates that the bytes really are an image and strips anything
         # unusual the original file carried.
-        from PIL import Image
-        img = Image.open(upload.stream)
-        img.verify()
-        upload.stream.seek(0)
-        img = Image.open(upload.stream)
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        img.save(tmp_path, format="PNG")
+        img = Image.open(upload.stream, formats=_SCREENSHOT_FORMATS)
+        # Only the header has been read, so the size the file claims is
+        # checked before a single pixel of it is decoded.
+        if img.width * img.height > MAX_PIXELS:
+            too_big = True
+        else:
+            img.verify()
+            upload.stream.seek(0)
+            img = Image.open(upload.stream, formats=_SCREENSHOT_FORMATS)
+            if img.mode in ("1", "P", "PA"):
+                # Shrinking a palette image picks pixels instead of blending
+                # them, which can make a chart's small print unreadable.
+                img = img.convert("RGBA")
+            # Shrunk to what the vision model uses, before anything else, so
+            # no full-size copy is ever made or passed on.
+            img.thumbnail((MAX_EDGE, MAX_EDGE))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            png = io.BytesIO()
+            img.save(png, format="PNG")
+    except Image.DecompressionBombError:
+        too_big = True
     except Exception:
         return render_template("error.html", symbol="",
                                message="That file could not be read as an image. "
                                        "PNG or JPEG works best."), 400
+    finally:
+        _DECODING.release()
+    if too_big:
+        return render_template("error.html", symbol="",
+                               message="That image is too large to read. Crop it "
+                                       "to just the chart and try again."), 413
 
+    # Held in memory for this request alone. A single shared file on disk
+    # let two uploads at once read, or delete, each other's picture.
+    png.seek(0)
     try:
-        read = read_chart(tmp_path)
+        read = read_chart(png)
     except VisionError as exc:
         return render_template("error.html", symbol="", message=str(exc)), 502
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
 
     if not read.symbol:
         return render_template("error.html", symbol="",
@@ -1019,16 +1246,21 @@ def research():
         return _allowance_used()
 
     cfg = _cfg()
+    with_news = request.args.get("news", "1") != "0"
+    with_options = request.args.get("options", "1") != "0"
     try:
-        analysis = cached_analysis(symbol, interval, cfg,
-                                   request.args.get("news", "1") != "0",
+        analysis = cached_analysis(symbol, interval, cfg, with_news,
                                    record=not g.demo,
                                    ttl=DEMO_TTL if g.demo else None)
     except DataError as exc:
         return render_template("error.html", message=str(exc), symbol=symbol), 404
     _spend_view(symbol, interval)
 
-    key = (analysis.bars.symbol.upper(), interval, "research")
+    # Keyed like the analysis it is built from: the thesis and the reasoning
+    # quote that person's own plan, so one person's stops and targets were
+    # being shown to the next person who opened the same ticker.
+    key = (analysis.bars.symbol.upper(), interval, "research", _settings_key(cfg),
+           with_news, with_options)
     now = time.time()
     with _CACHE_LOCK:
         hit = _RESEARCH_CACHE.get(key)
@@ -1036,8 +1268,7 @@ def research():
         found = hit[1]
     else:
         found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
-                                cfg, analysis=analysis,
-                                with_options=request.args.get("options", "1") != "0")
+                                cfg, analysis=analysis, with_options=with_options)
         with _CACHE_LOCK:
             _RESEARCH_CACHE[key] = (time.time(), found)
             if len(_RESEARCH_CACHE) > 20:
@@ -1071,10 +1302,26 @@ def research():
                            plain=plain_mod.explain_company(found))
 
 
+# Each save runs the research pipeline again: fundamentals, filings and risk.
+THESES_PER_HOUR = 30
+# A note is a reminder to yourself, not an essay, and it is stored for good.
+NOTE_LIMIT = 1000
+
+
 @app.route("/thesis/save", methods=["POST"])
 def save_thesis():
-    symbol = request.form.get("symbol", "").upper()
-    interval = request.form.get("interval", "1d")
+    symbol = (request.form.get("symbol") or "").strip().upper()[:20]
+    interval = request.form.get("interval") or "1d"
+    if not symbol or interval not in dict(INTERVALS):
+        return render_template("error.html", symbol="",
+                               message="Open the stock's research page and save "
+                                       "the thesis from there."), 400
+    # Saving analyses the instrument, so it costs a free look as opening it
+    # does. Without this a free account could research anything from here.
+    if not _allowance_left(symbol, interval):
+        return _allowance_used()
+    if _rate_limited("thesis", THESES_PER_HOUR):
+        return _too_often("saved theses")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         cfg = _cfg()
@@ -1093,12 +1340,20 @@ def save_thesis():
               "evidence": [{"claim": e.claim, "value": e.value,
                             "source": e.source, "url": e.url} for e in p.evidence]}
              for p in t.bear.points],
-            t.falsifiers, t.all_sources, request.form.get("note", ""),
-            user=uid())
-    except Exception as exc:
+            t.falsifiers, t.all_sources,
+            (request.form.get("note") or "")[:NOTE_LIMIT], user=uid())
+    except DataError as exc:
         return render_template("error.html", message=str(exc), symbol=symbol), 400
+    except Exception:
+        # The text of an unexpected error can carry file paths or SQL, which
+        # are for the log, not the page.
+        app.logger.exception("Saving a thesis for %s failed", symbol)
+        return render_template("error.html", symbol=symbol,
+                               message="That thesis could not be saved just now. "
+                                       "Try again in a minute."), 500
     finally:
         conn.close()
+    _spend_view(symbol, interval)
     return redirect(url_for("research", symbol=symbol, interval=interval))
 
 
@@ -1353,6 +1608,11 @@ def pricing():
 
 CODE_ERROR = ("That code does not work, or it has run out. Check the "
               "spelling, or empty the box to pay full price.")
+# Codes are passed on by word of mouth, so they are words someone chose and
+# can be guessed, and every check is a call to Stripe.
+CODE_CHECKS_PER_HOUR = 10
+CODE_TOO_OFTEN = ("Too many codes were tried in the last hour. Wait a while, "
+                  "or empty the box to pay full price.")
 
 
 @app.route("/billing/code", methods=["POST"])
@@ -1366,6 +1626,8 @@ def billing_code():
     if not billing_mod.ready() or g.demo:
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
+    if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
+        return render_template("_codesaid.html", code_error=CODE_TOO_OFTEN), 429
     try:
         found = billing_mod.promotion(code)
     except billing_mod.BillingError as exc:
@@ -1388,6 +1650,8 @@ def billing_checkout():
     finally:
         conn.close()
     code = (request.form.get("code") or "").strip()[:40]
+    if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
+        return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
     try:
         found = billing_mod.promotion(code)
         if code and not found:
@@ -1459,9 +1723,13 @@ def billing_webhook():
     return jsonify({"received": True, "outcome": outcome})
 
 
-@app.route("/signout", methods=["GET", "POST"])
+@app.route("/signout", methods=["POST"])
 def signout():
-    """End this session everywhere, not just in this browser."""
+    """End this session everywhere, not just in this browser.
+
+    POST only. The session cookie travels with a link followed from another
+    site, so a GET here let any page sign its visitors out.
+    """
     token = session.pop(SESSION_KEY, "")
     if token:
         conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2587,6 +2855,12 @@ def not_found(_exc):
 
 @app.errorhandler(413)
 def too_large(_exc):
+    # Typed fields have their own, much smaller, limit, and a padded note is
+    # not an image.
+    if request.endpoint != "analyse_image":
+        return render_template("error.html", symbol="",
+                               message="That is more text than this form takes. "
+                                       "Shorten it and try again."), 413
     return render_template("error.html", symbol="",
                            message="That image is larger than 12 MB. A normal "
                                    "screenshot is well under that, so try "

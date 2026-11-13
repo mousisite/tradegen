@@ -1,6 +1,7 @@
 """Paid plans: off by default, signed webhooks only, and limits that hold."""
 import hashlib
 import hmac
+import io
 import json
 import os as _os
 import sys as _sys
@@ -60,6 +61,15 @@ def signed(payload, secret="whsec_test", ts=None):
     return "t=%d,v1=%s" % (ts, sig)
 
 
+def png_bytes(size=(900, 500)):
+    """A small screenshot-shaped image, as an upload."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, (250, 249, 245)).save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 try:
     print("=" * 72)
     print("WHILE BILLING IS OFF, NOTHING CHANGES")
@@ -80,6 +90,12 @@ try:
               "price_round": {"unit_amount": 900, "currency": "usd",
                               "recurring": {"interval": "month", "interval_count": 1}}}
 
+    # The subscription the paid account's checkout started, as Stripe holds it
+    # now. A checkout stays "complete" and "paid" for ever; this is what says
+    # whether the plan is still running.
+    SUB = {"id": "sub_paid", "object": "subscription", "status": "active",
+           "current_period_end": int(time.time()) + 30 * 86400}
+
     def fake_stripe(method, path, data=None):
         sent.append((method, path, dict(data or {})))
         if path.startswith("prices/"):
@@ -87,8 +103,12 @@ try:
         if path == "checkout/sessions":
             return {"url": "https://checkout.stripe.test/c/1", "id": "cs_test_1"}
         if path.startswith("checkout/sessions/"):
-            return {"status": "complete", "client_reference_id": str(paid.id),
-                    "customer": "cus_paid", "payment_status": "paid"}
+            found = {"status": "complete", "client_reference_id": str(paid.id),
+                     "customer": "cus_paid", "payment_status": "paid",
+                     "created": int(time.time()) - 600, "subscription": SUB["id"]}
+            if "expand[]=subscription" in path:
+                found["subscription"] = dict(SUB)
+            return found
         if method == "DELETE":
             return {"deleted": True}
         return {"url": "https://billing.stripe.test/p/1"}
@@ -181,6 +201,68 @@ try:
 
     print()
     print("=" * 72)
+    print("EVENTS THAT ARRIVE LATE OR OUT OF ORDER")
+    print("=" * 72)
+    now = int(time.time())
+
+    def event(kind, created, **obj):
+        return {"type": kind, "created": created, "data": {"object": obj}}
+
+    conn = db.connect(DB)
+    late = A.upsert_email_user(conn, "late@example.com")
+    check("a paid checkout makes them Pro",
+          billing.handle(conn, event("checkout.session.completed", 1500,
+                                     client_reference_id=str(late.id),
+                                     customer="cus_late", payment_status="paid"))
+          == "pro" and billing.is_pro(A.get_user(conn, late.id)))
+    check("cancelling makes them Free",
+          billing.handle(conn, event("customer.subscription.deleted", 2000,
+                                     customer="cus_late", status="canceled"))
+          == "free" and not billing.is_pro(A.get_user(conn, late.id)))
+    said = billing.handle(conn, event("customer.subscription.updated", 1000,
+                                      customer="cus_late", status="active",
+                                      current_period_end=now - 86400))
+    check("an older 'active', retried after the cancellation, is ignored",
+          said == "stale" and not billing.is_pro(A.get_user(conn, late.id)), said)
+    check("and so is a late copy of the checkout itself",
+          billing.handle(conn, event("checkout.session.completed", 1400,
+                                     client_reference_id=str(late.id),
+                                     customer="cus_late", payment_status="paid"))
+          == "stale" and not billing.is_pro(A.get_user(conn, late.id)))
+    check("while a newer one still counts",
+          billing.handle(conn, event("customer.subscription.updated", 3000,
+                                     customer="cus_late", status="active",
+                                     current_period_end=now + 30 * 86400))
+          == "pro" and billing.is_pro(A.get_user(conn, late.id)))
+    check("the end of the paid period is kept",
+          A.get_user(conn, late.id).plan_until == now + 30 * 86400)
+
+    # If the cancellation never arrives at all, the paid period still ends.
+    billing.handle(conn, event("customer.subscription.updated", 4000,
+                               customer="cus_late", status="active",
+                               current_period_end=now - 4 * 86400))
+    check("a plan four days past its paid period, with no word since, is over",
+          not billing.is_pro(A.get_user(conn, late.id)))
+    billing.handle(conn, event("customer.subscription.updated", 5000,
+                               customer="cus_late", status="active",
+                               current_period_end=now - 86400))
+    check("one a day past it is still Pro, while Stripe retries the renewal",
+          billing.is_pro(A.get_user(conn, late.id)))
+    billing.handle(conn, event("customer.subscription.deleted", 6000,
+                               customer="cus_late", status="canceled"))
+    conn.execute("UPDATE users SET plan_until=? WHERE id=?",
+                 (now - 365 * 86400, late.id))
+    conn.commit()
+    billing.handle(conn, event("checkout.session.completed", 7000,
+                               client_reference_id=str(late.id),
+                               customer="cus_late", payment_status="paid"))
+    back = A.get_user(conn, late.id)
+    check("subscribing again is Pro, whatever ended a year ago",
+          billing.is_pro(back) and back.plan_until == 0, back.plan_until)
+    conn.close()
+
+    print()
+    print("=" * 72)
     print("THE FREE ALLOWANCE")
     print("=" * 72)
     sign_in(free)
@@ -226,6 +308,113 @@ try:
     check("which offers the upgrade", 'action="/billing/checkout"' in page)
     check("the JSON API keeps the same allowance",
           c.get("/api/analyse?symbol=MSFT").status_code == 402)
+
+    touched = []
+
+    def must_not_run(*a, **k):
+        touched.append(a)
+        raise DataError("This should not have been analysed.")
+
+    real_research = web.engine.research
+    real_read = web.read_chart
+    had_key = _os.environ.get("ANTHROPIC_API_KEY")
+    web.cached_analysis = web.engine.research = must_not_run
+    web.read_chart = must_not_run
+    _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+    try:
+        r = c.post("/thesis/save", data={"symbol": "ZZZZ", "interval": "1d"})
+        check("saving a thesis is held to the same allowance",
+              r.status_code == 402 and not touched, r.status_code)
+        r = c.post("/analyse/image", data={"chart": (png_bytes(), "c.png")},
+                   content_type="multipart/form-data")
+        check("and a screenshot is not sent to the paid reader once it is used up",
+              r.status_code == 402 and not touched, r.status_code)
+    finally:
+        web.cached_analysis, web.engine.research = real_analysis, real_research
+        web.read_chart = real_read
+        if had_key is None:
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            _os.environ["ANTHROPIC_API_KEY"] = had_key
+    conn = db.connect(DB)
+    check("and nothing was saved", db.thesis_list(conn, user=free.id) == [])
+    conn.close()
+
+    # Ten requests sent together used to all read the same count and all get
+    # through. Each look is now taken before the analysis runs.
+    import threading
+    conn = db.connect(DB)
+    racer = A.upsert_email_user(conn, "racer@example.com")
+    conn.close()
+    got = []
+    gate = threading.Barrier(8)
+
+    def look(n):
+        with web.app.test_request_context("/"):
+            conn = db.connect(DB)
+            web.g.user, web.g.demo = A.get_user(conn, racer.id), False
+            conn.close()
+            gate.wait()
+            if web._allowance_left("RACE%d" % n, "1d"):
+                got.append(n)
+                web._spend_view("RACE%d" % n, "1d")
+
+    threads = [threading.Thread(target=look, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    conn = db.connect(DB)
+    check("eight looks asked for at once get no more than the allowance",
+          len(got) == limit, len(got))
+    check("and exactly that many are counted",
+          billing.views_today(conn, racer.id) == limit)
+    conn.close()
+
+    # A link on someone else's site arrives with the session cookie, so it
+    # could spend a free account's looks.
+    conn = db.connect(DB)
+    linked = A.upsert_email_user(conn, "linked@example.com")
+    billing.count_view(conn, linked.id, "SEEN|1d")
+    conn.close()
+    sign_in(linked)
+    ran = []
+
+    def note_and_fail(symbol, *a, **k):
+        ran.append(symbol)
+        raise DataError("No data for %s." % symbol)
+
+    web.cached_analysis = note_and_fail
+    try:
+        # Google sends a fresh sign-in back through its own redirect, which
+        # the browser reports as another site.
+        c.get("/analyse?symbol=WANTED&interval=1d",
+              headers={"Sec-Fetch-Site": "cross-site"})
+        check("the page someone signed in to reach still opens after Google",
+              ran == ["WANTED"], ran)
+        ran.clear()
+        conn = db.connect(DB)
+        conn.execute("UPDATE sessions SET created_ts=created_ts-600 WHERE user_id=?",
+                     (linked.id,))
+        conn.commit()
+        conn.close()
+        r = c.get("/analyse?symbol=LINKED&interval=1d",
+                  headers={"Sec-Fetch-Site": "cross-site"})
+        check("a link from another site does not spend a free look",
+              r.status_code == 200 and not ran
+              and "another site" in r.data.decode("utf-8", "replace"), r.status_code)
+        c.get("/analyse?symbol=SEEN&interval=1d", headers={"Sec-Fetch-Site": "cross-site"})
+        check("but opens one already looked at today", ran == ["SEEN"], ran)
+        c.get("/analyse?symbol=LINKED&interval=1d",
+              headers={"Sec-Fetch-Site": "same-origin"})
+        check("and from this site it opens as usual", ran[-1:] == ["LINKED"], ran)
+        conn = db.connect(DB)
+        check("a look taken for something that could not be shown is handed back",
+              billing.views_today(conn, linked.id) == 1)
+        conn.close()
+    finally:
+        web.cached_analysis = real_analysis
+    sign_in(free)
 
     conn = db.connect(DB)
     db.alert_add(conn, "AAPL", "price_above", 999999.0, user=free.id)
@@ -318,7 +507,38 @@ try:
     check("someone else's checkout cannot upgrade them",
           "You have Pro" not in r.data.decode("utf-8", "replace"))
 
+    print()
+    print("   A finished checkout is not a running plan:")
+    check("the return page reads the subscription along with the checkout",
+          any(p.startswith("checkout/sessions/cs_test_1")
+              and "expand[]=subscription" in p for _, p, _ in sent))
+    conn = db.connect(DB)
+    check("and keeps when its paid period ends",
+          A.get_user(conn, paid.id).plan_until == SUB["current_period_end"])
+    conn.close()
     sign_in(paid)
+    gone = json.dumps({"type": "customer.subscription.deleted",
+                       "created": int(time.time()),
+                       "data": {"object": {"id": "sub_paid", "customer": "cus_paid",
+                                           "status": "canceled"}}}).encode()
+    c.post("/billing/webhook", data=gone, headers={"Stripe-Signature": signed(gone)})
+    SUB["status"] = "canceled"
+    r = c.get("/billing/done?session_id=cs_test_1")
+    conn = db.connect(DB)
+    check("opening the return address again after cancelling does not bring Pro back",
+          "You have Pro" not in r.data.decode("utf-8", "replace")
+          and not billing.is_pro(A.get_user(conn, paid.id)))
+    SUB["status"] = "active"
+    check("nor does a reply from Stripe that leaves the subscription out",
+          not billing.confirm_checkout(
+              conn, "cs_test_1", paid.id,
+              call=lambda m, p, d=None: {"status": "complete", "subscription": "sub_paid",
+                                         "client_reference_id": str(paid.id),
+                                         "payment_status": "paid"}))
+    # Pro again for the checks that follow.
+    billing.set_plan(conn, paid.id, "pro", "active", "cus_paid")
+    conn.close()
+
     r = c.post("/billing/portal")
     check("managing the subscription goes to Stripe's portal",
           r.status_code == 303 and "billing.stripe" in r.headers["Location"])
@@ -473,6 +693,123 @@ try:
     check("in place too", r.status_code == 400
           and "does not work" in r.data.decode("utf-8", "replace"))
     billing._stripe = fake_stripe
+
+    print()
+    print("=" * 72)
+    print("A DISCOUNT CODE CANNOT BE GUESSED AT SPEED")
+    print("=" * 72)
+    asked = []
+
+    def no_such_codes(method, path, data=None):
+        if path.startswith("promotion_codes?"):
+            asked.append(path)
+            return {"data": []}
+        return fake_stripe(method, path, data)
+
+    billing._stripe = no_such_codes
+    billing._MISSES.clear()
+    conn = db.connect(DB)
+    guesser = A.upsert_email_user(conn, "guesser@example.com")
+    conn.close()
+    sign_in(guesser)
+    first = c.post("/billing/code", data={"code": "GUESS0"}).status_code
+    c.post("/billing/code", data={"code": "guess0"})
+    check("the same wrong code twice asks Stripe once",
+          first == 400 and len(asked) == 1, len(asked))
+    for n in range(1, web.CODE_CHECKS_PER_HOUR - 1):
+        c.post("/billing/code", data={"code": "GUESS%d" % n})
+    before = len(asked)
+    r = c.post("/billing/code", data={"code": "GUESS99"})
+    check("past ten tries in an hour, a code is not even checked",
+          r.status_code == 429 and len(asked) == before
+          and "Too many codes" in r.data.decode("utf-8", "replace"), r.status_code)
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": "GUESS100"})
+    check("and the checkout form counts against the same tries",
+          r.status_code == 429 and len(asked) == before, r.status_code)
+    r = c.post("/billing/checkout", data={"plan": "monthly", "code": ""})
+    check("while paying full price is never held up", r.status_code == 303,
+          r.status_code)
+    billing._stripe = fake_stripe
+
+    print()
+    print("=" * 72)
+    print("PAID AND SLOW REQUESTS HAVE AN HOURLY BUDGET")
+    print("=" * 72)
+    from types import SimpleNamespace as NS
+    from bot.vision import ChartRead
+
+    conn = db.connect(DB)
+    heavy = A.upsert_email_user(conn, "heavy@example.com")
+    billing.set_plan(conn, heavy.id, "pro", "active", "cus_heavy")
+    conn.close()
+    sign_in(heavy)
+    had_key = _os.environ.get("ANTHROPIC_API_KEY")
+    _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+    real_read, real_research = web.read_chart, web.engine.research
+    web.read_chart = lambda png: ChartRead(symbol="AAPL")
+    try:
+        got = [c.post("/analyse/image", data={"chart": (png_bytes(), "c.png")},
+                      content_type="multipart/form-data").status_code
+               for _ in range(web.IMAGE_READS_PER_HOUR)]
+        check("a Pro account can read screenshots", set(got) == {302}, got)
+        r = c.post("/analyse/image", data={"chart": (png_bytes(), "c.png")},
+                   content_type="multipart/form-data")
+        check("but not without end, since every read is paid for",
+              r.status_code == 429, r.status_code)
+
+        found = NS(thesis=NS(balance=0.3, verdict="Leans bullish",
+                             bull=NS(points=[]), bear=NS(points=[]),
+                             falsifiers=["A close below 90"], all_sources=[]))
+        web.cached_analysis = lambda *a, **k: NS(bars=NS(last_price=101.5))
+        web.engine.research = lambda *a, **k: found
+        saved_budget, web.THESES_PER_HOUR = web.THESES_PER_HOUR, 3
+        r = c.post("/thesis/save", data={"symbol": "acme", "interval": "1d",
+                                         "note": "n" * 5000})
+        conn = db.connect(DB)
+        kept = db.thesis_list(conn, user=heavy.id)
+        conn.close()
+        check("a thesis saves", r.status_code == 302 and len(kept) == 1, r.status_code)
+        check("with a long note cut to a reminder's length",
+              kept and len(kept[0]["user_note"]) == web.NOTE_LIMIT)
+
+        def locked(*a, **k):
+            import sqlite3
+            raise sqlite3.OperationalError("database is locked: /data/stockbot.db")
+
+        import logging
+
+        class Keep(logging.Handler):
+            def emit(self, record):
+                logged.append(record.getMessage())
+
+        logged, handlers = [], web.app.logger.handlers[:]
+        web.app.logger.handlers = [Keep()]
+        web.engine.research = locked
+        try:
+            r = c.post("/thesis/save", data={"symbol": "ACME", "interval": "1d"})
+        finally:
+            web.app.logger.handlers = handlers
+        page = r.data.decode("utf-8", "replace")
+        check("a failure says so plainly, without the error's own text",
+              r.status_code == 500 and "could not be saved" in page
+              and "stockbot.db" not in page and "locked" not in page, r.status_code)
+        check("while the error itself goes to the log",
+              any("Saving a thesis for ACME failed" in m for m in logged), logged)
+        web.engine.research = lambda *a, **k: found
+        r = c.post("/thesis/save", data={"symbol": "ACME", "interval": "forever"})
+        check("a timeframe that does not exist is refused", r.status_code == 400)
+        c.post("/thesis/save", data={"symbol": "ACME", "interval": "1d"})
+        r = c.post("/thesis/save", data={"symbol": "ACME", "interval": "1d"})
+        check("and saving is held to an hourly budget too", r.status_code == 429,
+              r.status_code)
+        web.THESES_PER_HOUR = saved_budget
+    finally:
+        web.read_chart, web.engine.research = real_read, real_research
+        web.cached_analysis = real_analysis
+        if had_key is None:
+            _os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            _os.environ["ANTHROPIC_API_KEY"] = had_key
 finally:
     billing._stripe = real
     for key in list(STRIPE) + ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]:
