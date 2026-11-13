@@ -10,6 +10,7 @@ lies about when it last looked is worse than no tool.
 """
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -116,6 +117,76 @@ def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
+# The free allowance
+# ---------------------------------------------------------------------------
+
+class _Looks:
+    """A free account's looks for the day, spent the way the site spends them.
+
+    A routine's analysis is an analysis like any other, so on a free account
+    each different instrument it opens takes one of the day's looks, and one
+    already opened today costs nothing more. Without this, the watchlist and
+    hunt routines were a way round the allowance. Pro, the operator, the
+    local account and an installation without billing have no limit.
+    """
+
+    def __init__(self, conn, user):
+        self.conn, self.user = conn, int(user)
+        self.limited = self._free(conn, user)
+        self.refused: List[str] = []
+
+    @staticmethod
+    def _free(conn, user) -> bool:
+        from . import accounts as accounts_mod
+        from . import billing as billing_mod
+        if not billing_mod.ready():
+            return False
+        person = accounts_mod.get_user(conn, int(user))
+        if person is None:
+            return False
+        # The operator is named the same way the site names them.
+        admins = {e.strip().lower()
+                  for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+                  if e.strip()}
+        return not billing_mod.is_pro(person, (person.email or "").lower() in admins)
+
+    @staticmethod
+    def _item(symbol: str, interval: str) -> str:
+        return "%s|%s" % (symbol.upper(), interval)
+
+    def take(self, symbol: str, interval: str) -> str:
+        """"new" or "seen" when the analysis may run, "free" when no limit
+        applies, and "" when today's looks are used up."""
+        if not self.limited:
+            return "free"
+        from . import billing as billing_mod
+        taken = billing_mod.reserve_view(self.conn, self.user, self._item(symbol, interval))
+        if not taken:
+            self.refused.append(symbol)
+        return taken
+
+    def give_back(self, symbol: str, interval: str, taken: str) -> None:
+        """Return a look taken for an analysis that failed, as the site does."""
+        if taken == "new":
+            from . import billing as billing_mod
+            billing_mod.release_view(self.conn, self.user, self._item(symbol, interval))
+
+    def report(self, report: RunReport) -> None:
+        """One step naming what was not analysed for want of a look."""
+        if not self.refused:
+            return
+        from . import billing as billing_mod
+        limit = billing_mod.free_limits()["analyses_per_day"]
+        report.steps.append(Step(
+            "Free allowance",
+            "Not analysed: %s. A free account opens %d different instrument%s a "
+            "day, and today's are used up. They come back at midnight UTC, or "
+            "Pro has no limit." % (", ".join(self.refused), limit,
+                                   "" if limit == 1 else "s"),
+            "attention"))
+
+
+# ---------------------------------------------------------------------------
 # The routines
 # ---------------------------------------------------------------------------
 
@@ -200,8 +271,12 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         return
 
     changed = 0
+    looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
+        taken = looks.take(symbol, interval)
+        if not taken:
+            continue
         step("Analysing %s" % symbol)
         try:
             # Recorded as this person's, so it is the "before" next time.
@@ -209,6 +284,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                                     with_news=False, record=True,
                                     db_path=db_path, user=user, source="workflow")
         except (DataError, Exception) as exc:
+            looks.give_back(symbol, interval, taken)
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
             continue
@@ -237,9 +313,19 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                 "%s, unchanged. %s" % (now, result.plan.headline), "ok",
                 {"symbol": symbol, "interval": interval}))
 
+    looks.report(report)
+    looked = len(rows) - len(looks.refused)
+    if not looked:
+        report.headline = ("Nothing on the watchlist was analysed: today's free "
+                           "looks are used up.")
+        return
     report.headline = ("%d of %d watched instruments changed their call."
-                       % (changed, len(rows)) if changed
-                       else "None of the %d watched instruments changed." % len(rows))
+                       % (changed, looked) if changed
+                       else "None of the %d watched instruments changed." % looked)
+    if looks.refused:
+        report.headline += (" %d more %s not analysed, for want of a free look."
+                            % (len(looks.refused),
+                               "was" if len(looks.refused) == 1 else "were"))
 
 
 def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
@@ -298,13 +384,19 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
             report.steps.append(Step("Screen", note, "ok"))
         return
 
-    for candidate in found.passed[:4]:
+    looks = _Looks(conn, user)
+    best = found.passed[:4]
+    for candidate in best:
+        taken = looks.take(candidate.symbol, cfg["interval"])
+        if not taken:
+            continue
         step("Analysing %s" % candidate.symbol)
         try:
             result = engine.analyse(candidate.symbol, cfg, interval=cfg["interval"],
                                     with_news=False, record=True, db_path=db_path,
                                     user=user, source="workflow")
         except Exception as exc:
+            looks.give_back(candidate.symbol, cfg["interval"], taken)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))
             continue
@@ -314,5 +406,10 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
             "%s. %s" % (result.plan.action, result.plan.headline), status,
             {"symbol": candidate.symbol, "interval": cfg["interval"]}))
 
+    looks.report(report)
+    if len(looks.refused) == len(best):
+        report.headline = ("%d candidates passed the screen, but today's free looks "
+                           "are used up, so none was analysed." % len(found.passed))
+        return
     report.headline = "%d candidates passed the screen; the best few were analysed." \
                       % len(found.passed)

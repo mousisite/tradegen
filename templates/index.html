@@ -9,12 +9,143 @@
     instead of inventing one, and it shows you the sample it counted.</p>
 </div>
 
+{# What needs the person now, read from what is already saved. Nothing in it
+   runs an analysis or a scan, so the page stays quick. Every line says how
+   old its price is. #}
+{% set att = attention %}
+<section aria-labelledby="attn" style="margin-bottom:var(--s4)">
+  <div class="sechead">
+    <h2 id="attn">Needs your attention</h2>
+    <span class="tail">read from what is saved</span>
+  </div>
+
+  {% if att.positions or att.fired or att.late %}
+  <div class="card{{ ' breach' if att.crossed }}">
+    {% if att.positions %}
+      <span class="eyebrow">Open positions</span>
+      <ul class="list warn">
+        {% for p in att.positions %}
+          {% set t, m = p.trade, p.mark %}
+          <li><b>{{ t['symbol'] }}</b> {{ 'long' if t['direction'] > 0 else 'short' }}:
+            {% if m.status == 'past stop' %}
+              at {{ m.price|price }}, past its stop of {{ t['stop']|price }}.
+              The journal does not close it for you.
+            {% else %}
+              at {{ m.price|price }}, at or past its target of {{ t['target1']|price }}.
+            {% endif %}
+            <span class="faint">Price as of {{ m.as_of or 'an unknown time' }}.</span>
+            <a href="{{ url_for('trades') }}">Open the journal</a></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if att.late %}
+      <p class="prose">The prices of your open positions did not come back in
+        time, so their stops are not checked here.
+        <a href="{{ url_for('trades') }}">The journal</a> checks them.</p>
+    {% endif %}
+    {% if att.fired %}
+      <span class="eyebrow"{% if att.positions or att.late %} style="margin-top:var(--s3)"{% endif %}>Alerts in the last three days</span>
+      <ul class="list">
+        {% for e in att.fired %}
+          <li>{% if e.kind == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e.message }}
+            <span class="faint">Told you {{ e.ts|ago }}; price as of {{ e.as_of or 'an unknown time' }}.</span></li>
+        {% endfor %}
+      </ul>
+      {% if att.fired_more %}
+        <p class="prose" style="margin-top:var(--s1)">And {{ att.fired_more }} more on
+          the <a href="{{ url_for('monitor') }}">Monitor</a> page.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <p class="prose">Nothing has happened that needs you.
+      {% if open_trades %}None of your open positions is past its stop or its
+      target{% else %}You have no open positions{% endif %}, and no alert has
+      fired in the last three days.</p>
+  </div>
+  {% endif %}
+
+  <div class="cols b" style="margin-top:var(--s3)">
+    <div>
+      <div class="card">
+        <span class="eyebrow">Your watchlist</span>
+        {% if att.watch %}
+          <ul class="list">
+            {% for w in att.watch %}
+              {# A popular stock opens its public page, which costs no look;
+                 anything else opens a fresh analysis. #}
+              <li>{% if w.public %}<a href="{{ url_for('stock_page', sym=w.slug) }}">{% else %}<a data-working href="{{ url_for('analyse', symbol=w.symbol, interval=w.interval) }}">{% endif %}<b class="fig">{{ w.symbol }}</b></a>
+                {% if w.call %}
+                  {% set a = w.call %}
+                  <span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
+                                       else 'hold' if a == 'WAIT' else 'mute' }}">{{ a }}</span>
+                  <span class="faint">
+                    {%- if w.public %}daily check {{ w.at|ago }} at {{ w.price|price }}
+                      {%- if w.quote_day %}, the {{ w.quote_day }} close{% endif %}
+                    {%- else %}your {{ w.run_interval }} analysis {{ w.at|ago }} at {{ w.price|price }}
+                      {%- if w.closed %}, market closed{% endif %}
+                    {%- endif %}</span>
+                {% else %}
+                  <span class="faint">not analysed yet</span>
+                {% endif %}</li>
+            {% endfor %}
+          </ul>
+          {% if att.watch_more %}
+            <p class="prose" style="margin-top:var(--s1)">And {{ att.watch_more }} more on
+              the <a href="{{ url_for('monitor') }}">Monitor</a> page.</p>
+          {% endif %}
+          <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+            The latest call on each: the daily check for a popular stock,
+            otherwise your own last analysis of it.</p>
+        {% else %}
+          <p class="prose">Nothing on your watchlist yet. Press <b>Add to
+            watchlist</b> on any analysis, and its latest call shows here.</p>
+        {% endif %}
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <span class="eyebrow">BUY calls in today's popular checks</span>
+        {% if att.buys %}
+          <ul class="list">
+            {% for v in att.buys %}
+              <li><a href="{{ url_for('stock_page', sym=v.slug) }}"><b class="fig">{{ v.short }}</b></a>
+                <span class="soft">{{ v.name }}</span>.
+                {% if v.samples %}Found this setup {{ v.samples }} times before; it
+                worked {{ v.worked }}.{% else %}Too few past examples to count.{% endif %}
+                <span class="faint">Checked {{ v.at|ago }} at {{ v.price|price }}{% if v.quote_day %}, the {{ v.quote_day }} close{% endif %}.</span></li>
+            {% endfor %}
+          </ul>
+          {% if att.buys_more %}
+            <p class="prose" style="margin-top:var(--s1)">And {{ att.buys_more }} more
+              among the <a href="{{ url_for('stocks_index') }}">popular stocks</a>.</p>
+          {% endif %}
+          <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+            A shortlist to look into, not advice. Each is the app's own daily
+            check, made with the standard settings rather than yours, and how
+            often a setup worked before is no promise it works again.</p>
+        {% elif att.checked %}
+          <p class="prose">None of today's popular checks says BUY. A BUY needs
+            an edge the past record shows, and on most days most of these do
+            not have one.</p>
+        {% else %}
+          <p class="prose">The popular checks have not run in the last day, so
+            there is no shortlist to show.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+
 <div class="card">
   <form class="searchrow" action="{{ url_for('analyse') }}" method="get" data-working>
     <label class="sr" for="symbol">Ticker or company name</label>
+    {# Focused straight away only when nothing above it needs reading first:
+       focusing a box further down scrolls the page past the list. #}
     <input class="field" id="symbol" type="text" name="symbol"
            placeholder="AAPL, NVDA, BTC-USD, Tesla…" data-suggest="submit"
-           autofocus autocomplete="off" spellcheck="false" required>
+           {{ 'autofocus' if not att.any }} autocomplete="off" spellcheck="false" required>
     <label class="sr" for="interval">Bar interval</label>
     <select class="field" id="interval" name="interval">
       {% for code, label in intervals %}

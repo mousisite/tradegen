@@ -186,7 +186,8 @@
                     <button class="btn quiet sm" type="submit">Resume</button>
                   </form>
                 {% endif %}
-                <form method="post" action="{{ url_for('alert_action', action='delete') }}">
+                <form method="post" action="{{ url_for('alert_action', action='delete') }}"
+                      onsubmit="return confirm('Delete this alert? This cannot be undone.');">
                   <input type="hidden" name="alert_id" value="{{ row['id'] }}">
                   <button class="btn quiet sm" type="submit">Delete</button>
                 </form>

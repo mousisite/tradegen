@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% block title %}Review a paper trade · Orenth{% endblock %}
+{% block content %}
+
+{# Everything here is read from the saved analysis and your settings: no
+   price is fetched and nothing is analysed. Confirm logs exactly this. #}
+{% set long = size.direction > 0 %}
+<div class="pagehead">
+  <span class="eyebrow">A simulated trade</span>
+  <h1>Review this paper trade</h1>
+  <p>Nothing is bought or sold, and no order goes to any broker. Confirming
+    only writes this trade into your journal, so you can see later how the
+    plan would have done.</p>
+</div>
+
+<div class="call {{ 'buy' if long else 'sell' }}">
+  <span class="word">{{ 'Long' if long else 'Short' }}</span>
+  <span class="line"><b>{{ run['symbol'] }}</b>{% if run['name'] and run['name'] != run['symbol'] %}, {{ run['name'] }}{% endif %}.
+    From your {{ run['action'] }} call on {{ words }} bars, analysed {{ run['ts']|ago }}.</span>
+</div>
+
+{% if logged %}
+  <div class="notice" style="margin-top:var(--s3)">
+    This plan is already in your journal, logged {{ logged['ts_opened']|ago }}.
+    Logging it again would count the same trade twice.
+  </div>
+{% elif stale %}
+  <div class="notice" style="margin-top:var(--s3)">
+    This plan was made {{ run['ts']|ago }}. The journal records its entry of
+    {{ size.entry|price }}, not the price now, so if the price has moved since,
+    this trade will not match one you could make today. Run the analysis
+    again for a fresh plan.
+  </div>
+{% endif %}
+
+<div class="cols b" style="margin-top:var(--s3)">
+  <div>
+    <div class="card">
+      <span class="eyebrow">The trade</span>
+      <dl class="pairs">
+        <dt>Side</dt>
+        <dd>{{ 'Long: it gains if the price rises' if long else 'Short: it gains if the price falls' }}</dd>
+        <dt>Entry</dt><dd class="fig">{{ size.entry|price }}</dd>
+        <dt>Stop</dt><dd class="fig loss">{{ size.stop|price }}</dd>
+        <dt>Target</dt>
+        <dd class="fig gain">{{ size.target|price if size.target else 'none set' }}</dd>
+        {% if size.reward_risk %}
+        <dt>Reward to risk</dt>
+        <dd class="fig">{{ "%.2f"|format(size.reward_risk) }}&thinsp;:&thinsp;1</dd>
+        {% endif %}
+      </dl>
+    </div>
+  </div>
+  <div>
+    <div class="card">
+      <span class="eyebrow">The size</span>
+      <dl class="pairs">
+        <dt>Size</dt>
+        <dd><span class="fig">{{ size.quantity_text }}</span> units
+          <span class="faint">{{ size.notional|money }} at the entry</span></dd>
+        <dt>Money at risk</dt>
+        <dd><span class="fig">{{ size.risk|money }}</span>
+          <span class="faint">lost if the stop is hit</span></dd>
+        <dt>Share of the account</dt>
+        <dd><span class="fig">{{ "%.2f"|format(size.risk_pct) }}%</span>
+          <span class="faint">of {{ size.account|money }}</span></dd>
+      </dl>
+      <p class="prose" style="margin-top:var(--s2)">Sized by your settings: at
+        most {{ '%g'|format(cfg.risk_per_trade_pct) }}% of the account lost at
+        the stop, and no position worth more than
+        {{ '%g'|format(cfg.max_position_pct) }}% of it.{% if size.capped %} The
+        second limit applied here, so less than
+        {{ '%g'|format(cfg.risk_per_trade_pct) }}% is at risk.{% endif %}
+        <a href="{{ url_for('settings') }}">Change them</a>.</p>
+    </div>
+  </div>
+</div>
+
+<p class="prose" style="margin-top:var(--s3)">A stop is a plan, not a promise.
+  A price that opens past it fills worse than the stop, so the loss can be
+  bigger than the money at risk above.</p>
+
+<div style="display:flex;gap:var(--s1);flex-wrap:wrap;margin-top:var(--s3)">
+  {% if logged %}
+    <a class="btn" href="{{ url_for('trades') }}">Open the journal</a>
+  {% else %}
+    <form method="post" action="{{ url_for('take_trade') }}">
+      <input type="hidden" name="run_id" value="{{ run['id'] }}">
+      <button class="btn" type="submit">Confirm paper trade</button>
+    </form>
+  {% endif %}
+  <a class="btn quiet" href="{{ back }}">Cancel</a>
+</div>
+
+{% endblock %}

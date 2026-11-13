@@ -125,7 +125,7 @@ otherwise. Each links to where the work happens.
 | 12 | Bull and bear thesis | `bot/thesis.py` | Both cases argued from the gathered evidence, each point carrying what would prove it wrong |
 | 13 | Source citations | throughout | Every figure carries where it came from; filings link to sec.gov |
 | 14 | Investment thesis memory | `bot/thesis.py`, `bot/database.py` | A thesis is saved with the price at the time and closed out later as right, wrong, right-by-luck, or undecided. The outcome offered when you close one is the one the price supports, not the one you remember |
-| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Eleven conditions covering price, percentage moves, volume, moving averages and volatility, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
+| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
 | 15d | Export | `bot/export.py` | The journal, theses, measured strategy record and analysis history as CSV or JSON |
@@ -372,9 +372,10 @@ paper journal and a live one side by side without editing anything:
 ## Finding something to look at
 
 The Find page answers the question people actually arrive with: *out of
-everything, what should I look at today?* Pick stocks or crypto, and whether
-you hold for days, weeks or months. It runs the whole back-test over forty
-instruments and ranks by the measured edge after costs.
+everything, what should I look at today?* Pick stocks, crypto or both, and
+whether you hold for days, weeks or months. It runs the whole back-test over up
+to 150 stocks, 28 coins, or 178 instruments for both, and ranks by the measured
+edge after costs.
 
 Two lists, and the second is why the first can stay honest:
 
@@ -384,7 +385,7 @@ on that instrument's own history.
 **Worth watching** — it has paid off before and nothing is happening today. The
 action offered is to watch it, not to buy it.
 
-Measuring forty instruments typically finds a handful with a positive edge and
+Measuring that many typically finds a handful with a positive edge and
 one or two with a setup actually firing, because an edge measured over years
 says nothing about today. Without the second list the page would be empty
 almost every day: honest, and useless.
@@ -741,7 +742,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         eleven alert conditions and the checker
+  alerts.py         thirteen alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 ```

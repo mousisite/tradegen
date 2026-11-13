@@ -1,6 +1,18 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
 {% block title %}{{ r.bars.symbol }} · Orenth{% endblock %}
+{# The trade chart comes drawn twice. Shrunk to a phone, the wide drawing's
+   labels would be a few pixels tall, so a phone gets the narrow one: fewer
+   candles, drawn larger. #}
+{% block head_extra %}{% if chart and chart.wide %}<style>
+  .tradechart .chart { max-height: 380px; }
+  .tradechart .narrow { display: none; }
+  @media (max-width: 600px) {
+    .tradechart .wide { display: none; }
+    .tradechart .narrow { display: block; }
+    .tradechart .chart { max-height: none; }
+  }
+</style>{% endif %}{% endblock %}
 
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
@@ -140,12 +152,13 @@
         only counts the stop understates what a bad morning does.</p>
     {% endif %}
     {# Only a call to act now is a trade. A wait has not filled, and logging it
-       would put a price the market never reached into the journal. #}
+       would put a price the market never reached into the journal. The button
+       opens a review of the trade first; nothing is written until it is
+       confirmed there. #}
     {% if r.run_id and a in ('BUY', 'SHORT') %}
-      <form action="{{ url_for('take_trade') }}" method="post" style="margin-top:var(--s3)">
-        <input type="hidden" name="run_id" value="{{ r.run_id }}">
-        <button class="btn quiet sm" type="submit">Log this as a paper trade</button>
-      </form>
+      <div style="margin-top:var(--s3)">
+        <a class="btn quiet sm" href="{{ url_for('simulate_trade', run_id=r.run_id) }}">Log this as a paper trade</a>
+      </div>
     {% elif r.run_id and a == 'WAIT' %}
       <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
         A wait is not a trade yet, so there is nothing to log. To hear when the
@@ -153,6 +166,28 @@
     {% endif %}
   </div>
 </div>
+{% endif %}
+
+{% if chart and chart.wide %}
+<section class="tradechart" style="margin-top:var(--s4)">
+  <div class="sechead">
+    <h2>{{ 'The plan on the chart' if chart.levels else 'The price' }}</h2>
+    <span class="tail">as of {{ chart.as_of or 'an unknown time' }}</span>
+  </div>
+  <div class="card">
+    <div class="wide">{{ chart.wide|safe }}</div>
+    <div class="narrow">{{ chart.narrow|safe }}</div>
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+      {{ chart.words|capitalize }} candles, the newest on the right, with the
+      volume traded underneath. The dot is the latest price.
+      {% if chart.levels and a == 'WAIT' %}The dashed lines are this plan's
+        entry, a price not reached yet, and its stop and target.
+      {% elif chart.levels %}The dashed lines are this plan's entry, stop and
+        target.{% else %}No plan is drawn: the call is to stand aside.{% endif %}
+      {% if chart.intraday %}Times are UTC.{% endif %}
+      Point at a candle to see its prices.</p>
+  </div>
+</section>
 {% endif %}
 
 <section>

@@ -14,6 +14,7 @@ rather than something misleading.
 from __future__ import annotations
 
 import math
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
@@ -140,24 +141,39 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
 # The trade, drawn on its own prices
 # ---------------------------------------------------------------------------
 
+# What one bar of each interval is called, for the trade chart's title.
+_BAR_WORDS = {"1d": "daily", "1h": "hourly", "60m": "hourly", "30m": "30-minute",
+              "15m": "15-minute", "5m": "5-minute", "2m": "2-minute",
+              "1m": "1-minute"}
+
+
+def bar_words(interval: str) -> str:
+    """"daily", "hourly" or "15-minute": what a bar of this interval covers."""
+    return _BAR_WORDS.get((interval or "1d").lower(), interval or "")
+
+
 def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[float],
                 lows: Sequence[float], closes: Sequence[float],
                 volumes: Sequence[float] = (), levels: Optional[Dict[str, float]] = None,
                 last: Optional[float] = None, as_of: str = "", day_label=None,
-                width: int = 720, height: int = 300, bars: int = 90) -> str:
-    """Daily candles with the plan's prices drawn across them.
+                width: int = 720, height: int = 300, bars: int = 90,
+                interval: str = "1d") -> str:
+    """Candles with the plan's prices drawn across them.
 
     For the analysis page, where the question is where today's price sits
     against the entry, the stop and the target. Candles here, unlike the
     research page's year-long line, because the last few months at this width
     leave each one wide enough to read, and the stop only means something
-    against the size of a normal day's range.
+    against the size of a normal bar's range.
 
     levels maps a label ("Buy at", "Stop", "Target") to a price. A level far
     outside the drawn range is kept, and the range is widened to show it,
     because a target nobody can see on the chart reads as no target. Each
-    candle carries its date and prices as a tooltip. Nothing is drawn for a
-    series too short or too broken to draw honestly.
+    candle carries its date and prices as a tooltip; on bars shorter than a
+    day that is the date and time, in UTC unless day_label says otherwise.
+    as_of is when the latest price was set, said in the title and on the dot
+    that marks it. Nothing is drawn for a series too short or too broken to
+    draw honestly.
     """
     n = min(len(times), len(opens), len(highs), len(lows), len(closes))
     rows = []
@@ -198,7 +214,8 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     def y_at(v):
         return pad_top + price_h * (1 - (v - axis_low) / span)
 
-    title = "Daily price%s" % (", as of " + as_of if as_of else "")
+    title = "%s price%s" % (bar_words(interval).capitalize(),
+                            ", as of " + as_of if as_of else "")
     parts = ['<svg class="chart trade" viewBox="0 0 %d %d" role="img" aria-label="%s">'
              % (width, height, _escape(title))]
 
@@ -211,15 +228,25 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
                      % (pad_left - 8, y + 4, _escape(_price(tick))))
         tick += step
 
-    day = day_label or (lambda ts: "")
+    # A daily candle is named by its date; a shorter one needs the time too,
+    # or a day's worth of hourly candles all carry the same name.
+    zone = ""
+    day = day_label
+    if day is None:
+        intraday = bar_words(interval) != "daily"
+        stamp = "%d %b %H:%M" if intraday else "%d %b"
+        zone = " UTC" if intraday else ""
+
+        def day(ts):
+            return time.strftime(stamp, time.gmtime(int(ts))).lstrip("0")
     peak = max(r[5] for r in rows) or 1.0
     for i, (ts, o, h, l, c, v) in enumerate(rows):
         up = c >= o
         colour = "var(--gain)" if up else "var(--loss)"
         x = x_at(i)
         top, bottom = y_at(max(o, c)), y_at(min(o, c))
-        tip = "%s  open %s  high %s  low %s  close %s" % (
-            day(ts), _price(o), _price(h), _price(l), _price(c))
+        tip = "%s%s  open %s  high %s  low %s  close %s" % (
+            day(ts), zone, _price(o), _price(h), _price(l), _price(c))
         parts.append('<g><title>%s</title>' % _escape(tip.strip()))
         parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>'
                      % (x, y_at(h), x, y_at(l), colour))
@@ -250,17 +277,19 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
                      % (width - pad_right + 6, label_y, colour, _escape(name), _escape(_price(price))))
 
     if last is not None and math.isfinite(last):
+        now = "Now %s%s" % (_price(last), ", as of " + as_of if as_of else "")
         parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--ink)"><title>%s</title></circle>'
-                     % (x_at(len(rows) - 1), y_at(last), _escape("Now " + _price(last))))
+                     % (x_at(len(rows) - 1), y_at(last), _escape(now)))
 
+    # The first and last candle's dates, short enough to sit apart on a
+    # phone. When the latest price was set is in the title and on its dot.
     first_day, last_day = day(rows[0][0]), day(rows[-1][0])
     if first_day:
         parts.append('<text x="%d" y="%d" class="clab">%s</text>'
                      % (pad_left, height - 6, _escape(first_day)))
-    if last_day or as_of:
+    if last_day:
         parts.append('<text x="%d" y="%d" text-anchor="end" class="clab">%s</text>'
-                     % (width - pad_right, height - 6,
-                        _escape(("price as of " + as_of) if as_of else last_day)))
+                     % (width - pad_right, height - 6, _escape(last_day + zone)))
     parts.append("</svg>")
     return "".join(parts)
 

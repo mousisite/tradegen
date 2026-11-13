@@ -337,8 +337,27 @@ try:
         fake.plan.action = action
         body = c.get("/analyse?symbol=FAKE&interval=1d&news=0").data.decode("utf-8", "replace")
         check("a %s %s logged as a paper trade" % (action, "can be" if offered else "cannot be"),
-              ('action="/trades/take"' in body) == offered)
+              ('href="/trades/simulate?run_id=4242"' in body) == offered)
+        # The button opens a review first; nothing is written from this page.
+        check("and a %s page never logs one straight away" % action,
+              'action="/trades/take"' not in body)
     check("and the WAIT says why", "A wait is not a trade yet" in body)
+    check("the trade is drawn on its own candles", 'class="chart trade"' in body
+          and "The plan on the chart" in body)
+    check("with the plan's prices across them",
+          "Short at " in body or "Buy at " in body)
+    check("and when the price was set, in words and for a screen reader",
+          'aria-label="Daily price, as of 2026-11-11, market closed"' in body
+          and ">as of 2026-11-11, market closed</span>" in body
+          and "Daily candles" in body)
+    check("drawn twice, so a phone gets the narrow one",
+          body.count('class="chart trade"') == 2 and ".tradechart .narrow" in body)
+    fake.plan.action = "AVOID"
+    body = c.get("/analyse?symbol=FAKE&interval=1d&news=0").data.decode("utf-8", "replace")
+    check("an AVOID draws the prices with no plan across them",
+          'class="chart trade"' in body and "No plan is drawn" in body
+          and "Stop " not in body.split("The price</h2>")[-1].split("</section>")[0])
+    fake.plan.action = "WAIT"
     check("the symbol is the page's heading", '<h1 class="sym">FAKE</h1>' in body)
     check("the plain-words box links to how it is tested",
           "How the strategies are tested" in body)

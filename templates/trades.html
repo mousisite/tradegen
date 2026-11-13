@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% set active = 'trades' %}
 {% block title %}Journal · Orenth{% endblock %}
+
+{# The call a trade was taken from, when it came from an analysis: logging one
+   writes "from run #12 (BUY)" into the trade. Empty for any other trade. #}
+{% macro call_of(t) %}{% set note = t['strategy_note'] or '' %}{% if t['run_id']
+  and note.endswith(')') and '(' in note %}{{ note[note.rfind('(') + 1:-1] }}{% endif %}{% endmacro %}
+
 {% block content %}
 
 <div class="pagehead">
@@ -8,6 +14,11 @@
   <p>Log what you actually took, let the bot mark it to market, and find out
     whether the process works before real money is involved.</p>
 </div>
+
+{% if request.args.get('logged') %}
+  <div class="saved">Logged as a paper trade: it is under Open below. Nothing
+    was bought or sold.</div>
+{% endif %}
 
 {% if summary.trades %}
 <div class="card">
@@ -116,14 +127,21 @@
         <tbody>
         {% for t in open_trades %}
           {% set m = live.get(t['id'], {}) %}
+          {# The reward to risk it was planned at: the target's distance over
+             the stop's, the way an analysis works out its own. #}
+          {% set rr = ((t['target1'] - t['entry']) / (t['entry'] - t['stop']))
+                      if t['target1'] and t['entry'] != t['stop'] else none %}
+          {% set from_call = call_of(t) %}
           <tr>
             <td><b>{{ t['symbol'] }}</b>
-              <div class="faint" style="font-size:var(--t-xs)">{{ t['ts_opened']|ago }}</div></td>
+              <div class="faint" style="font-size:var(--t-xs)">{{ t['ts_opened']|ago }}{% if from_call %}
+                · from your {{ from_call }} call{% endif %}</div></td>
             <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
             <td class="r fig">{{ t['entry']|price }}</td>
             <td class="r fig loss">{{ t['stop']|price }}</td>
-            <td class="r fig gain">{{ t['target1']|price }}</td>
+            <td class="r fig gain">{{ t['target1']|price }}
+              {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
             <td class="r fig">{{ m.price|price if m.price else '—' }}</td>
             <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}">
               {{ m.r|signed if m.r is not none else '—' }}</td>
@@ -189,16 +207,23 @@
         </tr></thead>
         <tbody>
         {% for t in closed %}
+          {% set rr = ((t['target1'] - t['entry']) / (t['entry'] - t['stop']))
+                      if t['target1'] and t['entry'] != t['stop'] else none %}
+          {% set from_call = call_of(t) %}
           <tr>
-            <td><b>{{ t['symbol'] }}</b></td>
+            <td><b>{{ t['symbol'] }}</b>{% if from_call %}
+              <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}</td>
             <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
             <td class="r fig">{{ t['entry']|price }}</td>
             <td class="r fig soft">{{ t['stop']|price }}</td>
             <td class="r fig">{{ t['exit_price']|price }}</td>
             <td class="soft">{{ t['exit_reason'] }}</td>
+            {# What the plan aimed for beside what it made: a target hit makes
+               the planned R, a stop hit makes -1. #}
             <td class="r fig {{ 'gain' if (t['r_multiple'] or 0) > 0 else 'loss' }}">
-              <b>{{ t['r_multiple']|signed }}</b></td>
+              <b>{{ t['r_multiple']|signed }}</b>
+              {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">of {{ rr|signed }} planned</div>{% endif %}</td>
             <td class="r fig {{ 'gain' if (t['pnl'] or 0) > 0 else 'loss' }}">
               {{ t['pnl']|money }}</td>
             <td class="r faint">{{ t['ts_closed']|ago }}</td>

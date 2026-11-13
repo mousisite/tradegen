@@ -54,6 +54,7 @@ from bot import database as db_mod
 from bot import demo as demo_mod
 from bot import digest as digest_mod
 from bot import engine
+from bot import events as events_mod
 from bot import ideas as ideas_mod
 from bot import invites as invites_mod
 from bot import export as export_mod
@@ -624,6 +625,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
         # "take this trade", which only opens your own runs, works for them.
         if mine is None and record:
             mine = _record_cached_run(result, me)
+            events_mod.first_analysis(app.config.get("DB_PATH"), me, mine)
             if mine is not None:
                 with _CACHE_LOCK:
                     runs[me] = mine
@@ -639,6 +641,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
         result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
                                 source="web", db_path=app.config.get("DB_PATH"),
                                 user=me, record=record)
+        events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
             _CACHE[key] = (time.time(), result,
                            {me: result.run_id} if result.run_id else {})
@@ -824,6 +827,8 @@ def index():
     # It is also the first thing a person arriving from a link sees, and a bare
     # login form asks them to commit before they know what this is.
     if getattr(g, "user", None) is None:
+        events_mod.landing_view(app.config.get("DB_PATH"), request.method,
+                                request.headers.get("User-Agent", ""))
         return render_template("landing.html", example=_example())
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -833,11 +838,132 @@ def index():
                                          user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
+        stored = _attention_stored(conn, uid())
     finally:
         conn.close()
     return render_template("index.html", runs=runs, open_trades=open_trades,
                            summary=summary, counts=counts,
+                           attention=_attention(stored, open_trades),
                            has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
+
+
+# The signed-in front page starts with what needs the person now. It is built
+# from what is already saved: their own records, and the popular checks the
+# background job has already run. Nothing here analyses or scans anything, so
+# the page stays as quick as the rest. The one thing fetched is the price of
+# each open position, the way the journal fetches it, and the page waits only
+# so long for that.
+ATTENTION_DAYS = 3          # an alert that fired this recently is still news
+DASHBOARD_WAIT = 4.0        # seconds the page waits for open positions' prices
+POPULAR_FRESH = 24 * 3600   # a popular check older than this is not today's
+ATTENTION_SHOWN = 6         # rows per list before "and N more"
+WATCH_SHOWN = 8
+
+
+def _quote_day(snap: Dict) -> str:
+    """The session a popular check's price is from, when not the check's own day.
+
+    On a weekend a stock's price is Friday's close, and "checked 3h ago" on its
+    own would pass that off as a price three hours old.
+    """
+    day, at = snap.get("price_day"), snap.get("at")
+    if day is None or not at or int(day) >= int(at) // 86400:
+        return ""
+    return time.strftime("%d %b", time.gmtime(int(day) * 86400)).lstrip("0")
+
+
+def _latest_runs(conn, me: int, symbols) -> Tuple[Dict, Dict]:
+    """This person's latest run of each symbol: by (symbol, interval), and overall."""
+    symbols = sorted(set(symbols))
+    by_pair: Dict = {}
+    by_symbol: Dict = {}
+    if not symbols:
+        return by_pair, by_symbol
+    # With one MAX() in the query, SQLite takes the other columns from the
+    # row that holds it: the latest run of each pair.
+    rows = conn.execute(
+        "SELECT symbol, interval, action, price, market_open, MAX(ts) AS ts "
+        "FROM runs WHERE user_id=? AND symbol IN (%s) GROUP BY symbol, interval"
+        % ",".join("?" * len(symbols)), [int(me)] + symbols).fetchall()
+    for row in rows:
+        by_pair[(row["symbol"], row["interval"])] = row
+        best = by_symbol.get(row["symbol"])
+        if best is None or row["ts"] > best["ts"]:
+            by_symbol[row["symbol"]] = row
+    return by_pair, by_symbol
+
+
+def _attention_stored(conn, me: int) -> Dict:
+    """The front page's first section, as far as the database has it."""
+    now = time.time()
+    fired = [dict(e) for e in db_mod.event_list(conn, me, limit=30)
+             if e["ts"] >= now - ATTENTION_DAYS * 86400]
+    popular = {v["symbol"]: v for v in public_mod.verdicts(conn) if v.get("at")}
+    fresh = [v for v in popular.values() if now - v["at"] <= POPULAR_FRESH]
+    watched = db_mod.watchlist(conn, user=me)
+    shown = watched[:WATCH_SHOWN]
+    by_pair, by_symbol = _latest_runs(conn, me, [w["symbol"] for w in shown])
+    watch = []
+    for w in shown:
+        symbol, interval = w["symbol"], w["interval"] or "1d"
+        # The public check is a daily one, so it answers only a daily watch.
+        snap = popular.get(symbol) if interval == "1d" else None
+        own = by_pair.get((symbol, interval)) or by_symbol.get(symbol)
+        item = {"symbol": symbol, "interval": interval}
+        if snap and snap.get("action"):
+            item.update(call=snap["action"], at=snap["at"], price=snap.get("price"),
+                        public=True, quote_day=_quote_day(snap),
+                        slug=public_mod.slug(symbol))
+        elif own is not None and own["action"]:
+            item.update(call=own["action"], at=own["ts"], price=own["price"],
+                        public=False, run_interval=own["interval"],
+                        closed=not own["market_open"])
+        watch.append(item)
+    return {"fired": fired, "watch": watch,
+            "watch_more": max(0, len(watched) - len(shown)),
+            "checked": bool(fresh),
+            "buys": [dict(v, quote_day=_quote_day(v), slug=public_mod.slug(v["symbol"]),
+                          short=public_mod.short(v["symbol"]))
+                     for v in fresh if v.get("action") == "BUY"]}
+
+
+def _marks_within(open_trades, wait: float):
+    """_mark_to_market's answer, and whether it was still not back after wait."""
+    if not open_trades:
+        return {}, False
+    done: Dict = {}
+    worker = threading.Thread(target=lambda: done.update(_mark_to_market(open_trades)),
+                              name="orenth-front-page-prices", daemon=True)
+    worker.start()
+    worker.join(wait)
+    if worker.is_alive():
+        # Left to finish on its own: what it fetches is kept for a minute, so
+        # the journal or the next look at this page gets it straight away.
+        return {}, True
+    return done, False
+
+
+def _attention(stored: Dict, open_trades) -> Dict:
+    """What needs the person now: stops and targets, alerts, watchlist, BUYs."""
+    marks, late = _marks_within(open_trades, DASHBOARD_WAIT)
+    positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
+                 if (marks.get(t["id"]) or {}).get("status") in ("past stop",
+                                                                 "past target")]
+    crossed = {p["trade"]["id"] for p in positions
+               if p["mark"]["status"] == "past stop"}
+    # The background check writes a crossed stop into the alert history as
+    # well. A position listed as past its stop is not said a second time.
+    fired = [e for e in stored["fired"]
+             if not (e["kind"] == "stop_breach" and e["trade_id"] in crossed)]
+    buys = stored["buys"]
+    return {"positions": positions, "late": late, "crossed": len(crossed),
+            "fired": fired[:ATTENTION_SHOWN],
+            "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
+            "watch": stored["watch"], "watch_more": stored["watch_more"],
+            "buys": buys[:ATTENTION_SHOWN],
+            "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
+            "checked": stored["checked"],
+            "any": bool(positions or fired or stored["watch"] or buys)}
 
 
 def _safe_back(raw, fallback):
@@ -945,7 +1071,7 @@ def analyse():
                            families=families, ranked=ranked, hold_text=hold_text,
                            plan=result.plan, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
-                           overlap=overlap,
+                           overlap=overlap, chart=_trade_chart(result),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
                            # A visitor cannot make a share, but every example
@@ -953,6 +1079,41 @@ def analyse():
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
                                result.bars.symbol))
                                if result.bars.symbol in public_mod.NAMES else ""))
+
+
+def _trade_chart(result) -> Dict:
+    """The analysis page's candle chart, from the bars already in hand.
+
+    Drawn twice, wide and narrow, and the page shows one: scaled down to a
+    phone, the wide drawing's labels shrink to a few pixels, so a phone gets
+    fewer candles drawn larger instead. An AVOID has no plan, so only the
+    prices are drawn.
+    """
+    bars, plan = result.bars, result.plan
+    action = (plan.action or "").upper()
+    levels = {}
+    if plan.entry and action != "AVOID":
+        side = plan.direction or (1 if (plan.stop or 0) < plan.entry else -1)
+        levels = {"Buy at" if side > 0 else "Short at": plan.entry,
+                  "Stop": plan.stop, "Target": plan.target1}
+    as_of = alerts_mod.as_of(bars)
+    drawn = dict(levels=levels, last=bars.last_price, as_of=as_of,
+                 interval=bars.interval)
+    series = (bars.timestamp, bars.open, bars.high, bars.low, bars.close,
+              bars.volume)
+    try:
+        wide = charts_mod.trade_chart(*series, **drawn)
+        narrow = charts_mod.trade_chart(*series, width=340, height=260, bars=40,
+                                        **drawn)
+    except Exception:
+        # A chart that cannot be drawn must not cost the person the analysis.
+        app.logger.exception("Could not draw the trade chart for %s", bars.symbol)
+        return {}
+    if not wide:
+        return {}
+    return {"wide": wide, "narrow": narrow or wide, "as_of": as_of,
+            "levels": bool(levels), "words": charts_mod.bar_words(bars.interval),
+            "intraday": charts_mod.bar_words(bars.interval) != "daily"}
 
 
 def _family_rollup(result: engine.Analysis):
@@ -1011,7 +1172,8 @@ def _mark_one(trade):
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
         status = "past target"
-    return {"price": price, "r": r_now, "status": status}
+    return {"price": price, "r": r_now, "status": status,
+            "as_of": alerts_mod.as_of(bars)}
 
 
 def _mark_to_market(open_trades):
@@ -1054,69 +1216,138 @@ def close_trade():
     return redirect(url_for("trades"))
 
 
+class _NoTrade(ValueError):
+    """A recorded analysis with no trade in it to log, said for the person."""
+
+
+def _paper_size(row, cfg: Dict) -> Dict:
+    """The paper position a recorded plan opens, by the journal's sizing rule.
+
+    One rule for the review page and for logging the trade, so the size, the
+    money at risk and its share of the account that are confirmed are the
+    ones written down. Only a BUY or a SHORT is a trade. A WAIT names a price
+    the market has not reached yet, so logging it would record a fill that
+    never happened and count its make-believe gain or loss in the hit rate
+    and expectancy.
+    """
+    if row is None or not row["entry"] or not row["stop"]:
+        raise _NoTrade("That analysis has no entry and stop to trade.")
+    action = (row["action"] or "").upper()
+    if action == "WAIT":
+        raise _NoTrade("That analysis said WAIT. Nothing has filled yet, so "
+                       "there is no trade to log. Set its entry alert to hear "
+                       "when the price gets there, and add the trade by hand "
+                       "in the journal if you take it.")
+    if action not in ("BUY", "SHORT"):
+        raise _NoTrade("That analysis said %s: there is no trade in it to "
+                       "simulate." % (action or "nothing"))
+    entry, stop = float(row["entry"]), float(row["stop"])
+    # The side is where the stop sits, which the plan keeps in step with
+    # the call: below the entry for a BUY, above it for a SHORT.
+    direction = 1 if stop < entry else -1
+    per_unit = abs(entry - stop)
+    account = float(cfg["account_size"])
+    qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
+               if per_unit > 0 else 0)
+    cap = account * cfg["max_position_pct"] / 100.0
+    capped = qty_raw * entry > cap
+    if capped:
+        qty_raw = cap / entry
+    crypto = row["asset_class"] == "crypto"
+    qty = round(qty_raw, 6) if crypto else float(int(qty_raw))
+    if qty <= 0:
+        raise _NoTrade("Account too small for one unit at this stop distance.")
+    target = float(row["target1"]) if row["target1"] else None
+    return {"direction": direction, "entry": entry, "stop": stop,
+            "target": target, "per_unit": per_unit, "quantity": qty,
+            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
+                              else "{:,.0f}".format(qty)),
+            "notional": qty * entry, "risk": qty * per_unit,
+            "risk_pct": (qty * per_unit / account * 100.0) if account else 0.0,
+            "account": account, "capped": capped,
+            "reward_risk": (abs(target - entry) / per_unit
+                            if target and per_unit > 0 else None)}
+
+
+def _own_run(conn, run_id: int):
+    """One of the signed-in person's own recorded analyses, or None."""
+    sql, args = db_mod._own("SELECT * FROM runs WHERE id=?", [run_id], uid())
+    return conn.execute(sql, args).fetchone()
+
+
+def _logged_from(conn, run_id: int):
+    """The open journal trade already made from this run, if there is one."""
+    return conn.execute("SELECT * FROM trades WHERE run_id=? AND user_id=? AND "
+                        "status='open' ORDER BY id LIMIT 1",
+                        (run_id, uid())).fetchone()
+
+
+@app.route("/trades/simulate")
+def simulate_trade():
+    """Show the paper trade a plan would open, before anything is written.
+
+    Read from the stored run and the person's settings only: no price is
+    fetched and nothing is analysed, so it opens at once, and Confirm logs
+    exactly what it shows.
+    """
+    try:
+        run_id = int(request.args.get("run_id") or "")
+    except ValueError:
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        row = _own_run(conn, run_id)
+        if row is None:
+            abort(404)
+        logged = _logged_from(conn, run_id)
+    finally:
+        conn.close()
+    cfg = _cfg()
+    try:
+        size = _paper_size(row, cfg)
+    except _NoTrade as exc:
+        return render_template("error.html", symbol="", message=str(exc)), 400
+    # Back to the analysis it came from. Without a page to go back to, the
+    # journal, rather than the analysis again: opening that would run it,
+    # and on a free account a new day's look at it costs one of the day's.
+    back = (_referrer_path() if request.referrer else "") or url_for("trades")
+    age = max(0, int(time.time()) - int(row["ts"] or 0))
+    return render_template(
+        "simulate.html", run=row, size=size, cfg=cfg, back=back, logged=logged,
+        words=charts_mod.bar_words(row["interval"] or "1d"),
+        # A plan's entry is the price when it was analysed; the journal logs
+        # that price, so a plan older than this says the price may have moved.
+        stale=age > (3600 if (row["interval"] or "1d") == "1d" else 900))
+
+
 @app.route("/trades/take", methods=["POST"])
 def take_trade():
-    """Open a paper position from a recorded plan.
-
-    Only a BUY or a SHORT is a trade. A WAIT names a price the market has not
-    reached yet, so logging it would record a fill that never happened and
-    count its make-believe gain or loss in the hit rate and expectancy.
-    """
+    """Open a paper position from a recorded plan, as the review page showed it."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         run_id = int(request.form["run_id"])
-        sql, args = db_mod._own("SELECT * FROM runs WHERE id=?", [run_id], uid())
-        row = conn.execute(sql, args).fetchone()
-        if row is None or not row["entry"] or not row["stop"]:
-            return render_template("error.html", symbol="",
-                                   message="That analysis has no entry and stop "
-                                           "to trade."), 400
-
-        cfg = _cfg()
-        action = (row["action"] or "").upper()
-        # symbol="" on these, because the error page's advice about mistyped
+        row = _own_run(conn, run_id)
+        # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
-        if action == "WAIT":
-            return render_template(
-                "error.html", symbol="",
-                message="That analysis said WAIT. Nothing has filled yet, so "
-                        "there is no trade to log. Set its entry alert to hear "
-                        "when the price gets there, and add the trade by hand "
-                        "in the journal if you take it."), 400
-        if action not in ("BUY", "SHORT"):
-            return render_template("error.html", symbol="",
-                                   message="That analysis said %s: there is no "
-                                           "trade in it to simulate."
-                                           % (action or "nothing")), 400
-        entry, stop = float(row["entry"]), float(row["stop"])
-        # The side is where the stop sits, which the plan keeps in step with
-        # the call: below the entry for a BUY, above it for a SHORT.
-        direction = 1 if stop < entry else -1
-        per_unit = abs(entry - stop)
-        account = cfg["account_size"]
-        qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
-                   if per_unit > 0 else 0)
-        cap = account * cfg["max_position_pct"] / 100.0
-        if qty_raw * entry > cap:
-            qty_raw = cap / entry
-        qty = round(qty_raw, 6) if row["asset_class"] == "crypto" else float(int(qty_raw))
-        if qty <= 0:
-            return render_template("error.html", symbol="",
-                                   message="Account too small for one unit at "
-                                           "this stop distance."), 400
-
+        size = _paper_size(row, _cfg())
+        if _logged_from(conn, run_id) is not None:
+            # Confirm pressed twice: the first press already logged it.
+            return redirect(url_for("trades", logged=1))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
-                          direction=direction, entry=entry, stop=stop,
-                          target1=row["target1"], target2=row["target2"],
-                          quantity=qty, risk_amount=qty * per_unit,
-                          run_id=run_id, account="paper",
+                          direction=size["direction"], entry=size["entry"],
+                          stop=size["stop"], target1=row["target1"],
+                          target2=row["target2"], quantity=size["quantity"],
+                          risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid())
+        events_mod.bump(conn, "paper_trade")
     except (ValueError, KeyError) as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    # The journal opens on its form for trades entered by hand, so it says
+    # first that the confirmed one went in, and where to find it.
+    return redirect(url_for("trades", logged=1))
 
 
 @app.route("/trades/open", methods=["POST"])
@@ -1143,6 +1374,7 @@ def open_trade_manual():
             risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid())
+        events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError) as exc:
         message = str(exc)
         if isinstance(exc, KeyError):
@@ -1582,7 +1814,7 @@ def google_callback():
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        user = accounts_mod.upsert_google_user(conn, profile)
+        user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
         return render_template("signin.html", reason=str(exc), why_not="",
                                next_url=""), 400
@@ -1676,11 +1908,13 @@ def code_verify(channel):
                 codes_mod.check_email_code(conn, pending["to"],
                                            request.form.get("code", ""),
                                            app.secret_key)
-                user = accounts_mod.upsert_email_user(conn, pending["to"])
+                user = events_mod.new_account(conn, accounts_mod.upsert_email_user,
+                                              pending["to"])
             else:
                 codes_mod.check_phone_code(conn, pending["to"],
                                            request.form.get("code", ""))
-                user = accounts_mod.upsert_phone_user(conn, pending["to"])
+                user = events_mod.new_account(conn, accounts_mod.upsert_phone_user,
+                                              pending["to"])
         except (codes_mod.CodeError, ValueError) as exc:
             error = str(exc)
         else:
@@ -1769,7 +2003,8 @@ def billing_done():
     if billing_mod.ready() and session_id and not g.demo:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
+            with events_mod.counting_upgrades(conn):
+                upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
         except billing_mod.BillingError:
             upgraded = False
         finally:
@@ -1811,7 +2046,8 @@ def billing_webhook():
         return jsonify({"error": "not json"}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        outcome = billing_mod.handle(conn, event)
+        with events_mod.counting_upgrades(conn):
+            outcome = billing_mod.handle(conn, event)
     finally:
         conn.close()
     return jsonify({"received": True, "outcome": outcome})
@@ -1949,6 +2185,7 @@ def usage():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         data = usage_mod.read(conn, days)
+        counts = events_mod.read(conn, days)
     finally:
         conn.close()
 
@@ -1977,7 +2214,7 @@ def usage():
 
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
-                           storage=storage,
+                           storage=storage, counts=counts,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 
@@ -2447,6 +2684,7 @@ def add_alert():
                          request.form.get("interval") or "1d",
                          request.form.get("note", ""),
                          request.form.get("repeat") == "1", user=uid())
+        events_mod.bump(conn, "alert_add")
     except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
         if isinstance(exc, KeyError):
@@ -2544,6 +2782,7 @@ def watch(action):
             db_mod.watch_add(conn, market_mod.normalise_symbol(symbol),
                              request.form.get("interval") or "1d",
                              request.form.get("note", ""), user=uid())
+            events_mod.bump(conn, "watch_add")
         elif action == "remove":
             # Exactly as stored, so an entry saved before tickers were
             # tidied up can still be removed.
