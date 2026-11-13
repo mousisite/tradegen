@@ -94,8 +94,16 @@
       <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}</dd>
       <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}</dd>
       <dt>Reward to risk</dt>
+      {# The break-even belongs to the trade the odds were measured on. When
+         this plan's own levels give a different reward, pairing the two
+         would quote one trade's odds for another. #}
+      {% set tested_rr = plan.tested_reward_risk %}
       <dd><span class="fig">{{ "%.2f"|format(plan.reward_risk or 0) }}&thinsp;:&thinsp;1</span>
-          <span class="faint">needs {{ plan.breakeven_rate|pct }}</span></dd>
+          {% if tested_rr and plan.reward_risk and ((plan.reward_risk / tested_rr) - 1)|abs > 0.1 %}
+          <span class="faint">odds below measured at {{ "%.2f"|format(tested_rr) }}&thinsp;:&thinsp;1</span>
+          {% else %}
+          <span class="faint">needs {{ plan.breakeven_rate|pct }}</span>
+          {% endif %}</dd>
       {% if plan.position and not plan.position.error %}
       <dt>Size</dt>
       <dd><span class="fig">{{ plan.position.quantity }}</span> units
@@ -140,11 +148,21 @@
 {% endif %}
 
 <section>
+  {% set odds_side = plan.odds_direction or calib.direction or 0 %}
+  {% set side_word = 'long' if odds_side > 0 else 'short' if odds_side < 0 else '' %}
   <div class="sechead">
     <h2>The odds, measured</h2>
-    <span class="tail">from this instrument's own history</span>
+    <span class="tail">from this instrument's own history{% if side_word %}, {{ side_word }} trades only{% endif %}</span>
   </div>
   <div class="card">
+    {# A call takes one side, so its odds are that side's record. When the
+       signals lean down and the call is not a short, that record is of
+       betting on a fall, and has to say so where the numbers are. #}
+    {% if odds_side < 0 and a != 'SHORT' and not (a == 'WAIT' and plan.direction < 0) %}
+      <p class="prose"><b>These odds are for the price falling.</b> The signals
+        lean down, so the record below is of past bets on a fall here, not of
+        buying.</p>
+    {% endif %}
     {% if plan.probability is not none %}
     <div class="figs" style="margin-bottom:var(--s3)">
       <div class="f"><div class="k">Reached target first</div>
@@ -154,6 +172,12 @@
         <div class="v fig {{ 'gain' if (plan.expectancy_r or 0) > 0 else 'loss' }}">
           {{ plan.expectancy_r|signed(3) }}R</div>
         <div class="n">per trade, after costs</div></div>
+      {% if plan.baseline_expectancy is not none %}
+      <div class="f"><div class="k">{{ 'Shorting' if odds_side < 0 else 'Buying' }} any day</div>
+        <div class="v fig {{ 'gain' if plan.baseline_expectancy > 0 else 'loss' }}">
+          {{ plan.baseline_expectancy|signed(3) }}R</div>
+        <div class="n">same trade, no signal</div></div>
+      {% endif %}
       <div class="f"><div class="k">Needs</div>
         <div class="v fig">{{ (plan.breakeven_rate or calib.breakeven)|pct }}</div>
         <div class="n">to break even</div></div>
@@ -173,6 +197,25 @@
     </div>
     {% endif %}
     <p class="prose">{{ plan.edge_verdict }}</p>
+    {% if calib.effective_samples and plan.prob_samples and calib.effective_samples < plan.prob_samples * 0.9 %}
+      <p class="prose">These {{ plan.prob_samples }} trades overlap in time, so
+        they are worth about {{ "%.0f"|format(calib.effective_samples) }}
+        separate ones. The 95% range is that wide to allow for it.</p>
+    {% endif %}
+    {% if plan.baseline_expectancy is not none %}
+      <p class="prose">A setup shows skill only if it beats taking the same
+        side on every day of the same history, which is what the market's own
+        drift paid. Beating zero is not enough on a stock that rose.</p>
+    {% endif %}
+    {% if calib.score is not none %}
+      <p class="prose faint" style="font-size:var(--t-xs)">Setups are matched
+        on the score the standard weights give today ({{ calib.score|signed }}),
+        because that is the model the history was replayed with. The weights
+        learned below were fitted to this same history, so they cannot be
+        tested on it. Every trade was entered at the close with the stop
+        {{ cfg.stop_atr_multiple }} ATR and the target {{ cfg.target_atr_multiple }} ATR
+        away; a price that opened past the stop is counted at the open.</p>
+    {% endif %}
     {% if calib.cost_r >= 0.25 %}
       <p class="prose"><b class="loss">Costs are the problem here.</b>
         {{ "%.2f"|format(calib.cost_r) }}R per round trip at
@@ -302,15 +345,19 @@
             <td class="r fig">{{ st.hit_rate|pct }}</td>
             <td class="r fig {{ 'gain' if st.expectancy > 0 else 'loss' }}">
               {{ st.expectancy|signed(3) }}</td>
-            <td class="r fig">{{ "%.2f"|format(st.multiplier()) }}</td>
+            {# The multiplier the call actually used: the all-conditions record
+               blended with this market state's own, not the first alone. #}
+            <td class="r fig">{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      These weights were applied to the call above. A strategy that lost money
-      on this instrument is trusted less here, whatever its reputation elsewhere.
+      These weights were applied to the call above, blending each strategy's
+      record in all conditions with its record in a {{ r.regime.trend }} market
+      like today's. A strategy that lost money on this instrument is trusted
+      less here, whatever its reputation elsewhere.
     </p>
   </div>
 </section>

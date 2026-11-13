@@ -17,7 +17,7 @@ from typing import Callable, Dict, List, Optional
 from . import config as config_mod
 from . import database as db_mod
 from .calibrate import Calibration, calibrate
-from .decision import Plan, decide
+from .decision import Plan, blend_conviction, decide
 from .learning import StrategyReport, learned_weights, measure_strategies
 from .levels import Level, build_levels
 from .market import Bars, DataError, fetch_bars, resolve
@@ -105,6 +105,11 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     ctx = build_context(bars)
     last = len(bars) - 1
     signals, composite, regime = evaluate(ctx, last, cfg["strategy_weights"])
+    # The replay that measures the odds scores history with these standard
+    # weights, so today's setup is looked up by the same model's score. The
+    # learned weights below were fitted on that same history, so replaying
+    # with them would mark the model's own homework.
+    standard_score = composite
     levels = build_levels(bars, float(ctx.atr[last]))
     cost_bps = config_mod.cost_bps_for(bars.asset_class, cfg)
     # Scaled to the interval, so a "day trade" on 5-minute bars does not quietly
@@ -125,16 +130,6 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         signals, composite, regime = evaluate(
             ctx, last, cfg["strategy_weights"], learned=learned, regime=regime)
 
-    step("Back-testing this setup")
-    calib = calibrate(ctx, composite,
-                      stop_atr=cfg["stop_atr_multiple"],
-                      target_atr=cfg["target_atr_multiple"],
-                      horizon=horizon,
-                      stride=cfg["calibration_stride"],
-                      weights=cfg["strategy_weights"],
-                      min_bucket=cfg["min_bucket_samples"],
-                      cost_bps=cost_bps)
-
     # The calendar is its own round trip and nothing above depends on it, so it
     # runs while the news is being read rather than after.
     from concurrent.futures import ThreadPoolExecutor
@@ -150,6 +145,23 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     else:
         sentiment = Sentiment(0.0, 0.0, 0.0, 0, 0, 0, 0, "skipped",
                               notes=["Sentiment analysis was skipped."])
+
+    # The odds are for the side the call will take, which the news can still
+    # tip, so they are measured once the news is in. Longs and shorts are
+    # never pooled: a bearish call was being quoted odds earned by buying.
+    step("Back-testing this setup")
+    conviction, _ = blend_conviction(composite, sentiment,
+                                     float(cfg["sentiment_weight"]))
+    calib = calibrate(ctx, standard_score,
+                      stop_atr=cfg["stop_atr_multiple"],
+                      target_atr=cfg["target_atr_multiple"],
+                      horizon=horizon,
+                      stride=cfg["calibration_stride"],
+                      weights=cfg["strategy_weights"],
+                      min_bucket=cfg["min_bucket_samples"],
+                      cost_bps=cost_bps,
+                      direction=(1 if conviction > 0 else
+                                 -1 if conviction < 0 else 0))
 
     try:
         calendar = calendar_job.result(timeout=12)
