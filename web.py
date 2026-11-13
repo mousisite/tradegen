@@ -478,6 +478,12 @@ def _signed(value, digits=2):
         return "-"
 
 
+@app.template_filter("strategy")
+def _strategy(name):
+    """rsi_reversion as "RSI reversion", the name the public pages use too."""
+    return public_mod.strategy_label(str(name or ""))
+
+
 @app.template_filter("day")
 def _day(ts):
     try:
@@ -808,7 +814,12 @@ def close_trade():
 
 @app.route("/trades/take", methods=["POST"])
 def take_trade():
-    """Open a paper position from a recorded plan."""
+    """Open a paper position from a recorded plan.
+
+    Only a BUY or a SHORT is a trade. A WAIT names a price the market has not
+    reached yet, so logging it would record a fill that never happened and
+    count its make-believe gain or loss in the hit rate and expectancy.
+    """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         run_id = int(request.form["run_id"])
@@ -820,13 +831,24 @@ def take_trade():
                                            "to trade."), 400
 
         cfg = _cfg()
-        if row["action"] == "AVOID":
-            return render_template("error.html", symbol=row["symbol"],
-                                   message="That analysis said AVOID: there is no "
-                                           "trade in it to simulate."), 400
+        action = (row["action"] or "").upper()
+        # symbol="" on these, because the error page's advice about mistyped
+        # tickers is for an analysis that failed, and this one worked.
+        if action == "WAIT":
+            return render_template(
+                "error.html", symbol="",
+                message="That analysis said WAIT. Nothing has filled yet, so "
+                        "there is no trade to log. Set its entry alert to hear "
+                        "when the price gets there, and add the trade by hand "
+                        "in the journal if you take it."), 400
+        if action not in ("BUY", "SHORT"):
+            return render_template("error.html", symbol="",
+                                   message="That analysis said %s: there is no "
+                                           "trade in it to simulate."
+                                           % (action or "nothing")), 400
         entry, stop = float(row["entry"]), float(row["stop"])
-        # The side is where the stop sits, not the word on the call: a WAIT
-        # can be waiting to go short.
+        # The side is where the stop sits, which the plan keeps in step with
+        # the call: below the entry for a BUY, above it for a SHORT.
         direction = 1 if stop < entry else -1
         per_unit = abs(entry - stop)
         account = cfg["account_size"]
@@ -837,7 +859,7 @@ def take_trade():
             qty_raw = cap / entry
         qty = round(qty_raw, 6) if row["asset_class"] == "crypto" else float(int(qty_raw))
         if qty <= 0:
-            return render_template("error.html", symbol=row["symbol"],
+            return render_template("error.html", symbol="",
                                    message="Account too small for one unit at "
                                            "this stop distance."), 400
 
@@ -909,16 +931,25 @@ def strategies():
     regime = request.args.get("regime", "all")
     rank_by = request.args.get("rank_by", "gross")
     symbol = request.args.get("symbol") or None
+    # Which instruments the record covers says what people here have looked
+    # up. A visitor is shown only the popular ones, which are public anyway.
+    if g.demo and symbol and symbol.upper() not in public_mod.NAMES:
+        symbol = None
+    minimum = 40
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = db_mod.strategy_leaderboard(conn, symbol=symbol, regime=regime,
-                                           minimum=40, limit=40, rank_by=rank_by)
+                                           minimum=minimum, limit=40,
+                                           rank_by=rank_by)
         seen = [r["symbol"] for r in conn.execute(
             "SELECT DISTINCT symbol FROM strategy_stats ORDER BY symbol")]
     finally:
         conn.close()
+    if g.demo:
+        seen = [s for s in seen if s in public_mod.NAMES]
     return render_template("strategies.html", rows=rows, regime=regime,
-                           rank_by=rank_by, symbol=symbol, seen=seen)
+                           rank_by=rank_by, symbol=symbol, seen=seen,
+                           minimum=minimum)
 
 
 @app.route("/analyse/image", methods=["POST"])
@@ -2594,8 +2625,13 @@ def too_large(_exc):
 
 
 @app.errorhandler(500)
-def server_error(exc):
-    return render_template("error.html", symbol="", message=str(exc)), 500
+def server_error(_exc):
+    # Flask has already written the exception to the server log by the time
+    # this runs. The visitor gets a plain sentence instead: an exception's text
+    # can carry paths, queries and internal names, and helps nobody reading it.
+    return render_template("error.html", symbol="",
+                           message="Something broke on our side. Try again "
+                                   "in a minute."), 500
 
 
 # One scheduler for the process. Created on start, not at import, so importing

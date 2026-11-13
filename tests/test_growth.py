@@ -409,6 +409,47 @@ try:
 
     print()
     print("=" * 72)
+    print("THE FRONT DOOR SAYS ONLY WHAT IS TRUE")
+    print("=" * 72)
+    sign_out()
+    # A recent example, so the page shows one without starting a real analysis.
+    _was = dict(web._example_state)
+    with web._example_lock:
+        web._example_state.update(at=time.time(), data={
+            "symbol": "NVDA", "samples": 80, "worked": 30, "action": "WAIT",
+            "headline": "Wait for a better price.", "sure": "", "price": 166.19,
+            "at": time.time() - 20 * 60})
+    try:
+        page = c.get("/").data.decode("utf-8", "replace")
+    finally:
+        with web._example_lock:
+            web._example_state.update(_was)
+    check("an example from twenty minutes ago is not called live",
+          "Live right now" not in page and "Latest check" in page and "20 min ago" in page)
+    check("someone with an account is offered a way back in",
+          ">Sign in</a>" in page and ">Sign up</a>" not in page)
+    check("the screener is not said to read filings",
+          "numbers in their filings" not in page
+          and "price, size and reported fundamentals" in page)
+    check("nor is every company figure said to cite one",
+          "Every company figure cites" not in page and "on the research page cite" in page)
+    check("the Monitor page has one name", "<b>Monitor</b>" in page and "<b>Alerts</b>" not in page)
+    check("and nothing promises to tell anyone anything", "get told" not in page)
+    check("how it is tested, and how its calls turned out, are one tap away",
+          'href="/backtests">how the strategies are tested' in page
+          and 'href="/record">how past calls turned out' in page)
+    check("every page has a skip link and one main landmark",
+          page.count('<main id="main">') == 1 and 'href="#main">Skip to content' in page)
+    page = c.get("/signin").data.decode("utf-8", "replace")
+    check("the sign-in page says it signs in too",
+          "<title>Sign in or create your free account" in page
+          and "<h1>Sign in or create your free account</h1>" in page)
+    page = c.get("/stocks").data.decode("utf-8", "replace")
+    check("asking someone to analyse a stock says analyse, like the button",
+          "Analyse any stock or coin" in page and "Check any stock" not in page)
+
+    print()
+    print("=" * 72)
     print("SHARING A CALL")
     print("=" * 72)
     sharer = user("sharer@example.com")

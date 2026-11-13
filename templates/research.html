@@ -16,7 +16,7 @@
 <div class="card" style="margin-bottom:var(--s3)">
   <div class="instrument">
     <div class="who">
-      <span class="sym">{{ r.symbol }}</span>
+      <h1 class="sym">{{ r.symbol }}</h1>
       <span class="name">{{ a.bars.name }}</span>
     </div>
     <div class="price">
@@ -729,7 +729,8 @@
   <div class="card pad0">
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Form</th><th>Filed</th><th>What it is</th><th></th></tr></thead>
+        <thead><tr><th>Form</th><th>Filed</th><th>What it is</th>
+          <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for fl in r.filings %}
           <tr>
@@ -756,7 +757,8 @@
     <div class="tablewrap">
       <table>
         <thead><tr><th>Saved</th><th class="r">Price then</th><th class="r">Now</th>
-          <th class="r">Move</th><th>Called</th><th>Outcome</th><th></th></tr></thead>
+          <th class="r">Move</th><th>Called</th><th>Outcome</th>
+          <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for row, rev in saved %}
           <tr>

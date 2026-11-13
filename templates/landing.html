@@ -7,7 +7,7 @@
    features are one tap away and show themselves better than a paragraph can,
    so the page's job is to get someone to tap one. #}
 {% if session.get('ref') and billing_on %}
-  <div class="notice" style="margin-bottom:var(--s3)"><b>A friend invited you.</b>
+  <div class="notice" style="max-width:40rem;margin:0 auto var(--s3)"><b>A friend invited you.</b>
     Join and you both get a week of Pro free.</div>
 {% endif %}
 <section class="hero">
@@ -21,11 +21,16 @@
     <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
     <a class="btn quiet" href="{{ url_for('analyse', symbol='NVDA', interval='1d') }}">Look around first</a>
   </div>
+  {# The method and the record, one tap from the door, for anyone who wants
+     to see how the answers are made before trusting one. #}
+  <p class="fine" style="margin-top:var(--s2)">
+    See <a href="{{ url_for('backtests') }}">how the strategies are tested</a>
+    and <a href="{{ url_for('record') }}">how past calls turned out</a>.</p>
 </section>
 
 {% if example %}
   <a class="card example" href="{{ url_for('analyse', symbol=example.symbol, interval='1d') }}">
-    <span class="eyebrow">Live right now &middot; {{ example.symbol }} at
+    <span class="eyebrow">Latest check &middot; {{ example.symbol }} at
       {{ example.price|price }}{% if example.age_min %} &middot;
       {{ example.age_min }} min ago{% endif %}</span>
     <span class="lead">
@@ -75,7 +80,7 @@
            stroke-linejoin="round" aria-hidden="true">
         <path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>
       <b>Screener</b>
-      <span class="say">Filter companies by the numbers in their filings.</span>
+      <span class="say">Filter companies by price, size and reported fundamentals.</span>
     </a>
     <a class="feature" href="{{ url_for('portfolio') }}">
       <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"
@@ -99,8 +104,8 @@
            stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
            stroke-linejoin="round" aria-hidden="true">
         <path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
-      <b>Alerts</b>
-      <span class="say">Watch stocks and get told when something happens.</span>
+      <b>Monitor</b>
+      <span class="say">Set alerts and keep a watchlist. See what fired, and when.</span>
     </a>
     <a class="feature" href="{{ url_for('strategies') }}">
       <svg class="ficon" width="22" height="22" viewBox="0 0 24 24" fill="none"

@@ -177,20 +177,39 @@ _run = _conn.execute(
 _avoid = _conn.execute(
     "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
     "VALUES (?, 'TSLA', '1d', 'AVOID', 100.0, 95.0, 110.0, ?)", (int(time.time()), bob.id)).lastrowid
-_short = _conn.execute(
+_wait_short = _conn.execute(
     "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
     "VALUES (?, 'TSLA', '1d', 'WAIT', 100.0, 105.0, 90.0, ?)", (int(time.time()), bob.id)).lastrowid
+_wait_long = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'WAIT', 95.0, 90.0, 105.0, ?)", (int(time.time()), bob.id)).lastrowid
+_short = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'SHORT', 100.0, 105.0, 90.0, ?)", (int(time.time()), bob.id)).lastrowid
 _conn.commit()
 _conn.close()
 r = c.post("/trades/take", data={"run_id": _run})
 check("Bob cannot open a paper trade from Alice's analysis", r.status_code == 400, r.status_code)
 r = c.post("/trades/take", data={"run_id": _avoid})
 check("an AVOID has no trade in it to simulate", r.status_code == 400, r.status_code)
+# A WAIT names a price the market has not reached. Logging it opened a trade
+# at that price straight away: a fill that never happened, counted as won or
+# lost, and for a short WAIT an error about where a long's stop goes.
+for _wait in (_wait_long, _wait_short):
+    r = c.post("/trades/take", data={"run_id": _wait})
+    _said = r.data.decode("utf-8", "replace")
+    check("a WAIT is not logged as a filled trade",
+          r.status_code == 400 and "Nothing has filled yet" in _said, r.status_code)
+    check("and is told why, not about stops or mistyped tickers",
+          "the stop must sit" not in _said and "ticker does not exist" not in _said)
 c.post("/trades/take", data={"run_id": _short})
 _conn = db.connect(DB)
 _side = _conn.execute("SELECT direction FROM trades WHERE run_id=?", (_short,)).fetchone()
+_waits = _conn.execute("SELECT COUNT(*) FROM trades WHERE run_id IN (?, ?)",
+                       (_wait_long, _wait_short)).fetchone()[0]
 _conn.close()
-check("a WAIT whose stop sits above the entry opens a short", _side and _side[0] == -1, _side)
+check("no trade was written for either WAIT", _waits == 0, _waits)
+check("a SHORT, whose stop sits above the entry, opens a short", _side and _side[0] == -1, _side)
 r = c.post("/monitor/alert/delete", data={"alert_id": alice_alert})
 check("Bob cannot delete Alice's alert", r.status_code == 400, r.status_code)
 
@@ -253,6 +272,15 @@ check("Bob is not offered the server-wide alert schedule",
       "Background checking" not in page)
 check("and is told his settings are his own",
       "changes nothing for anyone else" in page)
+# The page was written for the desktop install, where nothing leaves the
+# machine. Online, settings live with the account on Orenth's server.
+check("and where they are kept", "Saved to your account on Orenth" in page)
+for desktop in ("never leaves this machine", "nothing phoned home", "config.json",
+                "STOCKBOT_DB", "everything you have looked"):
+    check("and is not told the desktop's '%s'" % desktop, desktop not in page)
+check("Restoring defaults asks first",
+      "return confirm(" in page[page.index('name="reset"') - 200:
+                                page.index("Restore defaults")])
 
 sign_in_as(c, alice)
 c.get("/settings?reset=1")
@@ -500,6 +528,31 @@ try:
     # Real people's data never appears in the example.
     seen = stranger.get("/trades").data.decode("utf-8", "replace")
     check("Alice's trade is not in the example journal", "987654" not in seen)
+
+    # The strategy record is shared, but which instruments it covers says what
+    # people here have looked up. A visitor's list holds only popular names.
+    conn = db.connect(DB)
+    for _sym in ("ZZPRIVATE", "NVDA"):
+        conn.execute("INSERT OR REPLACE INTO strategy_stats (symbol, interval, strategy, "
+                     "family, regime, n, wins, sum_r, sum_r_gross, sum_bars, updated_ts) "
+                     "VALUES (?, '1d', 'rsi_reversion', 'mean_reversion', 'all', 50, 25, "
+                     "2.0, 3.0, 400, ?)", (_sym, int(time.time())))
+    conn.commit()
+    conn.close()
+    seen = stranger.get("/strategies").data.decode("utf-8", "replace")
+    check("a visitor's instrument list leaves out what people looked up",
+          "ZZPRIVATE" not in seen and '<option value="NVDA"' in seen)
+    seen = stranger.get("/strategies?symbol=ZZPRIVATE").data.decode("utf-8", "replace")
+    check("and asking for one by name shows nothing about it", "ZZPRIVATE" not in seen)
+    seen = stranger.get("/strategies").data.decode("utf-8", "replace")
+    check("the strategies page says the record is everyone's",
+          "anyone on Orenth has analysed" in seen
+          and "you have run" not in seen and "you have analysed" not in seen)
+
+    seen = stranger.get("/settings").data.decode("utf-8", "replace")
+    check("the example's settings do not claim to be the visitor's own",
+          "changes nothing for anyone else" not in seen
+          and "never leaves this machine" not in seen and "config.json" not in seen)
 
     # Nothing a visitor posts is written: every form sends them to sign up,
     # and back to the page they were on rather than to a URL that only POSTs.

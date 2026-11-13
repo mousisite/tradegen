@@ -14,6 +14,11 @@
  * its own lightness ramp until it cleared 4.5:1, so the palette keeps its
  * character and still reads. Interactive borders clear 3:1 per WCAG 1.4.11.
  *
+ * The ratios in the comments are WCAG contrast on paper, then on the tinted
+ * wash the colour also sits on: a chip, the active nav item, the plain-words
+ * box. Solving against the lighter card surface alone left several of those
+ * short of 4.5:1. Surface always scores higher than paper.
+ *
  * Semantic colours are warm on purpose. A neon green on cream would look
  * wrong, so gains are olive and losses are rust: they belong to this palette
  * instead of being borrowed from a dark terminal.
@@ -28,10 +33,10 @@
   --surface:     #faf9f5;
   --sunken:      #eeede6;
 
-  /* Ink — all AA on both paper and surface */
-  --ink:         #191817;   /* 15.96 on paper */
-  --ink-2:       #5a554e;   /*  6.65 */
-  --ink-3:       #726d64;   /*  4.62 */
+  /* Ink — AA on every ground in the palette */
+  --ink:         #191817;   /* 15.96 on paper, 14.92 on accent-wash */
+  --ink-2:       #5a554e;   /*  6.65, 6.21 */
+  --ink-3:       #6e6960;   /*  4.91, 4.59 */
 
   /* Lines. Hairlines are decorative; strong is for controls, at 3:1. */
   --hairline:    #e3dfd4;
@@ -40,19 +45,19 @@
 
   /* One accent. Terracotta never competes with itself. */
   --accent:      #c96442;   /* large display and decorative use */
-  --accent-text: #b05232;   /*  4.61 — small text and links */
+  --accent-text: #aa4f30;   /*  4.88, 4.57 on accent-wash — small text and links */
   --accent-btn:  #bc5736;   /*  4.61 with a white label */
   --accent-wash: #f6e9e2;
 
-  /* Semantics, warm */
-  --gain:        #68773b;   /*  4.65 */
-  --loss:        #a53e2a;   /*  6.00 */
-  --hold:        #98652b;   /*  4.71 */
+  /* Semantics, warm. Second figure: on the colour's own wash. */
+  --gain:        #616f37;   /*  4.93, 4.70 */
+  --loss:        #a53e2a;   /*  5.69, 5.26 */
+  --hold:        #916029;   /*  4.84, 4.59 */
   --gain-wash:   #edefe2;
   --loss-wash:   #f7e7e2;
   --hold-wash:   #f6ecdd;
 
-  --focus:       #b05232;
+  --focus:       #aa4f30;
 
   /* Type: serif display, humanist sans body, mono for every figure. */
   --serif: 'Source Serif 4', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
@@ -77,26 +82,30 @@
 }
 
 /* Warm dark. Same palette inverted deliberately, not naively: the ground
-   becomes the ink colour and every accent is lifted so it still reads. */
+   becomes the ink colour and every accent is lifted so it still reads.
+   Here the card surface is lighter than the page, so the second figure is
+   the lowest of surface and the wash the colour sits on. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --paper:       #191817;
     --surface:     #22201e;
     --sunken:      #141312;
-    --ink:         #f4f3ee;
-    --ink-2:       #a8a199;
-    --ink-3:       #8c877d;
+    --ink:         #f4f3ee;   /* 15.96 on paper, 13.34 on accent-wash */
+    --ink-2:       #a8a199;   /*  6.94, 5.81 */
+    --ink-3:       #938e85;   /*  5.44, 4.55 on accent-wash */
     --hairline:    #302d2a;
     --rule:        #3a3733;
     --line-strong: #706a63;
     --accent:      #e89268;
-    --accent-text: #e89268;
-    --accent-btn:  #c96442;
+    --accent-text: #e89268;   /*  7.38, 6.17 */
+    /* Not lifted like the other accents: a button carries a white label, and
+       white on the lighter #c96442 is 3.90:1. */
+    --accent-btn:  #bc5736;   /*  4.61 with a white label */
     --accent-wash: #2e2622;
-    --gain:        #9aad63;
-    --loss:        #e0715a;
-    --hold:        #dda85e;
+    --gain:        #9aad63;   /*  7.20, 6.11 */
+    --loss:        #e0715a;   /*  5.64, 4.97 */
+    --hold:        #dda85e;   /*  8.31, 7.08 */
     --gain-wash:   #24281c;
     --loss-wash:   #2f201d;
     --hold-wash:   #2d2519;
@@ -371,6 +380,18 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 }
 .btn.quiet:hover { background: var(--sunken); border-color: var(--ink-3); }
 .btn.sm { min-height: 36px; padding: 0 14px; font-size: var(--t-xs); }
+/* Deleting an account. One red in both themes: the dark theme's --loss is
+   lifted for text, and a white label on it is only 3.14:1. This is 6.32. */
+.btn.danger { background: #a53e2a; border-color: #a53e2a; }
+.btn.danger:hover { background: #8e3423; border-color: #8e3423; }
+
+/* Off screen until a keyboard reaches it, then over the top bar. */
+.skip {
+  position: absolute; left: var(--s2); top: -100px; z-index: 100;
+  padding: 10px var(--s2); border-radius: var(--r-sm);
+  background: var(--accent-btn); color: #fff; font-weight: 500;
+}
+.skip:focus { top: var(--s1); text-decoration: none; }
 
 .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--s2); }
 .pills a {
@@ -556,6 +577,7 @@ ul.list.ok li::marker { color: var(--gain); }
 /* ---------- screenshot drop zone ---------- */
 
 .drop {
+  position: relative;
   margin-top: var(--s2);
   border: 1px dashed var(--line-strong); border-radius: var(--r-md);
   background: var(--paper);
@@ -568,7 +590,14 @@ ul.list.ok li::marker { color: var(--gain); }
 .drop:hover .icon, .drop.over .icon { color: var(--accent); }
 .drop .head { font-size: var(--t-sm); font-weight: 500; color: var(--ink); }
 .drop .sub { font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
-.drop input[type=file] { display: none; }
+/* Hidden the way .sr hides things rather than with display:none, which took
+   the file box out of the tab order and left the zone mouse-only. The ring
+   goes round the whole zone, since the box itself is a pixel. */
+.drop input[type=file] {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
 .drop.locked { cursor: default; border-style: dashed; opacity: .75; }
 .drop.locked:hover { border-color: var(--line-strong); background: var(--paper); }
 .drop.locked:hover .icon { color: var(--ink-3); }
@@ -741,12 +770,7 @@ ul.list.ok li::marker { color: var(--gain); }
 .signin h1 { font-size: var(--t-xl); line-height: 1.1; }
 .signin .lede { margin: var(--s2) 0 var(--s4); color: var(--ink-2);
                 font-size: var(--t-base); text-align: left; }
-.signin .notice {
-  background: var(--hold-wash); border: 1px solid var(--hold);
-  color: var(--ink); border-radius: var(--r-sm);
-  padding: 11px var(--s2); font-size: var(--t-sm);
-  margin-bottom: var(--s3); text-align: left;
-}
+.signin .notice { margin-bottom: var(--s3); text-align: left; }
 .fine { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.7; }
 .signin .fine { margin-top: var(--s3); text-align: left; }
 
@@ -797,14 +821,19 @@ ul.list.ok li::marker { color: var(--gain); }
   .chart .clab { font-size: 11px; }
 }
 
-/* The grounding warning reuses the sign-in notice styling, which needs to be
-   available outside that page now. */
-.card > .notice {
+/* A note that has to be read before anything else here: an invitation, a
+   limit reached, an unchecked claim. Once scoped to the sign-in page and to
+   cards, which left the same note elsewhere as plain body text. */
+.notice {
   background: var(--hold-wash); border: 1px solid var(--hold);
   color: var(--ink); border-radius: var(--r-sm);
   padding: 11px var(--s2); font-size: var(--t-sm); line-height: 1.6;
 }
-.card > .notice b { font-weight: 600; }
+.notice b { font-weight: 600; }
+
+/* How many rows a section holds, beside its heading. */
+.count { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3);
+         font-variant-numeric: tabular-nums; }
 
 /* ---------- plain-English box ---------- */
 

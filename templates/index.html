@@ -215,7 +215,7 @@
         <thead><tr>
           <th>When</th><th>Instrument</th><th>Bars</th><th>Conditions</th>
           <th class="r">Conviction</th><th>Call</th><th class="r">Entry</th>
-          <th class="r">Expectancy</th><th></th>
+          <th class="r">Expectancy</th><th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for r in runs %}
@@ -233,7 +233,7 @@
             </td>
             <td class="r fig">{{ r['entry']|price }}</td>
             <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}">
-              {{ r['expectancy_r']|signed(3) }}</td>
+              {{ r['expectancy_r']|signed(3) ~ 'R' if r['expectancy_r'] is not none else '—' }}</td>
             <td class="r"><a data-working
               href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval']) }}">Run again</a></td>
           </tr>

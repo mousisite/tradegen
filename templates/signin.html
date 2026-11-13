@@ -1,17 +1,20 @@
 {% extends "base.html" %}
 {% set active = 'signin' %}
-{% block title %}Create your account · Orenth{% endblock %}
+{% block title %}Sign in or create your free account · Orenth{% endblock %}
 {% block content %}
 
 {# Only the ways in. The pitch lives on the front page, and someone who got
-   here already decided to sign up; anything else on the page is in the way. #}
+   here already decided to sign in or up; anything else on the page is in the
+   way. Both are the same buttons, so the page says both. #}
 <div class="signin">
   <div class="mark" aria-hidden="true">
     {% with size=48 %}{% include "_mark.html" %}{% endwith %}
   </div>
 
-  <h1>Create your free account</h1>
-  <p class="lede">Or sign back in. It takes about ten seconds.</p>
+  <h1>Sign in or create your free account</h1>
+  {% if google_ready or email_ready or phone_ready %}
+    <p class="lede">The same buttons do both. It takes about ten seconds.</p>
+  {% endif %}
 
   {% if session.get('ref') and billing_on %}
     <div class="notice"><b>A friend invited you.</b> Join and you both get a
