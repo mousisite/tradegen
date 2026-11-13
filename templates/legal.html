@@ -34,13 +34,15 @@
   <p class="prose">If you sign in with a code instead:</p>
   <ul class="list">
     <li><b>By email:</b> your email address, used as the identity of your
-      account. The code is kept only as a keyed hash, for ten minutes, and can
-      be used once.</li>
+      account. The code is kept only as a keyed hash. It works for ten minutes
+      and only once.</li>
     <li><b>By text:</b> your phone number, used as the identity of your
       account. The code is created and checked by Twilio and never stored
       here.</li>
     <li>For either, the time of each code request and the network address it
-      came from, kept so that nobody can flood an inbox or a phone with codes.</li>
+      came from, kept for 30 days so that nobody can flood an inbox or a phone
+      with codes, or keep guessing at one. Deleting your account deletes
+      them.</li>
   </ul>
   <p class="prose">There are no passwords, so there are none to leak.</p>
   <p class="prose">If you subscribe to Pro, Orenth stores the customer number
@@ -75,6 +77,12 @@
     the sources it reads. It does not send your identity, your positions or your
     journal to any of them.
   </p>
+  <p class="prose">
+    A chart screenshot you upload is the exception: the picture itself goes to
+    Anthropic, which reads off it which instrument it shows. Whatever else is
+    in the picture goes with it, so crop out anything you would not want to
+    share. It is not stored here.
+  </p>
   <div class="tablewrap">
     <table>
       <thead><tr><th>Sent to</th><th>What is sent</th><th>Why</th></tr></thead>
@@ -83,8 +91,10 @@
         <tr><td>SEC EDGAR</td><td>The ticker</td><td>Filings and filed financials</td></tr>
         <tr><td>Google News</td><td>The company name</td><td>Headlines</td></tr>
         <tr><td>StockTwits</td><td>The ticker</td><td>Retail posts</td></tr>
-        <tr><td>Anthropic</td><td>Headlines and gathered figures, only if an API key is configured</td>
-            <td>Sentiment and written reasoning</td></tr>
+        <tr><td>Anthropic</td><td>Headlines, gathered figures and any chart
+            screenshot you upload, only if an API key is configured</td>
+            <td>Sentiment, written reasoning, and reading which instrument a
+              screenshot shows</td></tr>
         <tr><td>The email delivery service</td><td>Your email address and the code, only if you sign in by email</td>
             <td>Delivering the code</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
@@ -95,6 +105,12 @@
         <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
+        <tr><td>Sentry</td><td>When something breaks: the error, the page
+            address and the values the failing code was working with, which
+            can include your email address. Cookies, form contents and
+            anything that looks like a password or key are removed first. Only
+            if error reporting is switched on</td>
+            <td>Finding and fixing faults</td></tr>
       </tbody>
     </table>
   </div>
@@ -114,9 +130,15 @@
   <p class="prose">
     Your data stays until you remove it. Every dataset can be downloaded as CSV
     or JSON from the Account page at any time, without asking anyone. Deleting
-    your account removes your trades, watchlist, alerts, theses and analysis
-    history immediately and permanently; the shared strategy record stays,
-    because it was never yours alone and contains nothing about you.
+    your account removes your trades, watchlist, alerts, theses, analysis
+    history, shared pages and sign-in records straight away; the shared
+    strategy record stays, because it was never yours alone and contains
+    nothing about you.
+  </p>
+  <p class="prose">
+    The server keeps backups so that a fault cannot lose everyone's journal.
+    A backup made before you deleted your account still holds a copy until it
+    is replaced by newer ones, which takes about a week.
   </p>
   <p class="prose">
     Sessions expire after {{ session_days }} days. Signing out ends the session
@@ -127,7 +149,8 @@
   <p class="prose">
     Google sign-in uses the authorization code flow with PKCE, exchanged
     between servers. Code sign-in limits how many codes one address and one
-    network can ask for, locks a code after five wrong tries, and caps how many
+    network can ask for, locks a code after five wrong tries, stops taking
+    codes for an address after twenty wrong tries in a day, and caps how many
     texts can be sent in an hour in total. Session tokens are random, opaque and stored, so they can be
     revoked. Credentials are read from the environment and are never written to
     a configuration file.

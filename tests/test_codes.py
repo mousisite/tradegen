@@ -133,6 +133,52 @@ try:
 except codes.CodeError:
     check("one connection cannot ask for endless codes", True)
 
+# Five tries a code, and a new code every few minutes, used to allow well
+# over a thousand guesses a day at one inbox. Wrong tries now count across
+# every code the address was sent.
+gus = "gus@example.com"
+for n in range(codes.WRONG_PER_DAY // 4):
+    codes.send_email_code(conn, gus, "8.8.%d.1" % n, SECRET, fake_send)
+    for _ in range(4):
+        try:
+            codes.check_email_code(conn, gus, "000000" if sent[gus] != "000000"
+                                   else "111111", SECRET)
+        except codes.CodeError:
+            pass
+    # Out of the quarter-hour sending limit, but still the same day.
+    conn.execute("UPDATE login_codes SET created_ts=created_ts-1000 WHERE target=?",
+                 (gus,))
+    conn.commit()
+try:
+    codes.check_email_code(conn, gus, sent[gus], SECRET)
+    check("after twenty wrong tries in a day, even the right code is refused", False)
+except codes.CodeError as exc:
+    check("after twenty wrong tries in a day, even the right code is refused",
+          "Too many wrong codes" in str(exc), exc)
+try:
+    codes.send_email_code(conn, gus, "8.8.9.1", SECRET, fake_send)
+    check("and no more codes are sent to that address that day", False)
+except codes.CodeError:
+    check("and no more codes are sent to that address that day", True)
+conn.execute("UPDATE login_codes SET created_ts=created_ts-86400 WHERE target=?", (gus,))
+conn.commit()
+codes.send_email_code(conn, gus, "8.8.9.2", SECRET, fake_send)
+codes.check_email_code(conn, gus, sent[gus], SECRET)
+check("a day later the address can sign in again", True)
+
+now = int(time.time())
+conn.execute("INSERT INTO login_codes (channel, target, code_hash, ip, created_ts, "
+             "expires_ts) VALUES ('email', 'ancient@example.com', 'x', '9.9.9.9', ?, ?)",
+             (now - 31 * 86400, now - 31 * 86400 + 600))
+conn.commit()
+codes.send_email_code(conn, "recent@example.com", "9.9.9.8", SECRET, fake_send)
+check("code requests older than a month are deleted",
+      conn.execute("SELECT COUNT(*) FROM login_codes WHERE target='ancient@example.com'")
+      .fetchone()[0] == 0)
+check("while this month's are kept for the limits",
+      conn.execute("SELECT COUNT(*) FROM login_codes WHERE target=?", (gus,))
+      .fetchone()[0] > 0)
+
 print()
 print("=" * 72)
 print("PHONE CODES, THROUGH A STAND-IN FOR TWILIO")
@@ -192,6 +238,46 @@ try:
     check("the local account cannot be signed in to by email", False)
 except ValueError:
     check("the local account cannot be signed in to by email", True)
+
+codes.send_email_code(conn, "leaving@example.com", "10.0.0.1", SECRET, fake_send)
+leaving = A.upsert_email_user(conn, "leaving@example.com")
+codes.send_phone_code(conn, "+15550009999", "10.0.0.2", fake_twilio)
+texting = A.upsert_phone_user(conn, "+15550009999")
+A.delete_user(conn, leaving.id)
+A.delete_user(conn, texting.id)
+check("deleting an account deletes the sign-in codes sent to it, and from where",
+      conn.execute("SELECT COUNT(*) FROM login_codes WHERE target IN "
+                   "('leaving@example.com', '+15550009999')").fetchone()[0] == 0)
+
+print()
+print("=" * 72)
+print("ONE INBOX, MANY ADDRESSES")
+print("=" * 72)
+
+from bot import invites  # noqa: E402
+
+check("a +tag reaches the same inbox",
+      codes.inbox_of("Me+stocks@Gmail.com") == "me@gmail.com")
+check("so do Gmail's dots, at either of Google's domains",
+      codes.inbox_of("m.e@googlemail.com") == "me@gmail.com")
+check("other providers keep their dots", codes.inbox_of("m.e+x@example.com")
+      == "m.e@example.com")
+
+host = A.upsert_email_user(conn, "me@gmail.com")
+link = invites.code_for(conn, host.id)
+alias = A.upsert_email_user(conn, "me+1@gmail.com")
+check("an alias of the inviter's own inbox earns no free week",
+      not invites.accept(conn, alias.id, link)
+      and A.get_user(conn, host.id).bonus_until == 0
+      and A.get_user(conn, alias.id).bonus_until == 0)
+dotted = A.upsert_email_user(conn, "m.e+2@gmail.com")
+check("nor does one spelled with dots", not invites.accept(conn, dotted.id, link))
+friend = A.upsert_email_user(conn, "you@gmail.com")
+check("a different person still does", invites.accept(conn, friend.id, link)
+      and A.get_user(conn, friend.id).bonus_until > time.time())
+again = A.upsert_email_user(conn, "you+again@gmail.com")
+check("but a second account for that friend's inbox does not",
+      not invites.accept(conn, again.id, link))
 conn.close()
 
 print()

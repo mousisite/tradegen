@@ -217,6 +217,22 @@ r = c.post("/thesis/delete", data={"thesis_id": ids[1],
 location = r.headers.get("Location") or ""
 check("the same guard covers thesis delete", "evil" not in location, location)
 
+# The Location header drops tabs and newlines, so "/<tab>/host" left the
+# server as "//host"; browsers read a backslash as a slash.
+for hostile in ("/\t/evil.example.com", "/\n/evil.example.com", "/\r/evil.example.com",
+                "/\\evil.example.com", "/\\/evil.example.com", "/\x00/evil.example.com",
+                "/\x7f/evil.example.com"):
+    check("refuses %r" % hostile, web._safe_back(hostile, "/home") == "/home")
+    r = c.post("/monitor/alert/add",
+               data={"symbol": "AAPL", "kind": "price_above", "threshold": "1",
+                     "back": hostile})
+    location = r.headers.get("Location") or ""
+    check("and its redirect stays here for %r" % hostile,
+          "evil" not in location and not location.startswith("//"), location)
+check("an ordinary page with a query still passes",
+      web._safe_back("/analyse?symbol=AAPL&interval=1d", "/home")
+      == "/analyse?symbol=AAPL&interval=1d")
+
 print()
 print("%d failure(s)" % len(fails))
 print("THESIS AND SUGGESTIONS OK" if not fails else "FAILURES: %s" % fails)

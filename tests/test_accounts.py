@@ -99,6 +99,24 @@ check("a changed address stays the same account", moved.id == alice.id)
 check("and the new address is stored",
       A.get_user(conn, alice.id).email == "alice.r@example.com")
 
+# The other half of that: once the address is given to someone new, a
+# different Google identity holding it is not the account's owner.
+try:
+    A.upsert_google_user(conn, {"email": "alice.r@example.com", "sub": "g-newcomer",
+                                "name": "Newcomer", "email_verified": True})
+    check("a different Google account with the same address is refused", False,
+          "it was handed Alice's account")
+except ValueError:
+    check("a different Google account with the same address is refused", True)
+check("and the account stays tied to Alice's own Google identity",
+      conn.execute("SELECT provider_id FROM users WHERE id=?",
+                   (alice.id,)).fetchone()[0] == "g-alice")
+by_code = A.upsert_email_user(conn, "carol@example.com")
+check("while an account made with an emailed code still joins Google",
+      A.upsert_google_user(conn, {"email": "carol@example.com", "sub": "g-carol",
+                                  "name": "Carol", "email_verified": True}).id
+      == by_code.id)
+
 try:
     A.upsert_google_user(conn, {"email": "x@example.com", "sub": "z",
                                 "email_verified": False})
@@ -402,6 +420,68 @@ conn.close()
 
 print()
 print("=" * 72)
+print("ONE SHARED ANALYSIS, A RUN FOR EACH PERSON")
+print("=" * 72)
+
+# The analysis cache is shared, and the run recorded by whoever asked first
+# used to be handed to everyone after them: missing from their history, and
+# refused by "take this trade", which only opens your own runs.
+from types import SimpleNamespace as _NS
+from bot import engine as _engine
+
+
+def _fake_analyse(symbol, cfg, interval=None, with_news=True, source="",
+                  db_path=None, user=1, record=True, **_kw):
+    bars = _NS(symbol="SHRD", name="Shared Co", asset_class="equity",
+               interval="1d", last_price=100.0, market_open=False)
+    plan = _NS(conviction=0.5, action="BUY", headline="Buy", entry=100.0,
+               stop=95.0, target1=110.0, target2=None, reward_risk=2.0,
+               breakeven_rate=0.4, probability=0.5, prob_samples=60,
+               expectancy_r=0.1)
+    regime = _NS(trend="up", volatility="normal", direction=1, adx=20.0)
+    calib, mood = _NS(cost_r=0.01), _NS(score=0.0, items=[])
+    run_id = None
+    if record:
+        rconn = db.connect(DB)
+        run_id = db.record_run(rconn, bars, plan, [], 0.3, regime, calib, mood,
+                               source=source, user=user)
+        rconn.close()
+    return _engine.Analysis(bars=bars, context=None, signals=[], composite=0.3,
+                            regime=regime, levels=[], calibration=calib,
+                            sentiment=mood, plan=plan, run_id=run_id)
+
+
+_real_analyse = web.engine.analyse
+web.engine.analyse = _fake_analyse
+_shared_cfg = _cfgmod.load(web.app.config.get("CFG_PATH"))
+runs_of = {}
+try:
+    for person in (alice, bob, alice):
+        conn = db.connect(DB)
+        with web.app.test_request_context("/"):
+            web.g.user, web.g.demo = A.get_user(conn, person.id), False
+            got = web.cached_analysis("SHRD", "1d", _shared_cfg, False)
+        conn.close()
+        runs_of.setdefault(person.id, []).append(got.run_id)
+    conn = db.connect(DB)
+    owner = {r["id"]: r["user_id"] for r in conn.execute("SELECT id, user_id FROM runs")}
+    conn.close()
+    check("the second person gets a run of their own",
+          runs_of[bob.id][0] and runs_of[bob.id][0] != runs_of[alice.id][0], runs_of)
+    check("recorded against them", owner.get(runs_of[bob.id][0]) == bob.id)
+    check("while the first keeps theirs, without a new one each refresh",
+          runs_of[alice.id][0] == runs_of[alice.id][1]
+          and owner.get(runs_of[alice.id][0]) == alice.id, runs_of)
+    sign_in_as(c, bob)
+    r = c.post("/trades/take", data={"run_id": runs_of[bob.id][0]})
+    check("so 'take this trade' works for the second person too",
+          r.status_code == 302, r.status_code)
+finally:
+    web.engine.analyse = _real_analyse
+    web._CACHE.clear()
+
+print()
+print("=" * 72)
 print("SESSIONS")
 print("=" * 72)
 
@@ -545,6 +625,34 @@ finally:
     web.app.config["AUTH_MODE"] = None
 
 check("removing the credentials restores local mode", web.auth_required() is False)
+
+print()
+print("   A public deployment whose sign-in keys went missing:")
+# Every visitor used to be signed in as the local account, which is the
+# operator and can see every account.
+_os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+try:
+    check("still asks people to sign in", web.auth_required() is True)
+    nobody = web.app.test_client()
+    r = nobody.get("/account")
+    check("so a visitor is not handed the operator's account",
+          r.status_code == 302 and "/signin" in r.headers.get("Location", ""),
+          r.status_code)
+    check("nor the page about everyone's use", nobody.get("/usage").status_code == 302)
+    check("and the sign-in page says what is missing",
+          "GOOGLE_CLIENT_ID" in nobody.get("/signin").data.decode("utf-8", "replace"))
+    web.app.config["AUTH_MODE"] = "off"
+    check("unless sign-in is switched off on purpose", web.auth_required() is False)
+finally:
+    web.app.config["AUTH_MODE"] = None
+    del _os.environ["STOCKBOT_PUBLIC_URL"]
+_os.environ["STOCKBOT_BEHIND_PROXY"] = "1"
+try:
+    check("behind the host's proxy it asks too", web.auth_required() is True)
+finally:
+    del _os.environ["STOCKBOT_BEHIND_PROXY"]
+check("while on your own machine it still needs no sign-in",
+      web.auth_required() is False and c.get("/trades").status_code == 200)
 
 print()
 print("=" * 72)

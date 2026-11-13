@@ -17,7 +17,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 DEFAULT_MODEL = "claude-sonnet-5"
-_MAX_EDGE = 1568          # beyond this the vision encoder gains nothing
+MAX_EDGE = 1568           # beyond this the vision encoder gains nothing
+# The most pixels an image may claim before it is decoded. A 6K screen is
+# about 20 million. A flat image compresses so well that a file of a few
+# kilobytes can claim a billion, and decoding that takes gigabytes.
+MAX_PIXELS = 25_000_000
 
 
 class VisionError(RuntimeError):
@@ -37,8 +41,11 @@ class ChartRead:
     raw: str = ""
 
 
-def _load_image_bytes(path: str):
-    """Load and downscale an image, returning (bytes, media_type)."""
+def _load_image_bytes(path):
+    """Load and downscale an image, returning (bytes, media_type).
+
+    path is a file path, or an open binary file such as io.BytesIO.
+    """
     from PIL import Image
 
     try:
@@ -46,11 +53,16 @@ def _load_image_bytes(path: str):
     except Exception as exc:
         raise VisionError("could not open image %s: %s" % (path, exc))
 
+    # Opening reads only the header, so this is checked before any pixel
+    # is decoded.
+    w, h = img.size
+    if w * h > MAX_PIXELS:
+        raise VisionError("That image is too large to read. Crop it to just "
+                          "the chart and try again.")
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
-    w, h = img.size
-    if max(w, h) > _MAX_EDGE:
-        scale = _MAX_EDGE / float(max(w, h))
+    if max(w, h) > MAX_EDGE:
+        scale = MAX_EDGE / float(max(w, h))
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
                          Image.LANCZOS)
     buf = io.BytesIO()
@@ -98,9 +110,13 @@ Rules:
   Do not speculate about what price will do next. Maximum 4 items."""
 
 
-def read_chart(image_path: str, model: Optional[str] = None,
+def read_chart(image_path, model: Optional[str] = None,
                api_key: Optional[str] = None) -> ChartRead:
-    """Send the screenshot to Claude and parse the instrument details."""
+    """Send the screenshot to Claude and parse the instrument details.
+
+    image_path is a file path, or an open binary file. The web upload passes
+    its bytes in memory, so two uploads at once never share a file on disk.
+    """
     key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise VisionError(

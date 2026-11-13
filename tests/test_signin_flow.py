@@ -435,6 +435,11 @@ try:
     print("SIGNING OUT, AND BACK IN")
     print("=" * 72)
 
+    # The session cookie travels with a link followed from another site, so
+    # signing out by plain link let any page sign its visitors out.
+    r = visitor.get("/signout")
+    check("a link cannot sign anyone out", r.status_code == 405
+          and visitor.get("/account").status_code == 200, r.status_code)
     visitor.post("/signout")
     check("signed out, the front door goes back to the landing page",
           visitor.get("/").status_code == 200)
@@ -576,6 +581,39 @@ try:
           out.status_code == 400, out.status_code)
     check("and it says what could not be reached",
           "Could not reach Google" in out.data.decode("utf-8", "replace"))
+
+    print()
+    print("=" * 72)
+    print("WHERE A SIGN-IN LANDS")
+    print("=" * 72)
+
+    def land(next_path):
+        client = web.app.test_client()
+        client.get("/auth/google?next=" + next_path)
+        with client.session_transaction() as sess:
+            st, kept = sess.get("oauth_state"), sess.get("oauth_next")
+        restore = with_google(FakeGoogle())
+        try:
+            out = client.get("/auth/google/callback?code=c&state=" + st)
+        finally:
+            restore()
+        return out, kept
+
+    # The Location header drops a tab, so "/<tab>/host" used to leave the
+    # server as "//host": a real Google sign-in here, landing somewhere else.
+    out, kept = land("/%09/evil.example/login")
+    where = out.headers.get("Location", "")
+    check("a tab hidden in next cannot send a fresh sign-in to another site",
+          out.status_code == 302 and "evil" not in where
+          and not where.startswith("//"), where)
+    check("it is not even kept for after the sign-in", kept == "", kept)
+    out, _kept = land("/%5Cevil.example/login")
+    check("nor can a backslash", "evil" not in out.headers.get("Location", ""),
+          out.headers.get("Location"))
+    out, _kept = land("/trades")
+    check("while a page on this site is still where it lands",
+          out.headers.get("Location", "").endswith("/trades"),
+          out.headers.get("Location"))
 
 finally:
     del _os.environ["GOOGLE_CLIENT_ID"]
