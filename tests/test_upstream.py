@@ -230,6 +230,81 @@ check("the in-flight marker was released", upstream.stats()["in_flight"] == 0)
 
 print()
 print("=" * 72)
+print("A FAILURE IS SHARED WITH THOSE WAITING, NOT REPEATED BY EACH")
+print("=" * 72)
+
+# Callers waiting on a fetch that failed used to run it again themselves,
+# past the breaker and without keeping the answer: eight people waiting on a
+# request the source refused sent eight more.
+upstream.reset()
+sent = {"n": 0}
+
+
+class Refused(RuntimeError):
+    pass
+
+
+def refusing():
+    sent["n"] += 1
+    time.sleep(0.4)
+    raise Refused("the source said no")
+
+
+told = []
+gate = threading.Barrier(9)
+
+
+def waits_on_refusal():
+    gate.wait(timeout=5)
+    try:
+        upstream.cached("refused", refusing, host=HOST)
+        told.append("answered")
+    except Refused as exc:
+        told.append(exc)
+
+
+threads = [threading.Thread(target=waits_on_refusal) for _ in range(8)]
+for t in threads:
+    t.start()
+gate.wait(timeout=5)
+for t in threads:
+    t.join(timeout=15)
+check("eight callers waiting on a failed fetch cost one fetch", sent["n"] == 1, sent["n"])
+check("and every one of them is told why it failed",
+      len(told) == 8 and all(isinstance(e, Refused) for e in told), told)
+check("nothing is left in flight", upstream.stats()["in_flight"] == 0)
+check("and the failure is not kept for whoever asks next",
+      upstream.cached("refused", lambda: "fine", host=HOST) == "fine")
+
+# A waiter whose wait runs out while the fetch is still going asks for itself,
+# which is the guard against a stuck fetch. It must not do so past a source
+# that has said stop in the meantime.
+upstream.reset()
+sent["n"] = 0
+
+
+def stuck():
+    sent["n"] += 1
+    for _ in range(upstream.THRESHOLD):
+        upstream.note_throttled(HOST)
+    time.sleep(0.6)
+    return "late"
+
+
+first = threading.Thread(target=lambda: upstream.cached("stuck", stuck, host=HOST, wait=0.1))
+first.start()
+time.sleep(0.1)
+try:
+    upstream.cached("stuck", stuck, host=HOST, wait=0.1)
+    check("a waiter that gives up does not ask a source that has said stop", False,
+          "it asked")
+except upstream.Throttled:
+    check("a waiter that gives up does not ask a source that has said stop",
+          sent["n"] == 1, sent["n"])
+first.join()
+
+print()
+print("=" * 72)
 print("OLD ANSWERS ARE LET GO")
 print("=" * 72)
 

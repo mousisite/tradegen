@@ -63,6 +63,14 @@ CALL_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("call"))
 # is a year of trading, and 252 five-minute bars are three days.
 DAILY_ONLY = ("near_52w_high", "near_52w_low")
 
+# How much history each check downloads: enough for every reading, no more. A
+# year of daily bars holds the 52-week range, the 50-bar average and a settled
+# 14-bar RSI; on shorter bars a few days or weeks hold over a hundred bars.
+# Without it every check, every five minutes, pulled the source's whole range:
+# five years of daily bars, or sixty days of five-minute ones.
+LOOKBACK = {"1d": "1y", "1h": "1mo", "60m": "1mo", "30m": "1mo",
+            "15m": "5d", "5m": "5d", "2m": "5d", "1m": "5d"}
+
 
 def problem(kind: str, threshold: Optional[float]) -> Optional[str]:
     """Why a value cannot work for this kind of alert, or None if it can.
@@ -450,7 +458,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
     def grab(key):
         symbol, interval = key
         try:
-            return key, fetch_bars(symbol, interval)
+            return key, fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
         except (DataError, Exception) as exc:
             return key, exc
 
@@ -530,7 +538,9 @@ def check_stops(conn, user=None) -> Dict:
     data, errors = {}, []
     for symbol in sorted({r["symbol"] for r in rows}):
         try:
-            data[symbol] = fetch_bars(symbol, "1d")
+            # The same history as a daily alert's, so a symbol with both an
+            # alert and a position is one request, not two.
+            data[symbol] = fetch_bars(symbol, "1d", lookback=LOOKBACK["1d"])
         except Exception as exc:
             errors.append({"symbol": symbol, "error": str(exc)[:120]})
 

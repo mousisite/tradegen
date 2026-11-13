@@ -36,6 +36,7 @@ from rich.table import Table
 from bot import config as config_mod
 from bot import database as db
 from bot.market import DataError, fetch_bars, format_price
+from bot.portfolio import stop_touched
 
 console = Console()
 
@@ -246,22 +247,21 @@ def cmd_check(args, conn) -> int:
         risk = abs(entry - stop)
         r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
 
-        # Scan bars since the trade opened for a stop or target touch.
-        since = bars.timestamp >= int(t["ts_opened"])
+        # Scan the bars since the trade opened for a stop or target touch, by
+        # the rule the journal pages use (portfolio.stop_touched): only bars
+        # that started after the trade did. The bar it opened in is left out,
+        # because part of that bar's range may have traded before the entry,
+        # and a low from before you bought is not your stop being hit.
+        opened = int(t["ts_opened"])
+        after = bars.timestamp > opened
         status = "open"
         target = t["target1"]
-        if since.any():
-            highs, lows = bars.high[since], bars.low[since]
-            if direction > 0:
-                if float(lows.min()) <= stop:
-                    status = "[red]STOP HIT[/]"
-                elif target and float(highs.max()) >= float(target):
-                    status = "[green]TARGET HIT[/]"
-            else:
-                if float(highs.max()) >= stop:
-                    status = "[red]STOP HIT[/]"
-                elif target and float(lows.min()) <= float(target):
-                    status = "[green]TARGET HIT[/]"
+        if stop_touched(bars, opened, stop, direction)[0] is not None:
+            status = "[red]STOP HIT[/]"
+        elif target and after.any():
+            if (float(bars.high[after].max()) >= float(target) if direction > 0
+                    else float(bars.low[after].min()) <= float(target)):
+                status = "[green]TARGET HIT[/]"
 
         # Fall back to the live price. No bars print while a market is closed,
         # and a gap can carry price through the stop before any bar covers it,

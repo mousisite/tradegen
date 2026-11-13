@@ -275,7 +275,7 @@ from bot import alerts as _alerts
 from bot import workflows as _workflows
 
 
-def _bars(symbol, interval="1d"):
+def _bars(symbol, interval="1d", lookback=None):
     return _NS(symbol=symbol, interval=interval, last_price=101.0, close=[101.0] * 60,
                volume=[1.0] * 60, prev_close=100.0, market_open=False,
                last_bar_time="", meta={})

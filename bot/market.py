@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import requests
@@ -31,15 +31,59 @@ _MAX_RANGE = {"1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d",
 _INTERVAL_SEC = {"1m": 60, "2m": 120, "5m": 300, "15m": 900,
                  "30m": 1800, "60m": 3600, "1h": 3600, "1d": 86400}
 
-_COMMON_CRYPTO = {
-    "BTC", "XBT", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", "MATIC",
-    "LINK", "LTC", "BCH", "SHIB", "TRX", "UNI", "ATOM", "XLM", "NEAR", "APT",
-    "ARB", "OP", "SUI", "PEPE", "TON", "ICP", "FIL", "HBAR", "VET", "INJ",
+# Each coin's id at Yahoo. Most are the ticker with -USD on the end, but where
+# an older coin already had the ticker Yahoo files the newer one under a
+# number: its ARB-USD is "ARbit" and XBT-USD "XBIT", not Arbitrum and Bitcoin,
+# and SUI-USD, UNI-USD, APT-USD, PEPE-USD and MATIC-USD hold nothing at all.
+# Polygon's coin is POL now, and Yahoo lists Toncoin as Gram.
+_COINS = {
+    "BTC": "BTC-USD", "XBT": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD",
+    "XRP": "XRP-USD", "ADA": "ADA-USD", "DOGE": "DOGE-USD", "AVAX": "AVAX-USD",
+    "DOT": "DOT-USD", "MATIC": "POL28321-USD", "LINK": "LINK-USD",
+    "LTC": "LTC-USD", "BCH": "BCH-USD", "SHIB": "SHIB-USD", "TRX": "TRX-USD",
+    "UNI": "UNI7083-USD", "ATOM": "ATOM-USD", "XLM": "XLM-USD",
+    "NEAR": "NEAR-USD", "APT": "APT21794-USD", "ARB": "ARB11841-USD",
+    "OP": "OP-USD", "SUI": "SUI20947-USD", "PEPE": "PEPE24478-USD",
+    "TON": "GRAM-USD", "ICP": "ICP-USD", "FIL": "FIL-USD", "HBAR": "HBAR-USD",
+    "VET": "VET-USD", "INJ": "INJ-USD",
 }
+
+# A bare ticker that is also a coin's is the hard case. "btc" typed into an
+# alert means Bitcoin, not the Grayscale fund listed as BTC, but SUI is Sun
+# Communities to anyone who owns it. The rule: a bare ticker is the coin,
+# unless a US stock or fund trades under the same ticker and the coin is not
+# one this site names by that ticker itself. These are the coin tickers where
+# the listing wins (as Yahoo listed them in November 2026). BTC, ETH, SOL, XRP,
+# DOGE, ADA, AVAX, LINK and LTC stay coins: they are the coins on the public
+# pages (public.POPULAR), which show each by its bare ticker, so typing what
+# the site shows has to open what it showed. The funds listed as BTC, ETH and
+# XRP hold that same coin; the cost is that Interlink Electronics (LINK) and
+# LTC Properties (LTC) cannot be looked up here. Each coin below stays one
+# step away, in the forms that can only mean a coin (SUI-USD, SUIUSD, SUI/USD,
+# BINANCE:SUIUSDT), and a symbol picked from the suggestions is analysed as
+# picked (see search).
+_LISTED_FIRST = {"BCH", "TRX", "ATOM", "NEAR", "APT", "ARB", "SUI", "VET"}
 
 
 class DataError(RuntimeError):
     """Raised when market data cannot be retrieved or is unusable."""
+
+
+class SymbolNotFound(DataError):
+    """The source has nothing under that symbol."""
+
+
+class DataThrottled(DataError):
+    """The source turned requests away for now; the request itself was fine.
+
+    Still a DataError, so every caller that copes with missing prices copes
+    with this, but its own kind, so a rate limit is never read as a ticker
+    that does not exist. `seconds` is roughly how long to leave it.
+    """
+
+    def __init__(self, message: str, seconds: float = upstream.COOLDOWN):
+        super().__init__(message)
+        self.seconds = max(1, int(round(seconds)))
 
 
 def format_price(value, currency: str = "") -> str:
@@ -100,6 +144,16 @@ class Bars:
     # public record compare them with prices people saw; the back-test reads
     # this so an ex-dividend drop is not scored as a loss on a long.
     dividend_factor: Optional[np.ndarray] = None
+    # Share splits inside the range fetched, oldest first, as (when, new
+    # shares per old share): 10.0 is a ten-for-one, 0.1 a one-for-ten. The
+    # prices above are already adjusted for them; this is for anything that
+    # holds a price recorded before one.
+    splits: List[Tuple[int, float]] = field(default_factory=list)
+    # Start times of daily coin bars the source left blank and that were
+    # rebuilt from their neighbours. A coin's day opens at the previous day's
+    # close, so their open and close are exact; their range is only what
+    # those two span, and their volume is not known and is left at nothing.
+    rebuilt: List[int] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.close)
@@ -127,31 +181,78 @@ class Bars:
 
 _HOST = "Yahoo Finance"
 
+# Seconds to connect and to wait for each part of the answer, and how many
+# tries. Together well inside the 30 seconds upstream.cached lets other callers
+# wait for this one: a request that could outlast that wait sent every waiting
+# caller to fetch for itself, which is the stampede the wait exists to stop.
+# The source answers in well under a second when it answers at all.
+_TIMEOUT = (5, 8)
+_TRIES = 2
 
-def _fetch(url: str, params: dict, tries: int = 3) -> dict:
-    """One request, with retries that stop when the source says stop."""
-    last = None
+
+def _refused(status: int, seconds: Optional[float]) -> DataThrottled:
+    """The error for a request the source turned away, said in words."""
+    # Capped as the breaker caps it, so the wait said is the wait kept.
+    wait = min(seconds if seconds and seconds > 0 else upstream.COOLDOWN, 900.0)
+    when = upstream._plainly(int(round(wait)))
+    if status == 429:
+        text = ("The market data source limits how often this site may ask for "
+                "prices, and turned this request away. Try again in about %s. "
+                "The limit is shared by everyone using the site right now, so "
+                "it is nothing to do with your account." % when)
+    else:
+        text = ("The market data source is busy or briefly down, and did not "
+                "answer. Try again in about %s. It is nothing to do with your "
+                "account." % when)
+    return DataThrottled(text, wait)
+
+
+def _fetch(url: str, params: dict, tries: int = _TRIES) -> dict:
+    """One request, with a retry that stops when the source says stop.
+
+    What went wrong is said in words. The address asked, query and all, used
+    to be the message, and a person reading it cannot act on a URL.
+    """
+    last = "it did not answer"
     for attempt in range(tries):
+        if attempt:
+            time.sleep(0.6 * attempt)
         try:
-            r = requests.get(url, params=params, headers=_HEADERS, timeout=20)
-            if r.status_code == 200:
-                upstream.note_ok(_HOST)
-                return r.json()
-            last = "HTTP %s" % r.status_code
-            if upstream.is_throttle(r.status_code):
-                # Retrying into a rate limit is how a shared address gets
-                # blocked rather than throttled. Record it and give up now.
-                upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
-                break
-            if r.status_code in (404, 422):
-                break
-        except requests.RequestException as exc:
-            last = str(exc)
-        time.sleep(0.6 * (attempt + 1))
-    raise DataError("request to %s failed: %s" % (url, last))
+            r = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+        except requests.Timeout:
+            last = "it took too long to answer"
+            continue
+        except requests.RequestException:
+            last = "it could not be reached"
+            continue
+        if r.status_code == 200:
+            try:
+                data = r.json()
+            except ValueError:
+                last = "it sent something that was not price data"
+                continue
+            upstream.note_ok(_HOST)
+            return data
+        if upstream.is_throttle(r.status_code):
+            # Retrying into a rate limit is how a shared address gets
+            # blocked rather than throttled. Record it and give up now.
+            wait = upstream.retry_after_seconds(r)
+            upstream.note_throttled(_HOST, wait)
+            raise _refused(r.status_code, wait)
+        if r.status_code == 404:
+            # Its own kind, so a caller can tell "no such ticker" from any
+            # other failure without reading the message.
+            raise SymbolNotFound("The data source has nothing under that symbol.")
+        if r.status_code == 422:
+            # A range the source does not serve at that bar size: asking
+            # again gets the same answer.
+            raise DataError("The market data source could not be used: it does "
+                            "not serve that range of bars (HTTP 422).")
+        last = "it answered with an error (HTTP %d)" % r.status_code
+    raise DataError("The market data source could not be used: %s." % last)
 
 
-def _get(url: str, params: dict, tries: int = 3) -> dict:
+def _get(url: str, params: dict, tries: int = _TRIES) -> dict:
     """A request that may be answered from a recent identical one.
 
     Keyed on the full query, so two callers asking for different ranges of the
@@ -162,14 +263,17 @@ def _get(url: str, params: dict, tries: int = 3) -> dict:
         return upstream.cached(key, lambda: _fetch(url, params, tries),
                                host=_HOST)
     except upstream.Throttled as exc:
-        raise DataError(str(exc))
+        # The breaker is open, so nothing was sent; its message says so.
+        raise DataThrottled(str(exc), exc.seconds)
 
 
 def normalise_symbol(raw: str) -> str:
     """Turn loose user or screenshot text into a Yahoo-style ticker.
 
     Handles the shapes a chart screenshot actually shows: BTCUSD, BTC/USD,
-    BINANCE:ETHUSDT, NASDAQ:AAPL, and a leading dollar-sign cashtag.
+    BINANCE:ETHUSDT, NASDAQ:AAPL, and a leading dollar-sign cashtag. A coin
+    in any of the shapes that can only mean a coin becomes Yahoo's id for it;
+    a bare ticker follows the rule above _LISTED_FIRST.
     """
     s = (raw or "").strip().upper()
     if not s:
@@ -177,19 +281,22 @@ def normalise_symbol(raw: str) -> str:
     if ":" in s:                       # strip exchange prefix, e.g. NASDAQ:AAPL
         s = s.split(":", 1)[1]
     s = s.lstrip("$").replace(" ", "")
+    if not s:                          # "$" or "NASDAQ:" alone
+        raise DataError("empty symbol")
     if "/" in s:                       # BTC/USD -> BTC-USD
         base, _, quote = s.partition("/")
         if quote in ("USDT", "USDC", "USD", ""):
-            quote = "USD"
+            return _COINS.get(base, base + "-USD")
         return base + "-" + quote
     if s.endswith("-USD"):
-        return s
+        # Yahoo's own id is used as given, except a coin's ticker with -USD
+        # added, which Yahoo files elsewhere or under another coin.
+        return _COINS.get(s[:-4], s)
     for suffix in ("USDT", "USDC", "USD"):
-        if s.endswith(suffix) and s[:-len(suffix)] in _COMMON_CRYPTO:
-            return s[:-len(suffix)] + "-USD"
-    if s in _COMMON_CRYPTO:
-        base = "BTC" if s == "XBT" else s
-        return base + "-USD"
+        if s.endswith(suffix) and s[:-len(suffix)] in _COINS:
+            return _COINS[s[:-len(suffix)]]
+    if s in _COINS and s not in _LISTED_FIRST:
+        return _COINS[s]
     return s
 
 
@@ -202,15 +309,22 @@ def resolve(query: str) -> dict:
     candidate = normalise_symbol(query)
     # Search the *normalised* candidate, not the raw text. Querying "$TSLA"
     # verbatim ranks foreign depositary receipts above the real listing.
+    # A refusal is passed on rather than guessed past. The guess sends one
+    # more request into the limit, and a company name guessed as a ticker
+    # ("TESLA") comes back as a ticker that does not exist.
     try:
         data = _get(_SEARCH, {"q": candidate, "quotesCount": 8, "newsCount": 0})
         quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
+    except DataThrottled:
+        raise
     except DataError:
         quotes = []
     if not quotes and candidate != query.strip().upper():
         try:
             data = _get(_SEARCH, {"q": query, "quotesCount": 8, "newsCount": 0})
             quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
+        except DataThrottled:
+            raise
         except DataError:
             quotes = []
 
@@ -258,10 +372,19 @@ def search(query: str, limit: int = 6) -> list:
     out = []
     for q in data.get("quotes", []):
         kind = (q.get("quoteType") or "").lower()
-        if q.get("symbol") and kind in _SUGGEST_KINDS:
-            out.append({"symbol": q["symbol"],
-                        "name": q.get("shortname") or q.get("longname") or q["symbol"],
-                        "where": q.get("exchDisp") or ""})
+        if not q.get("symbol") or kind not in _SUGGEST_KINDS:
+            continue
+        # What is picked here is analysed exactly as picked, so an entry whose
+        # ticker this app reads as something else is left out: the fund
+        # listed as XRP would otherwise open the XRP coin.
+        try:
+            if normalise_symbol(q["symbol"]) != q["symbol"].strip().upper():
+                continue
+        except DataError:
+            continue
+        out.append({"symbol": q["symbol"],
+                    "name": q.get("shortname") or q.get("longname") or q["symbol"],
+                    "where": q.get("exchDisp") or ""})
     return out[:limit]
 
 
@@ -309,15 +432,23 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
         raise DataError("unsupported interval %r. Use one of: %s"
                         % (interval, ", ".join(sorted(_MAX_RANGE))))
     rng = lookback or _MAX_RANGE.get(interval, "60d")
+    step = _INTERVAL_SEC.get(interval, 300)
     try:
+        # Splits come with the prices, for anything that holds a price from
+        # before one (Bars.splits).
         payload = _get(_CHART.format(sym=symbol),
-                       {"range": rng, "interval": interval, "includePrePost": "false"})
+                       {"range": rng, "interval": interval, "includePrePost": "false",
+                        "events": "split"})
+    except SymbolNotFound:
+        raise SymbolNotFound("no instrument found for %r. Check the ticker, and "
+                             "note that crypto needs the -USD suffix, as in "
+                             "BTC-USD." % symbol)
+    except DataThrottled:
+        # Told apart by its kind, not by reading the message: looking for
+        # "404" in the text once reported a rate limit on 4043.T as a ticker
+        # that does not exist. Its own words already say how long to wait.
+        raise
     except DataError as exc:
-        # A raw URL and status code helps nobody. Say what actually went wrong.
-        if "404" in str(exc):
-            raise DataError("no instrument found for %r. Check the ticker, and "
-                            "note that crypto needs the -USD suffix, as in "
-                            "BTC-USD." % symbol)
         raise DataError("could not fetch %s: %s" % (symbol, exc))
 
     chart = payload.get("chart") or {}
@@ -333,6 +464,17 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     quote = ((res.get("indicators") or {}).get("quote") or [{}])[0]
     if not ts or not quote.get("close"):
         raise DataError("%s: empty price series at interval %s" % (symbol, interval))
+    # Asked for five-minute bars of a fund priced once a day, Yahoo quietly
+    # sends daily ones, and they were analysed as if each were five minutes.
+    granted = str(meta.get("dataGranularity") or interval)
+    if _INTERVAL_SEC.get(granted) != step:
+        given = "daily" if granted == "1d" else granted
+        fund = (meta.get("instrumentType") or "").upper() == "MUTUALFUND"
+        raise DataError("%s has no %s bars at the data source, only %s ones%s. "
+                        "Choose %s bars instead."
+                        % (symbol, interval, given,
+                           ": a mutual fund is priced once a day, after the close"
+                           if fund else "", given))
 
     def col(key) -> np.ndarray:
         vals = list(quote.get(key) or [])
@@ -346,7 +488,6 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     asset = _classify(meta.get("instrumentType"))
     regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
     now = int(time.time())
-    step = _INTERVAL_SEC.get(interval, 300)
 
     # After the close Yahoo sometimes sends the finished session's daily bar
     # with everything but its close, and that close is the quote it reports
@@ -355,15 +496,36 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
     # a session that is over is filled, and only from a quote stamped on its
     # own day.
     quoted, quoted_at = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
+    from_quote = False
     if (interval == "1d" and len(c) and np.isnan(c[-1]) and quoted and quoted_at
             and (int(quoted_at) + gmt) // 86400 == (int(t[-1]) + gmt) // 86400
             and not _still_forming(int(t[-1]), step, interval, asset, regular,
                                    gmt, now)):
         c[-1] = float(quoted)
+        from_quote = True
         if np.isfinite(h[-1]):
             h[-1] = max(h[-1], c[-1])
         if np.isfinite(l[-1]):
             l[-1] = min(l[-1], c[-1])
+
+    # A coin's finished day is sometimes left blank for an hour or more after
+    # midnight UTC, with the new day already trading. Dropped, it took the day
+    # out of every reading: the analysis ran on the day before it, and the
+    # day's change was measured across two days. A coin's day opens at the
+    # previous day's close, so a blank day between two known ones has its open
+    # and close exactly. Its range and volume are not known yet: the range is
+    # left at what those two span, and the volume at nothing.
+    rebuilt: List[int] = []
+    if interval == "1d" and asset == "crypto":
+        for k in range(1, len(t) - 1):
+            if (np.isnan(c[k]) and np.isfinite(c[k - 1]) and np.isfinite(o[k + 1])
+                    and t[k] - t[k - 1] == step and t[k + 1] - t[k] == step):
+                if not np.isfinite(o[k]):
+                    o[k] = c[k - 1]
+                c[k] = o[k + 1]
+                h[k] = np.nanmax([h[k], o[k], c[k]])
+                l[k] = np.nanmin([l[k], o[k], c[k]])
+                rebuilt.append(int(t[k]))
 
     # Each daily bar's dividend factor. Yahoo's close is already adjusted for
     # splits but not for dividends, so a stock paying 3% a year shows a small
@@ -408,9 +570,14 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
 
     # Yahoo appends a synthetic session-close bar with zero volume and zero
     # range (O==H==L==C). Left in place it deflates ATR and zeroes RVOL, which
-    # would size every stop far too tightly. Trim any such stubs off the tail.
+    # would size every stop far too tightly. Trim it off the tail: one bar,
+    # and only after a bar that traded, in a series that reports volume at
+    # all. A fund priced once a day reports every bar flat and without
+    # volume, and trimming "stubs" until one traded cut such a series to two
+    # bars from 2021. A session closed from its own quote is a session, too.
     live = None
-    while len(t) > 2 and v[-1] == 0 and h[-1] == l[-1]:
+    if (len(t) > 2 and v[-1] == 0 and h[-1] == l[-1] and v[-2] > 0
+            and float(np.median(v)) > 0 and not from_quote):
         live = float(c[-1])
         t, o, h, l, c, v = t[:-1], o[:-1], h[:-1], l[:-1], c[:-1], v[:-1]
 
@@ -423,6 +590,10 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
         live = float(c[-1])
         live_start = int(t[-1])
         t, o, h, l, c, v = t[:-1], o[:-1], h[:-1], l[:-1], c[:-1], v[:-1]
+    # Counted again now the tail is off: thirty bars before it could be
+    # twenty-eight after.
+    if len(t) < 30:
+        raise DataError("%s: only %d usable bars at %s" % (symbol, len(t), interval))
     if factor is not None:
         factor = factor[:len(t)]
         factor = factor / factor[-1]
@@ -480,4 +651,21 @@ def fetch_bars(symbol: str, interval: str = "5m", lookback: Optional[str] = None
         last_bar_time=stamp,
         meta=meta,
         dividend_factor=factor,
+        splits=_splits(res),
+        rebuilt=[x for x in rebuilt if x <= int(t[-1])],
     )
+
+
+def _splits(res: dict) -> List[Tuple[int, float]]:
+    """The splits Yahoo lists with a chart, as (when, new over old), oldest first."""
+    out = []
+    listed = (res.get("events") or {}).get("splits") or {}
+    for event in (listed.values() if isinstance(listed, dict) else listed):
+        try:
+            when = int(event["date"])
+            ratio = float(event["numerator"]) / float(event["denominator"])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        if ratio > 0 and np.isfinite(ratio):
+            out.append((when, ratio))
+    return sorted(out)

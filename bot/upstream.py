@@ -52,7 +52,9 @@ MAX_ENTRIES = 100
 
 _lock = threading.Lock()
 _cache: Dict[str, Tuple[float, object]] = {}
-_inflight: Dict[str, threading.Event] = {}
+# One entry per question being asked right now: an event set when the answer
+# is in, and the error, when asking failed.
+_inflight: Dict[str, Dict] = {}
 _breakers: Dict[str, Dict] = {}
 # The longest reuse any caller has asked for. An entry older than that can
 # never be returned again, so it is let go rather than kept until pushed out.
@@ -160,6 +162,11 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
     up early finds the cache still empty and runs the whole fetch itself, which
     is the stampede this exists to prevent, and it does it at the worst moment:
     the defect is invisible until two people ask at once.
+
+    A failure is shared the same way. Those waiting get the error the fetch
+    raised rather than each asking again: eight people waiting on a request
+    the source refused used to send eight more, and on a rate limit every one
+    of them keeps the door shut longer.
     """
     global _max_ttl
     now = time.time()
@@ -170,26 +177,32 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
         if hit and (now - hit[0]) < ttl:
             return hit[1]
 
-        waiting = _inflight.get(key)
-        if waiting is None:
-            # This caller does the work; others will wait on this event.
-            event = threading.Event()
-            _inflight[key] = event
-            mine = True
-        else:
-            event, mine = waiting, False
+        flight = _inflight.get(key)
+        mine = flight is None
+        if mine:
+            # This caller does the work; others will wait for its answer.
+            flight = {"done": threading.Event(), "error": None}
+            _inflight[key] = flight
 
     if not mine:
         # Somebody else is already fetching this. Wait for them rather than
         # asking the source the same question at the same moment.
-        event.wait(timeout=wait)
+        finished = flight["done"].wait(timeout=wait)
         with _lock:
             hit = _cache.get(key)
         if hit:
             return hit[1]
-        # The other caller failed. Fall through and try once, rather than
-        # failing on somebody else's behalf.
-        return fetch()
+        if finished and flight["error"] is not None:
+            raise flight["error"]
+        # Still not answered after `wait`, so the other caller is stuck. Ask
+        # once here, but not past a source that has said stop in the meantime,
+        # and keep what comes back for the next caller.
+        if host:
+            check(host)
+        result = fetch()
+        with _lock:
+            _store(key, result)
+        return result
 
     try:
         if host:
@@ -198,10 +211,13 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
         with _lock:
             _store(key, result)
         return result
+    except Exception as exc:
+        flight["error"] = exc
+        raise
     finally:
         with _lock:
             _inflight.pop(key, None)
-        event.set()
+        flight["done"].set()
 
 
 def _store(key: str, result: object) -> None:
