@@ -244,7 +244,14 @@ def cmd_check(args, conn) -> int:
         # In the shares the trade was opened with, as its entry and stop
         # are: after a split the quote and the bars are in today's.
         opened = int(t["ts_opened"])
-        split = split_factor_since(t["symbol"], opened, bars)
+        try:
+            split = split_factor_since(t["symbol"], opened, bars)
+        except DataError:
+            # A split cannot be ruled out just now.
+            table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
+                          format_price(t["entry"]), "-", "-", _age(t["ts_opened"]),
+                          "[yellow]no split data[/]")
+            continue
         price = bars.last_price * split
         direction = int(t["direction"])
         entry, stop = float(t["entry"]), float(t["stop"])

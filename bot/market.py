@@ -7,9 +7,10 @@ class without the user telling it what they pasted in.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import requests
@@ -321,11 +322,17 @@ def resolve(query: str) -> dict:
     # A refusal is passed on rather than guessed past. The guess sends one
     # more request into the limit, and a company name guessed as a ticker
     # ("TESLA") comes back as a ticker that does not exist.
+    # A search that did not answer is kept: if the guess it leaves then turns
+    # out not to exist, the caller says the source did not answer, not that
+    # the ticker is wrong (engine.analyse).
+    search_down = None
     try:
         data = _get(_SEARCH, {"q": candidate, "quotesCount": 8, "newsCount": 0})
         quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
     except DataThrottled:
         raise
+    except DataUnavailable as exc:
+        search_down, quotes = exc, []
     except DataError:
         quotes = []
     if not quotes and candidate != query.strip().upper():
@@ -334,6 +341,8 @@ def resolve(query: str) -> dict:
             quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
         except DataThrottled:
             raise
+        except DataUnavailable as exc:
+            search_down, quotes = exc, []
         except DataError:
             quotes = []
 
@@ -355,7 +364,10 @@ def resolve(query: str) -> dict:
     ranked = sorted(quotes, key=rank)
     if ranked:
         return pack(ranked[0])
-    return {"symbol": candidate, "name": candidate, "type": ""}
+    guess = {"symbol": candidate, "name": candidate, "type": ""}
+    if search_down is not None:
+        guess["search_down"] = search_down
+    return guess
 
 
 # What an analysis can run on. Options, currencies and the like are left out
@@ -690,8 +702,11 @@ def split_words(factor: float) -> str:
     return "%d-for-%d" % (ratio.numerator, ratio.denominator)
 
 
-# How often a symbol's whole split history is asked for.
+# How long a symbol's whole split history is kept, and for how many symbols.
 SPLIT_HISTORY_TTL = 12 * 3600
+SPLIT_HISTORY_KEPT = 2000
+_SPLIT_HISTORY: Dict[str, Tuple[float, List[Tuple[int, float]]]] = {}
+_SPLIT_HISTORY_LOCK = threading.Lock()
 
 
 def split_history(symbol: str) -> List[Tuple[int, float]]:
@@ -701,42 +716,63 @@ def split_history(symbol: str) -> List[Tuple[int, float]]:
     stored before an older one (a year-old position read with a year of
     bars, a 15-minute trade read with sixty days) could not be set beside
     today's quote. This asks for the whole history at a coarse bar size, a
-    small answer, and keeps it for twelve hours.
+    small answer, and keeps it for twelve hours in a store of its own: kept
+    in the shared one, a twelve-hour entry held every forty-five-second chart
+    there for as long, and was the first pushed out when it filled.
+
+    Only splits older than the bars a caller holds are read from here
+    (splits_since), so a copy kept from before today's split never hides it.
     """
-    def fetch():
-        payload = _fetch(_CHART.format(sym=symbol),
-                         {"range": "max", "interval": "3mo", "events": "split"})
-        results = (payload.get("chart") or {}).get("result") or []
-        return _splits(results[0]) if results else []
+    now = time.time()
+    with _SPLIT_HISTORY_LOCK:
+        kept = _SPLIT_HISTORY.get(symbol)
+        if kept is not None and now - kept[0] < SPLIT_HISTORY_TTL:
+            return list(kept[1])
     try:
-        return upstream.cached("splits|" + symbol, fetch, ttl=SPLIT_HISTORY_TTL,
-                               host=_HOST)
+        upstream.check(_HOST)
     except upstream.Throttled as exc:
         raise DataThrottled(str(exc), exc.seconds)
+    payload = _fetch(_CHART.format(sym=symbol),
+                     {"range": "max", "interval": "3mo", "events": "split"})
+    results = (payload.get("chart") or {}).get("result") or []
+    found = _splits(results[0]) if results else []
+    with _SPLIT_HISTORY_LOCK:
+        if symbol not in _SPLIT_HISTORY and len(_SPLIT_HISTORY) >= SPLIT_HISTORY_KEPT:
+            del _SPLIT_HISTORY[min(_SPLIT_HISTORY, key=lambda k: _SPLIT_HISTORY[k][0])]
+        _SPLIT_HISTORY[symbol] = (now, found)
+    return list(found)
 
 
 def splits_since(symbol: str, since: int, bars=None) -> List[Tuple[int, float]]:
     """The splits after `since`, oldest first, as (when, ratio).
 
-    From the bars when they reach back that far, since the splits inside
-    their range are then all of them; otherwise from the whole history. A
-    coin has none to look up. If the history cannot be had, the bars' own
-    are the best there is.
+    The splits inside the bars' own range come from the bars, which are
+    fresh. Those before it, when the bars do not reach back to `since`, come
+    from the whole history; a coin has none to look up. When that history is
+    needed and the source does not answer, this raises DataThrottled or
+    DataUnavailable: a split cannot be ruled out, and a caller that acts on
+    the answer (a stop notice, an alert, a logged trade) waits rather than
+    act on prices that may be ten times off. A history the source has no
+    answer for at all leaves the bars' own.
     """
     since = int(since)
-    have = list(getattr(bars, "splits", None) or ())
+    have = [(int(when), float(ratio)) for when, ratio in getattr(bars, "splits", None) or ()]
     stamps = getattr(bars, "timestamp", None)
     # Bars that carry no times (stand-ins) cannot say how far back they
     # reach, so theirs are all there is; with no bars, the history is asked.
     timed = stamps is not None and len(stamps) > 0
-    reaches = (bars is not None and not timed) or (timed and int(stamps[0]) <= since)
+    first = int(stamps[0]) if timed else None
+    reaches = (bars is not None and not timed) or (timed and first <= since)
     if not reaches and not (symbol or "").upper().endswith("-USD"):
         try:
-            have = split_history(symbol)
+            history = split_history(symbol)
+        except (DataThrottled, DataUnavailable):
+            raise
         except DataError:
-            pass
-    return [(int(when), float(ratio)) for when, ratio in have
-            if int(when) > since and ratio and float(ratio) > 0]
+            history = []
+        have = [(int(w), float(r)) for w, r in history
+                if first is None or int(w) < first] + have
+    return sorted((when, ratio) for when, ratio in have if when > since and ratio > 0)
 
 
 def split_factor_since(symbol: str, since: int, bars=None) -> float:

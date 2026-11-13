@@ -851,8 +851,9 @@ def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
     held = conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=?",
                         (int(user),)).fetchone()[0]
     if cap is not None and held >= cap:
-        raise ValueError("You have %d alerts, the most one account can keep. "
-                         "Delete some you no longer need first." % held)
+        raise ValueError("An account not on Pro can keep %d alerts, and this one "
+                         "has %d. Delete %d you no longer need first."
+                         % (cap, held, held - cap + 1))
     if not KINDS[kind]["needs_threshold"]:
         threshold = None
     if kind in DAILY_ONLY:

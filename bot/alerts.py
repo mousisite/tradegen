@@ -480,7 +480,14 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             db.alert_failed(conn, int(row["id"]), "No price: %s" % failed.get(
                 key, "the data source did not answer"))
             continue
-        row = _after_splits(conn, row, bars)
+        try:
+            row = _after_splits(conn, row, bars)
+        except DataError:
+            # A split cannot be ruled out just now, and a level read in the
+            # wrong shares fires falsely: this alert waits for the next round.
+            db.alert_failed(conn, int(row["id"]),
+                            "the share split history could not be read just now.")
+            continue
         is_call = row["kind"] in CALL_KINDS
         call = calls.get(key) if is_call else None
         if is_call and call is None:
@@ -580,25 +587,39 @@ def check_stops(conn, user=None) -> Dict:
     if not rows:
         return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
 
+    def bar_size(row) -> str:
+        # The trade's own bars, as the journal reads it, so a stop touched
+        # and recovered inside an intraday trade's day is seen here too.
+        interval = row["interval"] or "1d"
+        return interval if interval in LOOKBACK else "1d"
+
     data, errors = {}, []
-    for symbol in sorted({r["symbol"] for r in rows}):
+    for key in sorted({(r["symbol"], bar_size(r)) for r in rows}):
         try:
-            # The same history as a daily alert's, so a symbol with both an
-            # alert and a position is one request, not two.
-            data[symbol] = fetch_bars(symbol, "1d", lookback=LOOKBACK["1d"])
+            # The same history as an alert's on that bar size, so a symbol
+            # with both an alert and a position is one request, not two.
+            data[key] = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
         except Exception as exc:
-            errors.append({"symbol": symbol, "error": str(exc)[:120]})
+            errors.append({"symbol": key[0], "error": str(exc)[:120]})
 
     fired: List[Fired] = []
     for row in rows:
-        bars = data.get(row["symbol"])
+        bars = data.get((row["symbol"], bar_size(row)))
         if bars is None:
             continue
         # The stop is in the shares of the day it opened; after a split the
         # quote is in today's, and read as is a long looked far past its stop.
         # Over the trade's whole life: a year of bars can miss an older split.
         opened = int(row["ts_opened"])
-        split = split_factor_since(row["symbol"], opened, bars)
+        try:
+            split = split_factor_since(row["symbol"], opened, bars)
+        except DataError as exc:
+            # A split cannot be ruled out just now. Told now, a position
+            # opened before one reads ten times past its stop, and the real
+            # crossing would then never be told: it waits for the next round.
+            errors.append({"symbol": row["symbol"],
+                           "error": "split history: %s" % str(exc)[:100]})
+            continue
         quote = float(bars.last_price)
         price, stop, side = quote * split, float(row["stop"]), int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:

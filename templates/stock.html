@@ -93,7 +93,7 @@
       <b>{{ o.action }}</b> at {{ '$' if not snap or snap.currency == 'USD' }}{{ o.price|price }},
       written down at {{ o.written }}.
       {% if history.coin %}A coin's call is the first check after midnight
-      (UTC), at the price then.{% else %}It is the first check after the
+      (UTC) once the day before is filled in, at the price then.{% else %}It is the first check after the
       market closed, at the closing price. This page is checked through the
       day and can say something else later; only the call after the close is
       scored.{% endif %}</p>

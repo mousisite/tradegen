@@ -20,7 +20,7 @@ from .calibrate import Calibration, calibrate
 from .decision import Plan, blend_conviction, decide
 from .learning import StrategyReport, learned_weights, measure_strategies
 from .levels import Level, build_levels
-from .market import Bars, DataError, fetch_bars, resolve
+from .market import Bars, DataError, SymbolNotFound, fetch_bars, resolve
 from .sentiment import Sentiment, analyse as analyse_sentiment
 from .strategies import Context, Regime, Signal, build_context, evaluate
 
@@ -99,6 +99,7 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
 
     interval = interval or cfg["interval"]
 
+    info: Dict = {}
     if resolve_symbol:
         step("Resolving %s" % symbol)
         info = resolve(symbol)
@@ -110,7 +111,15 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         resolved = name = (symbol or "").strip().upper()
 
     step("Fetching market data")
-    bars = fetch_bars(resolved, interval)
+    try:
+        bars = fetch_bars(resolved, interval)
+    except SymbolNotFound:
+        # With the search down, a company name was guessed as a ticker. That
+        # it is not one says nothing about what was typed: the source did
+        # not answer, and the page says so instead of "check the ticker".
+        if info.get("search_down") is not None:
+            raise info["search_down"]
+        raise
 
     step("Computing indicators")
     ctx = build_context(bars)

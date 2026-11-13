@@ -120,6 +120,9 @@ def sign_in(user):
 
 
 alice, bob = person("alice@example.com"), person("bob@example.com")
+# Put back when the suite ends: the split checks stand a history in for it,
+# and a position they leave open must never send the suite to the network.
+REAL_HISTORY = web.market_mod.split_history
 
 try:
     print("=" * 72)
@@ -202,7 +205,6 @@ try:
     split_at = LAST - 3 * DAY
     # The symbol's whole split history, as the source would list it. Stand-in
     # bars that do not reach back to a level's day send the look-up there.
-    real_history = web.market_mod.split_history
     web.market_mod.split_history = (lambda symbol: [(split_at, 10.0)]
                                     if symbol in ("SPL", "SP2") else [])
 
@@ -277,8 +279,9 @@ try:
     check("resuming an alert clears what was kept from before the pause",
           conn.execute("SELECT last_error FROM alerts WHERE id=?", (edited,)).fetchone()[0] is None)
 
-    # A 15-minute alert reads days of bars, not the week since the split.
-    SERIES["SP2"] = lambda interval="15m": daily([100.0] * 5, live=101.0, interval=interval)
+    # A 15-minute alert reads days of bars, which start after the split: it
+    # comes from the symbol's whole history.
+    SERIES["SP2"] = lambda interval="15m": daily([100.0] * 2, live=101.0, interval=interval)
     short = db.alert_add(conn, "SP2", "price_below", threshold=900.0, interval="15m",
                          user=alice.id)
     conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (before, short))
@@ -287,7 +290,45 @@ try:
     check("an alert whose bars do not reach the split still has it applied",
           short not in fired_ids(out) and abs(conn.execute(
               "SELECT threshold FROM alerts WHERE id=?", (short,)).fetchone()[0] - 90.0) < 1e-9)
-    web.market_mod.split_history = real_history
+
+    # A history kept from before today's split must not hide the split the
+    # bars themselves list.
+    web.market_mod.split_history = lambda symbol: []
+    fresh = daily([100.0] * 30, live=101.0)
+    fresh.splits = [(split_at, 10.0)]
+    check("a split in the bars counts even when a kept history predates it",
+          web.market_mod.split_factor_since("SPL", before, fresh) == 10.0)
+
+    # With no history to hand, nothing that acts on prices from before the
+    # bars goes ahead: it waits for the next round.
+    def no_answer(symbol):
+        raise web.market_mod.DataUnavailable("the source did not answer")
+
+    web.market_mod.split_history = no_answer
+    SERIES["OUT"] = lambda interval="1d": daily([100.0] * 30, live=101.0, interval=interval)
+    waits = db.open_trade(conn, "OUT", "1d", 1, entry=1000.0, stop=950.0, target1=1200.0,
+                          quantity=1, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (before, waits))
+    conn.commit()
+    res = alerts.check_stops(conn)
+    check("with no split history to hand, a position from before its bars is not told",
+          not any(f.trade_id == waits for f in res["fired"])
+          and conn.execute("SELECT breach_noticed FROM trades WHERE id=?",
+                           (waits,)).fetchone()[0] is None)
+    held_back = db.alert_add(conn, "OUT", "price_below", threshold=900.0, user=alice.id)
+    conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (before, held_back))
+    conn.commit()
+    res = alerts.check(conn, call_of=call_of)
+    kept = conn.execute("SELECT active, last_error FROM alerts WHERE id=?",
+                        (held_back,)).fetchone()
+    check("and a price alert from before them waits, saying why",
+          held_back not in fired_ids(res) and kept["active"] == 1
+          and "split history" in (kept["last_error"] or ""), dict(kept))
+    db.alert_delete(conn, held_back, user=alice.id)
+    conn.execute("UPDATE trades SET breach_noticed=1 WHERE id=?", (waits,))
+    conn.commit()
+    web.market_mod.split_history = (lambda symbol: [(split_at, 10.0)]
+                                    if symbol in ("SPL", "SP2") else [])
 
     # A stop that traded and came back: the journal counts it as hit, so the
     # owner is told, once.
@@ -693,7 +734,7 @@ try:
             db.alert_add(conn, "AAPL", "price_above", threshold=2.0, user=carol.id)
             stopped = False
         except ValueError as exc:
-            stopped = "the most one account can keep" in str(exc)
+            stopped = "An account not on Pro can keep" in str(exc)
         check("an account not on Pro keeps alerts up to the ceiling, and not past it",
               stopped)
         check("Pro, as everyone is while billing is off, has no ceiling",
@@ -946,6 +987,7 @@ try:
     check("the form says how a percent is typed", "5 means 5%" in page)
     check("a desktop notice can be asked for", 'id="notifyask"' in page)
 finally:
+    web.market_mod.split_history = REAL_HISTORY
     for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
         _os.environ.pop(key, None)
 

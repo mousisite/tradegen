@@ -124,7 +124,7 @@ def must_not_run(what):
 
 
 QUOTED_AT = 1762956300                      # 12 Nov 2025 14:05 UTC
-PRICES = {"ZZA": 90.0, "ZZB": 106.0, "ZZC": 101.0}
+PRICES = {"ZZA": 90.0, "ZZB": 106.0, "ZZC": 101.0, "ZZSTALE": 100.0}
 
 
 def fake_bars(symbol, interval="1d", lookback=None):
@@ -388,8 +388,16 @@ try:
     # A plan made before a split and confirmed after it: its prices are in
     # the shares of its day, so they are divided by the split, shown so and
     # logged so. Logged as made, the journal read them as a 90% fall.
-    market_mod.split_history = (lambda symbol: [(NOW - 86400, 10.0)]
-                                if symbol == "ZZSPLIT" else [])
+    def split_fake(symbol, interval="1d", lookback=None):
+        if symbol != "ZZSPLIT":
+            return fake_bars(symbol, interval, lookback)
+        return NS(symbol=symbol, interval=interval, last_price=101.0,
+                  timestamp=[NOW - (10 - k) * 86400 for k in range(10)],
+                  low=[], high=[], close=[101.0], splits=[(NOW - 86400, 10.0)],
+                  meta={"regularMarketTime": QUOTED_AT}, market_open=True,
+                  last_bar_time="")
+
+    market_mod.fetch_bars = split_fake
     before_split = add_run(alice, "ZZSPLIT", "BUY", entry=1000.0, stop=950.0, target=1100.0,
                            ts=NOW - 3 * 86400)
     body = text(c.get("/trades/simulate?run_id=%d" % before_split))
@@ -403,7 +411,7 @@ try:
           len(got) == 1 and abs(got[0]["entry"] - 100.0) < 1e-9
           and abs(got[0]["stop"] - 95.0) < 1e-9 and abs(got[0]["target1"] - 110.0) < 1e-9,
           [dict(x) for x in got])
-    market_mod.split_history = lambda symbol: []
+    market_mod.fetch_bars = fake_bars
     check("an unknown run is not found", c.get("/trades/simulate?run_id=999999").status_code == 404)
     check("nor is a run that is not a number", c.get("/trades/simulate?run_id=x").status_code == 404)
     sign_in(c, bob)

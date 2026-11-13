@@ -28,7 +28,13 @@
           {% set t, m = p.trade, p.mark %}
           <li><b>{{ t['symbol'] }}</b> {{ 'long' if t['direction'] > 0 else 'short' }}:
             {% if m.status == 'past stop' %}
-              at {{ m.price|price }}, past its stop of {{ t['stop']|price }}.
+              {% set beyond = (m.price <= t['stop']) if t['direction'] > 0 else (m.price >= t['stop']) %}
+              {% if m.touched_at and not beyond %}
+                traded through its stop of {{ t['stop']|price }} at {{ m.touched|price }}
+                on {{ m.touched_at|day }}, and is at {{ m.price|price }} now.
+              {% else %}
+                at {{ m.price|price }}, past its stop of {{ t['stop']|price }}.
+              {% endif %}
               The journal does not close it for you.
             {% else %}
               at {{ m.price|price }}, at or past its target of {{ t['target1']|price }}.

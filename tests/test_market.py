@@ -514,6 +514,112 @@ check("a second start finds nothing to move, and leaves a resumed alert on",
       conn.execute("SELECT active FROM alerts WHERE id=1").fetchone()[0] == 1)
 conn.close()
 
+# ---------------------------------------------------------------------------
+head("SPLITS FROM THE BARS, AND FROM THE WHOLE HISTORY BEFORE THEM")
+# ---------------------------------------------------------------------------
+DAYS = 86400
+t_now = int(time.time())
+recent = types.SimpleNamespace(timestamp=np.array([t_now - (9 - k) * DAYS for k in range(10)]),
+                               splits=[(t_now - 2 * DAYS, 10.0)])
+real_hist = market.split_history
+try:
+    market.split_history = lambda s: []                  # a copy kept from before the split
+    check("a split inside the bars counts, whatever a kept history says",
+          market.splits_since("XYZ", t_now - 30 * DAYS, recent) == [(t_now - 2 * DAYS, 10.0)])
+    market.split_history = lambda s: [(t_now - 20 * DAYS, 2.0), (t_now - 2 * DAYS - 60, 10.0)]
+    check("an older split comes from the history, and none is counted twice",
+          market.split_factor_since("XYZ", t_now - 30 * DAYS, recent) == 20.0)
+
+    def down(s):
+        raise market.DataUnavailable("the source did not answer")
+
+    market.split_history = down
+    try:
+        market.splits_since("XYZ", t_now - 30 * DAYS, recent)
+        said = False
+    except market.DataUnavailable:
+        said = True
+    check("a history needed and not to be had is said, not taken for no split", said)
+    check("bars that reach back need no history",
+          market.splits_since("XYZ", t_now - 5 * DAYS, recent) == [(t_now - 2 * DAYS, 10.0)])
+
+    def gone(s):
+        raise market.SymbolNotFound("nothing under that symbol")
+
+    market.split_history = gone
+    check("a symbol the source has no history for keeps the bars' own",
+          market.splits_since("XYZ", t_now - 30 * DAYS, recent) == [(t_now - 2 * DAYS, 10.0)])
+    market.split_history = down
+    check("and a coin asks for none", market.splits_since("BTC-USD", 0, None) == [])
+finally:
+    market.split_history = real_hist
+
+asked_for = []
+
+
+def chart_with_split(url, params, tries=2):
+    asked_for.append(dict(params))
+    return {"chart": {"result": [{"events": {"splits": {
+        "1": {"date": 1000, "numerator": 4, "denominator": 1}}}}]}}
+
+
+real_fetch = market._fetch
+market._fetch = chart_with_split
+market._SPLIT_HISTORY.clear()
+upstream.reset()
+longest = upstream._max_ttl
+try:
+    one, two = market.split_history("ABC"), market.split_history("ABC")
+    check("a symbol's split history is asked for once, then kept",
+          one == two == [(1000, 4.0)] and len(asked_for) == 1, (one, asked_for))
+    check("in a store of its own, so the shared one's charts still go after 45 seconds",
+          upstream._max_ttl == longest, upstream._max_ttl)
+finally:
+    market._fetch = real_fetch
+    market._SPLIT_HISTORY.clear()
+
+# A company name typed while the search is down is guessed as a ticker. That
+# the guess is not one says the source did not answer, not "check the ticker".
+from bot import config as config_mod  # noqa: E402
+from bot import engine  # noqa: E402
+
+
+def search_down(url, params, tries=2):
+    if url == market._SEARCH:
+        raise market.DataUnavailable("The market data source could not be used: it "
+                                     "took too long to answer.")
+    raise AssertionError("only the search is asked here")
+
+
+real_get = market._get
+market._get = search_down
+try:
+    guess = market.resolve("tesla")
+finally:
+    market._get = real_get
+check("a search that did not answer is kept with the guess",
+      guess["symbol"] == "TESLA" and isinstance(guess.get("search_down"), market.DataUnavailable),
+      guess)
+real_engine = (engine.resolve, engine.fetch_bars)
+
+
+def not_a_ticker(symbol, interval):
+    raise market.SymbolNotFound("no instrument found for %r" % symbol)
+
+
+engine.resolve = lambda s: dict(guess)
+engine.fetch_bars = not_a_ticker
+try:
+    engine.analyse("tesla", config_mod.load(None), interval="1d", with_news=False,
+                   record=False)
+    outcome = None
+except Exception as exc:                  # noqa: BLE001 - the kind is the check
+    outcome = exc
+finally:
+    engine.resolve, engine.fetch_bars = real_engine
+check("and the analysis says the source did not answer",
+      isinstance(outcome, market.DataUnavailable), repr(outcome))
+
 shown = [(public.short(s), s) for s, _ in public.POPULAR if s.endswith("-USD")]
 check("every coin on the public pages opens by the ticker those pages show it as",
       shown and all(market.normalise_symbol(label) == s for label, s in shown),

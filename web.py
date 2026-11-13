@@ -1211,8 +1211,8 @@ def _mark_one(trade):
     target = trade["target1"]
     status = "open"
     # A stop that traded and recovered was still hit: the plan said get out.
-    touched_at, _touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
-                                                      stop / split, direction)
+    touched_at, touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
+                                                     stop / split, direction)
     if ((price <= stop) if direction > 0 else (price >= stop)) or touched_at:
         status = "past stop"
     elif target and ((price >= float(target)) if direction > 0
@@ -1220,7 +1220,10 @@ def _mark_one(trade):
         status = "past target"
     return {"price": price, "r": r_now, "status": status,
             "as_of": alerts_mod.as_of(bars), "quoted": bars.last_price,
-            "split_words": split_words(split) if split != 1.0 else ""}
+            "split_words": split_words(split) if split != 1.0 else "",
+            # Where and when the stop was traded through, in the same shares.
+            "touched": touched * split if touched_at else None,
+            "touched_at": touched_at}
 
 
 def _mark_to_market(open_trades):
@@ -1277,12 +1280,19 @@ def _run_split(row) -> float:
     in the hour before that open and confirmed after it is the only miss.
     """
     made = int(row["ts"] or 0)
-    if not made or time.time() - made < 3600:
+    if (not made or time.time() - made < 3600 or row["asset_class"] == "crypto"
+            or (row["symbol"] or "").upper().endswith("-USD")):
         return 1.0
     try:
-        return market_mod.split_factor_since(row["symbol"], made)
-    except Exception:
-        return 1.0
+        # Fresh daily bars hold any split in the last three months, the
+        # whole history any older one; a copy of it kept from before today
+        # cannot hide today's split.
+        bars = market_mod.fetch_bars(row["symbol"], "1d", lookback="3mo")
+        return market_mod.split_factor_since(row["symbol"], made, bars)
+    except DataError:
+        raise _NoTrade("Could not check %s for a share split since this plan "
+                       "was made, so its prices cannot yet be set beside "
+                       "today's. Try again in a minute." % row["symbol"])
 
 
 def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
@@ -1358,9 +1368,9 @@ def _logged_from(conn, run_id: int):
 def simulate_trade():
     """Show the paper trade a plan would open, before anything is written.
 
-    Read from the stored run and the person's settings only: no price is
-    fetched and nothing is analysed, so it opens at once, and Confirm logs
-    exactly what it shows.
+    Read from the stored run and the person's settings: nothing is analysed,
+    so it opens at once, and Confirm logs exactly what it shows. Only a plan
+    over an hour old fetches daily prices, to check for a share split since.
     """
     try:
         run_id = int(request.args.get("run_id") or "")
@@ -1376,6 +1386,8 @@ def simulate_trade():
         conn.close()
     cfg = _cfg()
     try:
+        # A trade at all first, so a WAIT says why before any split look-up.
+        _paper_size(row, cfg)
         size = _paper_size(row, cfg, _run_split(row))
     except _NoTrade as exc:
         return render_template("error.html", symbol="", message=str(exc)), 400
@@ -1401,7 +1413,8 @@ def take_trade():
         row = _own_run(conn, run_id)
         # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
-        size = _paper_size(row, _cfg(), _run_split(row) if row is not None else 1.0)
+        _paper_size(row, _cfg())                  # a trade at all, before any look-up
+        size = _paper_size(row, _cfg(), _run_split(row))
         if _logged_from(conn, run_id) is not None:
             # Confirm pressed twice: the first press already logged it.
             return redirect(url_for("trades", logged=1))
@@ -1690,9 +1703,11 @@ def research():
 
     reviews = []
     for row in saved:
+        now_price = _thesis_price(row, analysis.bars)[0]
         reviews.append((row, thesis_mod.review(
             {"price": row["price"], "balance": row["balance"],
-             "created": row["created_ts"]}, _thesis_price(row, analysis.bars)[0])))
+             "created": row["created_ts"]}, now_price) if now_price else
+            {"usable": False, "reason": "Could not price %s today." % row["symbol"]}))
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
@@ -1719,7 +1734,9 @@ def _thesis_price(row, bars):
         split = market_mod.split_factor_since(row["symbol"],
                                               int(row["created_ts"] or 0), bars)
     except Exception:
-        split = 1.0
+        # A split cannot be ruled out just now: no price, rather than one
+        # that may be ten times off.
+        return None, 1.0
     return float(bars.last_price) * split, split
 
 
@@ -1811,6 +1828,12 @@ def close_thesis():
                               % (row["symbol"], exc))
         # In the shares it was saved in, like the price it is set against.
         price = _thesis_price(row, bars)[0]
+        if price is None:
+            return render_template(
+                "error.html", symbol=row["symbol"],
+                message="Could not check %s for a share split just now, so it "
+                        "cannot be priced to close the thesis. Try again in a "
+                        "minute." % row["symbol"]), 503
 
         db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
     except (KeyError, ValueError) as exc:
