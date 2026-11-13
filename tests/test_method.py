@@ -349,8 +349,11 @@ head("OVERLAPPING TRADES ARE NOT SEPARATE TESTS")
 # their bars. Counted as independent, the range held the true rate about nine
 # times in ten instead of 19 in 20.
 
-runs = [Outcome(0.3, (k // 4) % 2 == 0, 1.0, 8, 3 * k, 0.0, 1) for k in range(40)]
-apart = [Outcome(0.3, (k // 4) % 2 == 0, 1.0, 8, 30 * k, 0.0, 1) for k in range(40)]
+# Wins and losses in runs of eight: every trade a window overlaps settled the
+# same way as most of its neighbours, which is what shared bars do. (Runs of
+# four alternate within one window, so their overlaps cancel out.)
+runs = [Outcome(0.3, (k // 8) % 2 == 0, 1.0, 8, 3 * k, 0.0, 1) for k in range(40)]
+apart = [Outcome(0.3, (k // 8) % 2 == 0, 1.0, 8, 30 * k, 0.0, 1) for k in range(40)]
 check("trades that overlap and win or lose together widen the range",
       cal.design_effect(runs, 10) > 1.5, cal.design_effect(runs, 10))
 check("trades that never overlap count in full",

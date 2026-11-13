@@ -254,10 +254,13 @@ def design_effect(outcomes: List[Outcome], horizon: int) -> float:
     no edge it held the true rate about nine times in ten, not 19 in 20.
 
     Every pair of trades whose windows overlap adds how much their results
-    moved together, weighted by the share of the window they have in common
-    (the Bartlett weights of a Newey-West estimate). The sample size divided by
-    this is the number of independent trades the evidence is worth. Never
-    below 1: overlap cannot make a sample worth more than its count.
+    moved together, in full (the Hansen-Hodrick rule for windows of a known
+    length, as learning.StrategyStat uses). Weighting each pair by the share
+    of the window it has in common, the Bartlett rule, was tried first: on
+    random walks it left the range about a sixth too narrow, holding the true
+    rate nine times in ten. The sample size divided by this is the number of
+    independent trades the evidence is worth. Never below 1: overlap cannot
+    make a sample worth more than its count.
     """
     n = len(outcomes)
     if n < 2 or horizon < 2:
@@ -275,7 +278,7 @@ def design_effect(outcomes: List[Outcome], horizon: int) -> float:
             gap = at[b] - at[a]
             if gap >= horizon:
                 break
-            shared += (1.0 - gap / float(horizon)) * d[a] * d[b]
+            shared += d[a] * d[b]
     return max(1.0, 1.0 + 2.0 * shared / spread)
 
 
