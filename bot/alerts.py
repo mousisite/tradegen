@@ -8,13 +8,18 @@ emails what fired, through whatever sender it is handed.
 Each alert states its condition in plain terms and, when it fires, records the
 value that triggered it. An alert that says only "AAPL alert triggered" is
 useless an hour later.
+
+An alert fires when its condition becomes true, not every time it is checked
+while it stays true: the last answer is kept on the alert (its state), so one
+that keeps watching speaks again only after the condition has cleared.
 """
 from __future__ import annotations
 
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -53,6 +58,61 @@ KINDS: Dict[str, Dict] = {
 }
 
 CALL_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("call"))
+
+# Tested on daily bars whatever bar size the alert was set on. A 52-week high
+# is a year of trading, and 252 five-minute bars are three days.
+DAILY_ONLY = ("near_52w_high", "near_52w_low")
+
+
+def problem(kind: str, threshold: Optional[float]) -> Optional[str]:
+    """Why a value cannot work for this kind of alert, or None if it can.
+
+    Percents are fractions here: 0.05 is 5%. Checked when an alert is saved,
+    and before one is tested, so an alert saved before these rules says what
+    is wrong with it instead of firing on a value that means nothing.
+    """
+    spec = KINDS.get(kind)
+    if spec is None:
+        return "Unknown alert type %r." % kind
+    if not spec["needs_threshold"]:
+        return None
+    if threshold is None:
+        return "%s needs a value to compare against." % spec["label"]
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError):
+        return "The alert value must be a number."
+    if not math.isfinite(value):
+        return "The alert value must be an ordinary number."
+    unit = spec["unit"]
+    if unit == "price" and value <= 0:
+        return "A price alert needs a positive price."
+    if unit == "percent" and not 0 < value < 1:
+        return "A percent needs to be more than 0 and less than 100."
+    if unit == "level" and not 0 < value < 100:
+        return "RSI runs from 0 to 100, so the level needs to be between them."
+    if unit == "multiple" and value <= 1:
+        return "A volume multiple needs to be more than 1, which is normal volume."
+    return None
+
+
+def _fraction(threshold) -> float:
+    """A stored percent as a fraction.
+
+    Alerts store 0.05 for 5%. A few saved before that rule hold the whole
+    number, and anything from 1 up has always been read that way.
+    """
+    value = float(threshold or 0)
+    return value if value < 1 else value / 100.0
+
+
+def _bars_for(row) -> str:
+    """The bar size an alert is tested on."""
+    return "1d" if row["kind"] in DAILY_ONLY else (row["interval"] or "1d")
+
+
+def _state(row) -> Optional[str]:
+    return row["state"] if "state" in row.keys() else None
 
 
 @dataclass
@@ -111,6 +171,52 @@ def as_of(bars) -> str:
     return stamp
 
 
+def _day(ts: int) -> str:
+    return time.strftime("%d %b", time.gmtime(ts)).lstrip("0")
+
+
+def _bar(bars, at_close: bool = False) -> str:
+    """The last completed bar in words, so a reading says which bar it is.
+
+    RSI, volume and the moving average are read from completed bars only. On
+    a daily chart that can be yesterday's session, so a message in the
+    present tense with no date would describe the wrong day.
+    """
+    try:
+        start = int(bars.timestamp[-1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return ""
+    if (getattr(bars, "interval", "") or "1d") == "1d":
+        # A daily bar is a trading day, named in the exchange's own calendar.
+        day = _day(start + int(getattr(bars, "gmt_offset", 0) or 0))
+        return ("at the %s close" if at_close else "on %s") % day
+    when = "%s UTC bar on %s" % (time.strftime("%H:%M", time.gmtime(start)), _day(start))
+    return ("at the close of the " if at_close else "in the ") + when
+
+
+def _year_range(bars):
+    """The highest high and lowest low of the last year of daily bars.
+
+    A year of dates, not 252 bars: crypto trades every day of the week. Also
+    returns the date the window starts, which is later than a year ago when
+    the data does not go back that far.
+    """
+    close = np.asarray(bars.close, dtype=float)
+    highs = np.asarray(getattr(bars, "high", close), dtype=float)
+    lows = np.asarray(getattr(bars, "low", close), dtype=float)
+    stamps = getattr(bars, "timestamp", None)
+    if stamps is not None and len(stamps) == len(close):
+        stamps = np.asarray(stamps, dtype=float)
+        keep = stamps >= stamps[-1] - 365 * 86400
+        start = int(stamps[keep][0])
+        whole_year = start <= stamps[-1] - 350 * 86400 or not keep.all()
+    else:
+        keep = np.arange(len(close)) >= len(close) - 252
+        start, whole_year = None, len(close) >= 252
+    return (float(np.nanmax(highs[keep])), float(np.nanmin(lows[keep])),
+            whole_year, start)
+
+
 def _owner(row) -> Optional[int]:
     try:
         return int(row["user_id"])
@@ -134,7 +240,7 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
                      row["note"] or "", _owner(row), as_of(bars))
 
     if kind in CALL_KINDS:
-        was = row["state"] if "state" in row.keys() else None
+        was = _state(row)
         # The first look only learns the call. A change needs a before.
         if not call or not was or call == was:
             return None
@@ -158,7 +264,7 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
         if not base:
             return None
         move = (price - base) / base
-        pct = threshold if threshold and threshold < 1 else (threshold or 0) / 100.0
+        pct = _fraction(threshold)
         if kind == "pct_up" and move >= pct:
             return fire(move, "%s is up %.2f%% since the previous close."
                         % (symbol, move * 100))
@@ -172,43 +278,65 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
         if not len(rsi) or not np.isfinite(rsi[-1]):
             return None
         value = float(rsi[-1])
+        when = _bar(bars, at_close=True)
+        when = " " + when if when else ""
         if kind == "rsi_above" and value > threshold:
-            return fire(value, "%s RSI is %.0f, above %.0f." % (symbol, value, threshold))
+            return fire(value, "%s RSI is %.0f%s, above %.0f."
+                        % (symbol, value, when, threshold))
         if kind == "rsi_below" and value < threshold:
-            return fire(value, "%s RSI is %.0f, below %.0f." % (symbol, value, threshold))
+            return fire(value, "%s RSI is %.0f%s, below %.0f."
+                        % (symbol, value, when, threshold))
         return None
 
     if kind in ("near_52w_high", "near_52w_low"):
-        if len(close) < 30:
+        # check() hands these daily bars whatever the alert's own bar size.
+        if len(close) < 20:
             return None
-        window = close[-252:] if len(close) >= 252 else close
-        pct = threshold if threshold and threshold < 1 else (threshold or 0) / 100.0
-        if kind == "near_52w_high":
-            high = float(np.max(window))
-            gap = (high - price) / high if high else 1.0
-            if gap <= pct:
-                return fire(gap, "%s at %s is within %.1f%% of its %s high of %s."
-                            % (symbol, format_price(price), gap * 100,
-                               "52-week" if len(close) >= 252 else "recent",
-                               format_price(high)))
+        high, low, whole_year, start = _year_range(bars)
+        pct = _fraction(threshold)
+        extreme = high if kind == "near_52w_high" else low
+        if not extreme:
+            return None
+        if whole_year:
+            where = "its 52-week %s of %s" % ("high" if kind == "near_52w_high" else "low",
+                                             format_price(extreme))
         else:
-            low = float(np.min(window))
-            gap = (price - low) / low if low else 1.0
-            if gap <= pct:
-                return fire(gap, "%s at %s is within %.1f%% of its %s low of %s."
-                            % (symbol, format_price(price), gap * 100,
-                               "52-week" if len(close) >= 252 else "recent",
-                               format_price(low)))
+            where = "%s, its %s since %s (the data goes back no further)" % (
+                format_price(extreme), "high" if kind == "near_52w_high" else "low",
+                time.strftime("%d %b %Y", time.gmtime(start)).lstrip("0")
+                if start else "the data starts")
+        if kind == "near_52w_high":
+            if price > high:
+                return fire((high - price) / high, "%s at %s is above %s: a new high."
+                            % (symbol, format_price(price), where))
+            gap = (high - price) / high
+        else:
+            if price < low:
+                return fire((price - low) / low, "%s at %s is below %s: a new low."
+                            % (symbol, format_price(price), where))
+            gap = (price - low) / low
+        if gap <= pct:
+            return fire(gap, "%s at %s is within %.1f%% of %s."
+                        % (symbol, format_price(price), gap * 100, where))
         return None
 
     if kind == "volume_spike":
-        rvol = ind.relative_volume(np.asarray(bars.volume, dtype=float), 20)
-        if not len(rvol) or not np.isfinite(rvol[-1]):
+        volume = np.asarray(bars.volume, dtype=float)
+        if len(volume) < 21 or not np.isfinite(volume[-1]):
             return None
-        value = float(rvol[-1])
+        # The last completed bar against the 20 before it. An average that
+        # includes the bar itself needs a bigger spike to say the same thing.
+        normal = float(np.nanmean(volume[-21:-1]))
+        if not np.isfinite(normal) or normal <= 0:
+            return None
+        value = float(volume[-1]) / normal
         if value >= threshold:
-            return fire(value, "%s is trading %.1f times its normal volume."
-                        % (symbol, value))
+            when = _bar(bars)
+            daily = (getattr(bars, "interval", "") or "1d") == "1d"
+            return fire(value, "%s traded %.1f times its normal volume%s, against "
+                               "the average of the 20 %s before."
+                        % (symbol, value, " " + when if when else "",
+                           "sessions" if daily else "bars"))
         return None
 
     if kind in ("crosses_ma", "loses_ma"):
@@ -219,20 +347,55 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
         # it requires the previous bar to have been on the other side.
         was_above = close[-2] > ma[-2]
         now_above = close[-1] > ma[-1]
+        when = _bar(bars)
+        when = " " + when if when else ""
         if kind == "crosses_ma" and now_above and not was_above:
             return fire(float(close[-1]),
-                        "%s closed at %s, back above its 50-bar average of %s."
-                        % (symbol, format_price(close[-1]), format_price(ma[-1])))
+                        "%s closed at %s%s, back above its 50-bar average of %s."
+                        % (symbol, format_price(close[-1]), when, format_price(ma[-1])))
         if kind == "loses_ma" and was_above and not now_above:
             return fire(float(close[-1]),
-                        "%s closed at %s, losing its 50-bar average of %s."
-                        % (symbol, format_price(close[-1]), format_price(ma[-1])))
+                        "%s closed at %s%s, losing its 50-bar average of %s."
+                        % (symbol, format_price(close[-1]), when, format_price(ma[-1])))
         return None
 
     return None
 
 
-def check(conn, only_active: bool = True, user=None, call_of=None) -> Dict:
+def _within_plan(conn, rows, limit_of: Callable[[int], Optional[int]]):
+    """Keep each person's alerts within what their plan checks, oldest first.
+
+    The free plan's limit is enforced when an alert is switched on, but a
+    paid plan can end while many are running. Those past the limit stay
+    switched on, so they start again if the plan does, and each says why it
+    was not checked rather than going quiet.
+    """
+    from . import database as db
+
+    mine: Dict[Optional[int], List] = {}
+    for row in rows:
+        mine.setdefault(_owner(row), []).append(row)
+    kept = []
+    for owner, theirs in mine.items():
+        try:
+            cap = limit_of(owner) if owner is not None else None
+        except Exception:
+            cap = None          # checking too many beats silently checking none
+        if cap is None or len(theirs) <= cap:
+            kept.extend(theirs)
+            continue
+        theirs.sort(key=lambda r: (r["created_ts"] or 0, int(r["id"])))
+        kept.extend(theirs[:cap])
+        for row in theirs[cap:]:
+            db.alert_failed(conn, int(row["id"]),
+                            "the free plan checks only your %s. Pause or delete "
+                            "the others, or Pro checks them all."
+                            % ("oldest alert" if cap == 1 else "%d oldest alerts" % cap))
+    return kept
+
+
+def check(conn, only_active: bool = True, user=None, call_of=None,
+          limit_of: Optional[Callable[[int], Optional[int]]] = None) -> Dict:
     """Check alerts against fresh data and record anything that fired.
 
     With no user this checks every alert in the database, which is what the
@@ -240,26 +403,48 @@ def check(conn, only_active: bool = True, user=None, call_of=None) -> Dict:
     a page acting on someone's behalf must do.
 
     call_of(symbol, interval) returns today's call for the call kinds; without
-    it those alerts are skipped. Every fire is also written to the person's
-    alert history, and a check that fails is kept on the alert with its reason.
+    it those alerts are left alone. limit_of(user_id) is how many alerts that
+    person's plan checks, or None for all of them. Every fire is also written
+    to the person's alert history, and a check that fails is kept on the
+    alert with its reason.
     """
     from . import database as db
 
     rows = [r for r in db.alert_list(conn, active_only=only_active, user=user)]
+    if call_of is None:
+        # Nothing here can work out a call, so a call alert is not checked at
+        # all, rather than marked as failing when nothing went wrong.
+        rows = [r for r in rows if r["kind"] not in CALL_KINDS]
+    if limit_of is not None:
+        rows = _within_plan(conn, rows, limit_of)
+    usable = []
+    for row in rows:
+        threshold = row["threshold"]
+        if threshold is not None and KINDS.get(row["kind"], {}).get("unit") == "percent":
+            threshold = _fraction(threshold)
+        why = problem(row["kind"], threshold)
+        if why:
+            # Saved before values were checked, e.g. a negative percent that
+            # would fire at once. Said on the alert instead of acted on.
+            db.alert_failed(conn, int(row["id"]),
+                            "its value cannot work. %s Edit or delete it." % why)
+        else:
+            usable.append(row)
+    rows = usable
     if not rows:
         return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
 
     calls: Dict = {}
     if call_of is not None:
-        for key in {(r["symbol"], r["interval"] or "1d") for r in rows
+        for key in {(r["symbol"], _bars_for(r)) for r in rows
                     if r["kind"] in CALL_KINDS}:
             try:
                 calls[key] = call_of(*key)
             except Exception:
                 calls[key] = None
 
-    # One fetch per symbol and interval, shared by every alert on it.
-    wanted = {(r["symbol"], r["interval"] or "1d") for r in rows}
+    # One fetch per symbol and bar size, shared by every alert on it.
+    wanted = {(r["symbol"], _bars_for(r)) for r in rows}
     data, errors = {}, []
 
     def grab(key):
@@ -269,20 +454,22 @@ def check(conn, only_active: bool = True, user=None, call_of=None) -> Dict:
         except (DataError, Exception) as exc:
             return key, exc
 
+    failed: Dict = {}
     with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
         for key, result in pool.map(grab, wanted):
             if isinstance(result, Exception):
                 errors.append({"symbol": key[0], "error": str(result)[:120]})
+                failed[key] = str(result)[:120]
             else:
                 data[key] = result
 
     fired: List[Fired] = []
-    failed = {e["symbol"]: e["error"] for e in errors}
     for row in rows:
-        key = (row["symbol"], row["interval"] or "1d")
+        key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
         if bars is None:
-            db.alert_failed(conn, int(row["id"]), "No price: %s" % failed.get(row["symbol"], "the data source did not answer"))
+            db.alert_failed(conn, int(row["id"]), "No price: %s" % failed.get(
+                key, "the data source did not answer"))
             continue
         is_call = row["kind"] in CALL_KINDS
         call = calls.get(key) if is_call else None
@@ -295,17 +482,29 @@ def check(conn, only_active: bool = True, user=None, call_of=None) -> Dict:
             errors.append({"symbol": row["symbol"], "error": str(exc)[:120]})
             db.alert_failed(conn, int(row["id"]), str(exc)[:120])
             continue
-        if hit:
-            db.alert_fire(conn, hit.alert_id, hit.value, hit.message)
-            if is_call:
-                db.alert_checked(conn, int(row["id"]), state=call)
-            if hit.user_id is not None:
-                hit.event_id = db.event_add(conn, hit.user_id, hit.kind, hit.symbol,
-                                            hit.message, hit.value, hit.as_of,
-                                            alert_id=hit.alert_id)
-            fired.append(hit)
+
+        was = _state(row)
+        if is_call:
+            state = call
         else:
-            db.alert_checked(conn, int(row["id"]), state=call if is_call else None)
+            state = "met" if hit else "clear"
+            # Still true since the last look, so not news: an alert that keeps
+            # watching speaks again only after its condition has cleared.
+            if hit and was == "met":
+                hit = None
+        if hit is None:
+            db.alert_checked(conn, int(row["id"]), state=state)
+            continue
+        # Two checks can overlap (the loop, "Check them all now", a routine).
+        # Only the one that moves the alert on from what it read tells anyone.
+        if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
+                             state=state, was=was):
+            continue
+        if hit.user_id is not None:
+            hit.event_id = db.event_add(conn, hit.user_id, hit.kind, hit.symbol,
+                                        hit.message, hit.value, hit.as_of,
+                                        alert_id=hit.alert_id)
+        fired.append(hit)
 
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time())}
@@ -427,4 +626,10 @@ def suggest_for(symbol: str, plan=None, bars=None) -> List[Dict]:
         out.append({"kind": "near_52w_high", "threshold": 0.02,
                     "why": "Approaching the 52-week high, where breakouts and "
                            "rejections both happen."})
+    for item in out:
+        # What the form sends: a percent as the whole number a person would
+        # type, since the form reads 5 as 5%.
+        item["form_value"] = (round(item["threshold"] * 100, 6)
+                              if KINDS[item["kind"]]["unit"] == "percent"
+                              else item["threshold"])
     return out

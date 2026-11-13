@@ -228,6 +228,103 @@ check("Alice does not see Bob's", "TSLA" not in page, "TSLA leaked")
 
 print()
 print("=" * 72)
+print("ROUTINES ACT FOR WHOEVER RUNS THEM")
+print("=" * 72)
+
+# No network: prices and the analysis are stand-ins. Carol and Dave hold no
+# trades, so the position check has nothing to price.
+from types import SimpleNamespace as _NS
+from bot import alerts as _alerts
+from bot import workflows as _workflows
+
+
+def _bars(symbol, interval="1d"):
+    return _NS(symbol=symbol, interval=interval, last_price=101.0, close=[101.0] * 60,
+               volume=[1.0] * 60, prev_close=100.0, market_open=False,
+               last_bar_time="", meta={})
+
+
+_recorded_for = []
+
+
+def _analyse(symbol, cfg, interval=None, with_news=True, with_learning=True,
+             record=True, db_path=None, user=1, progress=None, source="engine"):
+    run_id = None
+    if record:
+        _cn = db.connect(DB)
+        try:
+            run_id = _cn.execute(
+                "INSERT INTO runs (ts, symbol, interval, action, user_id, source) "
+                "VALUES (?, ?, ?, 'BUY', ?, ?)",
+                (int(time.time()), symbol.upper(), interval, user, source)).lastrowid
+            _cn.commit()
+        finally:
+            _cn.close()
+    _recorded_for.append(user)
+    return _NS(bars=_NS(symbol=symbol.upper(), interval=interval), run_id=run_id,
+               plan=_NS(action="BUY", headline="A stand-in call."))
+
+
+_real = (_alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse)
+_alerts.fetch_bars = _workflows.fetch_bars = _bars
+_workflows.engine.analyse = _analyse
+try:
+    conn = db.connect(DB)
+    carol = A.upsert_google_user(conn, {"email": "carol@example.com", "sub": "g-carol",
+                                        "name": "Carol", "email_verified": True})
+    dave = A.upsert_google_user(conn, {"email": "dave@example.com", "sub": "g-dave",
+                                       "name": "Dave", "email_verified": True})
+    dave_alert = db.alert_add(conn, "ZZDAVE", "price_above", 1.0, user=dave.id)
+    carol_alert = db.alert_add(conn, "ZZCAROL", "price_above", 1.0, user=carol.id)
+    db.watch_add(conn, "ZZCAROL", "1d", user=carol.id)
+    conn.close()
+
+    sign_in_as(c, carol)
+    check("Carol's morning review runs", c.post("/workflow/morning").status_code == 302)
+    conn = db.connect(DB)
+    row = conn.execute("SELECT active, triggered_ts FROM alerts WHERE id=?",
+                       (dave_alert,)).fetchone()
+    check("it leaves Dave's alert alone, still on and never fired",
+          row["active"] == 1 and row["triggered_ts"] is None, dict(row))
+    check("and checks Carol's",
+          conn.execute("SELECT triggered_ts FROM alerts WHERE id=?",
+                       (carol_alert,)).fetchone()[0] is not None)
+    check("nothing of it lands in Dave's history", not db.event_list(conn, dave.id))
+    conn.close()
+    page = visible(c, "/monitor")
+    check("Carol sees her report", "ZZCAROL is 101" in page)
+    fires = c.get("/api/alerts/status").get_json()["new_fires"]
+    check("and the bar on her pages is told of the fire, like one from the loop",
+          [f["symbol"] for f in fires] == ["ZZCAROL"], fires)
+
+    sign_in_as(c, dave)
+    page = visible(c, "/monitor")
+    check("Dave does not see Carol's report", "ZZCAROL" not in page and "needs you" not in page)
+    check("nor does her fire reach Dave's bar",
+          "ZZCAROL" not in str(c.get("/api/alerts/status").get_json()))
+
+    # The watchlist routine: Carol's last own look at ZZCAROL said WAIT.
+    conn = db.connect(DB)
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, user_id) "
+                 "VALUES (?, 'ZZCAROL', '1d', 'WAIT', ?)", (int(time.time()) - 60, carol.id))
+    conn.commit()
+    conn.close()
+    sign_in_as(c, carol)
+    c.post("/workflow/watchlist")
+    page = visible(c, "/monitor")
+    check("the watchlist routine reports Carol's change of call",
+          "went from WAIT to BUY" in page)
+    check("and keeps the new analysis as Carol's",
+          _recorded_for and set(_recorded_for) == {carol.id}, _recorded_for)
+    c.post("/workflow/watchlist")
+    page = visible(c, "/monitor")
+    check("run again, the call is unchanged rather than the same change twice",
+          "BUY, unchanged" in page and "went from WAIT to BUY" not in page)
+finally:
+    _alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse = _real
+
+print()
+print("=" * 72)
 print("SETTINGS ARE EACH PERSON'S OWN")
 print("=" * 72)
 
@@ -500,6 +597,9 @@ try:
     # Real people's data never appears in the example.
     seen = stranger.get("/trades").data.decode("utf-8", "replace")
     check("Alice's trade is not in the example journal", "987654" not in seen)
+    seen = stranger.get("/monitor").data.decode("utf-8", "replace")
+    check("nor anyone's routine report in the example's Monitor page",
+          "ZZCAROL" not in seen and "needs you" not in seen)
 
     # Nothing a visitor posts is written: every form sends them to sign up,
     # and back to the page they were on rather than to a URL that only POSTs.

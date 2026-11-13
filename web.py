@@ -1970,7 +1970,10 @@ def monitor():
                            theses=judged, board=board,
                            outcomes=thesis_mod.OUTCOMES, kinds=alerts_mod.KINDS,
                            workflows=workflows_mod.WORKFLOWS,
-                           last_run=app.config.get("LAST_WORKFLOW"),
+                           # This person's own last routine. A report holds
+                           # their alerts, positions and watchlist.
+                           last_run=(None if g.demo else
+                                     app.config.get("LAST_WORKFLOW_BY_USER", {}).get(uid())),
                            events=events,
                            loop=({k: v for k, v in ALERTS.status().items()
                                   if k in ("running", "interval", "last_run")}
@@ -1982,35 +1985,61 @@ def monitor():
                                           and not g.user.is_local))
 
 
+def _over_alert_cap(conn):
+    """The pricing page if one more running alert would pass the free limit.
+
+    Asked wherever an alert is switched on: adding one, resuming one, and
+    re-arming one that fired. Asked only when adding, re-arming was a way
+    round it.
+    """
+    if _pro():
+        return None
+    cap = billing_mod.free_limits()["alerts"]
+    if len(db_mod.alert_list(conn, active_only=True, user=uid())) < cap:
+        return None
+    return _upgrade("A free account can run %d alert%s at a time. Pause or "
+                    "delete one on the Monitor page first, or Pro has no limit."
+                    % (cap, "" if cap == 1 else "s"))
+
+
+def _alert_value(kind: str, raw: Optional[str]) -> Optional[float]:
+    """The value typed into an alert form, as the alert stores it.
+
+    A percent is typed as a whole number, 5 for 5%, and stored as 0.05. Always
+    divided: guessing from the size read 0.5 as 50% and -5 as -500%.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    value = float(raw)
+    if alerts_mod.KINDS.get(kind, {}).get("unit") == "percent":
+        value = value / 100.0
+    return value
+
+
 @app.route("/monitor/alert/add", methods=["POST"])
 def add_alert():
-    if not _pro():
-        conn = db_mod.connect(app.config.get("DB_PATH"))
-        try:
-            running = len(db_mod.alert_list(conn, active_only=True, user=uid()))
-        finally:
-            conn.close()
-        cap = billing_mod.free_limits()["alerts"]
-        if running >= cap:
-            return _upgrade("A free account can run %d alert%s at a time. "
-                            "Remove one on the Monitor page, or Pro has no limit."
-                            % (cap, "" if cap == 1 else "s"))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        raw = (request.form.get("threshold") or "").strip()
-        threshold = float(raw) if raw else None
+        refused = _over_alert_cap(conn)
+        if refused is not None:
+            return refused
         kind = request.form["kind"]
-        # People type "5" meaning five percent, not five hundred percent.
-        if threshold is not None and alerts_mod.KINDS[kind]["unit"] == "percent" \
-                and threshold > 1:
-            threshold = threshold / 100.0
-        db_mod.alert_add(conn, request.form["symbol"], kind, threshold,
+        threshold = _alert_value(kind, request.form.get("threshold"))
+        # The same ticker an analysis would use: "btc" is Bitcoin, not the
+        # fund listed as BTC, and " aapl" is AAPL.
+        symbol = market_mod.normalise_symbol(request.form["symbol"])
+        db_mod.alert_add(conn, symbol, kind, threshold,
                          request.form.get("interval") or "1d",
                          request.form.get("note", ""),
                          request.form.get("repeat") == "1", user=uid())
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
-        if isinstance(exc, ValueError) and "could not convert" in message:
+        if isinstance(exc, KeyError):
+            message = "The alert form was incomplete. Try again from the Monitor page."
+        elif isinstance(exc, DataError):
+            message = "Type a ticker, for example AAPL."
+        elif "could not convert" in message:
             message = "The alert value must be a number."
         return render_template("error.html", message=message, symbol=""), 400
     finally:
@@ -2039,28 +2068,28 @@ def alert_action(action):
         elif action == "resume":
             # Resuming counts as switching an alert on, so the free plan's
             # limit applies here as it does to adding one.
-            if not _pro():
-                running = len(db_mod.alert_list(conn, active_only=True, user=uid()))
-                if running >= billing_mod.free_limits()["alerts"]:
-                    return _upgrade("A free account can run %d alert%s at a time. "
-                                    "Pause another first, or Pro has no limit."
-                                    % (billing_mod.free_limits()["alerts"],
-                                       "" if billing_mod.free_limits()["alerts"] == 1 else "s"))
+            refused = _over_alert_cap(conn)
+            if refused is not None:
+                return refused
             db_mod.alert_set_active(conn, alert_id, True, user=uid())
         elif action == "edit":
-            raw = (request.form.get("threshold") or "").strip()
-            threshold = float(raw) if raw else None
             row = conn.execute("SELECT kind FROM alerts WHERE id=? AND user_id=?",
                                (alert_id, uid())).fetchone()
-            if row is not None and threshold is not None and threshold > 1 and \
-                    alerts_mod.KINDS.get(row["kind"], {}).get("unit") == "percent":
-                threshold = threshold / 100.0
+            threshold = _alert_value(row["kind"] if row else "",
+                                     request.form.get("threshold"))
             db_mod.alert_edit(conn, alert_id, threshold,
                               (request.form.get("note") or "").strip(), user=uid())
         else:
+            # Re-arming switches a fired alert back on: the same limit.
+            refused = _over_alert_cap(conn)
+            if refused is not None:
+                return refused
             db_mod.alert_reset(conn, alert_id, user=uid())
     except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+        message = str(exc)
+        if "could not convert" in message:
+            message = "The alert value must be a number."
+        return render_template("error.html", message=message, symbol=""), 400
     finally:
         conn.close()
     return redirect(url_for("monitor"))
@@ -2096,16 +2125,23 @@ def watch(action):
     try:
         symbol = request.form["symbol"]
         if action == "add":
-            db_mod.watch_add(conn, symbol, request.form.get("interval") or "1d",
+            # The ticker an analysis would use, so the watchlist routine and
+            # an alert on it look at the same instrument.
+            db_mod.watch_add(conn, market_mod.normalise_symbol(symbol),
+                             request.form.get("interval") or "1d",
                              request.form.get("note", ""), user=uid())
         elif action == "remove":
+            # Exactly as stored, so an entry saved before tickers were
+            # tidied up can still be removed.
             db_mod.watch_remove(conn, symbol, user=uid())
         else:
             return render_template("error.html", message="Unknown action.",
                                    symbol=""), 404
-    except KeyError:
+    except (KeyError, DataError):
         return render_template("error.html", message="No instrument given.",
                                symbol=""), 400
+    except ValueError as exc:
+        return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2117,9 +2153,15 @@ def run_workflow(name):
         return render_template("error.html", message="No routine called %r." % name,
                                symbol=""), 404
     cfg = _cfg()
-    report = workflows_mod.run(name, cfg, app.config.get("DB_PATH"),
-                               user=uid())
-    app.config["LAST_WORKFLOW"] = report
+    # Alerts the way the loop checks them: a call worked out, the fire kept
+    # in the person's history and emailed if they asked. Crossed stops are
+    # left to the routine, which reports them in its own words.
+    report = workflows_mod.run(
+        name, cfg, app.config.get("DB_PATH"), user=uid(),
+        check_alerts=lambda conn, user: _check_and_tell(conn, user=user, stops=False))
+    # Kept per person. One shared slot showed whoever ran a routine last to
+    # everybody's Monitor page, visitors included.
+    app.config.setdefault("LAST_WORKFLOW_BY_USER", {})[uid()] = report
     # A workflow can change what every analysis would say, so drop the caches.
     with _CACHE_LOCK:
         _CACHE.clear()
@@ -2199,13 +2241,18 @@ def settings():
                 _RESEARCH_CACHE.clear()
             if personal and not operator:
                 return redirect(url_for("settings", saved="1"))
-            # Apply a changed check interval now rather than at next start.
-            if ALERTS is not None:
-                minutes = cfg.get("alert_check_minutes", 5)
-                if minutes:
-                    ALERTS.set_interval(float(minutes) * 60.0)
-                else:
+            # Apply a changed check interval now rather than at next start,
+            # including switching checks back on after they were off.
+            minutes = cfg.get("alert_check_minutes", 5)
+            if not minutes:
+                if ALERTS is not None:
                     ALERTS.stop()
+            elif ALERTS is None:
+                start_alert_loop(cfg)
+            else:
+                ALERTS.set_interval(float(minutes) * 60.0)
+                if not ALERTS.running:
+                    ALERTS.start()
             return redirect(url_for("settings", saved="1"))
         except ValueError:
             error = "Every numeric field needs a number."
@@ -2654,15 +2701,44 @@ def _alert_address(conn):
     return address_of
 
 
-def _check_and_tell(conn, user: Optional[int] = None) -> Dict:
-    """Check alerts and open positions' stops, record and email what fired."""
-    result = alerts_mod.check(conn, user=user, call_of=_call_now)
-    stops = alerts_mod.check_stops(conn, user=user)
-    fired = list(result["fired"]) + list(stops["fired"])
+def _alert_limits(conn):
+    """limit_of(user_id) for alerts.check, or None while billing is off.
+
+    The free plan's limit is checked when an alert is switched on, but a paid
+    plan can lapse with many running. This is how many each person's plan
+    checks now, or None for all of them.
+    """
+    if not billing_mod.ready():
+        return None
+    cap = billing_mod.free_limits()["alerts"]
+    admins = {e.strip().lower()
+              for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+              if e.strip()}
+
+    def limit_of(user_id: int) -> Optional[int]:
+        person = accounts_mod.get_user(conn, user_id)
+        if person is None:
+            return None
+        operator = (person.email or "").lower() in admins
+        return None if billing_mod.is_pro(person, operator) else cap
+    return limit_of
+
+
+def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True) -> Dict:
+    """Check alerts and open positions' stops, record and email what fired.
+
+    stops=False leaves crossed stops to the caller: a routine reports those
+    in its own words.
+    """
+    result = alerts_mod.check(conn, user=user, call_of=_call_now,
+                              limit_of=_alert_limits(conn))
+    crossed = (alerts_mod.check_stops(conn, user=user) if stops
+               else {"checked": 0, "fired": [], "errors": []})
+    fired = list(result["fired"]) + list(crossed["fired"])
     if fired and codes_mod.email_ready():
         alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
-    return {"checked": result["checked"] + stops["checked"], "fired": fired,
-            "errors": result["errors"] + stops["errors"], "when": result["when"]}
+    return {"checked": result["checked"] + crossed["checked"], "fired": fired,
+            "errors": result["errors"] + crossed["errors"], "when": result["when"]}
 
 
 def _check_alerts_job():
@@ -2689,29 +2765,52 @@ def start_alert_loop(cfg):
 
 @app.route("/api/alerts/status")
 def alert_status():
-    """What the background checker has been doing, for the page to poll.
+    """What has fired for the person asking, for the page to poll.
 
-    `since` lets a page ask only for alerts that fired after it last looked, so
-    it can announce them once rather than on every poll.
+    Read from their alert history in the database, not from the loop's
+    memory: a restart does not lose a fire, and a fire from "Check them all
+    now" or a routine is announced like one from the loop. `after` is the id
+    of the last fire a page has seen, and `cursor` in the reply is the one to
+    send next time, so each is announced once. With no marker at all, a page
+    is told only the last day's, rather than old news as if it were new.
     """
-    if ALERTS is None:
-        return jsonify({"running": False, "enabled": False,
-                        "note": "Background checking is switched off in settings."})
-    try:
-        since = float(request.args.get("since") or 0)
-    except ValueError:
-        since = 0.0
-    # The loop checks everybody's alerts in one pass, so its list of what
-    # fired is everybody's. Each person is shown only their own: another
-    # person's symbols, levels and notes are theirs.
     me = uid()
-    full = ALERTS.status()
-    out = {key: full[key] for key in ("running", "interval", "last_run", "next_run")}
-    if _is_operator():
-        out.update(full)
-    out["enabled"] = True
-    out["new_fires"] = [f for f in ALERTS.unseen_fires(since)
-                        if f.get("user_id") == me]
+
+    def number(name, kind):
+        try:
+            raw = request.args.get(name)
+            return kind(raw) if raw not in (None, "") else None
+        except ValueError:
+            return None
+
+    after, since = number("after", int), number("since", float)
+    if after is None and not since:
+        since = time.time() - 86400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        # The marker first: a fire recorded in between is then left for the
+        # next poll, rather than counted as seen without being shown.
+        cursor = db_mod.event_cursor(conn, me)
+        rows = [r for r in db_mod.events_after(conn, me, after=after, since=since)
+                if r["id"] <= cursor]
+    finally:
+        conn.close()
+
+    if ALERTS is None:
+        out = {"running": False, "enabled": False,
+               "note": "Background checking is switched off in settings."}
+    else:
+        # The loop checks everybody's alerts in one pass, so its own list of
+        # what fired is everybody's: that is for the operator only.
+        full = ALERTS.status()
+        out = {key: full[key] for key in ("running", "interval", "last_run", "next_run")}
+        if _is_operator():
+            out.update(full)
+        out["enabled"] = True
+    out["new_fires"] = [{"id": r["id"], "at": r["ts"], "kind": r["kind"],
+                         "symbol": r["symbol"], "message": r["message"],
+                         "as_of": r["as_of"]} for r in rows]
+    out["cursor"] = cursor
     out["now"] = time.time()
     return jsonify(out)
 

@@ -430,7 +430,7 @@
 {% if request.args.get('alert_set') %}
   <div class="saved" style="margin-top:var(--s3)">
     Alert set. It is listed on the <a href="{{ url_for('monitor') }}">Monitor</a>
-    page, which is where it gets checked.
+    page, with when it was last checked.
   </div>
 {% endif %}
 
@@ -438,7 +438,7 @@
 <section>
   <div class="sechead">
     <h2>Worth being told about</h2>
-    <span class="tail">set one and the Monitor page checks it</span>
+    <span class="tail">checked every few minutes once set</span>
   </div>
   <div class="card pad0">
     <div class="tablewrap">
@@ -453,7 +453,7 @@
               <form method="post" action="{{ url_for('add_alert') }}">
                 <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
                 <input type="hidden" name="kind" value="{{ sg.kind }}">
-                <input type="hidden" name="threshold" value="{{ sg.threshold }}">
+                <input type="hidden" name="threshold" value="{{ sg.form_value }}">
                 <input type="hidden" name="interval" value="{{ r.bars.interval }}">
                 <input type="hidden" name="note" value="{{ sg.why }}">
                 <input type="hidden" name="back" value="{{ request.full_path }}">
@@ -466,8 +466,15 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      Nothing runs while this window is closed. These are checked when you open
-      the Monitor page or run a routine, and each one says when it last looked.
+      {% if current_user and current_user.is_local %}
+      Alerts are checked every few minutes while Orenth is running on this
+      computer. Nothing is checked while it is closed.
+      {% else %}
+      Alerts are checked on Orenth's server every few minutes, whether or not
+      you have a page open.
+      {% endif %}
+      When one fires you see it on the Monitor page, and in a bar on any Orenth
+      page you have open. Each alert says when it was last checked.
     </p>
   </div>
 </section>

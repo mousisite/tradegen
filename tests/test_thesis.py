@@ -179,9 +179,11 @@ check("it says that it worked", "alert_set=1" in location, location)
 conn = db.connect(DB)
 stored = db.alert_list(conn)[0]
 conn.close()
-check("the suggested value is stored unchanged",
-      abs(stored["threshold"] - float(threshold)) < 1e-9,
-      "%s vs %s" % (stored["threshold"], threshold))
+# The form sends a percent as the whole number a person types, 5 for 5%.
+meant = float(threshold) / (100.0 if web.alerts_mod.KINDS[kind]["unit"] == "percent" else 1.0)
+check("the suggested value is stored as what it means",
+      abs(stored["threshold"] - meant) < 1e-9,
+      "%s vs %s" % (stored["threshold"], meant))
 
 confirmed = c.get("/analyse?symbol=AAPL&interval=1d&alert_set=1")
 check("the confirmation renders",

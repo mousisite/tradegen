@@ -179,7 +179,8 @@
 {% if not personal or operator %}
 <section>
   <div class="sechead"><h2>Background checking</h2>
-    <span class="tail">only while this window is open</span></div>
+    <span class="tail">{{ 'only while Orenth is running' if current_user and current_user.is_local
+                         else 'for every account, on the server' }}</span></div>
   <div class="card">
     <div class="setgrid">
       <div class="setfield">
@@ -210,10 +211,17 @@
       {% endif %}
     {% endif %}
     <p class="prose" style="margin-top:var(--s3)">
-      <b>Nothing runs when this window is closed.</b> The check happens inside
-      the server process, so stopping the server stops the watching. An alert
-      that must survive a closed laptop needs the app hosted somewhere that
-      stays up, which this does not pretend to be.
+      {% if current_user and current_user.is_local %}
+      <b>Nothing runs when Orenth is closed.</b> The check happens inside the
+      server process on this computer, so stopping it, or the computer going
+      to sleep, stops the watching. An alert that must survive a closed laptop
+      needs the app hosted somewhere that stays up.
+      {% else %}
+      The check runs inside the server process, for everyone's alerts and open
+      positions, whether or not anybody has a page open. A restart or a new
+      release pauses it until the server is back, and switching it off here
+      switches it off for every account.
+      {% endif %}
     </p>
   </div>
 </section>

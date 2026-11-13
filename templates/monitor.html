@@ -99,7 +99,7 @@
           <label for="a-kind">Tell me when it</label>
           <select class="field" id="a-kind" name="kind">
             {% for key, spec in kinds.items() %}
-              <option value="{{ key }}">{{ spec.label }}</option>
+              <option value="{{ key }}">{{ spec.label }}{% if spec.suffix %} … {{ spec.suffix }}{% endif %}</option>
             {% endfor %}
           </select>
         </div>
@@ -107,8 +107,9 @@
           <label for="a-threshold">Value</label>
           <input class="field fig" id="a-threshold" name="threshold" type="number"
                  step="any" placeholder="price, percent or level">
-          <div class="hint">Leave empty for the conditions that need no value:
-            the moving average, and a change of call.</div>
+          <div class="hint">A percent is a whole number: 5 means 5%. Leave empty
+            for the conditions that need no value: the moving average, and a
+            change of call.</div>
         </div>
         <div class="setfield">
           <label for="a-interval">Bars</label>
@@ -146,12 +147,15 @@
           <tr>
             <td>{{ text }}
               {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}
-              {% if row['state'] %}<div class="faint" style="font-size:var(--t-xs)">call when last checked: {{ row['state'] }}</div>{% endif %}</td>
+              {% if row['state'] and kinds.get(row['kind'], {}).get('call') %}<div class="faint" style="font-size:var(--t-xs)">call when last checked: {{ row['state'] }}</div>{% endif %}</td>
             <td>
-              {% if row['triggered_ts'] %}
+              {# One that keeps watching is still on after it fires: it is
+                 watching, and what it last said is in the next column. #}
+              {% if row['triggered_ts'] and not row['active'] and not row['repeat'] %}
                 <span class="chip hold">Triggered</span>
               {% elif row['active'] %}
                 <span class="chip mute">Watching</span>
+                {% if row['repeat'] %}<div class="faint" style="font-size:var(--t-xs)">tells you every time it happens</div>{% endif %}
               {% else %}
                 <span class="chip mute">Paused</span>
               {% endif %}
@@ -166,7 +170,7 @@
             </td>
             <td class="r">
               <div style="display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap">
-                {% if row['triggered_ts'] %}
+                {% if row['triggered_ts'] and not row['active'] and not row['repeat'] %}
                   <form method="post" action="{{ url_for('alert_action', action='reset') }}">
                     <input type="hidden" name="alert_id" value="{{ row['id'] }}">
                     <button class="btn quiet sm" type="submit">Re-arm</button>
@@ -225,6 +229,16 @@
         fires or a position crosses its stop.{% endif %}</span>
       <button class="btn quiet sm" type="submit">{{ 'Stop the emails' if alert_email else 'Email me' }}</button>
     </form>
+  {% endif %}
+
+  {% if not demo %}
+    {# Shown by the script in base.html, and only where the browser can show
+       notices. They come from an open Orenth page, so the text says that. #}
+    <p class="prose" id="notifywrap" style="margin-top:var(--s3)" hidden>
+      <button class="btn quiet sm" type="button" id="notifyask">Show a desktop notice too</button>
+      <span id="notifynote">A fired alert pops up on your screen while any Orenth page
+        is open in this browser.</span>
+    </p>
   {% endif %}
 
   <div class="sechead" style="margin-top:var(--s4)">
