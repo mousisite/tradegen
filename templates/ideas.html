@@ -56,24 +56,38 @@
     <button class="btn" type="submit" style="margin-top:var(--s3)">Find something</button>
   </form>
   <p class="prose" style="margin-top:var(--s3)">
-    The first scan takes up to half a minute, because it runs the whole
-    back-test on every instrument rather than reading a saved score. The
-    result is then shared, so asking again straight after is instant.
+    A fresh scan can take a few minutes, because it runs the whole back-test
+    on every instrument rather than reading a saved score. It runs on the
+    server while this page shows how far it has got, and the result is shared,
+    so asking again straight after is instant.
   </p>
 </div>
+
+{% if busy %}
+  <div class="plainbox" role="status" style="margin-top:var(--s3)">
+    <span class="eyebrow">Busy</span>
+    <p class="prose" style="margin:0">{{ busy }}</p>
+  </div>
+{% endif %}
 
 {% if result and result.running %}
   {% set looked = result.looked_at or 0 %}
   {% set total = result.asked_for_now or result.asked_for or 0 %}
   <div class="plainbox scanning" role="status" aria-live="polite" style="margin-top:var(--s3)">
-    <span class="eyebrow">{{ 'Refreshing' if result.refreshing else 'Still checking' }}</span>
-    <p class="lead" style="margin:0">{{ looked }} of {{ total }} looked at so far.</p>
-    <div class="meter" style="margin:var(--s2) 0"><i style="width:{{ ((looked / total * 100) if total else 0)|round(1) }}%"></i></div>
-    <p class="prose" style="margin:0">
+    <span class="eyebrow">{{ 'Waiting its turn' if result.queued else 'Refreshing' if result.refreshing else 'Still checking' }}</span>
+    {% if result.queued %}
+      <p class="lead" style="margin:0">Waiting for another scan to finish.</p>
+      <p class="prose" style="margin:var(--s2) 0 0">The server runs one scan at
+        a time, so this one starts as soon as the one ahead of it is done.
+    {% else %}
+      <p class="lead" style="margin:0">{{ looked }} of {{ total }} looked at so far.</p>
+      <div class="meter" style="margin:var(--s2) 0"><i style="width:{{ ((looked / total * 100) if total else 0)|round(1) }}%"></i></div>
+      <p class="prose" style="margin:0">
+    {% endif %}
       {% if result.refreshing %}
-        Below is the last finished scan, from {{ (result.age or 0)|int // 60 }}
-        minute(s) ago, while a fresh one runs.
-      {% else %}
+        Below is the last finished scan, with prices read at
+        {{ result.checked_at }}, while a fresh one {{ 'waits' if result.queued else 'runs' }}.
+      {% elif not result.queued %}
         The list below is only what has been checked so far. It is not ranked
         yet and will change as the rest come in.
       {% endif %}
@@ -87,13 +101,20 @@
   <span class="eyebrow">In plain words</span>
   <p class="lead">
     {% if result.partial %}
-      {% if result.passed %}So far, {{ result.passed|length }} worth a look.{% else %}Nothing so far.{% endif %}
+      {% if result.passed %}So far, {{ result.passed_total }} worth a look.{% else %}Nothing so far.{% endif %}
+    {% elif not result.complete %}
+      {% if result.passed %}{{ result.passed_total }} worth a look in the part of the list that could be read.{% else %}Nothing in the part of the list that could be read.{% endif %}
+    {% elif result.passed and result.passed|length < result.passed_total %}
+      Showing {{ result.passed|length }} of {{ result.passed_total }} worth a look right now.
     {% elif result.passed %}
-      {{ result.passed|length }} worth a look right now.
+      {{ result.passed_total }} worth a look right now.
     {% else %}
       Nothing worth buying today.
     {% endif %}
   </p>
+  {% if result.refresh_note %}
+    <p class="prose"><b>Not refreshed.</b> {{ result.refresh_note }}</p>
+  {% endif %}
   <p class="prose">{{ result.summary }}</p>
   {% if result.warning %}
     <p class="prose"><b>Worth knowing.</b> {{ result.warning }}</p>
@@ -110,8 +131,8 @@
 {% if result.passed %}
 <section>
   <div class="sechead">
-    <h2>{{ 'So far, not ranked' if result.partial else 'Ready now' }}</h2>
-    <span class="count">{{ result.passed|length }}</span>
+    <h2>{{ 'So far, not ranked' if result.partial else 'Ready now' if result.complete else 'Not ranked' }}</h2>
+    <span class="count">{% if result.passed|length < result.passed_total %}{{ result.passed|length }} of {% endif %}{{ result.passed_total }}</span>
     <span class="tail">a setup is firing and it has paid off before</span>
   </div>
   <div class="card pad0">
@@ -145,6 +166,8 @@
                 <div class="faint" style="font-size:var(--t-xs)">no filings to check</div>
               {% elif r.accounts == 'unchecked' %}
                 <div class="faint" style="font-size:var(--t-xs)">filings not read in time</div>
+              {% elif r.accounts == 'unreadable' %}
+                <div class="faint" style="font-size:var(--t-xs)">filings could not be read just now</div>
               {% endif %}
             </td>
             <td class="r">
@@ -158,8 +181,10 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       {% if result.partial %}Not ranked until every instrument has been looked
-      at.{% else %}Ranked 1 to {{ result.passed|length }} by {{ result.ranked_as }}.{% endif %} Number 1
-      is the best on that measure, not the safest and not a recommendation.
+      at.{% elif not result.complete %}Not ranked, because too much of the list
+      could not be read.{% else %}Ranked 1 to {{ result.passed_total }} by {{ result.ranked_as }}.
+      Number 1 is the best on that measure, not the safest and not a
+      recommendation.{% endif %}
       "Worked before" counts how many times this same setup reached its target
       before its stop, on this instrument's own history. "Gap risk" is how much
       worse than your stop an overnight move could be: at 3x, a gap costs three
@@ -170,12 +195,18 @@
 </section>
 {% endif %}
 
-{% if result.limited_total %}
+{% if result.limited %}
+  {# Counted from the lists before they were cut, and said as "the full scan"
+     only of a scan that read its whole list. #}
   <div class="plainbox" style="margin-top:var(--s3)">
     <span class="eyebrow">Free plan</span>
-    <p class="prose">Showing the top of each list. The full scan found
-      {{ result.limited_total }} worth a look.
-      <a href="{{ url_for('pricing') }}">Pro shows all of them.</a></p>
+    <p class="prose">Showing the top {{ result.limited }} of each list.
+      {% if result.partial %}So far this scan has found{% elif not result.complete %}The part of the list that could be read has{% else %}The full scan found{% endif %}
+      {{ result.passed_total }} worth a look{% if result.watch_total %} and
+      {{ result.watch_total }} worth watching{% endif %}.
+      <a href="{{ url_for('pricing') }}">{% if result.watch_total > result.watch_shown %}Pro
+        shows every one worth a look and the {{ result.watch_shown }} strongest
+        worth watching.{% else %}Pro shows all of them.{% endif %}</a></p>
   </div>
 {% endif %}
 
@@ -216,8 +247,8 @@
 <section>
   <div class="sechead">
     <h2>Worth watching</h2>
-    <span class="count">{{ result.watch|length }}</span>
-    <span class="tail">has paid off before, nothing firing today</span>
+    <span class="count">{% if result.watch|length < result.watch_total %}{{ result.watch|length }} of {% endif %}{{ result.watch_total }}</span>
+    <span class="tail">has paid off before, nothing to buy today</span>
   </div>
   <div class="card pad0">
     <div class="tablewrap">
@@ -233,7 +264,10 @@
             <td class="r fig">{{ r.price|price }}</td>
             <td class="r fig">
               {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}</td>
-            <td class="soft">No setup is firing right now.</td>
+            {# Every row here is a stand-aside. Leaning down with no way to
+               short it, and no setup at all, are both nothing to buy, but
+               only the second is "nothing firing". #}
+            <td class="soft">{% if (r.conviction or 0) < 0 %}Leaning down, so nothing to buy.{% else %}No setup is firing right now.{% endif %}</td>
             <td class="r">
               <form method="post" action="{{ url_for('watch', action='add') }}"
                     style="display:inline">
@@ -249,9 +283,9 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      These have made money after costs on their own history, but nothing is
-      happening on them today. Adding one to your watchlist means the routines
-      on the Monitor page will keep checking it for you.
+      These have made money after costs on their own history, but today's
+      reading on them is to stand aside. Adding one to your watchlist means the
+      routines on the Monitor page will keep checking it for you.
     </p>
   </div>
 </section>
@@ -261,14 +295,18 @@
   {% if result.partial %}So far, analysed {{ result.scanned }} of
   {{ result.asked_for }} instruments on {{ result.interval }} bars.
   {% else %}Analysed {{ result.scanned }} of the {{ result.asked_for }} instruments
-  on its list, on {{ result.interval }} bars, in {{ "%.0f"|format(result.seconds) }}
-  seconds{% if result.age and result.age > 45 %}, and this scan ran
-  {{ result.age|int // 60 }} minute(s) ago. Prices have moved since{% endif %}.
+  on its list, on {{ result.interval }} bars.{% if result.checked_at %} The
+  oldest price on it was read at {{ result.checked_at }}{% if result.age_minutes %},
+  {{ result.age_minutes }} minute{{ '' if result.age_minutes == 1 else 's' }} ago,
+  and prices have moved since{% endif %}.{% endif %}
   {% endif %}
   {% if result.failed %}Could not read {{ result.failed|length }}:
   {{ result.failed|join(', ') }}.{% endif %}
   {{ result.avoided }} had no setup at all.
-  A list can be empty, and often is. That is the app working, not failing.
+  {# Only a scan that read its list can call an empty list a real answer.
+     One the data source refused is the source failing, and says so above. #}
+  {% if result.complete %}A list can be empty, and often is. That is the app
+  working, not failing.{% endif %}
 </p>
 
 {% endif %}

@@ -1788,6 +1788,11 @@ def export_data(dataset, fmt):
                  'attachment; filename="%s"' % built["filename"]})
 
 
+def _utc_clock(ts) -> str:
+    """A time of day in UTC, for saying when a list's prices were read."""
+    return time.strftime("%H:%M UTC", time.gmtime(float(ts)))
+
+
 @app.route("/ideas")
 def ideas():
     """What is worth looking at, given how you trade."""
@@ -1797,6 +1802,7 @@ def ideas():
     cfg = _cfg()
 
     result = None
+    busy = ""
     asked = (request.args.get("market") or request.args.get("horizon")
              or request.args.get("risk"))
     if g.demo and asked and horizon == "short":
@@ -1806,35 +1812,50 @@ def ideas():
                        examples=False)
     if asked:
         try:
-            # The scan runs in the background; the page waits a few seconds
-            # for it and otherwise shows how far it has got.
+            # The scan runs in the background. The request that starts it
+            # waits a few seconds for it; one joining a scan already running,
+            # such as the page reloading itself, answers at once with how far
+            # it has got.
             result = (_demo_shortlist(market, horizon, risk) if g.demo else
                       ideas_mod.find(market, horizon, cfg, risk,
-                                     wait=ideas_mod.PAGE_WAIT))
+                                     wait=ideas_mod.PAGE_WAIT, join_wait=0))
+        except ideas_mod.Busy as exc:
+            # Said on the Find page itself, with the form, so asking again is
+            # one press away.
+            busy = str(exc)
         except Exception as exc:
             return render_template("error.html", symbol="",
                                    message="The scan failed: %s" % exc), 502
+    if result is not None:
+        result = dict(result)
+        result.setdefault("passed_total", len(result["passed"]))
+        result.setdefault("watch_total", len(result["watch"]))
+        result.setdefault("watch_shown", len(result["watch"]))
         # Scans are shared between everyone asking the same question, so
-        # this one may have run minutes ago. The page says so rather than
-        # presenting a stale list as this second's answer.
+        # this one may have run minutes ago. The page says so, with the clock
+        # time, rather than presenting a stale list as this second's answer.
         if result.get("scanned_at"):
-            result = dict(result, age=time.time() - result["scanned_at"])
+            age = max(0.0, time.time() - result["scanned_at"])
+            result.update(age=age, checked_at=_utc_clock(result["scanned_at"]),
+                          # Rounded up, so a list read fifty seconds ago does
+                          # not say it was read "0 minutes ago".
+                          age_minutes=int((age + 59) // 60) if age > 45 else 0)
 
     # Visitors included: an example that showed more than a free account would
-    # make signing up look like a downgrade.
+    # make signing up look like a downgrade. The counts beside the shortened
+    # lists are the full ones, from before anything was cut.
     if result is not None and not _pro():
         keep = billing_mod.free_limits()["find_results"]
-        total = len(result["passed"]) + len(result["watch"])
         if len(result["passed"]) > keep or len(result["watch"]) > keep:
             result = dict(result, passed=result["passed"][:keep],
-                          watch=result["watch"][:keep], limited_total=total)
+                          watch=result["watch"][:keep], limited=keep)
 
-    return render_template("ideas.html", result=result,
+    return render_template("ideas.html", result=result, busy=busy,
                            market=market if market in ideas_mod.MARKETS else "stocks",
                            horizon=horizon if horizon in ideas_mod.HORIZONS else "medium",
                            risk=risk if risk in ideas_mod.RISKS else "balanced",
                            markets=ideas_mod.MARKETS, horizons=ideas_mod.HORIZONS,
-                           risks=ideas_mod.RISKS)
+                           risks=ideas_mod.RISKS), (503 if busy else 200)
 
 
 # The example account's scans: the house settings, and reused for an hour,
@@ -1845,7 +1866,7 @@ DEMO_SCAN_TTL = 60 * 60.0
 def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     return ideas_mod.find(market, horizon, cfg, risk, wait=ideas_mod.PAGE_WAIT,
-                          ttl=DEMO_SCAN_TTL)
+                          ttl=DEMO_SCAN_TTL, join_wait=0)
 
 
 @app.route("/screener", methods=["GET"])
@@ -1862,6 +1883,7 @@ def screener():
         filters = dict(preset["filters"])
         universe = preset["universe"]
     else:
+        import math
         for key, spec in screener_mod.FILTERS.items():
             raw = request.args.get(key)
             if raw in (None, ""):
@@ -1870,10 +1892,21 @@ def screener():
                 value = float(raw)
             except ValueError:
                 continue
-            # Percent fields are typed as whole numbers by people, not decimals.
-            if spec["unit"] == "pct" and value > 1:
+            if not math.isfinite(value):
+                continue
+            # Percent fields are typed as whole percents: 15 is 15%, 0.5 is
+            # half a percent and -3 is down 3%. Guessing from the size of the
+            # number turned "up at most -3" into -300% and "up at least 1"
+            # into 100%.
+            if spec["unit"] == "pct":
                 value = value / 100.0
             filters[key] = value
+
+    # The boxes show percents the way they are typed, so running the same
+    # screen again asks the same question.
+    typed = {key: ("%.6f" % (value * 100 if screener_mod.FILTERS[key]["unit"] == "pct"
+                             else value)).rstrip("0").rstrip(".")
+             for key, value in filters.items()}
 
     result = None
     if g.demo and request.args.get("go") and not preset:
@@ -1882,14 +1915,32 @@ def screener():
                        "account you can set your own filters.", examples=False)
     if g.demo and preset:
         # A ready-made screen is the same answer for every visitor, so it is
-        # run once and shared rather than once per visit.
+        # run once and shared rather than once per visit. Only a screen that
+        # read everything is shared: one the data source refused is shown to
+        # the visitor who ran it, and the next visitor gets a fresh try rather
+        # than that failure for a quarter of an hour.
         from bot import upstream as upstream_mod
+
+        class _NotKept(Exception):
+            def __init__(self, found):
+                super().__init__("not kept")
+                self.found = found
+
+        def fresh():
+            found = screener_mod.run(symbols=None, universe=universe,
+                                     filters=filters, limit=40)
+            if not found.complete:
+                raise _NotKept(found)
+            return found
+
         try:
             result = upstream_mod.cached(
-                "demo-screen:" + preset_key,
-                lambda: screener_mod.run(symbols=None, universe=universe,
-                                         filters=filters, limit=40),
-                ttl=DEMO_TTL, wait=60.0)
+                "demo-screen:" + preset_key, fresh, ttl=DEMO_TTL,
+                # Longer than a screen can take, so a second visitor waits for
+                # the first one's answer rather than running the screen again.
+                wait=screener_mod.BUDGET + 30.0)
+        except _NotKept as kept:
+            result = kept.found
         except Exception as exc:
             return render_template("error.html", message=str(exc), symbol=""), 500
     elif request.args.get("go") or preset:
@@ -1903,8 +1954,9 @@ def screener():
 
     return render_template("screener.html", result=result, presets=screener_mod.PRESETS,
                            universes=screener_mod.UNIVERSES, filters=filters,
-                           universe=universe, symbols_raw=symbols_raw,
+                           typed=typed, universe=universe, symbols_raw=symbols_raw,
                            preset_key=preset_key,
+                           checked_at=_utc_clock(result.at) if result else "",
                            filter_specs=screener_mod.FILTERS)
 
 
