@@ -5,7 +5,8 @@
 
 <div class="pagehead">
   <h1>What people actually do</h1>
-  <p>Read from the analyses this app already recorded, not from tracking. There
+  <p>Read from what the app already records, and from a daily count of a few
+    things people do here, which holds no account, address or ticker. There
     is no analytics script on any page and nothing leaves this server.</p>
 </div>
 
@@ -44,6 +45,49 @@
   <div class="card">{{ trend|safe }}</div>
 </section>
 {% endif %}
+
+{# From arriving to paying, day by day. Each figure is a count and nothing
+   else: no account, address or ticker is stored with it. #}
+<section>
+  <div class="sechead"><h2>From visit to Pro</h2>
+    <span class="tail">counts per day, UTC, last {{ days }} days</span></div>
+  <div class="card pad0">
+    {% if counts.days %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Day</th>
+          {% for key, label in counts.names %}<th class="r">{{ label }}</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td><b>All {{ days }} days</b></td>
+            {% for key, label in counts.names %}
+              <td class="r fig"><b>{{ "{:,}".format(counts.total[key]) }}</b></td>
+            {% endfor %}
+          </tr>
+          {% for d in counts.days %}
+          <tr>
+            <td class="fig soft" style="white-space:nowrap">{{ d.day }}</td>
+            {% for key, label in counts.names %}
+              <td class="r fig {{ '' if d.counts.get(key) else 'faint' }}">{{ "{:,}".format(d.counts.get(key, 0)) }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing counted in the last {{ days }} days.</div>
+    {% endif %}
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      Front page views are by people not signed in, with robots that say what
+      they are left out; a robot posing as a browser is still counted. A first
+      analysis is someone's first on the site, counted once. Turned Pro is a
+      change of plan from Free, not a renewal. Days with nothing counted are
+      left out.
+    </p>
+  </div>
+</section>
 
 <section>
   <div class="cols b">
@@ -139,7 +183,7 @@
     <span class="tail">whether a deploy keeps it or deletes it</span></div>
   <div class="card">
     <p class="prose">
-      The database is at <span class="fig">{{ storage.path }}</span>,
+      The database is at <span class="fig" style="overflow-wrap:anywhere">{{ storage.path }}</span>,
       currently {{ "%.1f"|format(storage.size / 1048576.0) }} MB.
     </p>
     {% if storage.on_disk %}
@@ -157,9 +201,11 @@
 </section>
 
 <p class="legal">
-  Everything here comes from rows this app already wrote in the course of doing
-  its job. No analytics script runs on any page, nothing is sent to a third
-  party, and this view is limited to whoever runs the installation.
+  Most of this comes from rows the app already wrote in the course of doing its
+  job. The day-by-day counts are kept for this page alone, as a day, what
+  happened and how many times. No analytics script runs on any page, nothing
+  is sent to a third party, and this view is limited to whoever runs the
+  installation.
 </p>
 
 {% endblock %}

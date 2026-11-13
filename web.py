@@ -54,6 +54,7 @@ from bot import database as db_mod
 from bot import demo as demo_mod
 from bot import digest as digest_mod
 from bot import engine
+from bot import events as events_mod
 from bot import ideas as ideas_mod
 from bot import invites as invites_mod
 from bot import export as export_mod
@@ -623,6 +624,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
         # "take this trade", which only opens your own runs, works for them.
         if mine is None and record:
             mine = _record_cached_run(result, me)
+            events_mod.first_analysis(app.config.get("DB_PATH"), me, mine)
             if mine is not None:
                 with _CACHE_LOCK:
                     runs[me] = mine
@@ -638,6 +640,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
         result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
                                 source="web", db_path=app.config.get("DB_PATH"),
                                 user=me, record=record)
+        events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
             _CACHE[key] = (time.time(), result,
                            {me: result.run_id} if result.run_id else {})
@@ -823,6 +826,8 @@ def index():
     # It is also the first thing a person arriving from a link sees, and a bare
     # login form asks them to commit before they know what this is.
     if getattr(g, "user", None) is None:
+        events_mod.landing_view(app.config.get("DB_PATH"), request.method,
+                                request.headers.get("User-Agent", ""))
         return render_template("landing.html", example=_example())
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -1334,6 +1339,7 @@ def take_trade():
                           risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid())
+        events_mod.bump(conn, "paper_trade")
     except (ValueError, KeyError) as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -1367,6 +1373,7 @@ def open_trade_manual():
             risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid())
+        events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError) as exc:
         message = str(exc)
         if isinstance(exc, KeyError):
@@ -1806,7 +1813,7 @@ def google_callback():
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        user = accounts_mod.upsert_google_user(conn, profile)
+        user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
         return render_template("signin.html", reason=str(exc), why_not="",
                                next_url=""), 400
@@ -1900,11 +1907,13 @@ def code_verify(channel):
                 codes_mod.check_email_code(conn, pending["to"],
                                            request.form.get("code", ""),
                                            app.secret_key)
-                user = accounts_mod.upsert_email_user(conn, pending["to"])
+                user = events_mod.new_account(conn, accounts_mod.upsert_email_user,
+                                              pending["to"])
             else:
                 codes_mod.check_phone_code(conn, pending["to"],
                                            request.form.get("code", ""))
-                user = accounts_mod.upsert_phone_user(conn, pending["to"])
+                user = events_mod.new_account(conn, accounts_mod.upsert_phone_user,
+                                              pending["to"])
         except (codes_mod.CodeError, ValueError) as exc:
             error = str(exc)
         else:
@@ -1993,7 +2002,8 @@ def billing_done():
     if billing_mod.ready() and session_id and not g.demo:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
+            with events_mod.counting_upgrades(conn):
+                upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
         except billing_mod.BillingError:
             upgraded = False
         finally:
@@ -2035,7 +2045,8 @@ def billing_webhook():
         return jsonify({"error": "not json"}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        outcome = billing_mod.handle(conn, event)
+        with events_mod.counting_upgrades(conn):
+            outcome = billing_mod.handle(conn, event)
     finally:
         conn.close()
     return jsonify({"received": True, "outcome": outcome})
@@ -2173,6 +2184,7 @@ def usage():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         data = usage_mod.read(conn, days)
+        counts = events_mod.read(conn, days)
     finally:
         conn.close()
 
@@ -2201,7 +2213,7 @@ def usage():
 
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
-                           storage=storage,
+                           storage=storage, counts=counts,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 
@@ -2671,6 +2683,7 @@ def add_alert():
                          request.form.get("interval") or "1d",
                          request.form.get("note", ""),
                          request.form.get("repeat") == "1", user=uid())
+        events_mod.bump(conn, "alert_add")
     except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
         if isinstance(exc, KeyError):
@@ -2768,6 +2781,7 @@ def watch(action):
             db_mod.watch_add(conn, market_mod.normalise_symbol(symbol),
                              request.form.get("interval") or "1d",
                              request.form.get("note", ""), user=uid())
+            events_mod.bump(conn, "watch_add")
         elif action == "remove":
             # Exactly as stored, so an entry saved before tickers were
             # tidied up can still be removed.
