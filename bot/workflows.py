@@ -140,22 +140,26 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return
 
-    view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True)
+    from . import config as config_mod
+    view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True,
+                               cost_bps={kind: config_mod.cost_bps_for(kind, cfg)
+                                         for kind in ("equity", "crypto", "other")})
     for p in view.positions:
         if p.price is None:
             report.steps.append(Step("Position: %s" % p.symbol,
                                      "No price available.", "failed"))
             continue
-        at_stop = ((p.price <= p.stop) if p.direction > 0
-                   else (p.price >= p.stop))
         at_target = (p.target is not None and
                      ((p.price >= p.target) if p.direction > 0
                       else (p.price <= p.target)))
-        if at_stop:
+        if p.breached:
+            # Said once, here, as a step pointing at the trade; the portfolio
+            # warnings below skip it rather than saying it twice.
             report.steps.append(Step(
                 "Position: %s" % p.symbol,
-                "%s is at %s, past its stop of %s. It should be closed."
-                % (p.symbol, format_price(p.price), format_price(p.stop)),
+                "%s is at %s and has crossed its stop of %s. Close it, or set a "
+                "new stop on purpose." % (p.symbol, format_price(p.price),
+                                          format_price(p.stop)),
                 "attention", {"trade_id": p.trade_id}))
         elif at_target:
             report.steps.append(Step(
@@ -165,6 +169,8 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
                 "attention", {"trade_id": p.trade_id}))
 
     for warning in view.warnings:
+        if warning.startswith("Stop breached on "):
+            continue
         report.steps.append(Step("Portfolio", warning, "attention"))
     for note in view.observations[:3]:
         report.steps.append(Step("Portfolio", note, "ok"))

@@ -168,6 +168,29 @@ r = c.post("/trades/close", data={"trade_id": alice_trade, "price": "120"})
 check("Bob cannot close Alice's trade", r.status_code == 400, r.status_code)
 r = c.post("/trades/delete", data={"trade_id": alice_trade})
 check("Bob cannot delete Alice's trade", r.status_code == 400, r.status_code)
+
+# An analysis run is Alice's too: its symbol and levels are her plan.
+_conn = db.connect(DB)
+_run = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'AAPL', '1d', 'BUY', 100.0, 95.0, 110.0, ?)", (int(time.time()), alice.id)).lastrowid
+_avoid = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'AVOID', 100.0, 95.0, 110.0, ?)", (int(time.time()), bob.id)).lastrowid
+_short = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'WAIT', 100.0, 105.0, 90.0, ?)", (int(time.time()), bob.id)).lastrowid
+_conn.commit()
+_conn.close()
+r = c.post("/trades/take", data={"run_id": _run})
+check("Bob cannot open a paper trade from Alice's analysis", r.status_code == 400, r.status_code)
+r = c.post("/trades/take", data={"run_id": _avoid})
+check("an AVOID has no trade in it to simulate", r.status_code == 400, r.status_code)
+c.post("/trades/take", data={"run_id": _short})
+_conn = db.connect(DB)
+_side = _conn.execute("SELECT direction FROM trades WHERE run_id=?", (_short,)).fetchone()
+_conn.close()
+check("a WAIT whose stop sits above the entry opens a short", _side and _side[0] == -1, _side)
 r = c.post("/monitor/alert/delete", data={"alert_id": alice_alert})
 check("Bob cannot delete Alice's alert", r.status_code == 400, r.status_code)
 

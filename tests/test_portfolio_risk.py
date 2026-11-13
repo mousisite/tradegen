@@ -3,6 +3,7 @@ import os as _os
 import sys as _sys
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from bot import portfolio as P  # noqa: E402
 
 fails = []
@@ -127,6 +128,124 @@ check("the summary never says nothing is at risk while a stop is breached",
       not any("the loss would be 0" in o for o in v.observations))
 check("an unpriced position is excluded and said so",
       "GONE" in v.failed and any("No price available for GONE" in w for w in v.warnings))
+
+print()
+print("=" * 72)
+print("MORE THAN ONE ROW, NO SIZE, NO PRICE")
+print("=" * 72)
+PRICES.update({"AAA": 10.0, "BBB": 10.0, "NOSIZE": 10.0, "DEAD": None})
+P._enrich = fake_enrich
+try:
+    rows = [{"id": i, "symbol": "AAA", "direction": 1, "quantity": 300, "entry": 10,
+             "stop": 9, "target1": None, "ts_opened": 0} for i in (1, 2, 3)]
+    rows.append({"id": 4, "symbol": "BBB", "direction": 1, "quantity": 100, "entry": 10,
+                 "stop": 9, "target1": None, "ts_opened": 0})
+    rows.append({"id": 5, "symbol": "NOSIZE", "direction": 1, "quantity": None, "entry": 10,
+                 "stop": 9, "target1": None, "ts_opened": 0})
+    rows.append({"id": 6, "symbol": "DEAD", "direction": 1, "quantity": 50, "entry": 10,
+                 "stop": 9, "target1": None, "ts_opened": 0})
+    v = P.build(rows, account=10000, with_correlation=False)
+finally:
+    P._enrich = real_enrich
+check("three journal rows in one stock are one position for concentration",
+      abs(v.concentration - (0.9 ** 2 + 0.1 ** 2)) < 1e-9, v.concentration)
+check("and the one-stock warning names it",
+      any("AAA alone is 90%" in w for w in v.warnings), v.warnings)
+check("a position with no size is left out of the money, and said so",
+      close(v.invested, 10000) and any("No size is logged for NOSIZE" in w for w in v.warnings))
+check("an unpriced holding's cost stays out of cash",
+      close(v.cash, max(0.0, 10000 - 10000 - 500)), v.cash)
+
+print()
+print("=" * 72)
+print("A STOP THAT TRADED AND RECOVERED")
+print("=" * 72)
+from types import SimpleNamespace as _NS
+bars = _NS(timestamp=[100, 200, 300], low=[8.0, 9.5, 8.9], high=[11, 11, 11])
+check("a low through the stop after opening counts as hit",
+      P.stop_touched(bars, 150, 9.0, 1) == (300, 8.9))
+check("a low from before the position opened does not",
+      P.stop_touched(bars, 150, 8.5, 1) == (None, None))
+check("for a short it is the high", P.stop_touched(bars, 0, 10.9, -1) == (100, 11.0))
+p = pos(1, 10, 9, 9.6)
+p.touched, p.touched_at = 8.9, 300
+P.mark(p)
+check("a position back above its stop after touching it is still breached", p.breached)
+
+print()
+print("=" * 72)
+print("RETURNS ON THE DAYS BOTH TRADED")
+print("=" * 72)
+import numpy as np
+from bot import risk as R
+# A coin trades every day; a stock skips the weekend (days 5 and 6).
+coin_close = np.array([100, 101, 102, 103, 104, 110, 120, 121], dtype=float)
+coin = _NS(session_id=np.arange(8), close=coin_close)
+stock = _NS(session_id=np.array([0, 1, 2, 3, 4, 7]), close=np.array([50, 50.5, 51, 51.5, 52, 59.0]))
+rets = R.aligned_returns([coin, stock])
+check("the coin's weekend move lands on the Monday the stock reopened",
+      rets.shape == (2, 5) and abs(rets[0][-1] - (121 / 104 - 1)) < 1e-12
+      and abs(rets[1][-1] - (59.0 / 52 - 1)) < 1e-12, str(rets.tolist()))
+
+print()
+print("=" * 72)
+print("THE JOURNAL'S OWN NUMBERS")
+print("=" * 72)
+import harness
+from bot import database as db
+DB = harness.isolate("journal")[0]
+conn = db.connect(DB)
+for bad, kw in (("a size of zero", {"quantity": 0}), ("a negative size", {"quantity": -5}),
+                ("a stop of zero", {"stop": 0}), ("an infinite entry", {"entry": float("inf")}),
+                ("a NaN target", {"target1": float("nan")})):
+    args = dict(entry=100, stop=95, target1=110, quantity=10)
+    args.update(kw)
+    try:
+        db.open_trade(conn, "AAA", "1d", 1, **args)
+        refused = False
+    except ValueError:
+        refused = True
+    check("%s is refused" % bad, refused)
+t1 = db.open_trade(conn, "AAA", "1d", 1, entry=100, stop=90, quantity=10)
+t2 = db.open_trade(conn, "BBB", "1d", 1, entry=100, stop=90, quantity=10)
+t3 = db.open_trade(conn, "CCC", "1d", 1, entry=100, stop=90, quantity=10)
+try:
+    db.close_trade(conn, t1, -1)
+    refused = False
+except ValueError:
+    refused = True
+check("a negative exit price is refused", refused)
+# Opened in the order 1, 2, 3, closed in the order 3, 1, 2.
+conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (1, t1))
+db.close_trade(conn, t3, 120)            # +2R, closed first
+conn.execute("UPDATE trades SET ts_closed=1000 WHERE id=?", (t3,))
+db.close_trade(conn, t1, 80)             # -2R
+conn.execute("UPDATE trades SET ts_closed=2000 WHERE id=?", (t1,))
+db.close_trade(conn, t2, 100)            # even
+conn.execute("UPDATE trades SET ts_closed=3000 WHERE id=?", (t2,))
+conn.commit()
+plain = db.journal_summary(conn)
+check("drawdown follows the order trades closed", close(plain["max_drawdown_r"], 2.0), plain["max_drawdown_r"])
+check("an even trade is neither a win nor a loss",
+      (plain["wins"], plain["losses"], plain["scratches"]) == (1, 1, 1))
+net = db.journal_summary(conn, costs={"equity": 0.001})
+check("after costs, every trade pays 0.01R here",
+      close(net["expectancy_r"], plain["expectancy_r"] - 0.01) and net["after_costs"]
+      and close(net["gross_expectancy_r"], plain["expectancy_r"]))
+check("and the even trade becomes a small loss, as it would in an account",
+      net["scratches"] == 0 and net["losses"] == 2)
+conn.close()
+
+print()
+print("=" * 72)
+print("A GAP IS MEASURED FROM THE STOP")
+print("=" * 72)
+from bot import decision as D
+closes = np.array([100.0] * 40 + [90.0] + [100.0] * 10)       # one -10% day
+gap = D._gap_risk(entry=100.0, stop=95.0, qty=10, account=100000, at_risk=50.0,
+                  bars=_NS(close=closes))
+check("a worst-day gap from a price resting at the stop",
+      close(gap["gap_price"], 95.0 * 0.9) and close(gap["gap_loss"], (100 - 85.5) * 10), gap)
 
 print()
 print("%d failure(s)" % len(fails))

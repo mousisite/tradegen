@@ -271,9 +271,10 @@ def _gap_risk(entry: float, stop: float, qty: float, account: float,
     if adverse <= 0:
         return {}
 
-    gap_fill = entry * (1 - adverse) if long_side else entry * (1 + adverse)
-    # If such a move would not even reach the stop, the stop fills normally and
-    # the loss stays what was budgeted.
+    # The bad morning that matters starts with the price resting just above
+    # the stop, not at the entry: from there the worst day opens straight
+    # through it. Measured from the entry it came out about 1R too small.
+    gap_fill = stop * (1 - adverse) if long_side else stop * (1 + adverse)
     gap_loss = max(at_risk, abs(entry - gap_fill) * qty)
     return {
         "gap_move": adverse,

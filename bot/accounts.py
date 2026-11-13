@@ -27,7 +27,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 # Tables that belong to one person. Everything else is shared or derived.
-OWNED_TABLES = ("runs", "trades", "watchlist", "alerts", "theses")
+# In the order they can be deleted: a trade opened from an analysis points at
+# its run, so trades go before runs or the database refuses the delete.
+OWNED_TABLES = ("trades", "runs", "watchlist", "alerts", "theses")
 
 # The account the app uses when nobody has signed in, which is how it behaves
 # on your own machine with no credentials configured.

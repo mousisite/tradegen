@@ -53,23 +53,38 @@ def _point(headline: str, detail: str) -> Dict:
     return {"headline": headline, "detail": detail, "evidence": []}
 
 
+def _size(entry: float, stop: float, crypto: bool = False) -> float:
+    """The size the app's own rule gives: the settings' risk per trade,
+    capped at the largest position the settings allow."""
+    from . import config as config_mod
+    cfg = config_mod.load()
+    account = float(cfg["account_size"])
+    qty = account * float(cfg["risk_per_trade_pct"]) / 100.0 / abs(entry - stop)
+    qty = min(qty, account * float(cfg["max_position_pct"]) / 100.0 / entry)
+    return round(qty, 6) if crypto else float(int(qty))
+
+
 def _seed(conn: sqlite3.Connection, user_id: int) -> None:
     """Fill the example account. Prices are live, so the numbers look current."""
     px = {s: _price(s) for s in ("NVDA", "AAPL", "TSLA", "MSFT", "BTC-USD")}
 
-    # Two positions still open, priced so they read as a normal working book.
-    nvda = px["NVDA"] * 0.97
-    db_mod.open_trade(conn, "NVDA", "1d", 1, round(nvda, 2),
-                      round(nvda * 0.93, 2), round(nvda * 1.12, 2),
-                      quantity=20, risk_amount=round(nvda * 0.07 * 20, 2),
+    # Two positions still open, priced so they read as a normal working book,
+    # and sized by the same rule the app applies to everyone else's.
+    nvda = round(px["NVDA"] * 0.97, 2)
+    nvda_stop = round(nvda * 0.93, 2)
+    q = _size(nvda, nvda_stop)
+    db_mod.open_trade(conn, "NVDA", "1d", 1, nvda, nvda_stop, round(nvda * 1.12, 2),
+                      quantity=q, risk_amount=round((nvda - nvda_stop) * q, 2),
                       notes="Example: bought the pullback to the 21-day average.",
                       user=user_id)
-    btc = px["BTC-USD"] * 0.98
-    db_mod.open_trade(conn, "BTC-USD", "1d", 1, round(btc, 2),
-                      round(btc * 0.92, 2), round(btc * 1.15, 2),
-                      quantity=0.05, risk_amount=round(btc * 0.08 * 0.05, 2),
-                      notes=("Example: kept small, because a bad day on Bitcoin "
-                             "costs several times what the stop budgets."),
+    btc = round(px["BTC-USD"] * 0.98, 2)
+    btc_stop = round(btc * 0.92, 2)
+    q = _size(btc, btc_stop, crypto=True)
+    db_mod.open_trade(conn, "BTC-USD", "1d", 1, btc, btc_stop, round(btc * 1.15, 2),
+                      quantity=q, risk_amount=round((btc - btc_stop) * q, 2),
+                      notes=("Example: sized by the 1% rule, and still the one to "
+                             "watch: a bad day on Bitcoin costs several times "
+                             "what the stop budgets."),
                       user=user_id)
 
     # Three closed: a target hit, a stop hit, and a small win taken early.

@@ -407,6 +407,13 @@ def _settings_key(cfg: Dict) -> str:
     return hashlib.sha1(repr(picked).encode("utf-8")).hexdigest()[:12]
 
 
+def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
+    """Round-trip trading costs as fractions of the price, from the settings."""
+    cfg = cfg or _cfg()
+    return {"equity": float(cfg.get("cost_bps_equity", 2.0)) / 10000.0,
+            "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0}
+
+
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
                     ttl: Optional[float] = None) -> engine.Analysis:
@@ -581,7 +588,7 @@ def index():
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)
         open_trades = db_mod.list_trades(conn, status="open", limit=20,
                                          user=uid())
-        summary = db_mod.journal_summary(conn, user=uid())
+        summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
     finally:
         conn.close()
@@ -728,7 +735,7 @@ def trades():
                                          user=uid())
         closed = db_mod.list_trades(conn, status="closed", limit=100,
                                     user=uid())
-        summary = db_mod.journal_summary(conn, user=uid())
+        summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         live = _mark_to_market(open_trades)
     finally:
         conn.close()
@@ -748,7 +755,10 @@ def _mark_one(trade):
 
     target = trade["target1"]
     status = "open"
-    if (price <= stop) if direction > 0 else (price >= stop):
+    # A stop that traded and recovered was still hit: the plan said get out.
+    touched_at, _touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
+                                                      stop, direction)
+    if ((price <= stop) if direction > 0 else (price >= stop)) or touched_at:
         status = "past stop"
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
@@ -810,8 +820,14 @@ def take_trade():
                                            "to trade."), 400
 
         cfg = _cfg()
-        direction = 1 if row["action"] in ("BUY", "WAIT") else -1
+        if row["action"] == "AVOID":
+            return render_template("error.html", symbol=row["symbol"],
+                                   message="That analysis said AVOID: there is no "
+                                           "trade in it to simulate."), 400
         entry, stop = float(row["entry"]), float(row["stop"])
+        # The side is where the stop sits, not the word on the call: a WAIT
+        # can be waiting to go short.
+        direction = 1 if stop < entry else -1
         per_unit = abs(entry - stop)
         account = cfg["account_size"]
         qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
@@ -1899,7 +1915,7 @@ def portfolio():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = db_mod.list_trades(conn, status="open", limit=100, user=uid())
-        summary = db_mod.journal_summary(conn, user=uid())
+        summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()
 

@@ -370,10 +370,19 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                run_id: Optional[int] = None, account: str = "paper",
                strategy_note: str = "", notes: str = "", user: int = 1) -> int:
     """Record a newly opened position."""
+    import math
     if direction not in (1, -1):
         raise ValueError("direction must be +1 (long) or -1 (short)")
+    for label, value in (("entry", entry), ("stop", stop), ("target", target1),
+                         ("second target", target2), ("size", quantity)):
+        if value is not None and not math.isfinite(float(value)):
+            raise ValueError("the %s must be a real number" % label)
     if entry <= 0:
         raise ValueError("entry price must be positive")
+    if stop <= 0:
+        raise ValueError("the stop must be a positive price")
+    if quantity is not None and float(quantity) <= 0:
+        raise ValueError("the size must be more than zero, or left empty")
     # A stop on the wrong side is almost always a typo, and silently accepting
     # it would corrupt every R calculation that follows.
     if direction > 0 and stop >= entry:
@@ -397,6 +406,9 @@ def close_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
                 exit_reason: str = "manual", notes: str = "",
                 user: Optional[int] = None) -> Dict:
     """Close a position and compute its realised R multiple and cash result."""
+    import math
+    if not math.isfinite(float(exit_price)) or float(exit_price) <= 0:
+        raise ValueError("the exit price must be a positive number")
     sql, args = _own("SELECT * FROM trades WHERE id=?", [trade_id], user)
     row = conn.execute(sql, args).fetchone()
     if row is None:
@@ -465,24 +477,38 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
 
 
 def journal_summary(conn: sqlite3.Connection, account: str = "paper",
-                    user: Optional[int] = None) -> Dict:
+                    user: Optional[int] = None,
+                    costs: Optional[Dict[str, float]] = None) -> Dict:
     """Realised performance of the journal so far.
 
     Expectancy is reported in R rather than cash because R is comparable across
     instruments and position sizes, which is what makes it the honest measure
     of whether a process works.
+
+    costs maps "equity" and "crypto" to a round-trip cost as a fraction of the
+    price. Given them, every figure is after costs, which is what the account
+    would really show; the before-cost expectancy is kept beside it. Trades are
+    taken in the order they closed, which is the order the drawdown happened.
     """
     sql, args = _own("SELECT * FROM trades WHERE status='closed' AND account=?",
                      [account], user)
-    rows = list(conn.execute(sql, args))
+    rows = list(conn.execute(sql + " ORDER BY ts_closed, id", args))
     n = len(rows)
     if n == 0:
         return {"trades": 0, "open": count_open(conn, account, user)}
 
-    rs = [float(r["r_multiple"] or 0.0) for r in rows]
+    costs = costs or {}
+    gross = [float(r["r_multiple"] or 0.0) for r in rows]
+    rs, pnl = [], 0.0
+    for r, row in zip(gross, rows):
+        cost = float(costs.get("crypto" if row["symbol"].endswith("-USD") else "equity", 0.0))
+        risk = abs(float(row["entry"]) - float(row["stop"]))
+        cost_r = (float(row["entry"]) * cost / risk) if risk > 0 else 0.0
+        rs.append(r - cost_r)
+        pnl += float(row["pnl"] or 0.0) - float(row["entry"]) * float(row["quantity"] or 0.0) * cost
+    # A scratch (exactly even) is neither a win nor a loss.
     wins = [r for r in rs if r > 0]
-    losses = [r for r in rs if r <= 0]
-    pnl = sum(float(r["pnl"] or 0.0) for r in rows)
+    losses = [r for r in rs if r < 0]
 
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
@@ -499,6 +525,9 @@ def journal_summary(conn: sqlite3.Connection, account: str = "paper",
         "open": count_open(conn, account, user),
         "wins": len(wins),
         "losses": len(losses),
+        "scratches": n - len(wins) - len(losses),
+        "after_costs": bool(costs),
+        "gross_expectancy_r": sum(gross) / n,
         "hit_rate": len(wins) / n,
         "expectancy_r": sum(rs) / n,
         "total_r": sum(rs),

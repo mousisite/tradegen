@@ -149,11 +149,11 @@
         <div class="n">{{ summary.open }} still open</div></div>
       <div class="f"><div class="k">Hit rate</div>
         <div class="v fig">{{ summary.hit_rate|pct }}</div>
-        <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost</div></div>
+        <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost{% if summary.scratches %} · {{ summary.scratches }} even{% endif %}</div></div>
       <div class="f"><div class="k">Expectancy</div>
         <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
           {{ summary.expectancy_r|signed(3) }}R</div>
-        <div class="n">per trade</div></div>
+        <div class="n">per trade{% if summary.after_costs %}, after costs{% endif %}</div></div>
       <div class="f"><div class="k">Total</div>
         <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
           {{ summary.total_r|signed(2) }}R</div>
