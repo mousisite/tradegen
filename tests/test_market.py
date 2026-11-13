@@ -554,6 +554,75 @@ finally:
     REFUSE[0] = False
 
 
+# ---------------------------------------------------------------------------
+head("PAPER CHECK READS A POSITION THE WAY THE JOURNAL DOES")
+# ---------------------------------------------------------------------------
+# `paper.py check` scanned bars from the one the trade opened in, while the
+# journal pages leave that bar out: part of its range may be from before the
+# entry, and a low from before you bought is not your stop being hit.
+
+import io  # noqa: E402
+
+import paper  # noqa: E402
+from rich.console import Console  # noqa: E402
+
+from bot import database as db  # noqa: E402
+from bot.portfolio import stop_touched  # noqa: E402
+
+E = D0 + 500 * DAY + OPEN                       # the entry day's bar
+OPENED = E + 3600                               # bought an hour into the session
+stamps = np.array([E + k * DAY for k in range(-3, 4)], dtype=np.int64)
+
+
+def position(lows, highs, live):
+    return types.SimpleNamespace(timestamp=stamps, low=np.asarray(lows, dtype=float),
+                                 high=np.asarray(highs, dtype=float), last_price=live)
+
+
+#                 E-3  E-2  E-1   E   E+1  E+2  E+3
+BOOK = {
+    "DIP": position([98, 98, 98, 93, 96, 96, 96], [101] * 7, 97.0),    # dip before entry
+    "HIT": position([98, 98, 98, 99, 96, 94, 96], [101] * 7, 97.0),    # stop hit at E+2
+    "WON": position([98, 98, 98, 99, 99, 99, 99], [101, 101, 101, 101, 105, 101, 101],
+                    102.0),                                           # target at E+1
+    "EDGE": position([98, 98, 98, 93, 96, 96, 96], [101] * 7, 97.0),   # opened at E's start
+}
+paper.fetch_bars = lambda symbol, interval="1d": BOOK[symbol]
+conn = db.connect(DB_PATH)
+for symbol, target, opened in (("DIP", 110.0, OPENED), ("HIT", 110.0, OPENED),
+                               ("WON", 104.0, OPENED), ("EDGE", 110.0, E)):
+    tid = db.open_trade(conn, symbol, "1d", 1, entry=100.0, stop=95.0, target1=target,
+                        quantity=1)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (opened, tid))
+conn.commit()
+out = io.StringIO()
+paper.console = Console(file=out, width=200, color_system=None)
+paper.cmd_check(types.SimpleNamespace(account="paper"), conn)
+conn.close()
+rows = {}
+for line in out.getvalue().splitlines():           # the table row, before any notes
+    for symbol in BOOK:
+        if symbol in line.split():
+            rows.setdefault(symbol, line)
+
+
+def said(symbol):
+    return rows.get(symbol, "")
+
+
+check("a dip in the entry bar from before the entry is not a stop hit",
+      "STOP" not in said("DIP") and "open" in said("DIP"), said("DIP"))
+check("which is what the journal pages say too",
+      stop_touched(BOOK["DIP"], OPENED, 95.0, 1) == (None, None))
+check("a stop hit on a later bar is", "STOP HIT" in said("HIT"), said("HIT"))
+check("on the bar the journal pages name", stop_touched(BOOK["HIT"], OPENED, 95.0, 1)[0]
+      == int(stamps[5]))
+check("and a target reached after the entry is", "TARGET HIT" in said("WON"), said("WON"))
+check("a bar that starts the moment the trade opened is read by the same rule",
+      ("STOP" in said("EDGE")) == (stop_touched(BOOK["EDGE"], E, 95.0, 1)[0] is not None),
+      (said("EDGE"), stop_touched(BOOK["EDGE"], E, 95.0, 1)))
+
+
 print()
 print("%d failure(s)" % len(fails))
 print("MARKET OK" if not fails else "FAILURES: %s" % fails)
