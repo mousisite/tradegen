@@ -944,7 +944,7 @@ def analyse():
                            families=families, ranked=ranked, hold_text=hold_text,
                            plan=result.plan, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
-                           overlap=overlap,
+                           overlap=overlap, chart=_trade_chart(result),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
                            # A visitor cannot make a share, but every example
@@ -952,6 +952,41 @@ def analyse():
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
                                result.bars.symbol))
                                if result.bars.symbol in public_mod.NAMES else ""))
+
+
+def _trade_chart(result) -> Dict:
+    """The analysis page's candle chart, from the bars already in hand.
+
+    Drawn twice, wide and narrow, and the page shows one: scaled down to a
+    phone, the wide drawing's labels shrink to a few pixels, so a phone gets
+    fewer candles drawn larger instead. An AVOID has no plan, so only the
+    prices are drawn.
+    """
+    bars, plan = result.bars, result.plan
+    action = (plan.action or "").upper()
+    levels = {}
+    if plan.entry and action != "AVOID":
+        side = plan.direction or (1 if (plan.stop or 0) < plan.entry else -1)
+        levels = {"Buy at" if side > 0 else "Short at": plan.entry,
+                  "Stop": plan.stop, "Target": plan.target1}
+    as_of = alerts_mod.as_of(bars)
+    drawn = dict(levels=levels, last=bars.last_price, as_of=as_of,
+                 interval=bars.interval)
+    series = (bars.timestamp, bars.open, bars.high, bars.low, bars.close,
+              bars.volume)
+    try:
+        wide = charts_mod.trade_chart(*series, **drawn)
+        narrow = charts_mod.trade_chart(*series, width=340, height=260, bars=40,
+                                        **drawn)
+    except Exception:
+        # A chart that cannot be drawn must not cost the person the analysis.
+        app.logger.exception("Could not draw the trade chart for %s", bars.symbol)
+        return {}
+    if not wide:
+        return {}
+    return {"wide": wide, "narrow": narrow or wide, "as_of": as_of,
+            "levels": bool(levels), "words": charts_mod.bar_words(bars.interval),
+            "intraday": charts_mod.bar_words(bars.interval) != "daily"}
 
 
 def _family_rollup(result: engine.Analysis):
