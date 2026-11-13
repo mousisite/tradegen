@@ -201,6 +201,12 @@ exc = refused("TEST", Wire(Answer(500)))
 check("any other failure keeps its status, but not the address",
       "HTTP 500" in str(exc) and not any(u in str(exc) for u in URLISH), str(exc))
 
+wire = Wire(Answer(422))
+exc = refused("TEST", wire)
+check("a range the source does not serve is not a missing ticker, and is not asked twice",
+      not isinstance(exc, market.SymbolNotFound) and "no instrument" not in str(exc)
+      and "HTTP 422" in str(exc) and len(wire.asked) == 1, (repr(exc), len(wire.asked)))
+
 on(Wire(Answer(429)))
 for _ in range(upstream.THRESHOLD):
     try:
@@ -557,8 +563,10 @@ finally:
 # ---------------------------------------------------------------------------
 head("PAPER CHECK READS A POSITION THE WAY THE JOURNAL DOES")
 # ---------------------------------------------------------------------------
-# `paper.py check` scanned bars from the one the trade opened in, while the
-# journal pages leave that bar out: part of its range may be from before the
+# `paper.py check` chose the bars to scan by a rule of its own, one step from
+# the journal pages' (portfolio.stop_touched): a bar starting the moment a
+# trade opened was read by one and not the other. The pages' rule leaves out
+# the bar the trade opened in, since part of its range may be from before the
 # entry, and a low from before you bought is not your stop being hit.
 
 import io  # noqa: E402

@@ -239,11 +239,15 @@ def _fetch(url: str, params: dict, tries: int = _TRIES) -> dict:
             wait = upstream.retry_after_seconds(r)
             upstream.note_throttled(_HOST, wait)
             raise _refused(r.status_code, wait)
-        if r.status_code in (404, 422):
+        if r.status_code == 404:
             # Its own kind, so a caller can tell "no such ticker" from any
             # other failure without reading the message.
-            raise SymbolNotFound("The data source has nothing under that "
-                                 "symbol (HTTP %d)." % r.status_code)
+            raise SymbolNotFound("The data source has nothing under that symbol.")
+        if r.status_code == 422:
+            # A range the source does not serve at that bar size: asking
+            # again gets the same answer.
+            raise DataError("The market data source could not be used: it does "
+                            "not serve that range of bars (HTTP 422).")
         last = "it answered with an error (HTTP %d)" % r.status_code
     raise DataError("The market data source could not be used: %s." % last)
 
