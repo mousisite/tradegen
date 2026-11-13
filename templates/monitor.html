@@ -6,8 +6,13 @@
 <div class="pagehead">
   <h1>What to keep an eye on</h1>
   <p>Alerts, a watchlist, saved theses, and routines that do the checking for
-    you. Nothing here runs while this window is closed, so it tells you when it
-    last actually looked.</p>
+    you.
+    {% if loop and loop.running %}The server checks your alerts every
+    {{ (loop.interval // 60)|int }} minutes, and your open positions' stops,
+    even when this page is closed{% if loop.last_run %}; it last looked
+    {{ loop.last_run|ago }}{% endif %}.
+    {% else %}Background checking is off, so alerts are only checked when you
+    press the button below, and each one says when it last looked.{% endif %}</p>
 </div>
 
 {% if request.args.get('checked') %}
@@ -102,8 +107,8 @@
           <label for="a-threshold">Value</label>
           <input class="field fig" id="a-threshold" name="threshold" type="number"
                  step="any" placeholder="price, percent or level">
-          <div class="hint">Leave empty for the two moving-average conditions,
-            which need no value.</div>
+          <div class="hint">Leave empty for the conditions that need no value:
+            the moving average, and a change of call.</div>
         </div>
         <div class="setfield">
           <label for="a-interval">Bars</label>
@@ -140,17 +145,19 @@
         {% for row, text in alerts %}
           <tr>
             <td>{{ text }}
-              {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}</td>
+              {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}
+              {% if row['state'] %}<div class="faint" style="font-size:var(--t-xs)">call when last checked: {{ row['state'] }}</div>{% endif %}</td>
             <td>
               {% if row['triggered_ts'] %}
                 <span class="chip hold">Triggered</span>
               {% elif row['active'] %}
                 <span class="chip mute">Watching</span>
               {% else %}
-                <span class="chip mute">Off</span>
+                <span class="chip mute">Paused</span>
               {% endif %}
             </td>
-            <td class="soft">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}</td>
+            <td class="soft">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}
+              {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">Could not check: {{ row['last_error'] }}</div>{% endif %}</td>
             <td class="soft">
               {% if row['trigger_note'] %}
                 {{ row['trigger_note'] }}
@@ -158,11 +165,21 @@
               {% else %}—{% endif %}
             </td>
             <td class="r">
-              <div style="display:flex;gap:5px;justify-content:flex-end">
+              <div style="display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap">
                 {% if row['triggered_ts'] %}
                   <form method="post" action="{{ url_for('alert_action', action='reset') }}">
                     <input type="hidden" name="alert_id" value="{{ row['id'] }}">
                     <button class="btn quiet sm" type="submit">Re-arm</button>
+                  </form>
+                {% elif row['active'] %}
+                  <form method="post" action="{{ url_for('alert_action', action='pause') }}">
+                    <input type="hidden" name="alert_id" value="{{ row['id'] }}">
+                    <button class="btn quiet sm" type="submit">Pause</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="{{ url_for('alert_action', action='resume') }}">
+                    <input type="hidden" name="alert_id" value="{{ row['id'] }}">
+                    <button class="btn quiet sm" type="submit">Resume</button>
                   </form>
                 {% endif %}
                 <form method="post" action="{{ url_for('alert_action', action='delete') }}">
@@ -170,6 +187,24 @@
                   <button class="btn quiet sm" type="submit">Delete</button>
                 </form>
               </div>
+              <details style="margin-top:6px;text-align:left">
+                <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">Edit</summary>
+                <form method="post" action="{{ url_for('alert_action', action='edit') }}"
+                      style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+                  <input type="hidden" name="alert_id" value="{{ row['id'] }}">
+                  {% if kinds.get(row['kind'], {}).get('needs_threshold') %}
+                    <label class="sr" for="e-th-{{ row['id'] }}">Value</label>
+                    <input class="field fig" id="e-th-{{ row['id'] }}" name="threshold" type="number"
+                           step="any" style="max-width:110px;min-height:34px"
+                           value="{{ (row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
+                  {% endif %}
+                  <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
+                  <input class="field" id="e-note-{{ row['id'] }}" name="note" type="text"
+                         style="max-width:180px;min-height:34px" value="{{ row['note'] or '' }}"
+                         placeholder="note">
+                  <button class="btn quiet sm" type="submit">Save</button>
+                </form>
+              </details>
             </td>
           </tr>
         {% endfor %}
@@ -178,6 +213,44 @@
     </div>
     {% else %}
       <div class="blank">No alerts set.</div>
+    {% endif %}
+  </div>
+
+  {% if email_ready and can_email %}
+    <form method="post" action="{{ url_for('alert_email') }}" class="card"
+          style="margin-top:var(--s3);display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap">
+      <input type="hidden" name="on" value="{{ '0' if alert_email else '1' }}">
+      <span class="prose" style="margin:0;flex:1 1 240px">{% if alert_email %}Fired alerts and
+        crossed stops are also emailed to you.{% else %}Get an email when an alert
+        fires or a position crosses its stop.{% endif %}</span>
+      <button class="btn quiet sm" type="submit">{{ 'Stop the emails' if alert_email else 'Email me' }}</button>
+    </form>
+  {% endif %}
+
+  <div class="sechead" style="margin-top:var(--s4)">
+    <h3>What it has told you</h3>
+    <span class="count">{{ events|length }}</span>
+  </div>
+  <div class="card pad0">
+    {% if events %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>When</th><th>What happened</th><th>Price as of</th><th>Email</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr>
+            <td class="soft" style="white-space:nowrap">{{ e['ts']|ago }}</td>
+            <td>{% if e['kind'] == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e['message'] }}</td>
+            <td class="soft" style="white-space:nowrap">{{ e['as_of'] or '—' }}</td>
+            <td class="soft">{% if e['emailed'] %}sent{% elif e['email_error'] %}<span style="color:var(--loss)">failed: {{ e['email_error'] }}</span>{% else %}—{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing yet. Fired alerts and positions that cross their
+        stop are listed here, with the time of the price behind them.</div>
     {% endif %}
   </div>
 </section>

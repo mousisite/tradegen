@@ -91,6 +91,7 @@ class User:
     plan_status: str = ""
     bonus_until: int = 0          # free Pro from invites, until this time
     weekly_email: bool = False
+    alert_email: bool = False
     created_ts: int = 0
 
     @property
@@ -114,6 +115,8 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 plan=row["plan"] if "plan" in keys else "free",
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
+                alert_email=bool(row["alert_email"]) if "alert_email" in keys
+                else False,
                 weekly_email=bool(row["weekly_email"]) if "weekly_email" in keys
                 else False,
                 created_ts=row["created_ts"] if "created_ts" in keys else 0)
@@ -140,6 +143,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                         ("invited_by", "INTEGER NOT NULL DEFAULT 0"),
                         ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),
                         ("weekly_email", "INTEGER NOT NULL DEFAULT 0"),
+                        ("alert_email", "INTEGER NOT NULL DEFAULT 0"),
                         ("digest_week", "TEXT NOT NULL DEFAULT ''")):
         if column not in have:
             conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
@@ -420,10 +424,21 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
     public.ensure_schema(conn)
     conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
+    from .database import _EVENTS
+    conn.executescript(_EVENTS)
+    cur = conn.execute("DELETE FROM alert_events WHERE user_id=?", (user_id,))
+    removed["alert_events"] = cur.rowcount
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()
     return removed
+
+
+def set_alert_email(conn: sqlite3.Connection, user_id: int, on: bool) -> None:
+    """Whether fired alerts and crossed stops are also emailed to this person."""
+    ensure_schema(conn)
+    conn.execute("UPDATE users SET alert_email=? WHERE id=?", (1 if on else 0, user_id))
+    conn.commit()
 
 
 def settings_for(conn: sqlite3.Connection, user_id: int) -> Dict:

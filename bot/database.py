@@ -233,6 +233,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     wanted = {
         "strategy_stats": [("sum_r_gross", "REAL NOT NULL DEFAULT 0")],
+        # state: the last call seen by a call alert, e.g. WAIT, so a change
+        # can be noticed. last_error: why the last check of it failed.
+        "alerts": [("state", "TEXT"), ("last_error", "TEXT"),
+                   ("last_error_ts", "INTEGER")],
+        # When the background check last told the owner this position had
+        # crossed its stop, so it is said once, not every five minutes.
+        "trades": [("breach_noticed", "INTEGER")],
     }
     for table, columns in wanted.items():
         existing = {row["name"] for row in
@@ -680,9 +687,112 @@ def alert_fire(conn: sqlite3.Connection, alert_id: int, value: float,
     conn.commit()
 
 
-def alert_checked(conn: sqlite3.Connection, alert_id: int) -> None:
-    conn.execute("UPDATE alerts SET last_checked=? WHERE id=?",
-                 (int(time.time()), alert_id))
+def alert_checked(conn: sqlite3.Connection, alert_id: int,
+                  state: Optional[str] = None) -> None:
+    """A check that found nothing to say. Clears any earlier error."""
+    if state is None:
+        conn.execute("UPDATE alerts SET last_checked=?, last_error=NULL, "
+                     "last_error_ts=NULL WHERE id=?", (int(time.time()), alert_id))
+    else:
+        conn.execute("UPDATE alerts SET last_checked=?, last_error=NULL, "
+                     "last_error_ts=NULL, state=? WHERE id=?",
+                     (int(time.time()), state, alert_id))
+    conn.commit()
+
+
+def alert_failed(conn: sqlite3.Connection, alert_id: int, error: str) -> None:
+    """A check that could not be done, kept so the page can say why."""
+    conn.execute("UPDATE alerts SET last_checked=?, last_error=?, last_error_ts=? "
+                 "WHERE id=?", (int(time.time()), error[:200], int(time.time()),
+                                alert_id))
+    conn.commit()
+
+
+def alert_set_active(conn: sqlite3.Connection, alert_id: int, active: bool,
+                     user: Optional[int] = None) -> None:
+    """Pause or resume an alert without losing what it last saw."""
+    sql, args = _own("UPDATE alerts SET active=? WHERE id=?",
+                     [1 if active else 0, alert_id], user)
+    if conn.execute(sql, args).rowcount == 0:
+        raise ValueError("No alert with id %d" % alert_id)
+    conn.commit()
+
+
+def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[float],
+               note: str, user: Optional[int] = None) -> None:
+    """Change an alert's value and note. Its condition stays what it was."""
+    from .alerts import KINDS
+    sql, args = _own("SELECT kind FROM alerts WHERE id=?", [alert_id], user)
+    row = conn.execute(sql, args).fetchone()
+    if row is None:
+        raise ValueError("No alert with id %d" % alert_id)
+    spec = KINDS.get(row["kind"], {})
+    if spec.get("needs_threshold") and threshold is None:
+        raise ValueError("%s needs a value to compare against." % spec["label"])
+    if threshold is not None and spec.get("unit") == "price" and threshold <= 0:
+        raise ValueError("A price alert needs a positive price.")
+    sql, args = _own("UPDATE alerts SET threshold=?, note=? WHERE id=?",
+                     [threshold if spec.get("needs_threshold") else None,
+                      note[:200], alert_id], user)
+    conn.execute(sql, args)
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# What the background checks have told people
+#
+# Every fired alert and every crossed stop is written here, with the time of
+# the price it was based on and whether an email went out. Kept per person;
+# the page shows the latest.
+# ---------------------------------------------------------------------------
+
+_EVENTS = """
+CREATE TABLE IF NOT EXISTS alert_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    ts          INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    value       REAL,
+    as_of       TEXT NOT NULL DEFAULT '',
+    alert_id    INTEGER,
+    trade_id    INTEGER,
+    emailed     INTEGER,
+    email_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alert_events_user ON alert_events(user_id, ts);
+"""
+
+
+def event_add(conn: sqlite3.Connection, user: int, kind: str, symbol: str,
+              message: str, value: Optional[float] = None, as_of: str = "",
+              alert_id: Optional[int] = None,
+              trade_id: Optional[int] = None) -> int:
+    conn.executescript(_EVENTS)
+    cur = conn.execute(
+        "INSERT INTO alert_events (user_id, ts, kind, symbol, message, value, "
+        "as_of, alert_id, trade_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        (int(user), int(time.time()), kind, symbol, message[:500], value, as_of,
+         alert_id, trade_id))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def event_list(conn: sqlite3.Connection, user: int, limit: int = 20) -> List[sqlite3.Row]:
+    conn.executescript(_EVENTS)
+    return list(conn.execute("SELECT * FROM alert_events WHERE user_id=? "
+                             "ORDER BY ts DESC, id DESC LIMIT ?", (int(user), limit)))
+
+
+def event_emailed(conn: sqlite3.Connection, event_ids: List[int],
+                  error: str = "") -> None:
+    """Record whether the email for these events went out."""
+    conn.executescript(_EVENTS)
+    for event_id in event_ids:
+        conn.execute("UPDATE alert_events SET emailed=?, email_error=? WHERE id=?",
+                     (None if error else int(time.time()), error[:200] or None,
+                      event_id))
     conn.commit()
 
 

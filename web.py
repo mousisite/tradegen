@@ -1919,6 +1919,7 @@ def monitor():
         alert_rows = db_mod.alert_list(conn, user=uid())
         watch_rows = db_mod.watchlist(conn, user=uid())
         thesis_rows = db_mod.thesis_list(conn, limit=20, user=uid())
+        events = db_mod.event_list(conn, uid(), limit=15)
     finally:
         conn.close()
 
@@ -1953,7 +1954,16 @@ def monitor():
                            theses=judged, board=board,
                            outcomes=thesis_mod.OUTCOMES, kinds=alerts_mod.KINDS,
                            workflows=workflows_mod.WORKFLOWS,
-                           last_run=app.config.get("LAST_WORKFLOW"))
+                           last_run=app.config.get("LAST_WORKFLOW"),
+                           events=events,
+                           loop=({k: v for k, v in ALERTS.status().items()
+                                  if k in ("running", "interval", "last_run")}
+                                 if ALERTS is not None else None),
+                           email_ready=codes_mod.email_ready(),
+                           alert_email=bool(getattr(g.user, "alert_email", False)),
+                           can_email=bool(g.user and g.user.email
+                                          and not g.user.email.endswith(".invalid")
+                                          and not g.user.is_local))
 
 
 @app.route("/monitor/alert/add", methods=["POST"])
@@ -2001,13 +2011,36 @@ def add_alert():
 
 @app.route("/monitor/alert/<action>", methods=["POST"])
 def alert_action(action):
-    if action not in ("delete", "reset"):
+    if action not in ("delete", "reset", "pause", "resume", "edit"):
         return render_template("error.html", message="Unknown action.", symbol=""), 404
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         alert_id = int(request.form["alert_id"])
         if action == "delete":
             db_mod.alert_delete(conn, alert_id, user=uid())
+        elif action == "pause":
+            db_mod.alert_set_active(conn, alert_id, False, user=uid())
+        elif action == "resume":
+            # Resuming counts as switching an alert on, so the free plan's
+            # limit applies here as it does to adding one.
+            if not _pro():
+                running = len(db_mod.alert_list(conn, active_only=True, user=uid()))
+                if running >= billing_mod.free_limits()["alerts"]:
+                    return _upgrade("A free account can run %d alert%s at a time. "
+                                    "Pause another first, or Pro has no limit."
+                                    % (billing_mod.free_limits()["alerts"],
+                                       "" if billing_mod.free_limits()["alerts"] == 1 else "s"))
+            db_mod.alert_set_active(conn, alert_id, True, user=uid())
+        elif action == "edit":
+            raw = (request.form.get("threshold") or "").strip()
+            threshold = float(raw) if raw else None
+            row = conn.execute("SELECT kind FROM alerts WHERE id=? AND user_id=?",
+                               (alert_id, uid())).fetchone()
+            if row is not None and threshold is not None and threshold > 1 and \
+                    alerts_mod.KINDS.get(row["kind"], {}).get("unit") == "percent":
+                threshold = threshold / 100.0
+            db_mod.alert_edit(conn, alert_id, threshold,
+                              (request.form.get("note") or "").strip(), user=uid())
         else:
             db_mod.alert_reset(conn, alert_id, user=uid())
     except (KeyError, ValueError) as exc:
@@ -2021,12 +2054,24 @@ def alert_action(action):
 def check_alerts():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        result = alerts_mod.check(conn, user=uid())
+        result = _check_and_tell(conn, user=uid())
     finally:
         conn.close()
-    app.config["LAST_ALERT_CHECK"] = result
     return redirect(url_for("monitor", checked=result["checked"],
                             fired=len(result["fired"])))
+
+
+@app.route("/monitor/alert-email", methods=["POST"])
+def alert_email():
+    """Switch alert emails on or off for the signed-in person."""
+    if g.demo or not codes_mod.email_ready():
+        abort(404)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        accounts_mod.set_alert_email(conn, uid(), request.form.get("on") == "1")
+    finally:
+        conn.close()
+    return redirect(url_for("monitor"))
 
 
 @app.route("/watch/<action>", methods=["POST"])
@@ -2542,11 +2587,73 @@ def server_error(exc):
 ALERTS = None
 
 
+# Today's call for a call alert, kept for half an hour per instrument so a
+# loop every five minutes does not run a full analysis every five minutes.
+CALL_TTL = 30 * 60.0
+_CALLS: Dict = {}
+_CALLS_LOCK = threading.Lock()
+
+
+def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
+    """BUY, WAIT, AVOID or SHORT for an instrument, with the standard settings.
+
+    A popular symbol's daily call is read from its public check when that is
+    recent; anything else is analysed once and kept for CALL_TTL.
+    """
+    key = (symbol.upper(), interval)
+    with _CALLS_LOCK:
+        hit = _CALLS.get(key)
+        if hit and time.time() - hit[0] < CALL_TTL:
+            return hit[1]
+    action = None
+    if interval == "1d" and public_mod.from_slug(symbol.lower()):
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            snap = public_mod.verdict(conn, symbol.upper())
+        finally:
+            conn.close()
+        if snap and time.time() - snap["at"] < public_mod.MAX_AGE + 3600:
+            action = snap.get("action") or None
+    if action is None:
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
+                                with_learning=True, record=False,
+                                db_path=app.config.get("DB_PATH"))
+        action = (result.plan.action or "").upper() or None
+    with _CALLS_LOCK:
+        _CALLS[key] = (time.time(), action)
+        for old in [k for k, v in _CALLS.items() if time.time() - v[0] > CALL_TTL]:
+            _CALLS.pop(old, None)
+    return action
+
+
+def _alert_address(conn):
+    """The address to email someone's alerts to, if they asked for that."""
+    def address_of(user_id: int) -> Optional[str]:
+        person = accounts_mod.get_user(conn, user_id)
+        if person is None or not person.alert_email or not person.email \
+                or person.email.endswith(".invalid") or person.is_local:
+            return None
+        return person.email
+    return address_of
+
+
+def _check_and_tell(conn, user: Optional[int] = None) -> Dict:
+    """Check alerts and open positions' stops, record and email what fired."""
+    result = alerts_mod.check(conn, user=user, call_of=_call_now)
+    stops = alerts_mod.check_stops(conn, user=user)
+    fired = list(result["fired"]) + list(stops["fired"])
+    if fired and codes_mod.email_ready():
+        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
+    return {"checked": result["checked"] + stops["checked"], "fired": fired,
+            "errors": result["errors"] + stops["errors"], "when": result["when"]}
+
+
 def _check_alerts_job():
     """What the background loop actually does, every interval."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        return alerts_mod.check(conn)
+        return _check_and_tell(conn)
     finally:
         conn.close()
 
@@ -2578,9 +2685,17 @@ def alert_status():
         since = float(request.args.get("since") or 0)
     except ValueError:
         since = 0.0
-    out = ALERTS.status()
+    # The loop checks everybody's alerts in one pass, so its list of what
+    # fired is everybody's. Each person is shown only their own: another
+    # person's symbols, levels and notes are theirs.
+    me = uid()
+    full = ALERTS.status()
+    out = {key: full[key] for key in ("running", "interval", "last_run", "next_run")}
+    if _is_operator():
+        out.update(full)
     out["enabled"] = True
-    out["new_fires"] = ALERTS.unseen_fires(since)
+    out["new_fires"] = [f for f in ALERTS.unseen_fires(since)
+                        if f.get("user_id") == me]
     out["now"] = time.time()
     return jsonify(out)
 
@@ -2591,6 +2706,11 @@ def alert_check_now():
     if ALERTS is None:
         return jsonify({"ok": False,
                         "note": "Background checking is switched off."}), 409
+    # It runs everybody's checks, so only the operator may start it early.
+    # Anyone can check their own from the Monitor page.
+    if not _is_operator():
+        return jsonify({"ok": False, "note": "Check your own alerts from the "
+                                             "Monitor page."}), 403
     ALERTS.check_now()
     return jsonify({"ok": True})
 

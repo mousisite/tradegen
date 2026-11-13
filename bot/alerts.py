@@ -1,8 +1,9 @@
 """Alerts: conditions worth being told about.
 
-Checked on demand, or by the scheduled workflow. Nothing here runs a background
-thread or sends email: the bot only knows what has happened when you ask it,
-which is honest about what a locally run tool can promise.
+Checked on demand, and by the server's background loop (web.start_alert_loop),
+which keeps going when nobody has the page open. Nothing here starts a thread
+or sends mail itself: the loop calls check() and check_stops(), and deliver()
+emails what fired, through whatever sender it is handed.
 
 Each alert states its condition in plain terms and, when it fires, records the
 value that triggered it. An alert that says only "AAPL alert triggered" is
@@ -43,7 +44,15 @@ KINDS: Dict[str, Dict] = {
                    "needs_threshold": False, "unit": ""},
     "loses_ma": {"label": "Closes below its 50-bar average",
                  "needs_threshold": False, "unit": ""},
+    # Calls rather than prices: the app's own BUY / WAIT / AVOID for the
+    # instrument, worked out with the standard settings.
+    "call_changes": {"label": "Call changes (for example WAIT to BUY)",
+                     "needs_threshold": False, "unit": "", "call": True},
+    "call_buy": {"label": "Call turns BUY", "needs_threshold": False, "unit": "",
+                 "call": True},
 }
+
+CALL_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("call"))
 
 
 @dataclass
@@ -56,6 +65,10 @@ class Fired:
     value: float
     message: str
     note: str = ""
+    user_id: Optional[int] = None
+    as_of: str = ""
+    trade_id: Optional[int] = None
+    event_id: Optional[int] = None
 
 
 def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
@@ -81,8 +94,35 @@ def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
     return text.replace(" rsi ", " RSI ")
 
 
-def _evaluate(row, bars) -> Optional[Fired]:
-    """Test one alert against fresh bars. Returns None when not triggered."""
+def as_of(bars) -> str:
+    """When the price behind a message was set, said with the message.
+
+    An alert that says "above 200" without saying when that was true is
+    unreadable an hour later, and on a closed market it may be Friday's.
+    """
+    meta = getattr(bars, "meta", None) or {}
+    when = meta.get("regularMarketTime")
+    if when:
+        stamp = time.strftime("%d %b %H:%M UTC", time.gmtime(int(when))).lstrip("0")
+    else:
+        stamp = getattr(bars, "last_bar_time", "") or ""
+    if stamp and not getattr(bars, "market_open", True):
+        stamp += ", market closed"
+    return stamp
+
+
+def _owner(row) -> Optional[int]:
+    try:
+        return int(row["user_id"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
+    """Test one alert against fresh bars. Returns None when not triggered.
+
+    call is the instrument's current BUY / WAIT / AVOID, for the call kinds.
+    """
     kind = row["kind"]
     threshold = row["threshold"]
     symbol = row["symbol"]
@@ -91,7 +131,17 @@ def _evaluate(row, bars) -> Optional[Fired]:
 
     def fire(value, message):
         return Fired(int(row["id"]), symbol, kind, threshold, value, message,
-                     row["note"] or "")
+                     row["note"] or "", _owner(row), as_of(bars))
+
+    if kind in CALL_KINDS:
+        was = row["state"] if "state" in row.keys() else None
+        # The first look only learns the call. A change needs a before.
+        if not call or not was or call == was:
+            return None
+        if kind == "call_buy" and call != "BUY":
+            return None
+        return fire(price, "%s's call changed from %s to %s, at %s."
+                    % (symbol, was, call, format_price(price)))
 
     if kind == "price_above" and price > threshold:
         return fire(price, "%s is %s, above the %s you set."
@@ -182,18 +232,31 @@ def _evaluate(row, bars) -> Optional[Fired]:
     return None
 
 
-def check(conn, only_active: bool = True, user=None) -> Dict:
+def check(conn, only_active: bool = True, user=None, call_of=None) -> Dict:
     """Check alerts against fresh data and record anything that fired.
 
     With no user this checks every alert in the database, which is what the
-    background loop on a single-user install wants. Pass one to check only that
-    person's, which is what a page acting on someone's behalf must do.
+    background loop wants. Pass one to check only that person's, which is what
+    a page acting on someone's behalf must do.
+
+    call_of(symbol, interval) returns today's call for the call kinds; without
+    it those alerts are skipped. Every fire is also written to the person's
+    alert history, and a check that fails is kept on the alert with its reason.
     """
     from . import database as db
 
     rows = [r for r in db.alert_list(conn, active_only=only_active, user=user)]
     if not rows:
         return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
+
+    calls: Dict = {}
+    if call_of is not None:
+        for key in {(r["symbol"], r["interval"] or "1d") for r in rows
+                    if r["kind"] in CALL_KINDS}:
+            try:
+                calls[key] = call_of(*key)
+            except Exception:
+                calls[key] = None
 
     # One fetch per symbol and interval, shared by every alert on it.
     wanted = {(r["symbol"], r["interval"] or "1d") for r in rows}
@@ -214,23 +277,124 @@ def check(conn, only_active: bool = True, user=None) -> Dict:
                 data[key] = result
 
     fired: List[Fired] = []
+    failed = {e["symbol"]: e["error"] for e in errors}
     for row in rows:
-        bars = data.get((row["symbol"], row["interval"] or "1d"))
+        key = (row["symbol"], row["interval"] or "1d")
+        bars = data.get(key)
         if bars is None:
+            db.alert_failed(conn, int(row["id"]), "No price: %s" % failed.get(row["symbol"], "the data source did not answer"))
+            continue
+        is_call = row["kind"] in CALL_KINDS
+        call = calls.get(key) if is_call else None
+        if is_call and call is None:
+            db.alert_failed(conn, int(row["id"]), "The call could not be worked out just now.")
             continue
         try:
-            hit = _evaluate(row, bars)
+            hit = _evaluate(row, bars, call)
         except Exception as exc:
             errors.append({"symbol": row["symbol"], "error": str(exc)[:120]})
+            db.alert_failed(conn, int(row["id"]), str(exc)[:120])
             continue
         if hit:
             db.alert_fire(conn, hit.alert_id, hit.value, hit.message)
+            if is_call:
+                db.alert_checked(conn, int(row["id"]), state=call)
+            if hit.user_id is not None:
+                hit.event_id = db.event_add(conn, hit.user_id, hit.kind, hit.symbol,
+                                            hit.message, hit.value, hit.as_of,
+                                            alert_id=hit.alert_id)
             fired.append(hit)
         else:
-            db.alert_checked(conn, int(row["id"]))
+            db.alert_checked(conn, int(row["id"]), state=call if is_call else None)
 
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time())}
+
+
+def check_stops(conn, user=None) -> Dict:
+    """Tell the owner, once, when an open journal position crosses its stop.
+
+    A stop in the journal is a plan, not an order: nothing closes the trade.
+    So the background loop watches every open position and says so the first
+    time the price is at or past the stop, with the time of that price. It is
+    written to the person's alert history like any alert, and never repeats
+    for the same position.
+    """
+    from . import database as db
+
+    sql, args = db._own("SELECT * FROM trades WHERE status='open' "
+                        "AND breach_noticed IS NULL", [], user)
+    rows = list(conn.execute(sql, args))
+    if not rows:
+        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
+
+    data, errors = {}, []
+    for symbol in sorted({r["symbol"] for r in rows}):
+        try:
+            data[symbol] = fetch_bars(symbol, "1d")
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)[:120]})
+
+    fired: List[Fired] = []
+    for row in rows:
+        bars = data.get(row["symbol"])
+        if bars is None:
+            continue
+        price, stop, side = float(bars.last_price), float(row["stop"]), int(row["direction"])
+        if (price - stop) * side > 0:
+            continue
+        message = ("%s is at %s, past the stop of %s on your %s position. "
+                   "The journal does not close it for you: close it, or set a "
+                   "new stop on purpose." % (row["symbol"], format_price(price),
+                                             format_price(stop),
+                                             "long" if side > 0 else "short"))
+        hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
+                    _owner(row), as_of(bars), int(row["id"]))
+        conn.execute("UPDATE trades SET breach_noticed=? WHERE id=?",
+                     (int(time.time()), int(row["id"])))
+        conn.commit()
+        if hit.user_id is not None:
+            hit.event_id = db.event_add(conn, hit.user_id, "stop_breach", hit.symbol,
+                                        message, price, hit.as_of, trade_id=hit.trade_id)
+        fired.append(hit)
+    return {"checked": len(rows), "fired": fired, "errors": errors,
+            "when": int(time.time())}
+
+
+def deliver(conn, fired: List[Fired], send, address_of) -> Dict:
+    """Email each person what fired for them this round, in one message.
+
+    send(to, subject, body) is the mail function; address_of(user_id) returns
+    an address for someone who asked for alert emails, or None. The outcome,
+    sent or the error, is written against each event, so a failure is on
+    record rather than silent.
+    """
+    from . import database as db
+
+    by_user: Dict[int, List[Fired]] = {}
+    for hit in fired:
+        if hit.user_id is not None:
+            by_user.setdefault(hit.user_id, []).append(hit)
+    sent, failed = 0, 0
+    for user_id, hits in by_user.items():
+        to = address_of(user_id)
+        if not to:
+            continue
+        events = [h.event_id for h in hits if h.event_id is not None]
+        subject = ("Orenth: %s" % hits[0].message[:60] if len(hits) == 1
+                   else "Orenth: %d alerts" % len(hits))
+        body = "\n\n".join("%s\n(price as of %s)" % (h.message, h.as_of or "unknown")
+                            for h in hits)
+        body += ("\n\nSee them all on your Monitor page. You get these because "
+                 "you asked for alert emails; switch them off on the Monitor page.\n")
+        try:
+            send(to, subject, body)
+            db.event_emailed(conn, events)
+            sent += 1
+        except Exception as exc:
+            db.event_emailed(conn, events, error=str(exc) or type(exc).__name__)
+            failed += 1
+    return {"sent": sent, "failed": failed}
 
 
 def suggest_for(symbol: str, plan=None, bars=None) -> List[Dict]:

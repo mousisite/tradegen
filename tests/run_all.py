@@ -46,6 +46,7 @@ SUITES = [
     ("test_billing.py",      False, "paid plans: signed webhooks, allowances, checkout"),
     ("test_growth.py",       False, "popular pages, sharing, invites, weekly email"),
     ("test_portfolio_risk.py", False, "open risk, breached stops, shorts, gaps and costs"),
+    ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),
 ]
 
 TIMEOUT = 900
