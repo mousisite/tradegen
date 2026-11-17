@@ -15,7 +15,16 @@
     trading costs taken off.</p>
 </div>
 
-{% if not summary.tested %}
+{% if not summary.tested and intraday %}
+  {# "Being tested" would never end for this one: it cannot fire on the daily
+     prices these tests use. #}
+  <div class="plainbox">
+    <span class="eyebrow">Not in the daily test</span>
+    <p class="prose">This strategy reads the inside of a trading day, so it
+      only fires on hourly or shorter bars. These tests run on daily prices,
+      so it has no result here. An analysis on shorter bars still uses it.</p>
+  </div>
+{% elif not summary.tested %}
   <div class="plainbox">
     <span class="eyebrow">Being tested</span>
     <p class="prose">Nothing to show yet. These tests run once a day on daily

@@ -3289,6 +3289,7 @@ def backtest_page(name):
     return render_template(
         "backtest.html", strategy=strategy, info=info,
         label=public_mod.strategy_label(strategy), results=results,
+        intraday=strategy in strategies_mod.INTRADAY_ONLY,
         summary=public_mod.strategy_summary(results), kin=kin,
         method=_house_method(), label_of=public_mod.strategy_label,
         strategy_slug=public_mod.strategy_slug, short=public_mod.short,
