@@ -64,6 +64,7 @@ SUITES = [
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
     ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
     ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it, the review sign-in"),
+    ("test_browser.py",      False, "every page at phone sizes in a real browser, and the main flows by touch"),
 ]
 
 TIMEOUT = 900
