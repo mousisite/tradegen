@@ -277,17 +277,23 @@ def _get(url: str, params: dict, tries: int = _TRIES) -> dict:
         raise DataThrottled(str(exc), exc.seconds)
 
 
-def normalise_symbol(raw: str) -> str:
+def normalise_symbol(raw: str, exact: bool = False) -> str:
     """Turn loose user or screenshot text into a Yahoo-style ticker.
 
     Handles the shapes a chart screenshot actually shows: BTCUSD, BTC/USD,
     BINANCE:ETHUSDT, NASDAQ:AAPL, and a leading dollar-sign cashtag. A coin
     in any of the shapes that can only mean a coin becomes Yahoo's id for it;
     a bare ticker follows the rule above _LISTED_FIRST.
+
+    exact is for Yahoo's own symbol, as a pick from the suggestions sends it.
+    It is only tidied, never read as a coin, so LINK stays Interlink
+    Electronics and BTC the fund listed under that ticker.
     """
     s = (raw or "").strip().upper()
     if not s:
         raise DataError("empty symbol")
+    if exact:
+        return s.replace(" ", "")
     if ":" in s:                       # strip exchange prefix, e.g. NASDAQ:AAPL
         s = s.split(":", 1)[1]
     s = s.lstrip("$").replace(" ", "")
@@ -310,13 +316,32 @@ def normalise_symbol(raw: str) -> str:
     return s
 
 
-def resolve(query: str) -> dict:
+def needs_exact(symbol: str) -> bool:
+    """Whether Yahoo's symbol, typed bare, would be read as something else.
+
+    LINK is Interlink Electronics at Yahoo, but a bare LINK is the Chainlink
+    coin here. A link to the listing, or an alert or watchlist entry saved for
+    it, has to say that it means the symbol exactly. AAPL or BTC-USD reads the
+    same either way, and needs nothing.
+    """
+    try:
+        own = normalise_symbol(symbol, exact=True)
+        return normalise_symbol(own) != own
+    except DataError:
+        return False
+
+
+def resolve(query: str, exact: bool = False) -> dict:
     """Look up a ticker or company name and return the best matching instrument.
 
     Falls back to the normalised string itself when search returns nothing, so
     a valid-but-unindexed symbol still gets a chance at a data fetch.
+
+    With exact, the query is Yahoo's own symbol and the answer is that symbol
+    and no other. The search only supplies its name, which the news search
+    reads: "Interlink Electronics" finds the company's news, "LINK" the coin's.
     """
-    candidate = normalise_symbol(query)
+    candidate = normalise_symbol(query, exact=exact)
     # Search the *normalised* candidate, not the raw text. Querying "$TSLA"
     # verbatim ranks foreign depositary receipts above the real listing.
     # A refusal is passed on rather than guessed past. The guess sends one
@@ -335,7 +360,7 @@ def resolve(query: str) -> dict:
         search_down, quotes = exc, []
     except DataError:
         quotes = []
-    if not quotes and candidate != query.strip().upper():
+    if not quotes and not exact and candidate != query.strip().upper():
         try:
             data = _get(_SEARCH, {"q": query, "quotesCount": 8, "newsCount": 0})
             quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
@@ -354,6 +379,10 @@ def resolve(query: str) -> dict:
     for q in quotes:                                   # exact match wins
         if q["symbol"].upper() == candidate:
             return pack(q)
+    if exact:
+        # Never another instrument. Nor is the symbol a guess, so one the
+        # source turns out not to have is said as such, search or no search.
+        return {"symbol": candidate, "name": candidate, "type": ""}
 
     preferred = ("cryptocurrency", "equity", "etf", "index", "future")
 
