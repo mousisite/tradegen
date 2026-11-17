@@ -456,6 +456,12 @@ try:
     check("and says nothing about an API key", "API key" not in page
           and "ANTHROPIC" not in page)
     check("they can view it as JSON", "View as JSON" in page)
+    check("its alerts are not said to be checked every few minutes whatever the hour",
+          "checked every few minutes once set, while the price can move" in flat(page)
+          and "Alerts are checked on Orenth's server every few minutes, whether or not "
+          "you have a page open. A stock waits while its market is closed, from an "
+          "hour after the close until it opens again; coins are checked every time."
+          in flat(page))
     status, page = SEEN[("free", "/api/analyse?symbol=NVDA")]
     check("whose risks say nothing about a key either", status == 200
           and "ANTHROPIC" not in page and "LLM" not in page, status)
@@ -517,6 +523,9 @@ try:
         page = text(owner.get("/analyse?symbol=NVDA&interval=1d"))
         check("the owner is told how to score headlines better",
               "ANTHROPIC_API_KEY" in page and ".env" in page)
+        check("and that a stock's alerts wait while its market is closed here too",
+              "Nothing is checked while it is closed. A stock waits while its market "
+              "is closed" in flat(page))
         page = text(owner.get("/research?symbol=NVDA&interval=1d"))
         check("and what the reasoning step needs",
               "What the evidence supports" in page and "ANTHROPIC_API_KEY" in page)

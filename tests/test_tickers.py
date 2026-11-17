@@ -459,18 +459,42 @@ try:
                  "VALUES ('ETH', '1d', 1, ?)", (reader.id,))
     conn.commit()
     asked = []
+    # What the look-up gives: Yahoo's own symbol, LINK for Interlink and
+    # LINK-USD for Chainlink.
+    CALLS = {"LINK": ("AVOID", "Leave this one alone."),
+             "LINK-USD": ("BUY", "The app thinks this is worth buying now.")}
 
     def look_up(symbol, exact=False):
         asked.append((symbol, exact))
+        if symbol in CALLS:
+            return {"symbol": symbol, "action": CALLS[symbol][0],
+                    "headline": CALLS[symbol][1]}
         return {"symbol": symbol}
 
     monday = calendar.timegm((2026, 10, 5, 14, 0, 0))
+    for sym, before, after in (("LINK", "AVOID", "AVOID"), ("LINK-USD", "WAIT", "BUY")):
+        db.watch_call_save(conn, sym, monday // DAY - 2, before, 100.0, 99.0, monday - 2 * DAY)
+        db.watch_call_save(conn, sym, monday // DAY - 1, after, 103.0, 100.0, monday - 3600)
+    outbox = []
     sent = digest.run(conn, "secret", "https://orenth.app", look_up,
-                      send=lambda *a, **k: None, now=monday)
+                      send=lambda to, subject, body, headers=None:
+                      outbox.append((subject, body)),
+                      now=monday, full=lambda person: True)
     check("the weekly email looks a watched listing up exactly, the rest as saved",
           sent.get("checked") == 1
           and sorted(asked) == [("ETH", False), ("LINK", True), ("LINK-USD", False)],
           (sent, asked))
+    subject, body = outbox[0] if outbox else ("", "")
+    check("it names the listing and the coin apart, each by Yahoo's own symbol",
+          "LINK avoid" in subject and "LINK-USD buy" in subject
+          and "  LINK   AVOID  Leave this one alone." in body
+          and "  LINK-USD BUY    The app thinks this is worth buying now." in body,
+          (subject, body))
+    check("in what changed since yesterday too",
+          "  LINK   Still AVOID; up 3.00% since the previous close." in body
+          and "  LINK-USD The daily call went from WAIT to BUY; up 3.00%" in body, body)
+    check("and a ticker that no other line shares keeps its short name",
+          "  ETH    could not be checked this week." in body, body)
 finally:
     conn.close()
     for key in MAIL:

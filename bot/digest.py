@@ -298,11 +298,22 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
     """Subject and plain-text body. Plain text reads like a person wrote it,
     which is also what keeps it out of spam folders. since is the person's
     since_yesterday(), said after their watchlist."""
+    # BTC-USD reads as BTC, unless this email also names the fund listed as
+    # BTC: then each goes by Yahoo's own symbol, as on the front page, so the
+    # coin's call and the fund's are not two lines under one name.
+    named_as: Dict[str, set] = {}
+    for r in list(rows) + list((since or {}).get("rows") or []) + list(picks):
+        named_as.setdefault(public.short(r["symbol"]), set()).add(r["symbol"])
+
+    def label(symbol: str) -> str:
+        short = public.short(symbol)
+        return symbol if len(named_as.get(short, ())) > 1 else short
+
     lines = ["Hi %s," % user.display, "", "Here is what Orenth says this week."]
     if rows:
         lines += ["", "YOUR WATCHLIST"]
         for r in rows:
-            sym = public.short(r["symbol"])
+            sym = label(r["symbol"])
             if r.get("action"):
                 lines.append("  %-6s %-6s %s" % (sym, r["action"], r.get("headline", "")))
                 if r.get("samples"):
@@ -315,7 +326,7 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
     if since and (since["rows"] or since["quiet"]):
         lines += ["", "SINCE YESTERDAY"]
         for r in since["rows"]:
-            lines.append("  %-6s %s" % (r["short"], change_line(r)))
+            lines.append("  %-6s %s" % (label(r["symbol"]), change_line(r)))
             lines += ["         Alert: %s" % m for m in r["alerts"]]
             lines += ["         Stop: %s" % m for m in r["stops"]]
         lines += ["  %s" % s for s in notes(since)]
@@ -323,7 +334,7 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
     if picks:
         for p in picks:
             lines.append("  %-6s BUY    worked %d of %d times in tests on past prices"
-                         % (public.short(p["symbol"]), p["worked"], p["samples"]))
+                         % (label(p["symbol"]), p["worked"], p["samples"]))
     else:
         lines.append("  None this week. Nothing on the popular list clears the "
                      "bar, so Orenth says wait. That is a normal answer.")
@@ -334,7 +345,7 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
               "Orenth account.",
               "Stop these emails: %s" % stop_url,
               postal_address()]
-    named = ["%s %s" % (public.short(r["symbol"]), r["action"].lower())
+    named = ["%s %s" % (label(r["symbol"]), r["action"].lower())
              for r in rows if r.get("action")][:3]
     subject = "Orenth this week: " + (", ".join(named) if named
                                       else "the strongest setups")
