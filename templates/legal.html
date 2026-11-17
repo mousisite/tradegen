@@ -153,9 +153,11 @@
         <tr><td>Sentry</td><td>When something breaks: the error, the page
             address and the values the failing code was working with, which
             can include your email address. Cookies, form contents and
-            anything that looks like a password or key are removed first. Only
+            anything that looks like a password or key are removed first.{% if sampled %}
+            Also, even when nothing breaks, {{ sampled }} page loads: the page
+            address without anything after a ?, and how long it took.{% endif %} Only
             if error reporting is switched on</td>
-            <td>Finding and fixing faults</td></tr>
+            <td>Finding and fixing faults{% if sampled %}, and slow pages{% endif %}</td></tr>
         <tr><td>{{ offsite.provider or "A storage service" }}</td><td>A copy of
             the whole database, which holds your email address and everything
             you have created here, in a private storage bucket{% if not offsite.provider %}.

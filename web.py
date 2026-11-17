@@ -3543,6 +3543,7 @@ def sitemap():
 @app.route("/privacy")
 def privacy():
     """Required by Google's consent screen, and worth having regardless."""
+    from bot import monitoring
     from bot import offsite as offsite_mod
     # Copies of the backups hold everyone's data, so once they are kept off
     # this server the page names who holds them and for how long. Never the
@@ -3552,7 +3553,20 @@ def privacy():
     return render_template("legal.html", page="privacy",
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
-                           contact=_contact(), offsite=offsite)
+                           contact=_contact(), offsite=offsite,
+                           sampled=_sampled_words(monitoring.status()["sampled"]))
+
+
+def _sampled_words(share: float) -> str:
+    """How many page loads go to Sentry when nothing breaks, in words; empty
+    when none do."""
+    if share <= 0:
+        return ""
+    if share >= 1:
+        return "all"
+    if share >= 0.01:
+        return "about %d in every 100" % round(share * 100)
+    return "fewer than 1 in every 100"
 
 
 @app.route("/terms")

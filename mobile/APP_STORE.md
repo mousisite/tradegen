@@ -361,6 +361,7 @@ Add these only if the setting is switched on in Render:
 | If this is set | Add | Linked | Why |
 | --- | --- | --- | --- |
 | `SENTRY_DSN` | Diagnostics: **Other Diagnostic Data** | Yes | Error reports can include the email of the person whose page failed |
+| `SENTRY_TRACES_RATE`, above 0 | Diagnostics: **Performance Data** | No | A sample of page loads that worked: the address without its query, and how long it took. Off unless this is set |
 | `ANTHROPIC_API_KEY` | User Content: **Photos or Videos** | No | A chart screenshot someone uploads goes to Anthropic to be read. Orenth does not keep it |
 
 Do **not** tick: Payment Info (Apple and Stripe take cards; Orenth never sees
