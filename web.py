@@ -2748,7 +2748,8 @@ def _app_challenge() -> Tuple[str, bool]:
     and the SHA-256 of a secret it keeps, base64url, 43 characters. A link on
     another site cannot start one: the browser marks it cross-site, and it
     becomes an ordinary sign-in in that browser, which hands nothing to
-    anyone.
+    anyone. Another app on the phone can start one, in a sheet of its own,
+    and nothing here tells it from Orenth's app: see accounts.py.
     """
     if request.args.get("app") != "1":
         return "", False

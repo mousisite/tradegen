@@ -7,7 +7,10 @@
  * it hands back a one-time code through the app's own address,
  * app.orenth.ios://auth/finish, and this page trades the code for a session
  * here, together with a secret that only this page held. A code caught by
- * another app on the phone is useless without that secret.
+ * another app on the phone is useless without that secret. It does not stop
+ * another app from starting a sign-in of its own, with its own secret:
+ * anyone who signs in on the sheet it shows signs that app in. Only an https
+ * Universal Link closes that (DEPLOY.md, known limitation).
  *
  * The app's own bridge, window.OrenthNative (static/native.js), is used when
  * it is there: its webAuth opens the sheet with ASWebAuthenticationSession,

@@ -698,6 +698,12 @@ def purge_expired(conn: sqlite3.Connection) -> int:
 # a secret it kept, the verifier, and only that secret makes the code work:
 # another app that registered the same address and caught the code has
 # nothing to use it with. The PKCE idea, applied to the last step.
+#
+# What it cannot do is tell which app started a sign-in. An app that opens
+# the start address in a sheet of its own, with a secret of its own, is
+# handed a code that its secret redeems, if the person signs in there. Only
+# a return address the Orenth app alone can claim, an https Universal Link,
+# closes that; DEPLOY.md lists it as a known limitation.
 
 HANDOFF_SECONDS = 120
 _CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43}$")

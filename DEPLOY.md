@@ -567,3 +567,17 @@ because the free sources count requests per address rather than per person.
 If you do see throttling, the symptom is `/healthz` staying green while
 analyses fail, and the message will say plainly that the limit is shared across
 the installation rather than a problem with the user's account.
+
+**Known limitation: another iPhone app can start the app's sign-in.** In the
+iPhone app, Google sign-in runs in the system browser sheet, and so does
+Apple's when the app's own Apple sheet is not there. It comes back through the
+app's own address, `app.orenth.ios://auth/finish`, with a one-time code that
+works only with a secret kept by whoever started that sign-in. That stops an
+app that catches a code meant for Orenth's app. It does not stop an app that
+starts a sign-in of its own, with its own secret: if someone signs in on the
+sheet that app shows them, that app is signed in to their Orenth account. They
+have to sign in for it to happen, so it is a phishing risk, not a silent one.
+Closing it needs a return address only Orenth's app can claim: an https
+Universal Link, with an apple-app-site-association file on orenth.app, the
+Associated Domains capability in the app, and the sheet sent back to that
+https address (iOS 17.4 and later).
