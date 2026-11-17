@@ -616,6 +616,54 @@ try:
                                                 "is_private_email": True})
         check("after taking consent back, signing in again reaches the same account",
               back_again.id == relay.id, (back_again.id, relay.id))
+
+        # An address handed to someone new after its first Apple ID was taken
+        # off: ever tied to another Apple ID counts, not only tied now.
+        def reaches(sub, email):
+            """The account an Apple ID with this verified address reaches,
+            or None when it is refused."""
+            try:
+                return A.upsert_apple_user(conn, {"sub": sub, "email": email,
+                                                  "email_verified": True}).id
+            except ValueError:
+                return None
+
+        frank = A.upsert_google_user(conn, {"sub": "g-frank",
+                                            "email": "frank@corp.example",
+                                            "email_verified": True})
+        check("a Google account no Apple ID was ever tied to is joined by its "
+              "own address", reaches("a-frank", "frank@corp.example") == frank.id)
+
+        alice = A.upsert_apple_user(conn, {"sub": "a-alice",
+                                           "email": "alice@corp.example",
+                                           "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-alice")
+        check("an address cannot take over the account another Apple ID made, "
+              "even once that one was taken off it",
+              reaches("a-alice-next", "alice@corp.example") is None)
+        check("while the Apple ID that made it still reaches it",
+              reaches("a-alice", "alice@corp.example") == alice.id)
+
+        carol = A.upsert_google_user(conn, {"sub": "g-carol",
+                                            "email": "carol@corp.example",
+                                            "email_verified": True})
+        reaches("a-carol", "carol@corp.example")
+        A.unlink_identity(conn, "apple", "a-carol")
+        check("nor a Google account another Apple ID was linked to and taken "
+              "off", reaches("a-carol-next", "carol@corp.example") is None)
+        check("while the Apple ID that was linked still reaches it",
+              reaches("a-carol", "carol@corp.example") == carol.id)
+
+        erin = A.upsert_apple_user(conn, {"sub": "a-erin",
+                                          "email": "erin@corp.example",
+                                          "email_verified": True})
+        A.upsert_google_user(conn, {"sub": "g-erin", "email": "erin@corp.example",
+                                    "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-erin")
+        check("nor one Apple made, once Google has signed in to it too",
+              reaches("a-erin-next", "erin@corp.example") is None)
+        check("while the Apple ID that made it still reaches it",
+              reaches("a-erin", "erin@corp.example") == erin.id)
     finally:
         conn.close()
 
@@ -817,6 +865,24 @@ try:
                 conn.execute("SELECT COUNT(*) FROM app_handoffs WHERE user_id=?",
                              (doomed.id,)).fetchone()[0])
         check("delete_user removes its identities and app codes", left == (0, 0), left)
+
+        def remembered(user_id):
+            """Rows kept of Apple IDs taken off this account."""
+            try:
+                return conn.execute("SELECT COUNT(*) FROM former_identities "
+                                    "WHERE user_id=?", (user_id,)).fetchone()[0]
+            except Exception as exc:             # no such table, before it
+                return repr(exc)
+
+        parted = A.upsert_apple_user(conn, {"sub": "a-parted", "email": "p@example.com",
+                                            "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-parted")
+        before_delete = remembered(parted.id)
+        A.delete_user(conn, parted.id)
+        check("an Apple ID taken off an account is remembered against it",
+              before_delete == 1, before_delete)
+        check("and delete_user removes that too", remembered(parted.id) == 0,
+              remembered(parted.id))
         older = A.upsert_apple_user(conn, {"sub": "a-older", "email": "o@example.com",
                                            "email_verified": True}, "", "r.o",
                                     SERVICES)
@@ -831,6 +897,14 @@ try:
                              (older.id,)).fetchone()[0])
         check("and the previous version's plain delete clears them too",
               left == (0, 0), left)
+        older_parted = A.upsert_apple_user(conn, {"sub": "a-older-parted",
+                                                  "email": "op@example.com",
+                                                  "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-older-parted")
+        conn.execute("DELETE FROM users WHERE id=?", (older_parted.id,))
+        conn.commit()
+        check("including what it remembered of Apple IDs taken off it",
+              remembered(older_parted.id) == 0, remembered(older_parted.id))
         A.ensure_schema(conn)
         A.ensure_schema(conn)
         check("the new tables are safe to create again", True)

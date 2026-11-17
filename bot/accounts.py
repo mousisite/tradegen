@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS identities (
 
 CREATE INDEX IF NOT EXISTS idx_identities_user ON identities(user_id);
 
+-- A way in that was taken off an account, as when someone stops using Sign
+-- in with Apple here: only which account and which id. An address joins an
+-- account only if no other id from that provider was ever tied to it, and
+-- this is what remembers "ever" once the link itself is gone.
+CREATE TABLE IF NOT EXISTS former_identities (
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider    TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    ended_ts    INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider, subject)
+);
+
 -- A sign-in finished in the iPhone app's browser sheet, waiting for the app's
 -- own web view to collect it. Only the code's hash is kept.
 CREATE TABLE IF NOT EXISTS app_handoffs (
@@ -398,8 +410,9 @@ def upsert_apple_user(conn: sqlite3.Connection, identity: Dict, name: str = "",
     order: the link made last time; the account Apple itself made here, which
     remembers the subject, so someone who took their consent back and signs in
     again reaches it; and, only when Apple says the address is verified and it
-    is not a private relay address, an account already using that address. A
-    local or example account is never joined. Anything else is a new account.
+    is not a private relay address, an account already using that address,
+    unless another Apple ID was ever tied to that account. A local or example
+    account is never joined. Anything else is a new account.
 
     The name comes from Apple only on a person's very first sign-in here, so
     it is kept then, and never written over a name already there.
@@ -429,12 +442,9 @@ def upsert_apple_user(conn: sqlite3.Connection, identity: Dict, name: str = "",
             row = conn.execute("SELECT * FROM users WHERE email=?",
                                (email,)).fetchone()
             if row is not None and not row["is_local"] and row["provider"] != "demo":
-                # Joined already to another Apple ID: the address has since
-                # been given to someone new, as with Google above.
-                other = conn.execute(
-                    "SELECT 1 FROM identities WHERE user_id=? AND provider='apple' "
-                    "AND subject<>?", (row["id"], sub)).fetchone()
-                if other is not None:
+                # Ever tied to another Apple ID: the address has since been
+                # given to someone new, as with Google above.
+                if _tied_to_another(conn, row, "apple", sub):
                     raise ValueError("That email address belongs to a different "
                                      "Apple account here. Sign in with that one "
                                      "instead.")
@@ -487,6 +497,22 @@ def upsert_apple_user(conn: sqlite3.Connection, identity: Dict, name: str = "",
         conn.rollback()
         raise
     return get_user(conn, user_id)
+
+
+def _tied_to_another(conn: sqlite3.Connection, row: sqlite3.Row, provider: str,
+                     subject: str) -> bool:
+    """Whether an account was ever tied to an id from this provider other
+    than this one: the one that made it, one linked to it now, or one taken
+    off it since. Only "never" lets an address bring a new id in: a person
+    who signed up with Google still reaches their account with Apple."""
+    if row["provider"] == provider and row["provider_id"] not in ("", subject):
+        return True
+    for table in ("identities", "former_identities"):
+        if conn.execute("SELECT 1 FROM %s WHERE user_id=? AND provider=? AND "
+                        "subject<>?" % table,
+                        (row["id"], provider, subject)).fetchone() is not None:
+            return True
+    return False
 
 
 def get_user(conn: sqlite3.Connection, user_id: int) -> Optional[User]:
@@ -568,13 +594,18 @@ def unlink_identity(conn: sqlite3.Connection, provider: str,
                     subject: str) -> Optional[int]:
     """Take a sign-in method off its account, and sign that account out.
 
-    Its stored token goes with it. Every session ends, because the method
-    being withdrawn is to be treated as the person signing out, and nothing
-    records which method opened which session. Returns the account's id.
+    Its stored token goes with it. Which account it was tied to is kept, so
+    that the address cannot later bring another id from that provider in.
+    Every session ends, because the method being withdrawn is to be treated
+    as the person signing out, and nothing records which method opened which
+    session. Returns the account's id.
     """
     row = identity_owner(conn, provider, subject)
     if row is None:
         return None
+    conn.execute("INSERT OR REPLACE INTO former_identities (user_id, provider, "
+                 "subject, ended_ts) VALUES (?,?,?,?)",
+                 (row["user_id"], provider, subject, int(time.time())))
     conn.execute("DELETE FROM identities WHERE provider=? AND subject=?",
                  (provider, subject))
     conn.execute("DELETE FROM sessions WHERE user_id=?", (row["user_id"],))
@@ -777,6 +808,7 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     # for the app. Both point at the account, so they go before it.
     cur = conn.execute("DELETE FROM identities WHERE user_id=?", (user_id,))
     removed["identities"] = cur.rowcount
+    conn.execute("DELETE FROM former_identities WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM app_handoffs WHERE user_id=?", (user_id,))
     # The phones and browsers notifications went to. Before the users row,
     # which they point at.
