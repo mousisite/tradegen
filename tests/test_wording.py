@@ -348,7 +348,7 @@ try:
     check("and says nothing about an API key", "API key" not in page
           and "ANTHROPIC" not in page and "LLM scoring" not in page)
     check("its news is said to be scored in plain words",
-          "Scored by a built-in list of finance words." in flat(page))
+          "Scored with a built-in list of finance words." in flat(page))
     check("a fresh headline is warned about once, not twice",
           flat(page).count("landed within three hours") == 1
           and "high-impact headline landed" not in page)

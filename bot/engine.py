@@ -322,7 +322,6 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
                 getattr(out.fundamentals, "sector", "") if out.fundamentals else "")
         except Exception as exc:
             log.warning("Research on %s: the scored models failed: %s", out.symbol, exc)
-            out.problems.append("scored models: %s" % str(exc)[:160])
             out.scores = {"available": False,
                           "reason": "The scored models could not be run on these "
                                     "filings."}

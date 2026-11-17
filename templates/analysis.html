@@ -457,8 +457,9 @@
       {% endif %}
       {% if r.sentiment.method != 'skipped' %}
       <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-        Scored by {{ 'a built-in list of finance words'
-                     if r.sentiment.method == 'finance lexicon' else r.sentiment.method }}.
+        Scored {{ 'with a built-in list of finance words'
+                  if r.sentiment.method == 'finance lexicon'
+                  else 'by ' ~ r.sentiment.method }}.
         {# The analysis is shared by everyone who opens this ticker, so the
            hint travels with it and the page decides who sees it: only the
            owner of a copy on their own machine can add a key. #}
