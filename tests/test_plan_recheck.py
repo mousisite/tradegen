@@ -189,6 +189,24 @@ for n, release in enumerate(("bbbb2222", "cccc3333", "dddd4444", "eeee5555")):
     serve._copy_before_release(DB)
 check("only the last few are kept", len(held()) == serve.KEEP_RELEASE_COPIES, held())
 
+head("THOSE COPIES GO ONCE THEY ARE A WEEK OLD")
+# Each holds every account as it was, a deleted one included, and the privacy
+# page says a backup holding a deleted account is gone in about a week. Kept
+# by count alone, three copies stayed until three more releases, however
+# many months that took.
+WEEK_OLD = time.time() - 8 * DAY
+
+
+def age_copies():
+    for name in held():
+        _os.utime(_os.path.join(copies, name), (WEEK_OLD, WEEK_OLD))
+
+
+age_copies()
+serve._copy_before_release(DB)          # a restart of the same release
+check("a start deletes every copy more than a week old, the newest too",
+      held() == [], held())
+
 head("THE SERVER ITSELF TAKES THAT COPY WHEN IT STARTS")
 # serve.main([]) as the host runs it. Only web.main() sets DB_PATH, and
 # serve.py never calls it: STOCKBOT_DB names the database, as render.yaml and
@@ -248,6 +266,10 @@ check("serve.main takes the copy for a new release, and notes the release",
       started == 0 and len(new) == 1 and release_noted() == "ffff6666",
       (started, new, release_noted()))
 check("the timed backups are set up beside it", len(jobs) == 1, jobs)
+age_copies()
+jobs[0]()                               # a timed backup, every 12 hours
+check("each timed backup also deletes the copies a week old, so one goes "
+      "however long the next release takes", held() == [], held())
 
 head("A COPY THAT DOES NOT VERIFY IS NOT KEPT")
 before = held()

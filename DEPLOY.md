@@ -256,7 +256,9 @@ python backup.py --fetch <its name> --out /data/restore
 The app only ever deletes copies named the way its backups are named. So to
 keep one for good, copy a backup by hand under another name, such as
 `keep-2026-11.db`, with `--offsite`; it stays until you delete it in
-Cloudflare. Two more settings are optional: `BACKUP_S3_REGION`
+Cloudflare. If you later remove these settings, the copies already in the
+bucket stay too, and nothing prunes them any more: delete them in Cloudflare,
+since each holds every account, deleted ones included. Two more settings are optional: `BACKUP_S3_REGION`
 (default `auto`, which R2 uses) and `BACKUP_S3_PREFIX` (default `orenth/`, the
 folder in the bucket). Any storage that speaks the S3 protocol works, not only
 R2.
@@ -397,6 +399,12 @@ server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
 disk as the database: section 6 copies each one somewhere else as it is taken.
 
+Each new release also copies the database, verified, before its start-up
+changes anything in it, into `/data/backups/before-release`, and writes the
+release's name to `/data/release.txt` so a restart takes no second copy. The
+last three are kept, none for more than a week: they are pruned at every start
+and with every timed backup. They are not copied off the server.
+
 ---
 
 ## Notifications to phones and browsers
@@ -511,9 +519,10 @@ operator:
   `.db` file is the backup.
 - Backups hold every account's data. A deleted account is gone from them once
   the last copy taken before the deletion is pruned, about four days at the
-  defaults, and from any copy you downloaded only when you delete that. With
-  copies kept off the server (section 6), the monthly ones keep it for up to
-  12 months, and the privacy page says so.
+  defaults and a week for the copies taken before a release, and from any copy
+  you downloaded only when you delete that. With copies kept off the server
+  (section 6), the monthly ones keep it for up to 12 months, and the privacy
+  page says so.
 
 Do not `cat` or `cp` the database. It runs in WAL mode, so at any moment some
 committed data lives in the `-wal` file rather than the main one; a copy taken

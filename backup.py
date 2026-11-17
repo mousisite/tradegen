@@ -173,17 +173,21 @@ def _copies(out_dir: str) -> list:
                    if _COPY.match(f)), key=os.path.getmtime, reverse=True)
 
 
-def prune(out_dir: str, keep: int) -> None:
+def prune(out_dir: str, keep: int, max_age: Optional[float] = None) -> None:
     """Delete all but the newest few, so this can run on a timer.
 
     A backup's CSV exports go with its database copy. They hold the same
     people's data, so keeping them would keep a deleted account's trades and
     notes for ever, and they would slowly fill the disk the database is on.
+    With max_age, a copy more than that many seconds old goes too, however
+    few are left.
     """
     if keep <= 0 or not os.path.isdir(out_dir):
         return
+    now = time.time()
     kept = {_COPY.match(os.path.basename(p)).group(1)
-            for p in _copies(out_dir)[:keep]}
+            for p in _copies(out_dir)[:keep]
+            if max_age is None or now - os.path.getmtime(p) <= max_age}
     for name in sorted(os.listdir(out_dir)):
         part = _PART.match(name)
         if part is None or part.group(1) in kept:

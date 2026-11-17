@@ -38,6 +38,12 @@ except ImportError:
 # Copies kept of the database as each earlier release left it.
 KEEP_RELEASE_COPIES = 3
 
+# And for how long, the newest included. Each holds every account as it was,
+# a deleted one too, and the privacy page says a backup holding a deleted
+# account is gone in about a week. A release that damaged data shows it within
+# days; after that the timed backups are the ones to go back to.
+RELEASE_COPY_DAYS = 7
+
 
 def _code_fingerprint() -> str:
     """A stand-in for the release name when the host gives none: a hash of
@@ -57,6 +63,24 @@ def _code_fingerprint() -> str:
     return "code-" + digest.hexdigest()[:16]
 
 
+def _prune_release_copies(db_path) -> None:
+    """Delete the copies taken before releases that are past their week.
+
+    Run at every start and after every timed backup, not only when a new
+    release takes a copy: otherwise the last few stayed for as long as the
+    next releases took, months in a quiet spell. Never raises.
+    """
+    try:
+        import backup as backup_mod
+        folder = os.path.dirname(os.path.abspath(db_path))
+        backup_mod.prune(os.path.join(folder, "backups", "before-release"),
+                         KEEP_RELEASE_COPIES, max_age=RELEASE_COPY_DAYS * 86400.0)
+    except Exception as exc:
+        print("  could not prune the copies taken before releases: %s: %s"
+              % (type(exc).__name__, exc))
+    sys.stdout.flush()
+
+
 def _copy_before_release(db_path) -> None:
     """Back the database up before a new release's migrations touch it.
 
@@ -68,7 +92,10 @@ def _copy_before_release(db_path) -> None:
     backup's is, and the release is not noted, so the next start tries again.
     """
     release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or _code_fingerprint()
-    if not release or not db_path or not os.path.exists(db_path):
+    if not db_path or not os.path.exists(db_path):
+        return
+    _prune_release_copies(db_path)
+    if not release:
         return
     folder = os.path.dirname(os.path.abspath(db_path))
     marker = os.path.join(folder, "release.txt")
@@ -205,6 +232,9 @@ def main(argv=None) -> int:
 
         def take_one():
             from bot import database as db_mod
+            # First, so a copy taken before a release goes when its week is
+            # up even when this backup fails.
+            _prune_release_copies(db_path)
             if not os.path.exists(db_mod.default_path()):
                 # Nothing has been written yet. Not a failure, and not worth
                 # an alert; the next run will find a database.
