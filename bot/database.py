@@ -309,11 +309,16 @@ def _prepare(conn: sqlite3.Connection) -> None:
     # Accounts come after the main schema, because giving existing rows an
     # owner means altering tables the script above has just made sure exist.
     from . import accounts as accounts_mod
+    from . import apple_store as apple_store_mod
     from . import public as public_mod
     _allowing_race(conn, accounts_mod.ensure_schema)
     # The public pages add columns of their own, and doing it here means they
     # exist before the first request rather than being added by several at once.
     _allowing_race(conn, public_mod.ensure_schema)
+    # Pro bought in the iPhone app: its tables, and each subscriber's Pro
+    # worked out again under the current settings. After accounts, whose
+    # users.apple_until it fills in.
+    _allowing_race(conn, apple_store_mod.prepare)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                  (str(SCHEMA_VERSION),))
     conn.commit()

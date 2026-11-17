@@ -5,6 +5,10 @@ belongs to, and what the site does with it.
     signed test data and certificate vectors from app-store-server-library-
     python (MIT licence, in tests/data/appstore with APPLE_LICENSE.txt), and
     against home-made chains that try every way round them.
+  - Who has Pro (bot/apple_store.py): purchases, renewals, grace periods,
+    refunds and their reversal, notifications out of order or twice, old
+    copies sent again, one Apple ID shared by two accounts, test purchases,
+    moving a subscription, and deleting an account.
 
 Apple's tests cannot sign with Apple's key either: they swap in a test root
 (testCA.der) and sign with a key under it, and so do these.
@@ -17,13 +21,23 @@ import datetime
 import hashlib
 import json
 import os as _os
+import sqlite3
 import sys as _sys
+import tempfile
+import threading
 import time
 import unittest
+import uuid
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 _sys.path.insert(0, _os.path.dirname(HERE))
 _sys.path.insert(0, HERE)
+
+# The settings these tests set themselves, cleared of anything the shell had.
+APPLE_SETTINGS = ("APPLE_APP_ID", "APPLE_PRODUCT_IDS", "APPLE_BUNDLE_ID",
+                  "APPLE_SANDBOX_PRO", "APPLE_SANDBOX_USERS")
+for _key in APPLE_SETTINGS:
+    _os.environ.pop(_key, None)
 
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
@@ -31,12 +45,24 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature  # noqa: E402
 from cryptography.x509.oid import NameOID  # noqa: E402
 
+from bot import accounts as A  # noqa: E402
+from bot import apple_store as st  # noqa: E402
 from bot import appstore as av  # noqa: E402
+from bot import billing  # noqa: E402
+from bot import database as db  # noqa: E402
 
 DATA = _os.path.join(HERE, "data", "appstore")
 UTC = datetime.timezone.utc
 BUNDLE = "app.orenth.ios"
 APP_ID = 6740000001
+MONTHLY = "app.orenth.ios.pro.monthly"
+YEARLY = "app.orenth.ios.pro.yearly"
+PRODUCTS = [MONTHLY, YEARLY]
+DAY = 86400 * 1000
+
+
+def now_ms():
+    return int(time.time() * 1000)
 
 
 # --- helpers: Apple's files, and a home-made chain shaped like Apple's ---------
@@ -539,6 +565,566 @@ class HomeMadeChains(unittest.TestCase):
     def test_production_needs_app_apple_id(self):
         with self.assertRaises(ValueError):
             av.Verifier(BUNDLE, None)
+
+
+# --- who has Pro ---------------------------------------------------------------------
+
+STORE_CHAIN = Chain(name="Store")
+
+
+def fresh_db():
+    """An in-memory database with the server's whole schema, Apple's included."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    db._prepare(conn)
+    return conn
+
+
+class StoreBase(unittest.TestCase):
+    chain = STORE_CHAIN
+
+    def setUp(self):
+        for key in APPLE_SETTINGS:
+            _os.environ.pop(key, None)
+        self.addCleanup(lambda: [_os.environ.pop(k, None) for k in APPLE_SETTINGS])
+        self.conn = fresh_db()
+        self.addCleanup(self.conn.close)
+        self.ann = A.upsert_email_user(self.conn, "ann@example.com").id
+        self.ben = A.upsert_email_user(self.conn, "ben@example.com").id
+        self.v = av.Verifier(BUNDLE, APP_ID, roots=[self.chain.root])
+        self.t0 = now_ms() - 2 * DAY
+        self.ann_token = st.account_token(self.conn, self.ann)
+        self.ben_token = st.account_token(self.conn, self.ben)
+
+    # --- signed things -------------------------------------------------------
+    def tx(self, txid="2000", otid="1000", product=MONTHLY, purchase=None, expires=None,
+           token="ann", env="Production", signed=None, **extra):
+        """A JWSTransaction. signed is Apple's signedDate for this copy."""
+        purchase = self.t0 if purchase is None else purchase
+        payload = {"transactionId": txid, "originalTransactionId": otid, "productId": product,
+                   "bundleId": BUNDLE, "environment": env, "type": "Auto-Renewable Subscription",
+                   "purchaseDate": purchase, "expiresDate": purchase + 30 * DAY if expires is None else expires,
+                   "signedDate": now_ms() if signed is None else signed, "inAppOwnershipType": "PURCHASED"}
+        if token:
+            payload["appAccountToken"] = {"ann": self.ann_token, "ben": self.ben_token}.get(token, token)
+        payload.update(extra)
+        return self.chain.sign(payload)
+
+    def note(self, ntype, tx, subtype=None, status=1, signed=None, renewal=None, env="Production", uid=None):
+        """A V2 notification around a transaction. signed is the notification's signedDate."""
+        signed = now_ms() if signed is None else signed
+        data = {"bundleId": BUNDLE, "environment": env, "signedTransactionInfo": tx, "status": status}
+        if env == "Production":
+            data["appAppleId"] = APP_ID
+        if renewal is not None:
+            renewal = dict({"environment": env, "signedDate": signed, "originalTransactionId": "1000",
+                            "autoRenewStatus": 1, "productId": MONTHLY}, **renewal)
+            data["signedRenewalInfo"] = self.chain.sign(renewal)
+        payload = {"notificationType": ntype, "notificationUUID": uid or str(uuid.uuid4()),
+                   "signedDate": signed, "version": "2.0", "data": data}
+        if subtype:
+            payload["subtype"] = subtype
+        return self.chain.sign(payload)
+
+    def at(self, ntype, when, subtype=None, status=1, renewal=None, **tx_kw):
+        """A notification and its transaction, both signed at the same moment."""
+        return self.note(ntype, self.tx(signed=when, **tx_kw), subtype, status, when, renewal)
+
+    # --- shortcuts -----------------------------------------------------------
+    def send(self, signed_payload):
+        return st.handle_notification(self.conn, self.v, signed_payload, PRODUCTS)
+
+    def app(self, user, *jws):
+        return st.handle_app_transactions(self.conn, self.v, user, list(jws), PRODUCTS)
+
+    def pro(self, user):
+        return st.pro_until_ms(self.conn, user) > now_ms()
+
+    def user(self, user_id):
+        return A.get_user(self.conn, user_id)
+
+
+class Tokens(StoreBase):
+    def test_token_is_random_stable_and_per_person(self):
+        self.assertEqual(st.account_token(self.conn, self.ann), self.ann_token)
+        self.assertNotEqual(self.ann_token, self.ben_token)
+        self.assertEqual(uuid.UUID(self.ann_token).version, 4)
+        self.assertEqual(self.ann_token, self.ann_token.lower())
+
+    def test_upper_case_token_from_storekit_matches(self):
+        self.app(self.ben, self.tx(token=self.ann_token.upper()))
+        self.assertTrue(self.pro(self.ann))      # the token decides, not who sent it
+        self.assertFalse(self.pro(self.ben))
+
+
+class ProOnTheUserRow(StoreBase):
+    """users.apple_until follows every change, so is_pro() needs nothing else."""
+
+    def test_apple_until_follows_purchase_and_refund(self):
+        os_keys = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
+                   "STRIPE_WEBHOOK_SECRET": "whsec_x"}
+        _os.environ.update(os_keys)
+        self.addCleanup(lambda: [_os.environ.pop(k, None) for k in os_keys])
+        self.assertFalse(billing.is_pro(self.user(self.ann)))
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        ann = self.user(self.ann)
+        self.assertEqual(ann.apple_until, (self.t0 + 30 * DAY + 999) // 1000)
+        self.assertTrue(billing.is_pro(ann))
+        self.assertEqual(ann.plan, "free")              # Stripe's plan is untouched
+        self.assertFalse(billing.is_pro(self.user(self.ben)))
+        refund_at = now_ms() - 1000
+        self.send(self.at("REFUND", refund_at, status=5, revocationDate=refund_at))
+        self.assertEqual(self.user(self.ann).apple_until, 0)
+        self.assertFalse(billing.is_pro(self.user(self.ann)))
+
+    def test_a_past_apple_until_is_not_pro(self):
+        conn = self.conn
+        conn.execute("UPDATE users SET apple_until=? WHERE id=?", (int(time.time()) - 5, self.ann))
+        os_keys = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
+                   "STRIPE_WEBHOOK_SECRET": "whsec_x"}
+        _os.environ.update(os_keys)
+        self.addCleanup(lambda: [_os.environ.pop(k, None) for k in os_keys])
+        self.assertFalse(billing.is_pro(self.user(self.ann)))
+        conn.execute("UPDATE users SET apple_until=? WHERE id=?", (int(time.time()) + 60, self.ann))
+        self.assertTrue(billing.is_pro(self.user(self.ann)))
+
+
+class Lifecycle(StoreBase):
+    def test_subscribe_and_renew(self):
+        self.assertEqual(self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY")), (200, st.APPLIED))
+        self.assertTrue(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        renew_at = self.t0 + 30 * DAY
+        self.send(self.at("DID_RENEW", renew_at, txid="2001", purchase=renew_at))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), renew_at + 30 * DAY)
+
+    def test_expired_ends_pro(self):
+        purchase = now_ms() - 40 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.assertFalse(self.pro(self.ann))            # that period already ended
+        fresh = now_ms() - DAY
+        self.send(self.at("DID_RENEW", fresh, txid="2001", purchase=fresh))
+        self.assertTrue(self.pro(self.ann))
+        self.send(self.at("EXPIRED", now_ms(), "VOLUNTARY", status=2, txid="2001", purchase=fresh,
+                          expires=now_ms() - 1000))
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.user(self.ann).apple_until, (now_ms() - 1000 + 999) // 1000)
+
+    def test_duplicate_notification_applies_once(self):
+        payload = self.note("SUBSCRIBED", self.tx(), "INITIAL_BUY", uid="same-uuid")
+        self.assertEqual(self.send(payload), (200, st.APPLIED))
+        self.assertEqual(self.send(payload), (200, st.DUPLICATE))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_notifications").fetchone()[0], 1)
+
+    def test_out_of_order_delivery(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        refund_at = now_ms() - 10000
+        self.send(self.at("REFUND", refund_at, status=5, revocationDate=refund_at, revocationReason=0))
+        self.assertFalse(self.pro(self.ann))
+        # A retry of an older notification arrives after the refund: no effect.
+        late = self.at("DID_CHANGE_RENEWAL_STATUS", self.t0 + 5, "AUTO_RENEW_ENABLED")
+        self.assertEqual(self.send(late), (200, st.STALE))
+        self.assertFalse(self.pro(self.ann))
+        # An old copy from the app, signed before the refund: no effect either.
+        self.assertEqual(self.app(self.ann, self.tx(signed=self.t0 + 5))[0]["outcome"], st.STALE)
+        self.assertFalse(self.pro(self.ann))
+
+    def test_old_transaction_cannot_block_a_late_refund(self):
+        # The server was down when the refund happened. Before Apple's retry
+        # arrives, the app sends an earlier renewal, freshly signed. It must not
+        # move anything forward, or the refund would later look stale.
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY", txid="2001"))
+        refund_at = now_ms() - 10000
+        refund = self.at("REFUND", refund_at, status=5, txid="2001", revocationDate=refund_at)
+        older = self.tx(txid="2000", purchase=self.t0 - 30 * DAY, signed=now_ms())
+        self.assertEqual(self.app(self.ann, older)[0]["outcome"], st.STALE)
+        self.assertEqual(self.send(refund), (200, st.APPLIED))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_a_renewal_is_not_turned_away_by_a_fresh_copy_of_the_old_period(self):
+        # The app sends this period's transaction, signed just now. Then Apple's
+        # renewal notification arrives, signed earlier (a retry): it is a newer
+        # purchase, so it moves Pro forward whatever its signature's date.
+        purchase = now_ms() - 29 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        renew_at = purchase + 29 * DAY - 3600 * 1000
+        renewal = self.at("DID_RENEW", renew_at, txid="2001", purchase=renew_at)
+        self.app(self.ann, self.tx(purchase=purchase, signed=now_ms()))
+        self.assertEqual(self.send(renewal), (200, st.APPLIED))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), renew_at + 30 * DAY)
+        # And a copy of the renewal signed before the stored one changes nothing.
+        self.assertEqual(self.app(self.ann, self.tx(txid="2001", purchase=renew_at,
+                                                    signed=renew_at - 1))[0]["outcome"], st.STALE)
+
+    def test_refund_reversed(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.send(self.at("REFUND", now_ms() - 2000, status=5, revocationDate=now_ms() - 2000))
+        self.assertFalse(self.pro(self.ann))
+        self.send(self.at("REFUND_REVERSED", now_ms(), status=1))
+        self.assertTrue(self.pro(self.ann))
+
+    def test_a_refunded_renewal_stays_refunded(self):
+        # Pro for the old period does not come back with the new one refunded.
+        self.send(self.at("SUBSCRIBED", self.t0 - 30 * DAY, "INITIAL_BUY", purchase=self.t0 - 30 * DAY))
+        self.send(self.at("DID_RENEW", self.t0, txid="2001", purchase=self.t0))
+        refund_at = now_ms() - 1000
+        self.send(self.at("REFUND", refund_at, status=5, txid="2001", purchase=self.t0,
+                          revocationDate=refund_at))
+        self.assertFalse(self.pro(self.ann))
+        old = self.tx(txid="2000", purchase=self.t0 - 30 * DAY, expires=now_ms() + 5 * DAY)
+        self.assertEqual(self.app(self.ann, old)[0]["outcome"], st.STALE)
+        self.assertFalse(self.pro(self.ann))
+
+    def test_revoke(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.send(self.at("REVOKE", now_ms(), status=5, revocationDate=now_ms()))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_grace_period(self):
+        purchase = now_ms() - 31 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.assertFalse(self.pro(self.ann))
+        grace_end = now_ms() + 15 * DAY
+        self.send(self.at("DID_FAIL_TO_RENEW", now_ms() - 3000, "GRACE_PERIOD", status=4, purchase=purchase,
+                          renewal={"isInBillingRetryPeriod": True, "gracePeriodExpiresDate": grace_end}))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), grace_end)
+        self.send(self.at("GRACE_PERIOD_EXPIRED", now_ms() - 2000, status=3, purchase=purchase,
+                          renewal={"isInBillingRetryPeriod": True}))
+        self.assertFalse(self.pro(self.ann))
+        recovered = now_ms() - 1000
+        self.send(self.at("DID_RENEW", recovered, "BILLING_RECOVERY", txid="2001", purchase=recovered))
+        self.assertTrue(self.pro(self.ann))
+
+    def test_grace_date_counts_only_while_status_says_grace(self):
+        # Renewal info can still name a grace end after grace is over; only
+        # status 4 (Billing Grace Period) extends Pro.
+        purchase = now_ms() - 31 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.send(self.at("EXPIRED", now_ms(), "BILLING_RETRY", status=2, purchase=purchase,
+                          renewal={"gracePeriodExpiresDate": now_ms() + 5 * DAY, "autoRenewStatus": 0}))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_billing_retry_without_grace(self):
+        purchase = now_ms() - 31 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.send(self.at("DID_FAIL_TO_RENEW", now_ms(), status=3, purchase=purchase,
+                          renewal={"isInBillingRetryPeriod": True}))
+        self.assertFalse(self.pro(self.ann))
+        # Apple may still charge while it retries, so the deletion warning knows.
+        self.assertIsNone(st.subscription(self.conn, self.ann))
+        found = st.subscription(self.conn, self.ann, counted_only=False)
+        self.assertTrue(found and found["retrying"] and found["renews"])
+
+    def test_cancel_keeps_pro_to_end_of_period(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.send(self.at("DID_CHANGE_RENEWAL_STATUS", now_ms(), "AUTO_RENEW_DISABLED",
+                          renewal={"autoRenewStatus": 0}))
+        self.assertTrue(self.pro(self.ann))
+        self.assertEqual(self.conn.execute("SELECT auto_renew FROM apple_subs").fetchone()["auto_renew"], 0)
+        self.assertFalse(st.subscription(self.conn, self.ann)["renews"])
+
+    def test_renewal_extended(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.send(self.at("RENEWAL_EXTENDED", now_ms(), expires=self.t0 + 45 * DAY))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), self.t0 + 45 * DAY)
+
+    def test_monthly_to_yearly_at_the_next_renewal(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.send(self.at("DID_CHANGE_RENEWAL_PREF", now_ms() - 5000, "UPGRADE",
+                          renewal={"autoRenewProductId": YEARLY}))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), self.t0 + 30 * DAY)
+        renew_at = self.t0 + 30 * DAY
+        self.send(self.at("DID_RENEW", now_ms(), txid="2001", product=YEARLY, purchase=renew_at,
+                          expires=renew_at + 365 * DAY))
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), renew_at + 365 * DAY)
+        self.assertEqual(self.conn.execute("SELECT product_id FROM apple_subs").fetchone()[0], YEARLY)
+
+    def test_upgraded_and_older_transactions_do_not_shorten(self):
+        self.send(self.at("SUBSCRIBED", self.t0 + 10, "INITIAL_BUY", txid="2005", purchase=self.t0 + 10))
+        until = st.pro_until_ms(self.conn, self.ann)
+        self.assertEqual(self.app(self.ann, self.tx(txid="2004", purchase=self.t0 - 30 * DAY,
+                                                    expires=self.t0))[0]["outcome"], st.STALE)
+        self.assertEqual(self.app(self.ann, self.tx(txid="2005", purchase=self.t0 + 10, expires=self.t0 + 11,
+                                                    isUpgraded=True))[0]["outcome"], st.STALE)
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), until)
+        # A first sight of an upgraded transaction is not a subscription.
+        self.assertEqual(self.app(self.ann, self.tx(otid="7000", txid="7001", isUpgraded=True))[0]["outcome"],
+                         st.IGNORED)
+
+    def test_types_that_change_nothing(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        before = st.pro_until_ms(self.conn, self.ann)
+        for ntype, sub in (("PRICE_INCREASE", "ACCEPTED"), ("DID_CHANGE_RENEWAL_PREF", "DOWNGRADE"),
+                           ("REFUND_DECLINED", None), ("CONSUMPTION_REQUEST", None), ("OFFER_REDEEMED", None),
+                           ("RENEWAL_EXTENSION", "SUMMARY"), ("METADATA_UPDATE", None)):
+            self.assertEqual(self.send(self.at(ntype, now_ms(), sub))[0], 200)
+        self.assertEqual(st.pro_until_ms(self.conn, self.ann), before)
+
+    def test_test_notification_and_bad_input(self):
+        test_note = self.chain.sign({"notificationType": "TEST", "notificationUUID": "t-1", "signedDate": now_ms(),
+                                     "data": {"bundleId": BUNDLE, "environment": "Production",
+                                              "appAppleId": APP_ID}})
+        self.assertEqual(self.send(test_note), (200, st.IGNORED))
+        self.assertEqual(self.send("not.a.jws")[0], 400)
+        forger = Chain(name="Forger")
+        forged = forger.sign({"notificationType": "SUBSCRIBED", "notificationUUID": "f-1", "signedDate": now_ms(),
+                              "data": {"bundleId": BUNDLE, "environment": "Production", "appAppleId": APP_ID,
+                                       "signedTransactionInfo": forger.sign({})}})
+        self.assertEqual(self.send(forged), (400, av.VERIFICATION_FAILURE))
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_notifications "
+                                           "WHERE uuid='f-1'").fetchone()[0], 0)
+
+    def test_unknown_product_ignored(self):
+        self.assertEqual(self.send(self.at("SUBSCRIBED", now_ms(), product="app.orenth.ios.coins")),
+                         (200, st.IGNORED))
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.app(self.ann, self.tx(product="app.orenth.ios.coins"))[0]["outcome"], st.IGNORED)
+        self.assertEqual(self.app(self.ann, self.tx(type="Consumable"))[0]["outcome"], st.IGNORED)
+
+    def test_a_forged_or_foreign_transaction_from_the_app_is_invalid(self):
+        forger = Chain(name="Forger")
+        forged = forger.sign({"transactionId": "1", "originalTransactionId": "1", "productId": MONTHLY,
+                              "bundleId": BUNDLE, "environment": "Production",
+                              "type": "Auto-Renewable Subscription", "purchaseDate": now_ms(),
+                              "expiresDate": now_ms() + 30 * DAY, "signedDate": now_ms(),
+                              "appAccountToken": self.ann_token})
+        out = self.app(self.ann, forged, self.tx(bundleId="com.other.app"), "x.y.z")
+        self.assertEqual([r["outcome"] for r in out], [st.INVALID] * 3)
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_subs").fetchone()[0], 0)
+
+
+class Ownership(StoreBase):
+    def test_notification_before_app_call_links_by_token(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
+        self.assertTrue(self.pro(self.ann))
+        self.assertEqual(self.app(self.ann, self.tx())[0]["outcome"], st.APPLIED)
+
+    def test_no_token_links_to_the_person_who_sends_it(self):
+        # e.g. an offer code redeemed in the App Store: no appAccountToken.
+        self.assertEqual(self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY", token=None)), (200, st.UNOWNED))
+        self.assertFalse(self.pro(self.ben))
+        self.assertEqual(self.app(self.ben, self.tx(token=None))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        # Later, a different account signed in on the same phone cannot take it.
+        self.assertEqual(self.app(self.ann, self.tx(token=None))[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertFalse(self.pro(self.ann))
+
+    def test_a_token_nobody_has_does_not_give_it_to_the_sender_over_its_owner(self):
+        # A token that is not any account's (made up, or a deleted account's):
+        # it belongs to whoever sends it, as with no token.
+        stray = str(uuid.uuid4())
+        self.assertEqual(self.app(self.ben, self.tx(token=stray))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+
+    def test_someone_elses_token(self):
+        # Ann bought on this Apple ID. Ben signs in on the same phone and taps
+        # Subscribe: StoreKit hands back the existing transaction, with Ann's token.
+        self.app(self.ann, self.tx())
+        self.assertEqual(self.app(self.ben, self.tx())[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertTrue(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        # Ben asks, on purpose, to move it here.
+        moved = st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)
+        self.assertEqual(moved, {"outcome": st.MOVED, "previous": self.ann})
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        self.assertTrue(billing.is_pro(self.user(self.ben)) or not billing.ready())
+        self.assertEqual(self.user(self.ann).apple_until, 0)
+        row = self.conn.execute("SELECT user_id, moved_from, moved_ms FROM apple_subs").fetchone()
+        self.assertEqual((row["user_id"], row["moved_from"]), (self.ben, self.ann))
+        self.assertGreater(row["moved_ms"], 0)
+        # Renewals stay with Ben, though they still carry Ann's token.
+        renew_at = self.t0 + 30 * DAY
+        self.send(self.at("DID_RENEW", renew_at, txid="2001", purchase=renew_at))
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_moving_back_and_forth_is_limited(self):
+        self.app(self.ann, self.tx())
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"], st.MOVED)
+        again = st.move_to(self.conn, self.v, self.ann, self.tx(), PRODUCTS)
+        self.assertEqual(again["outcome"], st.TOO_SOON)
+        self.assertGreater(again["after"], time.time() + 29 * 86400)
+        self.assertTrue(self.pro(self.ben))
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"],
+                         st.ALREADY_HERE)
+        # A month on, it may move again.
+        self.conn.execute("UPDATE apple_subs SET moved_ms=?", (now_ms() - 31 * DAY,))
+        self.conn.commit()
+        self.assertEqual(st.move_to(self.conn, self.v, self.ann, self.tx(), PRODUCTS)["outcome"], st.MOVED)
+        self.assertTrue(self.pro(self.ann))
+
+    def test_only_the_running_transaction_can_move_it(self):
+        # An old, ended period, or a refunded one, moves nothing: what moves a
+        # subscription is what the phone holds now.
+        old = self.tx(txid="1999", purchase=self.t0 - 30 * DAY)
+        self.app(self.ann, self.tx(signed=self.t0 + 1000))
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, old, PRODUCTS)["outcome"], st.NOT_CURRENT)
+        ended = self.tx(otid="5000", txid="5001", purchase=now_ms() - 40 * DAY, token="ann")
+        self.app(self.ann, ended)
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, ended, PRODUCTS)["outcome"], st.NOT_CURRENT)
+        refund_at = now_ms() - 1000
+        self.send(self.at("REFUND", refund_at, status=5, revocationDate=refund_at))
+        # A copy from before the refund, and Apple's own copy since, which
+        # names the refund: neither moves it.
+        for copy in (self.tx(signed=refund_at - 5000), self.tx(revocationDate=refund_at)):
+            self.assertEqual(st.move_to(self.conn, self.v, self.ben, copy, PRODUCTS)["outcome"],
+                             st.NOT_CURRENT)
+        self.assertFalse(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        with self.assertRaises(av.VerificationError):
+            st.move_to(self.conn, self.v, self.ben, Chain(name="Forger").sign({}), PRODUCTS)
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(product="other.product"),
+                                    PRODUCTS)["outcome"], st.IGNORED)
+
+    def test_moving_an_unowned_subscription_claims_it(self):
+        self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY", token=None))
+        moved = st.move_to(self.conn, self.v, self.ben, self.tx(token=None), PRODUCTS)
+        self.assertEqual(moved["outcome"], st.ALREADY_HERE)
+        self.assertTrue(self.pro(self.ben))
+
+    def test_deleted_account(self):
+        self.app(self.ann, self.tx())
+        A.delete_user(self.conn, self.ann)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_subs").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?",
+                                           (self.ann,)).fetchone()[0], 0)
+        # Apple keeps renewing until the person cancels; the renewal has no owner now.
+        renew = self.t0 + DAY
+        self.assertEqual(self.send(self.at("DID_RENEW", renew, txid="2001", purchase=renew))[1], st.UNOWNED)
+        # The same person makes a new account and taps Restore: it follows them.
+        self.assertEqual(self.app(self.ben, self.tx(txid="2001", purchase=renew))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+
+    def test_deleting_the_previous_owner_forgets_the_move(self):
+        self.app(self.ann, self.tx())
+        st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)
+        A.delete_user(self.conn, self.ann)
+        row = self.conn.execute("SELECT user_id, moved_from FROM apple_subs").fetchone()
+        self.assertEqual((row["user_id"], row["moved_from"]), (self.ben, None))
+        self.assertTrue(self.pro(self.ben))
+
+
+class Sandbox(StoreBase):
+    def test_sandbox_recorded_and_counted_by_default(self):
+        self.app(self.ann, self.tx(env="Sandbox"))
+        self.assertEqual(self.conn.execute("SELECT environment FROM apple_subs").fetchone()["environment"],
+                         "Sandbox")
+        self.assertEqual(st.sandbox_policy(), "all")
+        self.assertTrue(self.pro(self.ann))
+        self.assertTrue(st.subscription(self.conn, self.ann)["test"])
+
+    def test_sandbox_and_production_are_separate(self):
+        self.app(self.ann, self.tx(env="Sandbox"))
+        self.app(self.ann, self.tx(env="Production"))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_subs").fetchone()[0], 2)
+
+    def test_policy_none_and_allowlist(self):
+        self.app(self.ann, self.tx(env="Sandbox"))
+        self.app(self.ben, self.tx(env="Sandbox", otid="3000", txid="3001", token="ben"))
+        _os.environ["APPLE_SANDBOX_PRO"] = "none"
+        self.assertFalse(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        _os.environ["APPLE_SANDBOX_PRO"] = "Allowlist"
+        _os.environ["APPLE_SANDBOX_USERS"] = "someone@example.com, BEN@example.com"
+        self.assertFalse(self.pro(self.ann))
+        self.assertTrue(self.pro(self.ben))
+        # Production purchases count whatever the setting says.
+        _os.environ["APPLE_SANDBOX_PRO"] = "none"
+        self.app(self.ann, self.tx(env="Production"))
+        self.assertTrue(self.pro(self.ann))
+
+    def test_a_changed_policy_reaches_the_user_rows_at_start_up(self):
+        self.app(self.ann, self.tx(env="Sandbox"))
+        self.assertGreater(self.user(self.ann).apple_until, time.time())
+        _os.environ["APPLE_SANDBOX_PRO"] = "none"
+        st.prepare(self.conn)
+        self.assertEqual(self.user(self.ann).apple_until, 0)
+        _os.environ["APPLE_SANDBOX_PRO"] = "all"
+        st.prepare(self.conn)
+        self.assertGreater(self.user(self.ann).apple_until, time.time())
+
+    def test_a_typo_in_the_setting_keeps_the_default(self):
+        _os.environ["APPLE_SANDBOX_PRO"] = "nobody"
+        self.assertEqual(st.sandbox_policy(), "all")
+
+
+class Settings(unittest.TestCase):
+    def setUp(self):
+        for key in APPLE_SETTINGS:
+            _os.environ.pop(key, None)
+        self.addCleanup(lambda: [_os.environ.pop(k, None) for k in APPLE_SETTINGS])
+
+    def test_off_until_the_app_id_is_set(self):
+        self.assertFalse(st.enabled())
+        self.assertIn("APPLE_APP_ID is not set", st.describe())
+        for bad in ("abc", "-5", "0", "674 000", "6740000001x"):
+            _os.environ["APPLE_APP_ID"] = bad
+            self.assertFalse(st.enabled(), bad)
+        _os.environ["APPLE_APP_ID"] = " 6740000001\n"
+        self.assertTrue(st.enabled())
+        self.assertEqual(st.app_id(), 6740000001)
+        self.assertIn("on for app.orenth.ios.pro.monthly, app.orenth.ios.pro.yearly", st.describe())
+
+    def test_products_and_bundle(self):
+        self.assertEqual(st.product_ids(), PRODUCTS)
+        _os.environ["APPLE_PRODUCT_IDS"] = " a.b.c , a.b.c,bad/id!, x_y-z.1 "
+        self.assertEqual(st.product_ids(), ["a.b.c", "x_y-z.1"])
+        self.assertEqual(st.bundle_id(), BUNDLE)
+        _os.environ["APPLE_BUNDLE_ID"] = "com.example.other"
+        self.assertEqual(st.bundle_id(), "com.example.other")
+
+    def test_the_verifier_follows_the_settings(self):
+        _os.environ["APPLE_APP_ID"] = str(APP_ID)
+        v = st.verifier()
+        self.assertEqual((v.bundle_id, v.app_apple_id, v.strict), (BUNDLE, APP_ID, True))
+        self.assertIs(st.verifier(), v)
+        _os.environ["APPLE_APP_ID"] = str(APP_ID + 1)
+        self.assertEqual(st.verifier().app_apple_id, APP_ID + 1)
+
+
+class Concurrency(unittest.TestCase):
+    def test_same_notification_delivered_four_times_at_once(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        _os.close(fd)
+        _os.remove(path)
+        try:
+            db.connect(path).close()          # the whole schema, as the server has it
+            v = av.Verifier(BUNDLE, APP_ID, roots=[STORE_CHAIN.root])
+            t0 = now_ms() - DAY
+            tx = STORE_CHAIN.sign({"transactionId": "1", "originalTransactionId": "1", "productId": MONTHLY,
+                                   "bundleId": BUNDLE, "environment": "Production", "signedDate": t0,
+                                   "type": "Auto-Renewable Subscription", "purchaseDate": t0,
+                                   "expiresDate": t0 + 30 * DAY})
+            payload = STORE_CHAIN.sign({"notificationType": "SUBSCRIBED", "subtype": "INITIAL_BUY",
+                                        "notificationUUID": "race", "signedDate": t0,
+                                        "data": {"bundleId": BUNDLE, "environment": "Production",
+                                                 "appAppleId": APP_ID, "signedTransactionInfo": tx,
+                                                 "status": 1}})
+            results = []
+
+            def deliver():
+                conn = db.connect(path)
+                try:
+                    results.append(st.handle_notification(conn, v, payload, PRODUCTS)[1])
+                finally:
+                    conn.close()
+
+            threads = [threading.Thread(target=deliver) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(sorted(results), sorted([st.UNOWNED] + [st.DUPLICATE] * 3))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    _os.remove(path + suffix)
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":
