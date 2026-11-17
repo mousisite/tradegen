@@ -56,6 +56,8 @@ SUITES = [
     ("test_tickers.py",      False, "a ticker shared by a coin and a stock: both reachable, kept apart"),
     ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
     ("test_wording.py",      False, "what visitors read on a public site: no setup text, plain errors"),
+    ("test_since.py",        False, "what changed on a watchlist since yesterday, page and email"),
+    ("test_help.py",         False, "help beside each figure; no setup words or errors to visitors"),
 ]
 
 TIMEOUT = 900

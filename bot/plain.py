@@ -224,6 +224,235 @@ def _trim(value) -> str:
     return "%.4f" % float(value)
 
 
+# --- help beside each figure ---------------------------------------------------
+
+# One or two sentences on each figure of the analysis page that a first-time
+# investor may not know, said the way this code works the figure out rather
+# than the way a textbook would. The page shows each behind a "?" beside its
+# figure (templates/_help.html). name finishes "What ... means"; text is the
+# answer. A word in braces is a setting, filled in by help_for, so the words
+# match the numbers on the page.
+HELP: Dict[str, Dict[str, str]] = {
+    # The call, and the market it was made in.
+    "call": {"name": "the call", "text": (
+        "BUY means setups like this one made money on this instrument before, "
+        "after costs, by more than luck and more than buying on any day did, and "
+        "the price is not stretched or just under a level; SHORT is the same for "
+        "a fall, and appears only when shorting is on in Settings. WAIT means the "
+        "signals lean one way but that record, or the price, is not there yet, "
+        "and AVOID means there is no setup worth the costs, the signals point "
+        "down with shorting off, or this setup has lost money here.")},
+    "regime": {"name": "the market's state", "text": (
+        "How the price has been moving lately: trending when the ADX reading is "
+        "25 or more, ranging at 17 or less, transitional in between. Volatility "
+        "is high, normal or low against this instrument's own last 120 bars, and "
+        "up, down or sideways is the way it leans.")},
+
+    # The plan.
+    "entry": {"name": "the entry", "text": (
+        "Where the plan gets in. A BUY or SHORT gets in at today's price "
+        "(market); a WAIT names a better price to wait for (limit): the nearest "
+        "support level (resistance, for a short), volume-weighted average or "
+        "21-bar average at least 0.3 ATR away, or 0.5 ATR off when there is "
+        "none.")},
+    "stop": {"name": "the stop", "text": (
+        "Where the plan says the idea was wrong and gets out. It is {stop} ATR "
+        "from the entry, or a little past the nearest support level (resistance, "
+        "for a short) when that is further off but within 2.5 ATR.")},
+    "target": {"name": "the first target", "text": (
+        "Where the plan takes its profit: {target} ATR from the entry, or just "
+        "short of the first level in the way that still leaves at least as much "
+        "to gain as the stop risks. The odds on this page were measured with the "
+        "target {target} ATR away.")},
+    "runner": {"name": "the runner", "text": (
+        "A second, further target for part of the position, at least {runner} "
+        "ATR from the entry. Nothing on this page measures how often it is "
+        "reached.")},
+    "reward_risk": {"name": "reward to risk", "text": (
+        "How far the first target is from the entry, against how far the stop "
+        "is: 2.00 : 1 means twice as far. Needs is how often trades like this "
+        "had to reach their target to come out even after costs, worked out from "
+        "what their wins and losses here were really worth.")},
+    "size": {"name": "the size", "text": (
+        "How many shares or coins the plan would buy: enough that reaching the "
+        "stop loses {risk}% of the {account} account set in Settings, rounded "
+        "down to whole shares for a stock, and never more than {cap}% of the "
+        "account in one position.")},
+    "risk": {"name": "the amount at risk", "text": (
+        "What reaching the stop would lose: the size times the distance from "
+        "entry to stop, before trading costs, and that as a share of the "
+        "account.")},
+    "gap": {"name": "the gap risk", "text": (
+        "A stop sells at the first price there is, which can be well past it "
+        "after a gap. This is the loss if the price moved against you from just "
+        "short of the stop by as much as this instrument's worst single bar, "
+        "close to close, in the history read.")},
+
+    # The odds.
+    "hit_rate": {"name": "reached target first", "text": (
+        "How often past trades scored about as strongly as today's, on this "
+        "instrument and on the same side, reached the target before the stop "
+        "within {window}. One that reached neither counts as a miss, and a bar "
+        "that touched both counts as the stop.")},
+    "range": {"name": "the 95% range", "text": (
+        "Where the true rate probably lies: if the future behaves like the past, "
+        "19 times in 20 it is inside this range. It is wider for fewer trades, "
+        "and wider again because trades close together share most of their bars "
+        "and count as fewer separate tests.")},
+    "expectancy": {"name": "expectancy", "text": (
+        "The average result of these past trades in R, the amount each one "
+        "risked between entry and stop, after a round trip of costs: +0.10R "
+        "means 10 cents kept for every dollar risked. A trade that reached "
+        "neither stop nor target counts at what it was worth when its time ran "
+        "out.")},
+    "baseline": {"name": "taking the same side any day", "text": (
+        "The same trade taken at every point the test looked at, whatever the "
+        "signals said: what the market's own drift paid here. A setup shows "
+        "skill only if it beats this, not just zero.")},
+    "breakeven": {"name": "the break-even rate", "text": (
+        "How often a trade like this has to reach its target to come out even "
+        "after costs, from what the wins and losses here were really worth. Most "
+        "misses are closed before the stop, so it is usually lower than the "
+        "stop and target alone suggest.")},
+    "sample": {"name": "the sample", "text": (
+        "How many past trades these figures come from: setups scored about as "
+        "strongly as today's, on the same side, and fewer than {minimum}, or a "
+        "history too short to test well, is called too few to trust. Trades a "
+        "few bars apart share most of their bars, so they count as fewer "
+        "separate tests when the 95% range is worked out.")},
+    "hold": {"name": "the typical hold", "text": (
+        "The average number of bars these past trades lasted: until the target "
+        "or the stop, or until the {bars}-bar limit, when they were closed at "
+        "the price then.")},
+    "holdout": {"name": "the most recent third", "text": (
+        "The average result of only the newest third of these trades. If it and "
+        "the whole record disagree, one making money and the other losing it, "
+        "the edge may be fading, and the app does not say BUY.")},
+    "costs": {"name": "trading costs", "text": (
+        "Every past trade is charged a round trip of costs: {equity}% of the "
+        "price for a stock or fund and {crypto}% for a coin, as set in "
+        "Settings, or {other}% for anything else (a basis point is a hundredth "
+        "of a percent). In R that is the cost divided by the distance to the "
+        "stop, so the closer the stop, the more of each trade it eats.")},
+    "atr": {"name": "ATR", "text": (
+        "The average true range: how far the price usually moves in one bar, "
+        "gaps included, smoothed over the last 14 bars. Stops and targets are "
+        "set in ATR so they suit how much this instrument moves.")},
+    "curve": {"name": "this table", "text": (
+        "Each row holds the past trades whose conviction, how strongly the "
+        "strategies leaned from 0 to 1 whichever way, fell in that band: how "
+        "many there were, and how often they reached the target first. If the "
+        "rate does not climb from row to row, how strongly the signals lean says "
+        "nothing here.")},
+
+    # Where the signal comes from.
+    "family": {"name": "family", "text": (
+        "A group of strategies that read the chart the same kind of way: trend, "
+        "mean reversion, breakout, volume, structure or pattern.")},
+    "lean": {"name": "lean", "text": (
+        "The family's weighted opinion today, from -1 (down) to +1 (up).")},
+    "active": {"name": "active", "text": (
+        "How many of the family's strategies have an opinion today, out of all "
+        "of them.")},
+    "combined": {"name": "combined", "text": (
+        "All the strategies together, a later voice in the same family counting "
+        "less than the first.")},
+    "with_news": {"name": "with news", "text": (
+        "The combined reading with the headlines and posts given {news}% of the "
+        "say, and cut back when the two disagree. It is the conviction the call "
+        "was made on.")},
+
+    # Each strategy, and the words its notes use.
+    "score": {"name": "score", "text": (
+        "The strategy's opinion today, from -1 (strongly down) to +1 (strongly "
+        "up).")},
+    "weight": {"name": "weight", "text": (
+        "How much its opinion counts: its starting weight, raised when it suits "
+        "today's kind of market and lowered when it does not, then scaled by its "
+        "record on this instrument.")},
+    "sees": {"name": "what it sees", "text": (
+        "What it read on the chart, in traders' shorthand. The common words "
+        "follow.")},
+    "rsi": {"name": "RSI", "text": (
+        "Relative strength: how hard the price rose against how hard it fell "
+        "over the last 14 bars, from 0 to 100. Above 70 is often called "
+        "stretched up, below 30 stretched down.")},
+    "ema": {"name": "EMA", "text": (
+        "A moving average of the last 9, 21, 50 or 200 bars that counts recent "
+        "bars more. EMA 9>21>50 means the shorter averages sit above the longer "
+        "ones, as they do in a rise.")},
+    "macd": {"name": "MACD", "text": (
+        "The gap between a 12-bar and a 26-bar moving average; its histogram is "
+        "that gap against its own 9-bar average, and a growing one means the "
+        "move is speeding up.")},
+    "adx": {"name": "ADX", "text": (
+        "How strong the trend has been over 14 bars, whichever way it points, "
+        "with +DI and -DI saying which way. Here 25 or more counts as "
+        "trending.")},
+    "vwap": {"name": "VWAP", "text": (
+        "The average price weighted by how much traded at each price: the "
+        "session's own on intraday bars, the last 20 bars' on daily ones.")},
+    "bollinger": {"name": "Bollinger %B", "text": (
+        "Where the price sits in a band two standard deviations either side of "
+        "its 20-bar average: 0 is the bottom edge and 1 the top.")},
+    "volume": {"name": "OBV and A/D", "text": (
+        "Running totals of volume: OBV adds a bar's volume when it closed up and "
+        "takes it off when it closed down, and A/D weighs it by where the bar "
+        "closed in its range. Here their change over the last 20 and 10 bars is "
+        "read as a share of the volume traded then.")},
+
+    # What this instrument taught the bot.
+    "setups": {"name": "setups", "text": (
+        "How many pretend trades the strategy made over this instrument's "
+        "history: one each time it had a clear opinion at a point the test "
+        "looked at.")},
+    "strategy_hit": {"name": "hit rate", "text": (
+        "How often those trades reached the target before the stop.")},
+    "net_r": {"name": "net R", "text": (
+        "Their average result after costs, in R: what each dollar risked made or "
+        "lost, on average.")},
+    "weight_given": {"name": "weight given", "text": (
+        "The multiplier its record gave it in today's call, from 0.25 to 1.9: "
+        "its record in all conditions blended with its record in markets like "
+        "today's, and pulled toward 1 while the record is short.")},
+
+    # The news.
+    "news": {"name": "the news reading", "text": (
+        "The recent headlines and posts read from -1 (bad news) to +1 (good "
+        "news), headlines counting about twice as much as posts and newer items "
+        "more than older ones. It has {news}% of the say in the call's "
+        "conviction.")},
+}
+
+
+def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
+    """HELP with the settings' own numbers in it, for one bar interval."""
+    from .config import DEFAULTS, describe_horizon, horizon_for
+
+    def setting(key):
+        value = cfg.get(key)
+        return DEFAULTS[key] if value is None else value
+
+    bars = horizon_for(interval, cfg)
+    filled = {
+        "stop": "%g" % float(setting("stop_atr_multiple")),
+        "target": "%g" % float(setting("target_atr_multiple")),
+        "runner": "%g" % float(setting("runner_atr_multiple")),
+        "risk": "%g" % float(setting("risk_per_trade_pct")),
+        "cap": "%g" % float(setting("max_position_pct")),
+        "account": "{:,.0f}".format(float(setting("account_size"))),
+        "bars": bars,
+        "window": describe_horizon(interval, bars),
+        "minimum": int(setting("min_bucket_samples")),
+        "equity": "%g" % (float(setting("cost_bps_equity")) / 100.0),
+        "crypto": "%g" % (float(setting("cost_bps_crypto")) / 100.0),
+        "other": "%g" % (float(setting("cost_bps_other")) / 100.0),
+        "news": "%d" % round(float(setting("sentiment_weight")) * 100),
+    }
+    return {key: {"name": h["name"], "text": h["text"].format(**filled)}
+            for key, h in HELP.items()}
+
+
 # --- the company ------------------------------------------------------------
 
 def explain_company(research) -> Dict:

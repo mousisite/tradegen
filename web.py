@@ -830,6 +830,11 @@ def exact_arg(symbol, saved=None) -> Optional[int]:
         return None
     return 1 if market_mod.needs_exact(symbol or "") else None
 
+# The words behind each "?" beside a figure (templates/_help.html), with the
+# house settings in them. The analysis page passes its own, with the
+# person's settings and bar interval in them instead.
+app.jinja_env.globals["help_text"] = plain_mod.help_for(config_mod.DEFAULTS)
+
 
 @app.template_filter("day")
 def _day(ts):
@@ -1027,24 +1032,36 @@ def _attention_stored(conn, me: int) -> Dict:
     shown = watched[:WATCH_SHOWN]
     meant = {w["symbol"]: _watched_instrument(w) for w in shown}
     by_pair, by_symbol = _latest_runs(conn, me, meant.values())
+    # The background job's daily check of anything else watched. The free
+    # plan is shown calls only on the popular stocks (digest.watched).
+    full = _pro()
+    checks = db_mod.watch_calls(conn, list(meant.values()), 1) if full else {}
     watch = []
     for w in shown:
         symbol, interval = w["symbol"], w["interval"] or "1d"
         instrument = meant[symbol]
         # The public check is a daily one, so it answers only a daily watch.
         snap = popular.get(instrument) if interval == "1d" else None
+        daily = (checks.get(instrument) or [None])[0] if interval == "1d" else None
         own = by_pair.get((instrument, interval)) or by_symbol.get(instrument)
         item = {"symbol": symbol, "interval": interval, "exact": bool(w["exact"])}
         if snap and snap.get("action"):
             item.update(call=snap["action"], at=snap["at"], price=snap.get("price"),
                         public=True, quote_day=_quote_day(snap),
                         slug=public_mod.slug(instrument))
+        elif daily is not None and daily["action"]:
+            item.update(call=daily["action"], at=daily["at"], price=daily["price"],
+                        public=False, daily=True)
         elif own is not None and own["action"]:
             item.update(call=own["action"], at=own["ts"], price=own["price"],
                         public=False, run_interval=own["interval"],
                         closed=not own["market_open"])
         watch.append(item)
-    return {"fired": fired, "watch": watch,
+    # What changed since the session before, from the calls the background
+    # job wrote down.
+    since = digest_mod.since_yesterday(conn, me, full, now)
+    since["notes"] = digest_mod.notes(since)
+    return {"fired": fired, "watch": watch, "since": since, "full": full,
             "watch_more": max(0, len(watched) - len(shown)),
             "checked": bool(fresh),
             "buys": [dict(v, quote_day=_quote_day(v), slug=public_mod.slug(v["symbol"]),
@@ -1090,6 +1107,7 @@ def _attention(stored: Dict, open_trades) -> Dict:
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
             "watch": stored["watch"], "watch_more": stored["watch_more"],
+            "since": stored["since"], "full": stored["full"],
             "buys": buys[:ATTENTION_SHOWN],
             "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
             "checked": stored["checked"],
@@ -1185,8 +1203,14 @@ def analyse():
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
     except Exception as exc:                        # keep the app usable
-        return render_template("error.html", symbol=symbol, message=_plainly(
-            exc, "The analysis could not be finished. Try again in a minute.")), 500
+        # No symbol for the page: its advice about tickers that do not exist
+        # is for a ticker the source refused, not for this. _plainly logs the
+        # exception and shows its text only to whoever runs the server.
+        said = ("The analysis of %s could not be finished. Try again in a minute."
+                % symbol.upper()[:20])
+        detail = _plainly(exc, said)
+        return render_template("error.html", symbol="", message=(
+            said if detail == said else "%s (%s)" % (said, detail))), 500
     _spend_view(symbol, interval, exact)
 
     families = _family_rollup(result)
@@ -1229,6 +1253,7 @@ def analyse():
                            overlap=overlap, chart=_trade_chart(result),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
+                           help_text=plain_mod.help_for(cfg, result.bars.interval),
                            # A visitor cannot make a share, but every example
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
@@ -3666,6 +3691,54 @@ def _digest_look_up(symbol: str, exact: bool = False):
     return _public_snapshot(symbol, exact=exact)
 
 
+def _watch_check(symbol: str, with_call: bool) -> dict:
+    """A watched instrument's daily call and price, for "since yesterday".
+
+    A popular instrument's call is its public daily check, so nothing more is
+    analysed for it. Any other is analysed the way that check is, on daily
+    bars with the standard settings, recorded in nobody's history and costing
+    nobody's look, and only when with_call; otherwise only its price is read.
+    """
+    action, bars = None, None
+    # Already Yahoo's own symbol: digest._first resolved each watchlist entry
+    # to what it opens, so LINK here is Interlink Electronics and the coin
+    # arrives as LINK-USD. Read as typed text it would turn into the coin.
+    ticker = market_mod.normalise_symbol(symbol, exact=True)
+    if with_call and ticker in public_mod.NAMES:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            snap = public_mod.verdict(conn, ticker)
+        finally:
+            conn.close()
+        if snap and time.time() - snap["at"] < public_mod.MAX_AGE + 3600:
+            action = snap.get("action") or None
+    elif with_call:
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        # No calendar: it adds warnings to a plan, never changes its call.
+        result = engine.analyse(ticker, cfg, interval="1d", with_news=False,
+                                with_learning=True, record=False,
+                                db_path=app.config.get("DB_PATH"),
+                                with_calendar=False, exact=True)
+        action, bars = result.plan.action, result.bars
+    if bars is None:
+        bars = market_mod.fetch_bars(ticker, "1d", lookback=alerts_mod.LOOKBACK["1d"])
+    return digest_mod.reading(bars, action)
+
+
+def _full_plan():
+    """full(person): whether the free plan's limits leave this account alone.
+
+    The pages' own test (_pro), for a background job with no page: Pro, an
+    invite week, the local account and the operator, or anyone while billing
+    is off.
+    """
+    admins = {e.strip().lower()
+              for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+              if e.strip()}
+    return lambda person: billing_mod.is_pro(person,
+                                             (person.email or "").lower() in admins)
+
+
 def _refresh_popular_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     # SPY and Bitcoin, fetched once for the whole run rather than once per
@@ -3674,9 +3747,18 @@ def _refresh_popular_job():
     try:
         # The bars were fetched moments ago for the check, so scoring the
         # earlier calls reads them from the cache rather than asking again.
-        return public_mod.refresh(
+        done = public_mod.refresh(
             conn, lambda s: _public_snapshot(s, _index_bars(s, indexes)),
             bars=lambda s: market_mod.fetch_bars(s, "1d"))
+        # Then what people watch, after the popular checks it reuses. Its own
+        # failure must not undo the popular run's.
+        try:
+            watch = digest_mod.check_watched(conn, _watch_check, _full_plan())
+        except Exception as exc:
+            app.logger.exception("Could not check the watched instruments")
+            watch = {"checked": 0, "errors": ["watched instruments: %s" % exc]}
+        return {"checked": done["checked"] + watch["checked"],
+                "errors": list(done["errors"]) + list(watch["errors"])}
     finally:
         conn.close()
 
@@ -3685,7 +3767,7 @@ def _weekly_email_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         return digest_mod.run(conn, app.secret_key, _public_base_offline(),
-                              _digest_look_up)
+                              _digest_look_up, full=_full_plan())
     finally:
         conn.close()
 

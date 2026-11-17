@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
+{# A "?" beside each figure a newcomer may not know, worded in plain.HELP. #}
+{% from "_help.html" import help, help_list with context %}
 {% block title %}{{ r.bars.symbol }} · Orenth{% endblock %}
 {# The trade chart comes drawn twice. Shrunk to a phone, the wide drawing's
    labels would be a few pixels tall, so a phone gets the narrow one: fewer
@@ -52,7 +54,7 @@
     <span>last <b>{{ r.bars.last_bar_time }}</b></span>
     <span>{% if r.bars.market_open %}<b class="gain">market open</b>
           {% else %}market closed{% endif %}</span>
-    <span><b>{{ r.regime.describe() }}</b></span>
+    <div><b>{{ r.regime.describe() }}</b>{{ help('regime') }}</div>
     <span>{{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
   {# A coin day the source left blank, rebuilt from the days either side
@@ -70,7 +72,7 @@
 <div class="call {{ 'buy' if a == 'BUY' else 'sell' if a == 'SHORT'
                     else 'wait' if a == 'WAIT' else 'skip' }}">
   <span class="word">{{ a|capitalize }}</span>
-  <span class="line">{{ plan.headline }}</span>
+  <div class="line">{{ plan.headline }}{{ help('call') }}</div>
 </div>
 
 {% if plain %}
@@ -113,10 +115,10 @@
     <dl class="pairs">
       <dt>Entry</dt>
       <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
-          <span class="faint">{{ plan.entry_type }}</span></dd>
-      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}</dd>
-      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}</dd>
-      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}</dd>
+          <span class="faint">{{ plan.entry_type }}</span>{{ help('entry') }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}{{ help('stop') }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}{{ help('target') }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}{{ help('runner') }}</dd>
       <dt>Reward to risk</dt>
       {# The break-even belongs to the trade the odds were measured on. When
          this plan's own levels give a different reward, pairing the two
@@ -127,22 +129,22 @@
           <span class="faint">odds below measured at {{ "%.2f"|format(tested_rr) }}&thinsp;:&thinsp;1</span>
           {% else %}
           <span class="faint">needs {{ plan.breakeven_rate|pct }}</span>
-          {% endif %}</dd>
+          {% endif %}{{ help('reward_risk') }}</dd>
       {% if plan.position and not plan.position.error %}
       <dt>Size</dt>
       <dd><span class="fig">{{ plan.position.quantity }}</span> units
-          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span></dd>
+          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span>{{ help('size') }}</dd>
       <dt>You risk</dt>
       <dd><span class="fig">{{ plan.position.risk_amount|money }}</span>
-          <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span></dd>
+          <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span>{{ help('risk') }}</dd>
       {% if plan.position.gap_loss %}
       <dt>If it gaps</dt>
       <dd><span class="fig {{ 'loss' if (plan.position.gap_multiple or 0) > 2 else '' }}">{{ plan.position.gap_loss|money }}</span>
           <span class="faint">{{ "%.2f"|format(plan.position.gap_pct_of_account) }}% of account,
-            {{ "%.1f"|format(plan.position.gap_multiple) }}&times; the budget</span></dd>
+            {{ "%.1f"|format(plan.position.gap_multiple) }}&times; the budget</span>{{ help('gap') }}</dd>
       {% endif %}
       {% elif plan.position.error %}
-      <dt>Size</dt><dd class="loss">{{ plan.position.error }}</dd>
+      <dt>Size</dt><dd class="loss">{{ plan.position.error }}{{ help('size') }}</dd>
       {% endif %}
     </dl>
   </div>
@@ -218,31 +220,31 @@
     {% endif %}
     {% if plan.probability is not none %}
     <div class="figs" style="margin-bottom:var(--s3)">
-      <div class="f"><div class="k">Reached target first</div>
+      <div class="f"><div class="k">Reached target first{{ help('hit_rate') }}</div>
         <div class="v fig">{{ plan.probability|pct }}</div>
-        <div class="n">95% range {{ plan.prob_low|pct }}–{{ plan.prob_high|pct }}</div></div>
-      <div class="f"><div class="k">Expectancy</div>
+        <div class="n">95% range {{ plan.prob_low|pct }}–{{ plan.prob_high|pct }}{{ help('range') }}</div></div>
+      <div class="f"><div class="k">Expectancy{{ help('expectancy') }}</div>
         <div class="v fig {{ 'gain' if (plan.expectancy_r or 0) > 0 else 'loss' }}">
           {{ plan.expectancy_r|signed(3) }}R</div>
         <div class="n">per trade, after costs</div></div>
       {% if plan.baseline_expectancy is not none %}
-      <div class="f"><div class="k">{{ 'Shorting' if odds_side < 0 else 'Buying' }} any day</div>
+      <div class="f"><div class="k">{{ 'Shorting' if odds_side < 0 else 'Buying' }} any day{{ help('baseline') }}</div>
         <div class="v fig {{ 'gain' if plan.baseline_expectancy > 0 else 'loss' }}">
           {{ plan.baseline_expectancy|signed(3) }}R</div>
         <div class="n">same trade, no signal</div></div>
       {% endif %}
-      <div class="f"><div class="k">Needs</div>
+      <div class="f"><div class="k">Needs{{ help('breakeven') }}</div>
         <div class="v fig">{{ (plan.breakeven_rate or calib.breakeven)|pct }}</div>
         <div class="n">to break even</div></div>
-      <div class="f"><div class="k">Sample</div>
+      <div class="f"><div class="k">Sample{{ help('sample') }}</div>
         <div class="v fig">{{ plan.prob_samples }}</div>
         <div class="n">{{ 'similar setups' if plan.prob_reliable else 'too few to trust' }}</div></div>
-      <div class="f"><div class="k">Typical hold</div>
+      <div class="f"><div class="k">Typical hold{{ help('hold') }}</div>
         <div class="v fig">{{ "%.0f"|format(calib.avg_bars_held or 0) }}</div>
         <div class="n">bars, about
           {{ hold_text }}</div></div>
       {% if calib.holdout_hit_rate is not none %}
-      <div class="f"><div class="k">Most recent third</div>
+      <div class="f"><div class="k">Most recent third{{ help('holdout') }}</div>
         <div class="v fig {{ 'gain' if (calib.holdout_expectancy or 0) > 0 else 'loss' }}">
           {{ calib.holdout_expectancy|signed(3) }}R</div>
         <div class="n">{{ calib.holdout_samples }} of them</div></div>
@@ -261,19 +263,21 @@
         drift paid. Beating zero is not enough on a stock that rose.</p>
     {% endif %}
     {% if calib.score is not none %}
-      <p class="prose faint" style="font-size:var(--t-xs)">Setups are matched
+      {# A div, not a p: the "?" inside is a details element, which a p
+         cannot hold. #}
+      <div class="prose faint" style="font-size:var(--t-xs)">Setups are matched
         on the score the standard weights give today ({{ calib.score|signed }}),
         because that is the model the history was replayed with. The weights
         learned below were fitted to this same history, so they cannot be
         tested on it. Every trade was entered at the close with the stop
         {{ cfg.stop_atr_multiple }} ATR and the target {{ cfg.target_atr_multiple }} ATR
-        away; a price that opened past the stop is counted at the open.</p>
+        away; a price that opened past the stop is counted at the open.{{ help('atr') }}</div>
     {% endif %}
     {% if calib.cost_r >= 0.25 %}
-      <p class="prose"><b class="loss">Costs are the problem here.</b>
+      <div class="prose"><b class="loss">Costs are the problem here.</b>
         {{ "%.2f"|format(calib.cost_r) }}R per round trip at
         {{ "%.0f"|format(calib.cost_bps) }} basis points. Fees alone eat most of
-        the risk budget on this instrument and interval.</p>
+        the risk budget on this instrument and interval.{{ help('costs') }}</div>
     {% endif %}
   </div>
 </section>
@@ -283,7 +287,7 @@
     {% if calib.curve %}
     <div class="card pad0">
       <div class="cardhead">
-        <span class="eyebrow">Does conviction predict the outcome?</span>
+        <span class="eyebrow">Does conviction predict the outcome?</span>{{ help('curve') }}
       </div>
       <div class="tablewrap">
         <table>
@@ -342,6 +346,8 @@
         Agreement inside one family is discounted. Ten trend strategies nodding
         along is one observation about trend, not ten.
       </p>
+      <div class="helpfoot">{{ help_list(['family', 'lean', 'active', 'combined', 'with_news'],
+                                         'What the rows and columns mean') }}</div>
     </div>
   </div>
 </section>
@@ -371,6 +377,9 @@
         </tbody>
       </table>
     </div>
+    <div class="helpfoot" style="padding-top:var(--s2)">{{ help_list(
+      ['score', 'weight', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
+      'What the columns and words mean') }}</div>
   </div>
 </section>
 
@@ -412,6 +421,8 @@
       like today's. A strategy that lost money on this instrument is trusted
       less here, whatever its reputation elsewhere.
     </p>
+    <div class="helpfoot">{{ help_list(['setups', 'strategy_hit', 'net_r', 'weight_given'],
+                                       'What the columns mean') }}</div>
   </div>
 </section>
 {% endif %}
@@ -423,7 +434,7 @@
       <div class="cardhead"><span class="eyebrow">News and chatter</span></div>
       <div style="padding:0 var(--s3)">
         <div class="figs" style="margin-bottom:var(--s2)">
-          <div class="f"><div class="k">Overall</div>
+          <div class="f"><div class="k">Overall{{ help('news') }}</div>
             <div class="v fig {{ 'gain' if r.sentiment.score > 0.1 else 'loss' if r.sentiment.score < -0.1 else '' }}">
               {{ r.sentiment.score|signed }}</div>
             <div class="n">{{ r.sentiment.label() }}</div></div>
@@ -452,14 +463,14 @@
           </table>
         </div>
       {% elif r.sentiment.method == 'skipped' %}
-        <div class="blank">News was not read for this analysis.</div>
+        <div class="blank">The news was not read for this analysis.</div>
       {% else %}
         <div class="blank">No news retrieved for this instrument.</div>
       {% endif %}
       {% if r.sentiment.method != 'skipped' %}
       <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
         Scored {{ 'with a built-in list of finance words'
-                  if r.sentiment.method == 'finance lexicon'
+                  if r.sentiment.method in ('finance lexicon', 'a list of finance words')
                   else 'by ' ~ r.sentiment.method }}.
         {# The analysis is shared by everyone who opens this ticker, so the
            hint travels with it and the page decides who sees it: only the

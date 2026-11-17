@@ -363,13 +363,19 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     notes: List[str] = []
     setup_hint = ""
 
-    scored_by = "finance lexicon"
+    scored_by = "a list of finance words"
     all_items = news + social
     if use_llm and _score_with_claude(all_items, symbol):
         scored_by = "Claude (%s)" % os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
     else:
         for it in all_items:
             it.score = lexicon_score(it.text)
+        # For every reader, in words about the reading rather than about a
+        # setting: only whoever runs the server can add a key (setup_hint).
+        if all_items:
+            notes.append("Headlines were scored with a list of finance words, "
+                         "which can misread financial phrasing, so treat the "
+                         "news reading as rough.")
         if use_llm and not os.environ.get("ANTHROPIC_API_KEY"):
             setup_hint = ("No ANTHROPIC_API_KEY is set, so headlines were scored "
                           "with the built-in word list. Claude reads financial "

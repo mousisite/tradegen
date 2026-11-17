@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
+{% macro chip(a) %}<span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
+  else 'hold' if a == 'WAIT' else 'mute' }}">{{ a }}</span>{% endmacro %}
 {% block content %}
 
 <div class="pagehead">
@@ -79,6 +81,42 @@
   </div>
   {% endif %}
 
+  {# What changed on the watchlist since the session before. The calls are
+     the ones the background job wrote down; nothing here is worked out on
+     the spot, and the alerts are the same ones listed above. #}
+  {% set since = att.since %}
+  {% if since.watching %}
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">Since yesterday</span>
+    {% if since.rows %}
+      <ul class="list">
+        {% for r in since.rows %}
+          <li>{% if r.slug %}<a href="{{ url_for('stock_page', sym=r.slug) }}">{% else %}<a data-working href="{{ url_for('analyse', symbol=r.symbol, interval='1d', exact=exact_arg(r.symbol)) }}">{% endif %}<b class="fig">{{ r.symbol }}</b></a>:
+            {% if r.changed %}the daily call went from {{ chip(r.was) }} to {{ chip(r.call) }}.
+            {% elif r.call and r.was %}still {{ chip(r.call) }}.
+            {% elif r.call %}daily call {{ chip(r.call) }}.{% endif %}
+            {% if r.move is not none %}{% set pct = "%.2f"|format(r.move|abs * 100) %}
+              {% if pct == "0.00" %}Level with the previous close.
+              {% else %}{{ 'Up' if r.move > 0 else 'Down' }}
+              <span class="fig {{ 'gain' if r.move > 0 else 'loss' }}">{{ pct }}%</span>
+              since the previous close.{% endif %}{% endif %}
+            {% if r.stops %}<span class="chip short">Stop crossed</span>{% endif %}
+            {% if r.alerts %}{{ 'An alert' if r.alerts|length == 1 else '%d alerts'|format(r.alerts|length) }} fired.{% endif %}
+            {% if r.at %}<span class="faint">Checked {{ r.at|ago }}.</span>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% for line in since.notes %}
+      <p class="prose" style="margin-top:var(--s1)">{{ line }}</p>
+    {% endfor %}
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+      Each daily call is made with the standard settings and set against the
+      one from the session before; each move is from the previous close to
+      the latest check. Alerts and stops are from the last 24 hours, and each
+      instrument is checked every few hours.</p>
+  </div>
+  {% endif %}
+
   <div class="cols b" style="margin-top:var(--s3)">
     <div>
       <div class="card">
@@ -96,6 +134,7 @@
                   <span class="faint">
                     {%- if w.public %}daily check {{ w.at|ago }} at {{ w.price|price }}
                       {%- if w.quote_day %}, the {{ w.quote_day }} close{% endif %}
+                    {%- elif w.daily %}daily check {{ w.at|ago }} at {{ w.price|price }}
                     {%- else %}your {{ w.run_interval }} analysis {{ w.at|ago }} at {{ w.price|price }}
                       {%- if w.closed %}, market closed{% endif %}
                     {%- endif %}</span>
@@ -109,8 +148,10 @@
               the <a href="{{ url_for('monitor') }}">Monitor</a> page.</p>
           {% endif %}
           <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
-            The latest call on each: the daily check for a popular stock,
-            otherwise your own last analysis of it.</p>
+            {% if att.full %}The latest call on each: its daily check, made with
+            the standard settings, otherwise your own last analysis of it.
+            {%- else %}The latest call on each: the daily check for a popular
+            stock, otherwise your own last analysis of it.{% endif %}</p>
         {% else %}
           <p class="prose">Nothing on your watchlist yet. Press <b>Add to
             watchlist</b> on any analysis, and its latest call shows here.</p>

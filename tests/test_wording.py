@@ -461,7 +461,8 @@ try:
           and "ANTHROPIC" not in page and "LLM" not in page, status)
     status, page = SEEN[("free", "/analyse?symbol=BOOM&interval=1d")]
     check("an analysis that broke says so in plain words", status == 500
-          and "The analysis could not be finished." in page, status)
+          and "could not be finished. Try again in a minute." in page
+          and "BOOM" in page and "do not exist" not in page, status)
     status, page = SEEN[("free", "/usage")]
     check("the operator's page refuses them without naming a setting",
           status == 403 and "runs this installation" in page, status)
