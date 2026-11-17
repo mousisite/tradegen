@@ -31,7 +31,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 API = "https://api.stripe.com/v1/"
 
@@ -467,6 +467,69 @@ def confirm_checkout(conn: sqlite3.Connection, session_id: str, user_id: int,
     _apply(conn, user_id, _stamp(found.get("created")), "pro", sub["status"],
            found.get("customer") or "", _period_end(sub), in_order=False)
     return True
+
+
+# How long before a recorded period end a plan is read again from Stripe
+# itself, and how many are read per run. A renewal is normally told by
+# webhook, but a webhook can stop arriving without anyone noticing: a firewall
+# rule in front of the site answering Stripe with 403, or a changed signing
+# secret. Without this, every paying customer would stop being Pro GRACE after
+# their period ended, though Stripe had charged them.
+RECHECK_BEFORE = 86400
+RECHECK_PER_RUN = 25
+
+
+def lapsing(conn: sqlite3.Connection, now: Optional[float] = None,
+            limit: int = RECHECK_PER_RUN) -> list:
+    """Pro plans whose recorded period has ended, or ends within a day."""
+    now = now or time.time()
+    return conn.execute(
+        "SELECT id, stripe_customer, plan_until FROM users WHERE plan='pro' "
+        "AND plan_status IN ('active', 'trialing', 'past_due') AND plan_until>0 "
+        "AND plan_until<? AND stripe_customer<>'' ORDER BY plan_until LIMIT ?",
+        (int(now + RECHECK_BEFORE), int(limit))).fetchall()
+
+
+def _current(subscriptions: List[Dict]) -> Optional[Dict]:
+    """The subscription that decides the plan: a running one, the one whose
+    period ends last if there are several, else the newest of the rest."""
+    running = [s for s in subscriptions if s.get("status") in ACTIVE]
+    if running:
+        return max(running, key=_period_end)
+    if subscriptions:
+        return max(subscriptions, key=lambda s: _stamp(s.get("created")))
+    return None
+
+
+def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
+            call=None, limit: int = RECHECK_PER_RUN) -> Dict:
+    """Read the plans that are lapsing with no renewal recorded from Stripe.
+
+    Whatever Stripe says now is recorded: a renewal moves the end forward,
+    a cancellation ends Pro, and an account Stripe knows nothing about is left
+    for the grace period to decide. Nothing here charges or changes anything
+    at Stripe; it only reads.
+    """
+    if not ready():
+        return {"checked": 0, "errors": []}
+    now = now or time.time()
+    checked, errors = 0, []
+    for row in lapsing(conn, now, limit):
+        customer = row["stripe_customer"]
+        try:
+            found = (call or _stripe)(
+                "GET", "subscriptions?status=all&limit=10&customer=" + customer)
+            sub = _current(found.get("data") or [])
+            if sub is None:
+                continue
+            status = sub.get("status") or ""
+            plan = "pro" if status in ACTIVE else "free"
+            _apply(conn, int(row["id"]), int(now), plan, status, customer,
+                   _period_end(sub), in_order=False)
+            checked += 1
+        except Exception as exc:          # one customer must not stop the rest
+            errors.append("user %d: %s" % (int(row["id"]), exc))
+    return {"checked": checked, "errors": errors}
 
 
 def portal_url(customer: str, return_url: str, call=None) -> str:

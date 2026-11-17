@@ -4014,6 +4014,8 @@ def start_background_jobs():
         _refresh_popular_job, interval_seconds=3600, name="orenth-popular")
     BACKGROUND["weekly"] = scheduler_mod.Scheduler(
         _weekly_email_job, interval_seconds=1800, name="orenth-weekly-email")
+    BACKGROUND["plans"] = scheduler_mod.Scheduler(
+        _recheck_plans_job, interval_seconds=3600, name="orenth-plans")
     for job in BACKGROUND.values():
         job.start()
     # The first popular run soon after start rather than an hour later, but
@@ -4021,7 +4023,21 @@ def start_background_jobs():
     soon = threading.Timer(120, BACKGROUND["popular"].check_now)
     soon.daemon = True
     soon.start()
+    # Plans that lapsed while the server was down are read again within a
+    # minute, before anyone notices their Pro has gone.
+    plans = threading.Timer(60, BACKGROUND["plans"].check_now)
+    plans.daemon = True
+    plans.start()
     return BACKGROUND
+
+
+def _recheck_plans_job():
+    """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return billing_mod.recheck(conn)
+    finally:
+        conn.close()
 
 
 @app.errorhandler(404)

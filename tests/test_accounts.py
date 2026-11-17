@@ -907,7 +907,10 @@ for _folder, _dirs, _files in _os.walk(ROOT):
 
 imported = {}
 for folder, _dirs, files in _os.walk(ROOT):
-    if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests")):
+    # .claude holds editor settings and, while parallel work is going on,
+    # other branches' worktrees, whose imports are not this checkout's.
+    if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests",
+                                       ".claude", "node_modules", "mobile")):
         continue
     for fname in files:
         if not fname.endswith(".py"):

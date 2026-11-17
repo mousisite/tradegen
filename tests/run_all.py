@@ -59,6 +59,7 @@ SUITES = [
     ("test_since.py",        False, "what changed on a watchlist since yesterday, page and email"),
     ("test_help.py",         False, "help beside each figure; no setup words or errors to visitors"),
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
+    ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
 ]
 
 TIMEOUT = 900

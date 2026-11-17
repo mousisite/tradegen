@@ -698,8 +698,9 @@ try:
     print("BACKGROUND JOBS")
     print("=" * 72)
     jobs = web.start_background_jobs()
-    check("the server starts the daily checks and the weekly email",
-          set(jobs) == {"popular", "weekly"} and all(j.running for j in jobs.values()))
+    check("the server starts the daily checks, the weekly email and the plan rechecks",
+          set(jobs) == {"popular", "weekly", "plans"}
+          and all(j.running for j in jobs.values()))
     check("and only once", web.start_background_jobs() is jobs)
     for job in jobs.values():
         job.stop()

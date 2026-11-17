@@ -35,6 +35,45 @@ except ImportError:
     pass
 
 
+# Copies kept of the database as each earlier release left it.
+KEEP_RELEASE_COPIES = 3
+
+
+def _copy_before_release(db_path) -> None:
+    """Back the database up before a new release's migrations touch it.
+
+    The release is the commit the host says it is running (Render sets
+    RENDER_GIT_COMMIT), remembered in a file beside the database, so a restart
+    of the same release takes no copy. A failed copy is said loudly but does
+    not stop the start: the migrations only ever add, and the timed backups
+    carry on either way.
+    """
+    release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip()
+    if not release or not db_path or not os.path.exists(db_path):
+        return
+    folder = os.path.dirname(os.path.abspath(db_path))
+    marker = os.path.join(folder, "release.txt")
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            if fh.read().strip() == release:
+                return
+    except OSError:
+        pass
+    try:
+        import backup as backup_mod
+        target = os.path.join(folder, "backups", "before-release")
+        path = backup_mod.take(target)
+        if not backup_mod.verify(path):
+            raise RuntimeError("the copy at %s did not verify" % path)
+        backup_mod.prune(target, KEEP_RELEASE_COPIES)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(release)
+        print("  copied the database before release %s" % release[:12])
+    except Exception as exc:
+        print("  COPY BEFORE RELEASE FAILED: %s: %s" % (type(exc).__name__, exc))
+    sys.stdout.flush()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Serve Orenth in production.")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
@@ -66,6 +105,10 @@ def main(argv=None) -> int:
 
     # Before anything else, so a failure during start-up is reported too.
     monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
+
+    # A copy of the database as the previous release left it, taken before this
+    # release changes anything in it. Once per release, not per restart.
+    _copy_before_release(web.app.config.get("DB_PATH"))
 
     # Once, on this one thread, before anything else can open the database:
     # new columns are added here rather than raced for by the first requests.
