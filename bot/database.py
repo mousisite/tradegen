@@ -374,11 +374,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # trail_hit_*: the first crossing of a trailing stop any reader saw
         # (when, the price, the stop in force then), so it stays a crossing
         # for every reader once that day's bar is finished.
+        # exit_split, and split on each part in trade_exits: the shares that
+        # day per share the trade was opened with, when the exit was written
+        # (10.0 after a ten-for-one in between), so the exits export can give
+        # each sale in the shares a broker lists. Empty where it was not known.
         "trades": [("breach_noticed", "INTEGER"), ("trail_pct", "REAL"),
                    ("trail_dist", "REAL"), ("trail_atr", "REAL"),
                    ("trail_ts", "INTEGER"), ("trail_best", "REAL"),
                    ("trail_best_ts", "INTEGER"), ("trail_hit_ts", "INTEGER"),
-                   ("trail_hit_price", "REAL"), ("trail_hit_stop", "REAL")],
+                   ("trail_hit_price", "REAL"), ("trail_hit_stop", "REAL"),
+                   ("exit_split", "REAL")],
+        "trade_exits": [("split", "REAL")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
     # Looking and adding happen inside one write transaction, so a second
@@ -649,7 +655,7 @@ def _qty(value: float) -> str:
 
 
 def _close_in_one(conn: sqlite3.Connection, row, trade_id: int, price: float,
-                  exit_reason: str, now: int) -> Dict:
+                  exit_reason: str, now: int, split: Optional[float] = None) -> Dict:
     """The whole position at one price, written as it always was."""
     direction = int(row["direction"])
     entry, stop = float(row["entry"]), float(row["stop"])
@@ -658,8 +664,8 @@ def _close_in_one(conn: sqlite3.Connection, row, trade_id: int, price: float,
     r_multiple = (move / risk_per_unit) if risk_per_unit > 0 else 0.0
     pnl = move * float(row["quantity"] or 0.0)
     conn.execute("UPDATE trades SET status='closed', ts_closed=?, exit_price=?, "
-                 "exit_reason=?, r_multiple=?, pnl=? WHERE id=?",
-                 (now, price, exit_reason, r_multiple, pnl, trade_id))
+                 "exit_reason=?, r_multiple=?, pnl=?, exit_split=? WHERE id=?",
+                 (now, price, exit_reason, r_multiple, pnl, split, trade_id))
     return {"r_multiple": r_multiple, "pnl": pnl}
 
 
@@ -667,7 +673,7 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
                quantity: Optional[float] = None, exit_reason: str = "manual",
                notes: str = "", user: Optional[int] = None,
                expect_left: Optional[float] = None,
-               expect_open: bool = False) -> Dict:
+               expect_open: bool = False, split: Optional[float] = None) -> Dict:
     """Close a position, or part of it, at a price in the trade's own shares.
 
     quantity None closes whatever is still open. A part is written to
@@ -681,6 +687,10 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
     that it saw it open: when either no longer holds (a form sent twice),
     nothing is written and TradeChanged says so. The look and the write are
     one transaction, so two exits at once cannot close more than there is.
+
+    split, when known, is the shares that day per share the trade was
+    opened with (10.0 after a ten-for-one since). It changes nothing here,
+    and is kept with the exit so the export can give it in that day's shares.
 
     Returns what this exit did: quantity and exit, what is left, closed
     (whether the trade is now closed), parts (how many it has been closed
@@ -696,6 +706,10 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
         if not math.isfinite(quantity) or quantity <= 0:
             raise ValueError("the size to close must be more than zero, or left "
                              "empty to close all of it")
+    if split is not None:
+        split = float(split)
+        if not math.isfinite(split) or split <= 0:
+            split = None
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")
@@ -728,19 +742,21 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
         direction, entry = int(row["direction"]), float(row["entry"])
         risk = abs(entry - float(row["stop"]))
         if not whole:
-            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason) "
-                         "VALUES (?,?,?,?,?)", (trade_id, now, quantity, price, exit_reason))
+            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason, "
+                         "split) VALUES (?,?,?,?,?,?)",
+                         (trade_id, now, quantity, price, exit_reason, split))
             move = (price - entry) * direction
             out = {"r_multiple": (move / risk) if risk > 0 else 0.0,
                    "pnl": move * quantity, "parts": len(earlier) + 1, "average": None}
         elif not earlier:
-            out = dict(_close_in_one(conn, row, trade_id, price, exit_reason, now),
+            out = dict(_close_in_one(conn, row, trade_id, price, exit_reason, now, split),
                        parts=0, average=price)
         else:
             # The last part: written like the others, then the whole
             # position's totals on the trade itself.
-            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason) "
-                         "VALUES (?,?,?,?,?)", (trade_id, now, left, price, exit_reason))
+            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason, "
+                         "split) VALUES (?,?,?,?,?,?)",
+                         (trade_id, now, left, price, exit_reason, split))
             parts = trade_parts(dict(row, status="closed", ts_closed=now),
                                 exits_for(conn, [trade_id]).get(trade_id, []))
             conn.execute("UPDATE trades SET status='closed', ts_closed=?, exit_price=?, "
@@ -792,6 +808,18 @@ def exits_for(conn: sqlite3.Connection, trade_ids) -> Dict[int, List[sqlite3.Row
     return out
 
 
+def _column(row, key):
+    """A row's value for a column, or None for a row without that column.
+
+    A copy read without being brought up to date (a backup's exports) lacks
+    the columns added since it was made.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def trade_parts(row, exits) -> Dict:
     """What a trade's exits add up to, in its own shares.
 
@@ -804,23 +832,27 @@ def trade_parts(row, exits) -> Dict:
     trade logged without a size). r is the R of what is closed so far,
     counted against the whole position: each part's R times its share of
     it, so a closed trade's r is the R of the whole trade. pnl is the cash
-    from what is closed, before costs.
+    from what is closed, before costs. Each exit's split is the shares that
+    day per share opened with, as kept when it was written, or None.
     """
     direction, entry = int(row["direction"]), float(row["entry"])
     risk = abs(entry - float(row["stop"]))
     size = float(row["quantity"]) if row["quantity"] is not None else None
 
-    def part(when, qty, price, reason, partial=True):
+    def part(when, qty, price, reason, partial=True, split=None):
         move = (float(price) - entry) * direction
         return {"ts": when, "quantity": qty, "price": float(price), "reason": reason,
                 "r": (move / risk) if risk > 0 else 0.0,
-                "pnl": move * (qty or 0.0), "partial": partial}
+                "pnl": move * (qty or 0.0), "partial": partial,
+                "split": float(split) if split else None}
 
-    out = [part(e["ts"], float(e["quantity"]), e["price"], e["reason"]) for e in exits]
+    out = [part(e["ts"], float(e["quantity"]), e["price"], e["reason"],
+                split=_column(e, "split")) for e in exits]
     done = sum(p["quantity"] for p in out)
     closed = row["status"] == "closed"
     if closed and not exits and row["exit_price"] is not None:
-        whole = part(row["ts_closed"], size, row["exit_price"], row["exit_reason"], False)
+        whole = part(row["ts_closed"], size, row["exit_price"], row["exit_reason"], False,
+                     _column(row, "exit_split"))
         whole["r"] = float(row["r_multiple"] or 0.0)
         whole["pnl"] = float(row["pnl"] or 0.0)
         out.append(whole)

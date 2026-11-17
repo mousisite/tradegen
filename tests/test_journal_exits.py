@@ -427,6 +427,9 @@ of_a = [x for x in lines if x["trade_id"] == str(ta)]
 check("the exits export lists each part with its own price",
       [float(x["price"]) for x in of_a] == [110.0, 120.0, 95.0]
       and all(x["part"] == "yes" for x in of_a), of_a)
+check("an exit written without its split leaves the shares of its day unsaid",
+      all(x.get("split") == "" and x.get("quantity_traded") == ""
+          and x.get("price_traded") == "" for x in of_a), of_a)
 check("and a trade closed in one go as one exit",
       [x["part"] for x in lines if x["trade_id"] == str(loose)] == ["no"])
 check("nobody else's exits are in it", all(x["symbol"].startswith("ZZ") for x in lines)
@@ -708,6 +711,12 @@ try:
     code, said = cli("close", tz, "--price", 1020)
     check("and the last part closes it, saying so", code == 0
           and "closed in 2 parts at 1,015 on average" in said, said)
+    sold = [x for x in csv.DictReader(io.StringIO(export.build(conn, "exits", "csv",
+                                                               user=1)["body"]))
+            if x["symbol"] == "ZZQ2"]
+    check("paper.py keeps the split with each exit, so the export gives both in today's shares",
+          [(x.get("split"), x.get("quantity_traded"), x.get("price_traded")) for x in sold]
+          == [("10.0", "10.0", "101.0"), ("10.0", "10.0", "102.0")], sold)
 
     # -----------------------------------------------------------------------
     head("THE JOURNAL PAGE: CLOSING IN PART, TRAILING, A SPLIT")
@@ -913,6 +922,31 @@ try:
     r = c.get("/export/exits.csv")
     check("the exits can be downloaded", r.status_code == 200 and "ZZS" in text(r)
           and "1010" in text(r))
+
+    # The journal keeps a trade in the shares it was opened with, and a
+    # broker's record of a sale after a split is in that day's shares. The
+    # split is kept with each exit, so the export gives both.
+    t3 = db.open_trade(conn, "ZZS3", "1d", 1, 1000.0, 900.0, quantity=10, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (NOW - 30 * DAY, t3))
+    conn.commit()
+    SPLITS["ZZS3"] = [(split_at, 10.0)]
+    BARS["ZZS3"] = bars_of([122] * 15, [118] * 15, live=120, start=NOW - 20 * DAY,
+                           splits=[(split_at, 10.0)])
+    c.post("/trades/close", data={"trade_id": t3, "price": "120", "quantity": "100",
+                                  "shares": "today", "reason": "manual", "left": "10.0"})
+    sold = {}
+    for x in csv.DictReader(io.StringIO(text(c.get("/export/exits.csv")))):
+        sold.setdefault(x["symbol"], []).append(
+            (x["quantity"], x["price"], x.get("split"), x.get("quantity_traded"),
+             x.get("price_traded")))
+    check("after a split each sale is also given in the shares of its day, as a broker "
+          "lists it: typed in today's shares, or in the shares opened with",
+          sold.get("ZZS") == [("1.0", "1010.0", "10.0", "10.0", "101.0"),
+                              ("1.0", "1020.0", "10.0", "10.0", "102.0")], sold.get("ZZS"))
+    check("and a trade closed in one go after a split as well",
+          sold.get("ZZS3") == [("10.0", "1200.0", "10.0", "100.0", "120.0")], sold.get("ZZS3"))
+    check("one with no split since opening is the same in both",
+          sold.get("ZZT") == [("20.0", "108.0", "1.0", "20.0", "108.0")], sold.get("ZZT"))
 finally:
     (market_mod.fetch_bars, market_mod.split_history, P.fetch_bars, P.fund.load,
      P.risk_mod.profile, P.risk_mod.correlation_matrix, alerts.fetch_bars,

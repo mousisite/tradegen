@@ -233,8 +233,16 @@ def cmd_close(args, conn) -> int:
                              "with, after a %s split" % (format_price(args.price),
                                                          format_price(price),
                                                          split_words(split)))
+        else:
+            # Kept with the exit for the exports, which give a sale in the
+            # shares a broker lists. The exit does not need it, so a price
+            # source that does not answer leaves it unknown.
+            try:
+                split = _bars_for(_trade(conn, args.trade_id))[1]
+            except DataError:
+                split = None
         result = db.exit_trade(conn, args.trade_id, price, qty, args.reason,
-                               args.notes or "")
+                               args.notes or "", split=split)
     except ValueError as exc:
         console.print("[red]Rejected:[/] %s" % exc)
         return 2

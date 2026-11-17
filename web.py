@@ -1485,6 +1485,20 @@ def _trade_bars(trade):
                                                int(trade["ts_opened"]), bars)
 
 
+def _exit_split(trade) -> Optional[float]:
+    """A trade's shares today per share it opened with, to keep with an exit, or None.
+
+    Kept so the exports can give a sale in the shares a broker lists. The
+    exit itself is in the trade's own shares and does not need it, so a
+    price source that does not answer leaves it unknown rather than holding
+    the exit back.
+    """
+    try:
+        return _trade_bars(trade)[1]
+    except DataError:
+        return None
+
+
 def _mark_one(trade):
     """Current price, open R, the stop in force and the state of one position.
 
@@ -1657,7 +1671,8 @@ def close_trade():
                 quantity /= split
         done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
                                  request.form.get("notes", ""), user=uid(),
-                                 expect_left=expect_left, expect_open=bool(seen))
+                                 expect_left=expect_left, expect_open=bool(seen),
+                                 split=split if shares == "today" else _exit_split(row))
         session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
                                          split)
     except db_mod.TradeChanged:
