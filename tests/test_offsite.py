@@ -534,6 +534,9 @@ result = offsite.copy_backup(path, today=TODAY)
 store.quiet_head = False
 check("a store that does not say the fingerprint back is checked by size alone",
       result["ok"] is True and result["fingerprint"] is False, result)
+page = text(c.get("/usage"))
+check("and the page claims no more than that",
+      "the same size" in page and "the same fingerprint" not in page)
 
 real_timeout = offsite.TIMEOUT
 offsite.TIMEOUT = (2.0, 0.3)
@@ -756,6 +759,54 @@ settings_off()
 code, said = run("--offsite-list")
 check("with no settings it says they are not set up, and where the steps are",
       code == 1 and "not set up" in said and "DEPLOY.md" in said, said)
+settings_on()
+
+print()
+print("=" * 72)
+print("THE OPERATOR'S PAGE AND THE PRIVACY PAGE")
+print("=" * 72)
+
+settings_off()
+page = text(c.get("/usage"))
+check("off: the page says the backups are on one disk only",
+      "not copied anywhere else" in page)
+_os.environ["BACKUP_S3_BUCKET"] = BUCKET
+page = text(c.get("/usage"))
+check("half set up: it says so, and what is missing",
+      "Off-site copies are not running" in page and "BACKUP_S3_ENDPOINT" in page)
+settings_on()
+check("a good copy to show", offsite.copy_backup(path, today=TODAY)["ok"])
+page = text(c.get("/usage"))
+section = page[page.index("Copies kept elsewhere"):]
+section = section[:section.index("</section>")]
+check("on: when, what, how big, and that it was checked",
+      "just now" in section and name in section and "MB" in section
+      and "Checked" in section and BUCKET in section
+      and "the same size" in section and "the same fingerprint" in section, section[:400])
+check("and what the history keeps", "the last 30 days" in section
+      and "the last 12 months" in section)
+store.fail = [403]
+offsite.copy_backup(path, today=TODAY)
+page = text(c.get("/usage"))
+section = page[page.index("Copies kept elsewhere"):]
+section = section[:section.index("</section>")]
+check("after a failure: that it failed, why, and the last good copy",
+      "Failed" in section and "Object Read &amp; Write" in section
+      and "The last good copy" in section, section[:600])
+check("the secret is never on the page", SECRET not in page)
+
+settings_off()
+privacy = text(c.get("/privacy"))
+check("the privacy page lists backup storage as off until it is switched on",
+      "Only if copies of the backups are kept off this server" in privacy)
+check("and says nothing of how long copies are kept there",
+      "12 months" not in privacy)
+settings_on(BACKUP_S3_ENDPOINT="https://abc123.r2.cloudflarestorage.com")
+privacy = text(c.get("/privacy"))
+check("once on, it names Cloudflare", "<td>Cloudflare</td>" in privacy)
+check("and how long a deleted account's data can stay in the copies",
+      "the last 30 days" in privacy and "the last 12 months" in privacy)
+check("without the bucket or its address", "abc123" not in privacy and BUCKET not in privacy)
 settings_on()
 
 print()

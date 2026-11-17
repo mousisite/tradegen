@@ -191,7 +191,7 @@ SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "12 November 2026"
+LEGAL_UPDATED = "16 November 2026"
 
 
 def _served_publicly() -> bool:
@@ -2313,10 +2313,14 @@ def usage():
     except ValueError:
         days = 30
 
+    from bot import offsite as offsite_mod
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         data = usage_mod.read(conn, days)
         counts = events_mod.read(conn, days)
+        # Read from the settings and the last result written down; opening
+        # this page never reaches the storage itself.
+        offsite = offsite_mod.status(conn)
     finally:
         conn.close()
 
@@ -2349,7 +2353,7 @@ def usage():
 
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
-                           storage=storage, counts=counts,
+                           storage=storage, counts=counts, offsite=offsite,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 
@@ -2481,10 +2485,16 @@ def sitemap():
 @app.route("/privacy")
 def privacy():
     """Required by Google's consent screen, and worth having regardless."""
+    from bot import offsite as offsite_mod
+    # Copies of the backups hold everyone's data, so once they are kept off
+    # this server the page names who holds them and for how long. Never the
+    # bucket or its address.
+    offsite = {"provider": offsite_mod.provider(), "days": offsite_mod.KEEP_DAYS,
+               "months": offsite_mod.KEEP_MONTHS}
     return render_template("legal.html", page="privacy",
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
-                           contact=_contact())
+                           contact=_contact(), offsite=offsite)
 
 
 @app.route("/terms")
