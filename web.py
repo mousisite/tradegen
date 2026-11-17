@@ -183,11 +183,12 @@ def healthcheck():
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "static", "healthcheck", "privacy", "terms",
                     "robots", "sitemap", "index", "favicon",
+                    "manifest", "service_worker", "offline",
                     "code_start", "code_verify", "pricing",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
                     "email_stop", "backtests", "backtest_page", "record",
-                    "record_csv", "manifest", "service_worker", "offline"}
+                    "record_csv"}
 
 SESSION_KEY = "stockbot_session"
 
