@@ -295,17 +295,107 @@ def buy_every_day(ctx, stop_atr: float, target_atr: float, horizon: int,
     kept money too, so a strategy that mostly bought shows skill only by
     beating this, not by beating zero.
     """
+    return _every_day(ctx, 1, stop_atr, target_atr, horizon, stride, cost_bps,
+                      max_samples)
+
+
+def short_every_day(ctx, stop_atr: float, target_atr: float, horizon: int,
+                    stride: int = 3, cost_bps: float = 0.0,
+                    max_samples: int = 1500) -> Optional[List]:
+    """A short on every day the strategies were tested on: buy_every_day's
+    mirror, on the same days, with the same levels, holding time and costs.
+
+    Over years when a stock rose it lost, so a strategy that mostly shorted
+    can look poor against zero and still have done better than this, which
+    is the yardstick for its side.
+    """
+    return _every_day(ctx, -1, stop_atr, target_atr, horizon, stride, cost_bps,
+                      max_samples)
+
+
+def _every_day(ctx, direction: int, stop_atr: float, target_atr: float,
+               horizon: int, stride: int, cost_bps: float,
+               max_samples: int) -> Optional[List]:
     from .calibrate import sample_points, simulate_trade
     from .learning import StrategyStat
-    stat = StrategyStat(name="buy_every_day", family="", regime="all")
+    stat = StrategyStat(name="buy_every_day" if direction > 0 else "short_every_day",
+                        family="", regime="all")
     for i in sample_points(ctx, horizon, stride, max_samples):
-        res = simulate_trade(ctx, i, 1, stop_atr, target_atr, horizon, cost_bps)
+        res = simulate_trade(ctx, i, direction, stop_atr, target_atr, horizon,
+                             cost_bps)
         if res is None:
             continue
         stat.n += 1
         stat.wins += 1 if res[0] else 0
         stat.sum_r += res[1]
         stat.note(i, res[1], horizon)
+    return _test_entry(stat) if stat.n else None
+
+
+def sides(report) -> Dict[str, int]:
+    """How many of each strategy's trades were buys, kept beside tests() in
+    the popular snapshot under "sides". The rest were shorts.
+
+    A strategy is set beside buying every day or shorting every day by the
+    side it mostly took.
+    """
+    if report is None:
+        return {}
+    return {s.name: int(getattr(s, "longs", 0)) for s in report.overall.values()
+            if hasattr(s, "longs")}
+
+
+def index_symbol(symbol: str) -> str:
+    """The index a strategy test on this instrument is set beside: Bitcoin
+    for a coin, and for a stock SPY, a fund holding the S&P 500."""
+    return "BTC-USD" if _is_coin(symbol) else "SPY"
+
+
+def hold_index(ctx, index_bars, stop_atr: float, horizon: int, stride: int = 3,
+               cost_bps: float = 0.0, max_samples: int = 1500) -> Optional[List]:
+    """Holding the index instead, over the windows the strategies were tested
+    on, stored like a strategy's test: [times, rose, R kept, variance,
+    separate].
+
+    On every day buy_every_day takes a trade, the same money goes into the
+    index at that day's close instead, and comes out at the close the test's
+    window ends on, horizon trading days later, less the same round-trip
+    cost. Days are matched by trading session; a window the index has no
+    price for at either end is left out. Dividends are counted when the bars
+    carry them, as the back-test counts them for a buy.
+
+    Its result is in the R of the trade it stands in for: the index's return
+    over the window divided by the share of the price that trade risked
+    (stop_atr ATR), so it reads beside "kept a trade". The same money, not
+    the same risk: the question it answers is what simply holding the index
+    with that money would have kept.
+    """
+    from .calibrate import sample_points
+    from .learning import StrategyStat
+    bars = ctx.bars
+    where = {int(day): k for k, day in enumerate(index_bars.session_id)}
+    closes = index_bars.close
+    factor = getattr(index_bars, "dividend_factor", None)
+    if factor is not None and len(factor) != len(closes):
+        factor = None
+    cost = cost_bps / 10000.0
+    stat = StrategyStat(name="hold_index", family="", regime="all")
+    for i in sample_points(ctx, horizon, stride, max_samples):
+        entry, atr = float(bars.close[i]), float(ctx.atr[i])
+        a = where.get(int(bars.session_id[i]))
+        b = where.get(int(bars.session_id[i + horizon]))
+        if a is None or b is None or b <= a:
+            continue
+        start, end = float(closes[a]), float(closes[b])
+        if factor is not None:
+            end *= float(factor[b]) / float(factor[a])
+        if not all(math.isfinite(x) and x > 0 for x in (entry, atr, start, end)):
+            continue
+        r = (end / start - 1.0 - cost) * entry / (stop_atr * atr)
+        stat.n += 1
+        stat.wins += 1 if r > 0 else 0
+        stat.sum_r += r
+        stat.note(i, r, horizon)
     return _test_entry(stat) if stat.n else None
 
 
@@ -394,8 +484,12 @@ def _figures(entry, spread=None) -> Dict:
 
 
 def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
-    """How one strategy did on each popular instrument, best first, with
-    what buying on every tested day kept there ("base")."""
+    """How one strategy did on each popular instrument, best first, beside
+    what buying ("base") and shorting ("short_base") on every tested day
+    kept there, and holding the index over the same windows ("index", the
+    index named by "index_symbol"). "longs" is how many of its trades there
+    were buys. Each is None where the snapshot does not hold it: one stored
+    before it was measured, until the next check."""
     out = []
     for v in rows:
         entry = (v.get("tests") or {}).get(name)
@@ -404,18 +498,30 @@ def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
         fig = _figures(entry, (v.get("spread") or {}).get(name))
         if fig["separate"] < MIN_TRADES:
             continue
-        base = _figures(v["baseline"]) if v.get("baseline") else None
+        index = v.get("index") or {}
+        longs = (v.get("sides") or {}).get(name)
         out.append(dict(fig, symbol=v["symbol"], name=v["name"],
-                        base=base["kept"] if base else None))
+                        base=_kept(v.get("baseline")),
+                        short_base=_kept(v.get("baseline_short")),
+                        index=_kept(index.get("hold")),
+                        index_symbol=index.get("symbol") if index.get("hold") else None,
+                        longs=(int(longs) if longs is not None
+                               and 0 <= int(longs) <= fig["n"] else None)))
     return sorted(out, key=lambda r: -r["kept"])
 
 
-def baseline_results(rows: List[Dict]) -> List[Dict]:
-    """Buying on every tested day, on each popular instrument."""
+def _kept(entry) -> Optional[float]:
+    """What one stored test kept a trade, or None without one."""
+    return _figures(entry)["kept"] if entry else None
+
+
+def baseline_results(rows: List[Dict], key: str = "baseline") -> List[Dict]:
+    """Buying on every tested day ("baseline"), or shorting on every one
+    ("baseline_short"), on each popular instrument."""
     out = []
     for v in rows:
-        if v.get("baseline"):
-            fig = _figures(v["baseline"])
+        if v.get(key):
+            fig = _figures(v[key])
             if fig["separate"] >= MIN_TRADES:
                 out.append(dict(fig, symbol=v["symbol"], name=v["name"]))
     return out
@@ -427,21 +533,38 @@ def strategy_summary(results: List[Dict]) -> Dict:
     Kept is pooled over trades, not averaged over instruments, so a symbol
     with twenty trades does not count as much as one with three hundred. Its
     margin of error adds up the instruments' as if they moved apart; stocks
-    that move together make the true one wider. "base" is what buying on
-    every tested day kept on the same instruments, weighted the same way.
+    that move together make the true one wider.
+
+    "base", "short_base" and "index" are what buying on every tested day,
+    shorting on every one, and holding the index over the same windows kept
+    on the same instruments, weighted the same way; "indexes" names the
+    indexes. "long_share" is the share of its trades that were buys and
+    "side" the one it mostly took, "buy" or "short", the yardstick it is set
+    beside. Each is None unless every instrument has it, so a figure is
+    never over fewer stocks than the strategy's own.
     """
     n = sum(r["n"] for r in results)
     kept = sum(r["kept_sum"] for r in results) / n if n else 0.0
     var = (sum(r["var"] for r in results)
            if results and all(r["var"] is not None for r in results) else None)
     se = math.sqrt(var) / n if var is not None and n else None
-    based = [r for r in results if r.get("base") is not None]
-    base = (sum(r["base"] * r["n"] for r in based) / n
-            if n and based and len(based) == len(results) else None)
+
+    def pooled(key: str) -> Optional[float]:
+        if not n or any(r.get(key) is None for r in results):
+            return None
+        return sum(r[key] * r["n"] for r in results) / n
+
+    share = (sum(r["longs"] for r in results) / n
+             if n and all(r.get("longs") is not None for r in results) else None)
     return {"tested": len(results),
             "paid": sum(1 for r in results if r["kept"] > 0),
             "n": n, "wins": sum(r["wins"] for r in results), "kept": kept,
-            "se": se, "verdict": _verdict(kept, se), "base": base,
+            "se": se, "verdict": _verdict(kept, se), "base": pooled("base"),
+            "short_base": pooled("short_base"), "index": pooled("index"),
+            "indexes": sorted({r["index_symbol"] for r in results
+                               if r.get("index_symbol")}),
+            "long_share": share,
+            "side": None if share is None else "buy" if share >= 0.5 else "short",
             "separate": sum(r["separate"] for r in results)}
 
 

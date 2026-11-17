@@ -3178,11 +3178,13 @@ def backtests():
              for s in strategies_mod.REGISTRY]
     table = [t for t in table if t["n"]]
     tested = len(table)
-    # Buying on every tested day ranks among them, so each strategy reads
-    # against what the market's own drift paid, not against zero.
-    base = public_mod.strategy_summary(public_mod.baseline_results(rows))
-    if table and base["n"]:
-        table.append(dict(base, strategy="", family="", baseline=True))
+    # Buying and shorting on every tested day rank among them, so each
+    # strategy reads against what the market's own drift paid its side, not
+    # against zero.
+    for key, side in (("baseline", "buy"), ("baseline_short", "short")):
+        base = public_mod.strategy_summary(public_mod.baseline_results(rows, key))
+        if table and base["n"]:
+            table.append(dict(base, strategy="", family="", baseline=side))
     table = sorted(table, key=lambda t: -t["kept"])
     return render_template("backtests.html", table=table, tested=tested,
                            method=_house_method(),
@@ -3376,27 +3378,56 @@ def email_stop():
                            t=request.values.get("t", ""))
 
 
-def _public_snapshot(symbol: str) -> dict:
-    """One popular instrument, analysed with the shared settings."""
+def _public_snapshot(symbol: str, indexes: Optional[dict] = None) -> dict:
+    """One popular instrument, analysed with the shared settings.
+
+    indexes holds the index bars a background run has fetched, by symbol,
+    for setting the strategy tests beside holding the index; without it the
+    snapshot leaves that comparison out.
+    """
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
                             db_path=app.config.get("DB_PATH"))
     horizon = config_mod.horizon_for("1d", cfg)
+    stop, target = cfg["stop_atr_multiple"], cfg["target_atr_multiple"]
+    stride = cfg["calibration_stride"]
     snap = public_mod.snapshot(
         result, plain_mod.explain_plan(result.plan, result.bars),
-        stop_atr=cfg["stop_atr_multiple"], target_atr=cfg["target_atr_multiple"],
-        horizon=horizon)
+        stop_atr=stop, target_atr=target, horizon=horizon)
     snap["tests"] = public_mod.tests(result.strategy_report)
     # Kept apart from the tests, whose three figures the previous version
-    # reads: rolled back to, it still opens the strategy pages.
+    # reads: rolled back to, it still opens the strategy pages. So are the
+    # sides, shorting every day and the index below, which it never reads.
     snap["spread"] = public_mod.spreads(result.strategy_report)
-    # The same pretend trade on every day the strategies were tested on, so
-    # the strategy pages can set each one against it.
+    snap["sides"] = public_mod.sides(result.strategy_report)
+    # The same pretend trade on every day the strategies were tested on,
+    # both ways, so the strategy pages can set each one against its side.
     snap["baseline"] = public_mod.buy_every_day(
-        result.context, cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
-        horizon, cfg["calibration_stride"], result.cost_bps)
+        result.context, stop, target, horizon, stride, result.cost_bps)
+    snap["baseline_short"] = public_mod.short_every_day(
+        result.context, stop, target, horizon, stride, result.cost_bps)
+    index = public_mod.index_symbol(symbol)
+    held = (public_mod.hold_index(result.context, indexes[index], stop, horizon,
+                                  stride, result.cost_bps)
+            if indexes and indexes.get(index) is not None else None)
+    snap["index"] = {"symbol": index, "hold": held} if held else None
     return snap
+
+
+def _index_bars(symbol: str, fetched: dict) -> dict:
+    """fetched, holding the daily bars of the index symbol's tests are set
+    beside: fetched once per background run, and None for the rest of the
+    run when the source would not give them."""
+    index = public_mod.index_symbol(symbol)
+    if index not in fetched:
+        try:
+            fetched[index] = market_mod.fetch_bars(index, "1d")
+        except Exception:                    # the pages go without it until the next run
+            app.logger.warning("Could not fetch %s to set the strategy tests beside",
+                               index, exc_info=True)
+            fetched[index] = None
+    return fetched
 
 
 def _digest_look_up(symbol: str):
@@ -3414,11 +3445,15 @@ def _digest_look_up(symbol: str):
 
 def _refresh_popular_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
+    # SPY and Bitcoin, fetched once for the whole run rather than once per
+    # stock or coin set beside them.
+    indexes: dict = {}
     try:
         # The bars were fetched moments ago for the check, so scoring the
         # earlier calls reads them from the cache rather than asking again.
-        return public_mod.refresh(conn, _public_snapshot,
-                                  bars=lambda s: market_mod.fetch_bars(s, "1d"))
+        return public_mod.refresh(
+            conn, lambda s: _public_snapshot(s, _index_bars(s, indexes)),
+            bars=lambda s: market_mod.fetch_bars(s, "1d"))
     finally:
         conn.close()
 

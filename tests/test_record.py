@@ -429,6 +429,133 @@ try:
           and "separate trades on a stock is" in page)
 
     # -----------------------------------------------------------------------
+    head("SHORTING EVERY DAY, AND HOLDING THE INDEX")
+    # -----------------------------------------------------------------------
+    # A strategy that mostly shorted was set beside buying every day alone,
+    # which a rising market makes hard for a short to beat, and nothing said
+    # what simply holding the index over the same days kept.
+    lift = 100 * np.exp(np.cumsum(np.random.RandomState(8).normal(0.004, 0.01, 900)))
+    lift_prev = np.concatenate([[100.0], lift[:-1]])
+    rising = Bars(symbol="T", name="T", asset_class="equity", currency="USD", exchange="T",
+                  interval="1d", timestamp=ts, open=lift_prev,
+                  high=np.maximum(lift_prev, lift) * 1.01,
+                  low=np.minimum(lift_prev, lift) * 0.99, close=lift,
+                  volume=np.full(900, 1e6), session_id=ts // DAY, market_open=False)
+    rctx = build_context(rising)
+    buys = public.buy_every_day(rctx, 1.5, 2.25, 10, 3, 2.0)
+    shorts = public.short_every_day(rctx, 1.5, 2.25, 10, 3, 2.0)
+    check("shorting every day takes the same days as buying every day",
+          shorts[0] == buys[0] == len(calibrate.sample_points(rctx, 10, 3, 1500))
+          and len(shorts) == 5, (shorts[0], buys[0]))
+    check("and over a rising price loses where buying keeps",
+          buys[2] > 0 > shorts[2], (buys[2], shorts[2]))
+
+    # Each strategy's buys are counted as measure_strategies takes them.
+    from bot.learning import MIN_OPINION
+    from bot.strategies import evaluate
+    sides = public.sides(rep)
+    busiest = max(rep.overall, key=lambda k: rep.overall[k].n)
+    by_hand = 0
+    for i in calibrate.sample_points(ctx, 10, 3, 1500):
+        for sig in evaluate(ctx, i, cfg["strategy_weights"])[0]:
+            if (sig.name == busiest and sig.weight > 0 and sig.score >= MIN_OPINION
+                    and calibrate.simulate_trade(ctx, i, 1, 1.5, 2.25, 10, 2.0)):
+                by_hand += 1
+    check("each strategy's buys are counted, the rest of its trades being shorts",
+          sides[busiest] == by_hand and set(sides) == set(rep.overall)
+          and any(0 < sides[k] < rep.overall[k].n for k in sides),
+          (busiest, sides.get(busiest), by_hand))
+
+    # An index that rises exactly 0.1% a day: every ten-day window gains
+    # 1.001**10 - 1, less a 2bp round trip, and in R of a trade risking 1.5
+    # ATR of the stock's own price that is the gain times price / (1.5 ATR).
+    points = calibrate.sample_points(ctx, 10, 3, 1500)
+    idx_close = 400.0 * 1.001 ** np.arange(900)
+    spy = Bars(symbol="SPY", name="SPY", asset_class="equity", currency="USD", exchange="P",
+               interval="1d", timestamp=ts, open=idx_close, high=idx_close, low=idx_close,
+               close=idx_close, volume=np.full(900, 1e6), session_id=ts // DAY,
+               market_open=False)
+
+    def by_hand_hold(gain):
+        return sum((gain - 1 - 0.0002) * float(walk.close[i]) / (1.5 * float(ctx.atr[i]))
+                   for i in points)
+
+    held = public.hold_index(ctx, spy, 1.5, 10, 3, 2.0)
+    check("holding the index puts the same money in it over each tested window",
+          held[0] == len(points) and abs(held[2] - by_hand_hold(1.001 ** 10)) < 1e-3
+          and len(held) == 5, (held[:3], by_hand_hold(1.001 ** 10)))
+    spy.dividend_factor = 1.0005 ** (np.arange(900) - 899.0)
+    check("and counts its dividends, as a buy is counted",
+          abs(public.hold_index(ctx, spy, 1.5, 10, 3, 2.0)[2]
+              - by_hand_hold(1.001 ** 10 * 1.0005 ** 10)) < 1e-3)
+    gone = points[50] + 10                      # the end of one window, the start of none
+    keep = np.arange(900) != gone
+    spy_gap = Bars(symbol="SPY", name="SPY", asset_class="equity", currency="USD",
+                   exchange="P", interval="1d", timestamp=ts[keep], open=idx_close[keep],
+                   high=idx_close[keep], low=idx_close[keep], close=idx_close[keep],
+                   volume=np.full(899, 1e6), session_id=ts[keep] // DAY, market_open=False)
+    check("a window the index has no price for at one end is left out",
+          public.hold_index(ctx, spy_gap, 1.5, 10, 3, 2.0)[0] == len(points) - 1)
+    check("a coin is set beside Bitcoin and a stock beside SPY",
+          public.index_symbol("ETH-USD") == "BTC-USD" and public.index_symbol("KO") == "SPY")
+
+    # The pages. rsi_reversion bought on 30 of its 120 trades on each stock,
+    # trend_stack on 250 of 300.
+    for sym, short_kept, index_kept in (("NVDA", -74.0, 74.0), ("AMD", -37.0, 37.0)):
+        snap = public.verdict(conn, sym)
+        snap.update(baseline_short=[370, 90, short_kept, 900.0, 160.0],
+                    sides={"rsi_reversion": 30, "trend_stack": 250},
+                    index={"symbol": "SPY", "hold": [370, 200, index_kept, 900.0, 160.0]})
+        public.save_verdict(conn, snap)
+    results = public.strategy_results(public.verdicts(conn), "rsi_reversion")
+    summary = public.strategy_summary(results)
+    # Each stock's figure per trade, weighted by the strategy's 120 trades on each.
+    check("a strategy's summary sets it beside both sides and the index, weighted alike",
+          abs(summary["short_base"] - (-0.2 - 0.1) / 2) < 1e-9
+          and abs(summary["index"] - (0.2 + 0.1) / 2) < 1e-9
+          and summary["long_share"] == 0.25 and summary["side"] == "short"
+          and summary["indexes"] == ["SPY"], summary)
+    page = text("/backtests")
+    check("the strategy list shows shorting on every tested day too",
+          "Shorting on every tested day" in page and "Buying on every tested day" in page)
+    check("and marks a strategy that mostly shorts", "mostly shorts" in page
+          and page.count("mostly shorts") == 1)
+    page = text("/backtest/rsi-reversion")
+    check("a mostly-short strategy's page sets it beside shorting every day, in bold",
+          "It shorted on 75% of its trades, so set it beside <b>shorting on every "
+          "tested day</b> of the same stocks, weighted the same way, which kept "
+          "<b>-0.15R</b>. Buying on every one kept +0.05R." in page)
+    check("and each stock beside both", "Shorting every day" in page and "-0.20R" in page)
+    check("and beside holding the index, saying which",
+          "Holding the index instead, the same money for 10 trading days" in page
+          and "+0.15R a trade" in page and "SPY, a fund holding the S&amp;P 500." in page)
+    check("the method says what each yardstick is",
+          "shorting on every tested day</b> for one that mostly shorted" in page
+          and "<b>holding the index</b>: the same money put in an index instead"
+          in page)
+    page = text("/backtest/trend-stack")
+    check("a mostly-buying strategy's page sets it beside buying every day",
+          "It bought on 83% of its trades, so set it beside <b>buying on every "
+          "tested day</b>" in page)
+    btc = dict(public.verdict(conn, "NVDA"), symbol="BTC-USD", name="Bitcoin",
+               index={"symbol": "BTC-USD", "hold": [370, 200, 37.0, 900.0, 160.0]})
+    public.save_verdict(conn, btc)
+    check("with stocks and coins, it names both indexes",
+          "SPY, a fund holding the S&amp;P 500, for the stocks, and Bitcoin for the coins"
+          in text("/backtest/rsi-reversion"))
+    old = public.verdict(conn, "AMD")
+    for key in ("baseline_short", "sides", "index"):
+        old.pop(key)
+    public.save_verdict(conn, old)
+    page = text("/backtest/rsi-reversion")
+    check("an instrument checked before these were measured leaves them out, not wrong",
+          "Buying on every tested day of the same stocks, weighted the same way, kept"
+          in page and "It shorted on" not in page and "Holding the index" not in page
+          .split("How we tested")[0])
+    conn.execute("DELETE FROM public_verdicts WHERE symbol='BTC-USD'")
+    conn.commit()
+
+    # -----------------------------------------------------------------------
     head("THE BACKGROUND CHECK, END TO END")
     # -----------------------------------------------------------------------
     # The real engine on made-up bars: no network, no calendar.
@@ -461,6 +588,39 @@ try:
     check("and whether the market was open, and the session of the price",
           snap["market_open"] is False
           and time.strftime("%a %d %b", time.gmtime(snap["price_day"] * DAY)) == "Fri 06 Nov")
+    check("without the index's prices, it leaves holding the index out", snap["index"] is None)
+    both = web._public_snapshot("NVDA", {"SPY": live})
+    check("and stores shorting every day, each strategy's buys, and holding SPY",
+          len(both["baseline_short"]) == 5
+          and both["baseline_short"][0] == both["baseline"][0]
+          and set(both["sides"]) == set(both["tests"])
+          and all(0 <= both["sides"][k] <= both["tests"][k][0] for k in both["sides"])
+          and both["index"]["symbol"] == "SPY" and len(both["index"]["hold"]) == 5,
+          (both.get("index"), both.get("baseline_short")))
+    check("each beside the figures the version before reads, which are as they were",
+          both["tests"] == snap["tests"] and both["baseline"] == snap["baseline"]
+          and both["spread"] == snap["spread"])
+    asked = []
+
+    def fetch_index(symbol, interval):
+        asked.append(symbol)
+        if symbol == "BTC-USD":
+            raise RuntimeError("the source refused")
+        return live
+
+    real_fetch = web.market_mod.fetch_bars
+    web.market_mod.fetch_bars = fetch_index
+    web.app.logger.disabled = True              # the refusal is logged, as it should be
+    try:
+        fetched = {}
+        for sym in ("NVDA", "AMD", "BTC-USD", "ETH-USD", "KO"):
+            web._index_bars(sym, fetched)
+    finally:
+        web.market_mod.fetch_bars = real_fetch
+        web.app.logger.disabled = False
+    check("a background run fetches each index once, and a refusal leaves only it out",
+          asked == ["SPY", "BTC-USD"] and fetched["SPY"] is live
+          and fetched["BTC-USD"] is None, asked)
     conn.execute("DELETE FROM calls WHERE symbol='NVDA'")
     conn.commit()
     check("the call after the close is written down", public.record_call(conn, snap))
