@@ -267,7 +267,8 @@ SQLite at `data/stockbot.db`, created on first run.
 | `runs` | Every analysis: price, regime, composite, action, levels, odds |
 | `run_signals` | All 34 strategy scores for every run |
 | `strategy_stats` | Measured performance per symbol, strategy and regime |
-| `trades` | The journal: entry, stop, exit, realised R, P&L |
+| `trades` | The journal: entry, stop, exit, realised R, P&L, and any trailing stop |
+| `trade_exits` | Parts of a position closed while the rest stayed open |
 | `run_news` | Headlines and posts seen at each run |
 
 Strategy statistics are **replaced** per key, not accumulated. Two runs over
@@ -285,8 +286,20 @@ run.bat --symbol AAPL          analyse; the plan is recorded automatically
 paper.bat take AAPL            open a trade from that exact plan
 paper.bat check                mark to market, flags stop and target hits
 paper.bat close 1 --price 329 --reason target
+paper.bat close 1 --price 329 --qty 20   close part of it; the rest stays open
+paper.bat trail 1 --pct 5      trail its stop 5% behind the best price since opening
 paper.bat stats                expectancy, profit factor, max drawdown
 ```
+
+A trailing stop (`--pct`, or `--atr` for a multiple of the ATR measured when it
+is set) sits that far behind the best price since the trade opened, and only
+ever tightens: for a long, the higher of the stop it opened with and the
+highest price minus the trail. The journal, the portfolio, `check` and the
+background stop notice all read it by the same rule. A trade closed in parts
+counts once it is closed in full, at the R of the whole position, each part
+weighted by its size; the parts are listed in the "Trade exits" export. After a
+share split, a trade stays in the shares it was opened with; `close --today`
+takes a price and size in today's shares and converts them.
 
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
 where price never reached the entry, and plans older than two hours. It records

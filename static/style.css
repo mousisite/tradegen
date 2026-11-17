@@ -615,6 +615,8 @@ ul.list.ok li::marker { color: var(--gain); }
 .inline-form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
 .inline-form .field { min-height: 36px; font-size: var(--t-xs); padding: 0 10px; }
 .inline-form input.field { flex: 0 0 92px; }
+/* Room for the arrow, which the padding above otherwise lets sit on the text. */
+.inline-form select.field { padding-right: 28px; background-position: right 9px center; }
 
 .sr {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

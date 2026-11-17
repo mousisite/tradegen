@@ -58,6 +58,7 @@ SUITES = [
     ("test_wording.py",      False, "what visitors read on a public site: no setup text, plain errors"),
     ("test_since.py",        False, "what changed on a watchlist since yesterday, page and email"),
     ("test_help.py",         False, "help beside each figure; no setup words or errors to visitors"),
+    ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
 ]
 
 TIMEOUT = 900

@@ -123,6 +123,23 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, account);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 
+-- Parts of a position closed while the rest stays open, in the trade's own
+-- shares. The trades row keeps the size it was opened with. A trade closed in
+-- one go has no row here: its exit is on the trade, as it always was. One
+-- closed in parts has a row for every part, the last included, and its
+-- trades row carries the totals, so a version that knows nothing of this
+-- table reads it as one trade closed at the average price. Deleting a trade
+-- takes its parts with it, in that version too.
+CREATE TABLE IF NOT EXISTS trade_exits (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id  INTEGER NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
+    ts        INTEGER NOT NULL,
+    quantity  REAL NOT NULL,
+    price     REAL NOT NULL,
+    reason    TEXT NOT NULL DEFAULT 'manual'
+);
+CREATE INDEX IF NOT EXISTS idx_trade_exits_trade ON trade_exits(trade_id, ts);
+
 -- Instruments you want kept an eye on.
 -- Keyed on the person as well as the symbol: two people watching AAPL are two
 -- rows, not a collision.
@@ -347,7 +364,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
                    ("exact", "INTEGER NOT NULL DEFAULT 0")],
         # When the background check last told the owner this position had
         # crossed its stop, so it is said once, not every five minutes.
-        "trades": [("breach_noticed", "INTEGER")],
+        # trail_*: a trailing stop, as a share of the best price since opening
+        # (trail_pct, 0.05 for 5%) or a distance in the trade's own shares
+        # (trail_dist, from trail_atr times the ATR when it was set); when it
+        # was set; and the best price seen since opening, with when, so every
+        # reader trails from it whatever its bars reach back to. The stop
+        # column keeps the stop the trade was opened with: R is measured from
+        # it, and a version that knows nothing of trails reads it unchanged.
+        "trades": [("breach_noticed", "INTEGER"), ("trail_pct", "REAL"),
+                   ("trail_dist", "REAL"), ("trail_atr", "REAL"),
+                   ("trail_ts", "INTEGER"), ("trail_best", "REAL"),
+                   ("trail_best_ts", "INTEGER")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
     # Looking and adding happen inside one write transaction, so a second
@@ -531,13 +558,36 @@ class TradeRecord:
     pnl: Optional[float] = None
 
 
+def check_trail(pct: Optional[float], distance: Optional[float],
+                atr: Optional[float]) -> None:
+    """Refuse a trail that cannot work. Raises ValueError in words."""
+    import math
+    if pct is not None and distance is not None:
+        raise ValueError("a trail is a percentage or a distance, not both")
+    for label, value in (("trail", pct), ("trail", distance), ("ATR multiple", atr)):
+        if value is not None and not math.isfinite(float(value)):
+            raise ValueError("the %s must be a real number" % label)
+    if pct is not None and not 0 < float(pct) < 1:
+        raise ValueError("a trail must be more than 0% and less than 100% of the price")
+    if distance is not None and float(distance) <= 0:
+        raise ValueError("a trail must be more than zero")
+    if atr is not None and not 0 < float(atr) <= 50:
+        raise ValueError("an ATR trail must be more than 0 and at most 50 ATR")
+
+
 def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                direction: int, entry: float, stop: float,
                target1: Optional[float] = None, target2: Optional[float] = None,
                quantity: Optional[float] = None, risk_amount: Optional[float] = None,
                run_id: Optional[int] = None, account: str = "paper",
-               strategy_note: str = "", notes: str = "", user: int = 1) -> int:
-    """Record a newly opened position."""
+               strategy_note: str = "", notes: str = "", user: int = 1,
+               trail_pct: Optional[float] = None, trail_dist: Optional[float] = None,
+               trail_atr: Optional[float] = None) -> int:
+    """Record a newly opened position, with a trailing stop if one is given.
+
+    trail_pct is a share of the best price (0.05 for 5%); trail_dist is a
+    distance in price, with trail_atr the ATR multiple it was worked out from.
+    """
     import math
     if direction not in (1, -1):
         raise ValueError("direction must be +1 (long) or -1 (short)")
@@ -557,57 +607,304 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
         raise ValueError("for a long, the stop must sit below the entry")
     if direction < 0 and stop <= entry:
         raise ValueError("for a short, the stop must sit above the entry")
+    check_trail(trail_pct, trail_dist, trail_atr)
+    trails = trail_pct is not None or trail_dist is not None
 
+    now = int(time.time())
     cur = conn.execute(
         """INSERT INTO trades (run_id, account, symbol, interval, direction,
                status, ts_opened, entry, stop, target1, target2, quantity,
-               risk_amount, strategy_note, notes, user_id)
-           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?)""",
-        (run_id, account, symbol.upper(), interval, direction, int(time.time()),
+               risk_amount, strategy_note, notes, user_id, trail_pct, trail_dist,
+               trail_atr, trail_ts, trail_best, trail_best_ts)
+           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (run_id, account, symbol.upper(), interval, direction, now,
          float(entry), float(stop), target1, target2, quantity, risk_amount,
-         strategy_note, notes, int(user)))
+         strategy_note, notes, int(user), trail_pct, trail_dist,
+         trail_atr if trail_dist is not None else None,
+         now if trails else None, float(entry) if trails else None,
+         now if trails else None))
     conn.commit()
     return int(cur.lastrowid)
+
+
+class TradeChanged(ValueError):
+    """The trade is not as the page that asked to close it showed it.
+
+    Most often a form sent twice: the first press already closed what the
+    second asked for, and doing it again would close more than was meant.
+    """
+
+
+# What is left of a position below this share of it is nothing: coins are
+# sized to six decimals, and adding parts up in floating point leaves dust.
+_DUST = 1e-9
+
+
+def _qty(value: float) -> str:
+    return ("%.6f" % value).rstrip("0").rstrip(".")
+
+
+def _close_in_one(conn: sqlite3.Connection, row, trade_id: int, price: float,
+                  exit_reason: str, now: int) -> Dict:
+    """The whole position at one price, written as it always was."""
+    direction = int(row["direction"])
+    entry, stop = float(row["entry"]), float(row["stop"])
+    risk_per_unit = abs(entry - stop)
+    move = (price - entry) * direction
+    r_multiple = (move / risk_per_unit) if risk_per_unit > 0 else 0.0
+    pnl = move * float(row["quantity"] or 0.0)
+    conn.execute("UPDATE trades SET status='closed', ts_closed=?, exit_price=?, "
+                 "exit_reason=?, r_multiple=?, pnl=? WHERE id=?",
+                 (now, price, exit_reason, r_multiple, pnl, trade_id))
+    return {"r_multiple": r_multiple, "pnl": pnl}
+
+
+def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
+               quantity: Optional[float] = None, exit_reason: str = "manual",
+               notes: str = "", user: Optional[int] = None,
+               expect_left: Optional[float] = None,
+               expect_open: bool = False) -> Dict:
+    """Close a position, or part of it, at a price in the trade's own shares.
+
+    quantity None closes whatever is still open. A part is written to
+    trade_exits and the rest stays open; the trade is closed when nothing is
+    left. Closed in parts, the trade's row then holds the totals: the average
+    exit price, the R of the whole position (each part's R weighted by its
+    size) and the cash. A trade logged without a size can only be closed
+    whole, since a part of it means nothing.
+
+    expect_left is how much the caller last saw still open, and expect_open
+    that it saw it open: when either no longer holds (a form sent twice),
+    nothing is written and TradeChanged says so. The look and the write are
+    one transaction, so two exits at once cannot close more than there is.
+
+    Returns what this exit did: quantity and exit, what is left, closed
+    (whether the trade is now closed), parts (how many it has been closed
+    in, 0 for one go), average (its average exit once closed), and
+    r_multiple and pnl: this part's, or the whole position's once closed.
+    """
+    import math
+    price = float(exit_price)
+    if not math.isfinite(price) or price <= 0:
+        raise ValueError("the exit price must be a positive number")
+    if quantity is not None:
+        quantity = float(quantity)
+        if not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("the size to close must be more than zero, or left "
+                             "empty to close all of it")
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        sql, args = _own("SELECT * FROM trades WHERE id=?", [trade_id], user)
+        row = conn.execute(sql, args).fetchone()
+        if row is None:
+            raise ValueError("no trade with id %d" % trade_id)
+        if row["status"] != "open":
+            if expect_open or expect_left is not None:
+                raise TradeChanged("That %s trade was already closed, so nothing more "
+                                   "was done." % row["symbol"])
+            raise ValueError("trade %d is already %s" % (trade_id, row["status"]))
+        earlier = exits_for(conn, [trade_id]).get(trade_id, [])
+        size = float(row["quantity"]) if row["quantity"] is not None else None
+        left = (size - sum(float(e["quantity"]) for e in earlier)) if size else None
+        dust = _DUST * max(1.0, size or 0.0)
+        if expect_left is not None and left is not None and abs(left - expect_left) > dust:
+            raise TradeChanged("That %s trade changed since the page was drawn: %s of it "
+                               "is open now, not %s. Nothing more was closed."
+                               % (row["symbol"], _qty(left), _qty(expect_left)))
+        if quantity is not None and left is None:
+            raise ValueError("This trade was logged without a size, so it can only be "
+                             "closed whole. Leave the size empty.")
+        if quantity is not None and quantity > left + dust:
+            raise ValueError("Only %s of it is still open." % _qty(left))
+
+        now = int(time.time())
+        whole = quantity is None or quantity >= left - dust
+        direction, entry = int(row["direction"]), float(row["entry"])
+        risk = abs(entry - float(row["stop"]))
+        if not whole:
+            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason) "
+                         "VALUES (?,?,?,?,?)", (trade_id, now, quantity, price, exit_reason))
+            move = (price - entry) * direction
+            out = {"r_multiple": (move / risk) if risk > 0 else 0.0,
+                   "pnl": move * quantity, "parts": len(earlier) + 1, "average": None}
+        elif not earlier:
+            out = dict(_close_in_one(conn, row, trade_id, price, exit_reason, now),
+                       parts=0, average=price)
+        else:
+            # The last part: written like the others, then the whole
+            # position's totals on the trade itself.
+            conn.execute("INSERT INTO trade_exits (trade_id, ts, quantity, price, reason) "
+                         "VALUES (?,?,?,?,?)", (trade_id, now, left, price, exit_reason))
+            parts = trade_parts(dict(row, status="closed", ts_closed=now),
+                                exits_for(conn, [trade_id]).get(trade_id, []))
+            conn.execute("UPDATE trades SET status='closed', ts_closed=?, exit_price=?, "
+                         "exit_reason=?, r_multiple=?, pnl=? WHERE id=?",
+                         (now, parts["avg_exit"], exit_reason, parts["r"], parts["pnl"],
+                          trade_id))
+            out = {"r_multiple": parts["r"], "pnl": parts["pnl"],
+                   "parts": parts["parts"], "average": parts["avg_exit"]}
+        if notes:
+            conn.execute("UPDATE trades SET notes = COALESCE(notes,'') || ' ' || ? "
+                         "WHERE id=?", (notes, trade_id))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    closed_now = left if (whole and left is not None) else quantity
+    return dict(out, id=trade_id, symbol=row["symbol"], direction=direction,
+                entry=entry, exit=price, closed=whole, quantity=closed_now,
+                left=0.0 if whole else (left - quantity if left is not None else None))
 
 
 def close_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
                 exit_reason: str = "manual", notes: str = "",
                 user: Optional[int] = None) -> Dict:
-    """Close a position and compute its realised R multiple and cash result."""
-    import math
-    if not math.isfinite(float(exit_price)) or float(exit_price) <= 0:
-        raise ValueError("the exit price must be a positive number")
-    sql, args = _own("SELECT * FROM trades WHERE id=?", [trade_id], user)
-    row = conn.execute(sql, args).fetchone()
-    if row is None:
-        raise ValueError("no trade with id %d" % trade_id)
-    if row["status"] != "open":
-        raise ValueError("trade %d is already %s" % (trade_id, row["status"]))
+    """Close all that is still open of a position, and compute its realised R and cash.
 
-    direction = int(row["direction"])
-    entry, stop = float(row["entry"]), float(row["stop"])
-    risk_per_unit = abs(entry - stop)
-    move = (exit_price - entry) * direction
-    r_multiple = (move / risk_per_unit) if risk_per_unit > 0 else 0.0
-    qty = float(row["quantity"] or 0.0)
-    pnl = move * qty
+    For a trade closed in parts, r_multiple and pnl are the whole position's.
+    """
+    return exit_trade(conn, trade_id, exit_price, None, exit_reason, notes, user)
 
-    conn.execute(
-        """UPDATE trades SET status='closed', ts_closed=?, exit_price=?,
-               exit_reason=?, r_multiple=?, pnl=?,
-               notes = CASE WHEN ?='' THEN notes ELSE COALESCE(notes,'') || ' ' || ? END
-           WHERE id=?""",
-        (int(time.time()), float(exit_price), exit_reason, r_multiple, pnl,
-         notes, notes, trade_id))
+
+def exits_for(conn: sqlite3.Connection, trade_ids) -> Dict[int, List[sqlite3.Row]]:
+    """Each trade's parts closed so far, oldest first, keyed by trade id.
+
+    A file from before partial exits, read without being brought up to date
+    (a backup's exports), has no such table, and so no parts.
+    """
+    ids = sorted({int(i) for i in trade_ids})
+    out: Dict[int, List[sqlite3.Row]] = {}
+    try:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            for row in conn.execute("SELECT * FROM trade_exits WHERE trade_id IN (%s) "
+                                    "ORDER BY ts, id" % ",".join("?" * len(chunk)), chunk):
+                out.setdefault(int(row["trade_id"]), []).append(row)
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+    return out
+
+
+def trade_parts(row, exits) -> Dict:
+    """What a trade's exits add up to, in its own shares.
+
+    exits are its trade_exits rows. A trade closed in one go has none: its
+    exit, R and cash are on the row, as stored. One closed in parts has a row
+    for each; if a version that knew nothing of parts closed what they left,
+    that last part went at the row's exit price, and is counted so.
+
+    size is what it was opened with and left what is still open (None for a
+    trade logged without a size). r is the R of what is closed so far,
+    counted against the whole position: each part's R times its share of
+    it, so a closed trade's r is the R of the whole trade. pnl is the cash
+    from what is closed, before costs.
+    """
+    direction, entry = int(row["direction"]), float(row["entry"])
+    risk = abs(entry - float(row["stop"]))
+    size = float(row["quantity"]) if row["quantity"] is not None else None
+
+    def part(when, qty, price, reason, partial=True):
+        move = (float(price) - entry) * direction
+        return {"ts": when, "quantity": qty, "price": float(price), "reason": reason,
+                "r": (move / risk) if risk > 0 else 0.0,
+                "pnl": move * (qty or 0.0), "partial": partial}
+
+    out = [part(e["ts"], float(e["quantity"]), e["price"], e["reason"]) for e in exits]
+    done = sum(p["quantity"] for p in out)
+    closed = row["status"] == "closed"
+    if closed and not exits and row["exit_price"] is not None:
+        whole = part(row["ts_closed"], size, row["exit_price"], row["exit_reason"], False)
+        whole["r"] = float(row["r_multiple"] or 0.0)
+        whole["pnl"] = float(row["pnl"] or 0.0)
+        out.append(whole)
+    elif (closed and size is not None and row["exit_price"] is not None
+          and size - done > _DUST * max(1.0, size)):
+        out.append(part(row["ts_closed"], size - done, row["exit_price"],
+                        row["exit_reason"]))
+    shut = sum(p["quantity"] or 0.0 for p in out)
+    if not exits:
+        # In one go: the trade's own figures, exactly as stored.
+        r = out[0]["r"] if out else None
+        average = out[0]["price"] if out else None
+    else:
+        r = sum(p["r"] * p["quantity"] for p in out) / size if size else None
+        average = sum(p["price"] * p["quantity"] for p in out) / shut if shut else None
+    return {"size": size, "parts": len(exits), "exits": out,
+            "closed": shut if size is not None else None,
+            "left": 0.0 if closed else ((size - done) if size is not None else None),
+            "avg_exit": average, "r": r, "pnl": sum(p["pnl"] for p in out)}
+
+
+def open_positions(conn: sqlite3.Connection, account: Optional[str] = None,
+                   limit: int = 100, user: Optional[int] = None) -> List[Dict]:
+    """Open trades as they are held now: quantity is what is still open.
+
+    The portfolio and the routines size, value and risk what is held, so a
+    position closed in part counts only the part left. quantity_opened keeps
+    the size it was opened with.
+    """
+    rows = list_trades(conn, status="open", account=account, limit=limit, user=user)
+    exits = exits_for(conn, [r["id"] for r in rows])
+    out = []
+    for row in rows:
+        held = dict(row)
+        held["quantity_opened"] = row["quantity"]
+        if exits.get(row["id"]):
+            held["quantity"] = trade_parts(row, exits[row["id"]])["left"]
+        out.append(held)
+    return out
+
+
+def set_trail(conn: sqlite3.Connection, trade_id: int, pct: Optional[float] = None,
+              distance: Optional[float] = None, atr: Optional[float] = None,
+              best: Optional[float] = None, best_at: Optional[int] = None,
+              user: Optional[int] = None) -> None:
+    """Give an open trade a trailing stop, from now on.
+
+    Whether the new trail loosens the stop is a question for the prices
+    (portfolio.trail_problem), asked by the caller first. best is the best
+    price since opening the caller read, kept if better than the one held.
+    """
+    check_trail(pct, distance, atr)
+    if pct is None and distance is None:
+        raise ValueError("No trail given.")
+    sql, args = _own("UPDATE trades SET trail_pct=?, trail_dist=?, trail_atr=?, trail_ts=? "
+                     "WHERE id=? AND status='open'",
+                     [pct, distance, atr if distance is not None else None,
+                      int(time.time()), trade_id], user)
+    if conn.execute(sql, args).rowcount == 0:
+        conn.rollback()
+        raise ValueError("No open trade with id %d." % trade_id)
     conn.commit()
-    return {"id": trade_id, "r_multiple": r_multiple, "pnl": pnl,
-            "symbol": row["symbol"], "direction": direction,
-            "entry": entry, "exit": exit_price}
+    if best is not None and best_at is not None:
+        trail_seen(conn, trade_id, best, best_at)
+
+
+def trail_seen(conn: sqlite3.Connection, trade_id: int, best: float,
+               best_at: int) -> bool:
+    """Keep the best price a trailing stop has seen, when it beats the one kept.
+
+    Every reader trails from the best since opening, and their bars reach
+    back different distances: the background check's a few days of
+    five-minute bars, the journal's sixty. Kept here, a high seen by any of
+    them holds the stop up for all of them. Only ever improves, so readers
+    racing each other cannot pull it back. True when this call moved it.
+    """
+    cur = conn.execute(
+        "UPDATE trades SET trail_best=?, trail_best_ts=? WHERE id=? AND status='open' "
+        "AND (trail_pct IS NOT NULL OR trail_dist IS NOT NULL) AND (trail_best IS NULL "
+        "OR (direction > 0 AND trail_best < ?) OR (direction < 0 AND trail_best > ?))",
+        (float(best), int(best_at), trade_id, float(best), float(best)))
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def delete_trade(conn: sqlite3.Connection, trade_id: int,
                  user: Optional[int] = None) -> Dict:
-    """Remove a trade entirely.
+    """Remove a trade entirely, with any parts of it already closed.
 
     Needed because a mistyped entry otherwise corrupts every statistic the
     journal produces, with no way to take it back. Returns what was deleted so
@@ -617,6 +914,8 @@ def delete_trade(conn: sqlite3.Connection, trade_id: int,
     row = conn.execute(sql, args).fetchone()
     if row is None:
         raise ValueError("no trade with id %d" % trade_id)
+    # Parts first: they point at the trade.
+    conn.execute("DELETE FROM trade_exits WHERE trade_id=?", (trade_id,))
     sql, args = _own("DELETE FROM trades WHERE id=?", [trade_id], user)
     conn.execute(sql, args)
     conn.commit()
@@ -644,6 +943,28 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
     return list(conn.execute(sql, args))
 
 
+def _cost_of(row, costs: Dict[str, float]) -> float:
+    """A trade's round-trip cost as a fraction of the price."""
+    return float(costs.get("crypto" if row["symbol"].endswith("-USD") else "equity", 0.0))
+
+
+def _open_realised(conn: sqlite3.Connection, account: str, user: Optional[int],
+                   costs: Dict[str, float]) -> Dict:
+    """Cash taken from positions still open, by closing part of them, after costs."""
+    sql, args = _own("SELECT * FROM trades WHERE status='open' AND account=?",
+                     [account], user)
+    rows = list(conn.execute(sql, args))
+    exits = exits_for(conn, [row["id"] for row in rows])
+    cash, count = 0.0, 0
+    for row in rows:
+        if not exits.get(row["id"]):
+            continue
+        parts = trade_parts(row, exits[row["id"]])
+        cash += parts["pnl"] - float(row["entry"]) * parts["closed"] * _cost_of(row, costs)
+        count += 1
+    return {"open_realised": cash, "open_in_part": count}
+
+
 def journal_summary(conn: sqlite3.Connection, account: str = "paper",
                     user: Optional[int] = None,
                     costs: Optional[Dict[str, float]] = None) -> Dict:
@@ -655,25 +976,40 @@ def journal_summary(conn: sqlite3.Connection, account: str = "paper",
 
     costs maps "equity" and "crypto" to a round-trip cost as a fraction of the
     price. Given them, every figure is after costs, which is what the account
-    would really show; the before-cost expectancy is kept beside it. Trades are
-    taken in the order they closed, which is the order the drawdown happened.
+    would really show; the before-cost expectancy is kept beside it.
+
+    A trade counts once it is closed in full, at the R of the whole position:
+    each part's R weighted by its share of it. The drawdown is walked exit by
+    exit in the order they happened, each part when it was taken, which is
+    the order the account really moved. Cash already taken from positions
+    still open is kept apart (open_realised), since those trades are not
+    finished and have no R yet.
     """
     sql, args = _own("SELECT * FROM trades WHERE status='closed' AND account=?",
                      [account], user)
     rows = list(conn.execute(sql + " ORDER BY ts_closed, id", args))
     n = len(rows)
+    taken = _open_realised(conn, account, user, costs or {})
     if n == 0:
-        return {"trades": 0, "open": count_open(conn, account, user)}
+        return dict(taken, trades=0, open=count_open(conn, account, user))
 
     costs = costs or {}
-    gross = [float(r["r_multiple"] or 0.0) for r in rows]
-    rs, pnl = [], 0.0
-    for r, row in zip(gross, rows):
-        cost = float(costs.get("crypto" if row["symbol"].endswith("-USD") else "equity", 0.0))
-        risk = abs(float(row["entry"]) - float(row["stop"]))
-        cost_r = (float(row["entry"]) * cost / risk) if risk > 0 else 0.0
+    exits = exits_for(conn, [row["id"] for row in rows])
+    gross, rs, pnl, steps = [], [], 0.0, []
+    for order, row in enumerate(rows):
+        parts = trade_parts(row, exits.get(row["id"], []))
+        cost = _cost_of(row, costs)
+        entry, size = float(row["entry"]), float(row["quantity"] or 0.0)
+        risk = abs(entry - float(row["stop"]))
+        cost_r = (entry * cost / risk) if risk > 0 else 0.0
+        r = float(parts["r"] or 0.0)
+        gross.append(r)
         rs.append(r - cost_r)
-        pnl += float(row["pnl"] or 0.0) - float(row["entry"]) * float(row["quantity"] or 0.0) * cost
+        pnl += parts["pnl"] - entry * size * cost
+        for seq, part in enumerate(parts["exits"]):
+            share = (part["quantity"] / size) if parts["parts"] and size > 0 else 1.0
+            steps.append((int(part["ts"] or 0), order, seq,
+                          share * (float(part["r"] or 0.0) - cost_r)))
     # A scratch (exactly even) is neither a win nor a loss.
     wins = [r for r in rs if r > 0]
     losses = [r for r in rs if r < 0]
@@ -683,12 +1019,13 @@ def journal_summary(conn: sqlite3.Connection, account: str = "paper",
     # Peak-to-trough of the cumulative R curve: the number that decides whether
     # a strategy is survivable, not just profitable.
     equity, peak, max_dd = 0.0, 0.0, 0.0
-    for r in rs:
+    for _when, _order, _seq, r in sorted(steps):
         equity += r
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
 
     return {
+        **taken,
         "trades": n,
         "open": count_open(conn, account, user),
         "wins": len(wins),

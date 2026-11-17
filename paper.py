@@ -8,6 +8,8 @@ whether the process works before any real money is involved.
     python paper.py open AAPL --entry 315 --stop 313.5 --target 317.5 --qty 60
     python paper.py check                  mark open trades to market
     python paper.py close 3 --price 317.5  close a position
+    python paper.py close 3 --price 317.5 --qty 20   close part of it
+    python paper.py trail 3 --pct 5        trail its stop 5% behind the best price
     python paper.py list                   show open positions
     python paper.py stats                  realised performance so far
     python paper.py leaderboard            which strategies measure best
@@ -36,7 +38,7 @@ from rich.table import Table
 from bot import config as config_mod
 from bot import database as db
 from bot.market import DataError, fetch_bars, format_price, split_factor_since
-from bot.portfolio import stop_touched
+from bot.portfolio import atr_of, read_trade_stop, trail_from, trail_problem
 
 console = Console()
 
@@ -59,30 +61,68 @@ def _side(direction: int) -> str:
 # Commands
 # ---------------------------------------------------------------------------
 
+def _bars_for(trade):
+    """A trade's own bars, and its shares today per share the day it opened.
+
+    Raises DataError when either cannot be had just now.
+    """
+    bars = fetch_bars(trade["symbol"], trade["interval"] or "5m")
+    return bars, split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
+
+
+def _trade(conn, trade_id: int):
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (trade_id,)).fetchone()
+    if row is None:
+        raise ValueError("no trade with id %d" % trade_id)
+    return row
+
+
 def cmd_open(args, conn) -> int:
     """Open a position from explicit numbers."""
     direction = -1 if args.short else 1
+    trail = {}
     try:
+        if args.trail is not None and args.trail_atr is not None:
+            raise ValueError("give the trail as --trail or --trail-atr, not both")
+        if args.trail is not None:
+            trail = {"trail_pct": args.trail / 100.0}
+        elif args.trail_atr is not None:
+            try:
+                unit = atr_of(fetch_bars(args.symbol.upper(), args.interval))
+            except DataError as exc:
+                raise ValueError("could not read %s's prices to measure its ATR: %s"
+                                 % (args.symbol.upper(), exc))
+            if unit is None:
+                raise ValueError("not enough price history to measure %s's ATR; "
+                                 "use --trail with a percentage" % args.symbol.upper())
+            trail = {"trail_dist": args.trail_atr * unit, "trail_atr": args.trail_atr}
         trade_id = db.open_trade(
             conn, symbol=args.symbol, interval=args.interval, direction=direction,
             entry=args.entry, stop=args.stop, target1=args.target,
             target2=args.target2, quantity=args.qty,
             risk_amount=(abs(args.entry - args.stop) * args.qty) if args.qty else None,
-            account=args.account, strategy_note=args.note or "", notes=args.notes or "")
+            account=args.account, strategy_note=args.note or "", notes=args.notes or "",
+            **trail)
     except ValueError as exc:
         console.print("[red]Rejected:[/] %s" % exc)
         return 2
 
     risk = abs(args.entry - args.stop)
+    trailing = ""
+    if trail:
+        trailing = "\nthe stop trails %s behind the best price, and only tightens" % (
+            "%g%%" % args.trail if args.trail is not None
+            else "%g ATR (%s)" % (args.trail_atr, format_price(trail["trail_dist"])))
     console.print(Panel(
         "[bold]#%d  %s %s[/]\nentry %s   stop %s   target %s\n"
-        "risk %s per unit%s" % (
+        "risk %s per unit%s%s" % (
             trade_id, _side(direction), args.symbol.upper(),
             format_price(args.entry), format_price(args.stop),
             format_price(args.target) if args.target else "-",
             format_price(risk),
             "   ·   %s units   ·   %s total risk" % (
-                args.qty, format_price(risk * args.qty)) if args.qty else ""),
+                args.qty, format_price(risk * args.qty)) if args.qty else "",
+            trailing),
         title="Opened", border_style="green"))
     return 0
 
@@ -169,19 +209,95 @@ def cmd_take(args, conn) -> int:
 
 
 def cmd_close(args, conn) -> int:
+    """Close a position, or part of it with --qty.
+
+    The price and size are in the shares the trade was opened with, as
+    `check` shows it, unless --today says they are in today's: after a
+    ten-for-one split, 10 shares at 101 today are 1 at 1,010 then.
+    """
+    price, qty, converted = args.price, args.qty, ""
     try:
-        result = db.close_trade(conn, args.trade_id, args.price, args.reason,
-                                args.notes or "")
+        if args.today:
+            try:
+                _bars, split = _bars_for(_trade(conn, args.trade_id))
+            except DataError as exc:
+                raise ValueError("could not check for a share split just now, so a "
+                                 "price in today's shares cannot be converted yet (%s). "
+                                 "Try again, or give it in the shares you opened with."
+                                 % exc)
+            if split != 1.0:
+                from bot.market import split_words
+                price = args.price * split
+                qty = args.qty / split if args.qty is not None else None
+                converted = ("\n%s in today's shares is %s in the shares you opened "
+                             "with, after a %s split" % (format_price(args.price),
+                                                         format_price(price),
+                                                         split_words(split)))
+        result = db.exit_trade(conn, args.trade_id, price, qty, args.reason,
+                               args.notes or "")
     except ValueError as exc:
         console.print("[red]Rejected:[/] %s" % exc)
         return 2
     colour = "green" if result["r_multiple"] > 0 else "red"
+    if result["closed"] and result["parts"]:
+        title, head = "Closed", ("[bold]#%d %s[/] closed in %d parts at %s on average, "
+                                 "the last at %s" % (result["id"], result["symbol"],
+                                                     result["parts"],
+                                                     format_price(result["average"]),
+                                                     format_price(result["exit"])))
+    elif result["closed"]:
+        title, head = "Closed", "[bold]#%d %s[/] closed at %s" % (
+            result["id"], result["symbol"], format_price(result["exit"]))
+    else:
+        title, head = "Closed in part", ("[bold]#%d %s[/] %s closed at %s, %s still open"
+                                         % (result["id"], result["symbol"],
+                                            db._qty(result["quantity"]),
+                                            format_price(result["exit"]),
+                                            db._qty(result["left"])))
     console.print(Panel(
-        "[bold]#%d %s[/] closed at %s\n[%s]%+.2fR[/]   ·   P&L %s%.2f" % (
-            result["id"], result["symbol"], format_price(result["exit"]),
-            colour, result["r_multiple"],
-            "+" if (result["pnl"] or 0) >= 0 else "", result["pnl"] or 0.0),
-        title="Closed", border_style=colour))
+        "%s\n[%s]%+.2fR[/]   ·   P&L %s%.2f%s%s" % (
+            head, colour, result["r_multiple"],
+            "+" if (result["pnl"] or 0) >= 0 else "", result["pnl"] or 0.0,
+            "" if result["closed"] else "   [dim](R of this part)[/]", converted),
+        title=title, border_style=colour))
+    return 0
+
+
+def cmd_trail(args, conn) -> int:
+    """Trail an open trade's stop behind the best price since it opened.
+
+    The stop only ever tightens: a trail that would loosen it, or put it past
+    today's price, is refused, and so is one on a position already past its
+    stop.
+    """
+    try:
+        if (args.pct is None) == (args.atr is None):
+            raise ValueError("give the trail as --pct or --atr, one of them")
+        db.check_trail(args.pct / 100.0 if args.pct is not None else None, None, args.atr)
+        row = _trade(conn, args.trade_id)
+        if row["status"] != "open":
+            raise ValueError("trade %d is already %s" % (args.trade_id, row["status"]))
+        try:
+            bars, split = _bars_for(row)
+        except DataError as exc:
+            raise ValueError("could not read %s's prices just now: %s" % (row["symbol"], exc))
+        trail, before, after = trail_from(row, bars, split,
+                                          pct=args.pct / 100.0 if args.pct is not None else None,
+                                          atr=args.atr)
+        problem = trail_problem(row["symbol"], int(row["direction"]), before, after)
+        if problem:
+            raise ValueError(problem)
+        db.set_trail(conn, args.trade_id, pct=trail.pct, distance=trail.distance,
+                     atr=trail.atr, best=after.best, best_at=after.best_at)
+    except ValueError as exc:
+        console.print("[red]Rejected:[/] %s" % exc)
+        return 2
+    console.print(Panel(
+        "[bold]#%d %s[/] trails %s behind its best price since opening, %s.\n"
+        "Its stop is %s now, from %s when it opened. It only ever tightens." % (
+            args.trade_id, row["symbol"], trail.words(), format_price(after.best),
+            format_price(after.stop), format_price(after.initial)),
+        title="Trailing stop", border_style="green"))
     return 0
 
 
@@ -215,8 +331,9 @@ def cmd_check(args, conn) -> int:
     table = Table(box=None, padding=(0, 1))
     for col, width, just in (("#", 3, "right"), ("symbol", 8, "left"),
                              ("side", 5, "left"), ("entry", 10, "right"),
-                             ("now", 10, "right"), ("R", 6, "right"),
-                             ("age", 4, "right"), ("status", 13, "left")):
+                             ("stop", 10, "right"), ("now", 10, "right"),
+                             ("R", 6, "right"), ("age", 4, "right"),
+                             ("status", 13, "left")):
         table.add_column(col, width=width, justify=just, no_wrap=True)
 
     # Fetch every instrument at once. One at a time, twenty positions is five
@@ -238,8 +355,8 @@ def cmd_check(args, conn) -> int:
         bars = fetched.get(t["id"])
         if bars is None:
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), "-", "-", _age(t["ts_opened"]),
-                          "[yellow]no data[/]")
+                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          _age(t["ts_opened"]), "[yellow]no data[/]")
             continue
 
         # In the shares the trade was opened with, as its entry and stop
@@ -250,10 +367,9 @@ def cmd_check(args, conn) -> int:
         except DataError:
             # A split cannot be ruled out just now.
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), "-", "-", _age(t["ts_opened"]),
-                          "[yellow]no split data[/]")
+                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          _age(t["ts_opened"]), "[yellow]no split data[/]")
             continue
-        price = bars.last_price * split
         if split != 1.0:
             from bot.market import split_words
             notes.append("#%d %s split %s since it was opened: its prices here are "
@@ -263,31 +379,41 @@ def cmd_check(args, conn) -> int:
         direction = int(t["direction"])
         entry, stop = float(t["entry"]), float(t["stop"])
         risk = abs(entry - stop)
-        r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
 
-        # Scan the bars since the trade opened for a stop or target touch, by
-        # the rule the journal pages use (portfolio.stop_touched): only bars
-        # that started after the trade did. The bar it opened in is left out,
-        # because part of that bar's range may have traded before the entry,
-        # and a low from before you bought is not your stop being hit.
+        # The stop by the rule the journal pages and the background notice
+        # use (portfolio.read_stop): only bars that started after the trade
+        # did, because part of the bar it opened in may have traded before
+        # the entry, and a low from before you bought is not your stop being
+        # hit; a trail, if it has one, behind the best price since opening;
+        # and the live price, which catches a gap through the stop before any
+        # bar covers it, and a market that is closed.
+        read = read_trade_stop(t, bars, split)
+        price = read.price
+        r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
+        if read.trail is not None:
+            db.trail_seen(conn, int(t["id"]), read.best, read.best_at)
+            where = "where it started"
+            if read.moved:
+                where = "%s from %s" % ("up" if direction > 0 else "down",
+                                        format_price(stop))
+            notes.append("#%d %s: the stop trails %s behind the best price since "
+                         "opening, %s, and is at %s, %s." % (
+                             t["id"], t["symbol"], read.trail.words(),
+                             format_price(read.best), format_price(read.stop), where))
         after = bars.timestamp > opened
         status = "open"
         target = t["target1"]
-        if stop_touched(bars, opened, stop / split, direction)[0] is not None:
+        if read.touched_at is not None:
             status = "[red]STOP HIT[/]"
         elif target and after.any():
             if (float(bars.high[after].max()) * split >= float(target) if direction > 0
                     else float(bars.low[after].min()) * split <= float(target)):
                 status = "[green]TARGET HIT[/]"
 
-        # Fall back to the live price. No bars print while a market is closed,
-        # and a gap can carry price through the stop before any bar covers it,
-        # so the bar scan alone would report a blown stop as still protected.
         if status == "open":
-            beyond_stop = (price <= stop) if direction > 0 else (price >= stop)
             hit_target = target and (
                 (price >= float(target)) if direction > 0 else (price <= float(target)))
-            if beyond_stop:
+            if read.past:
                 status = "[red]PAST STOP[/]"
             elif hit_target:
                 status = "[green]PAST TARGET[/]"
@@ -297,7 +423,7 @@ def cmd_check(args, conn) -> int:
 
         colour = "green" if r_now > 0 else "red"
         table.add_row(str(t["id"]), t["symbol"], _side(direction),
-                      format_price(entry), format_price(price),
+                      format_price(entry), format_price(read.stop), format_price(price),
                       "[%s]%+.2f[/]" % (colour, r_now), _age(t["ts_opened"]), status)
 
     console.print(Panel(table, title="Open positions marked to market",
@@ -325,18 +451,28 @@ def cmd_list(args, conn) -> int:
     table = Table(box=None, padding=(0, 1))
     for col, width, just in (("#", 3, "right"), ("symbol", 8, "left"),
                              ("side", 5, "left"), ("entry", 9, "right"),
-                             ("stop", 9, "right"), ("exit", 9, "right"),
-                             ("R", 6, "right"), ("status", 6, "left"),
-                             ("age", 4, "right")):
+                             ("stop", 9, "right"), ("size", 13, "right"),
+                             ("exit", 9, "right"), ("R", 6, "right"),
+                             ("status", 6, "left"), ("age", 4, "right")):
         table.add_column(col, width=width, justify=just, no_wrap=True)
+    exits = db.exits_for(conn, [t["id"] for t in trades])
     for t in trades:
-        r = t["r_multiple"]
+        parts = db.trade_parts(t, exits.get(t["id"], []))
+        # A position closed in part shows what is left of it, and the R and
+        # exit price of what is closed so far.
+        size = "-" if parts["size"] is None else db._qty(parts["size"])
+        if parts["parts"] and t["status"] == "open":
+            size = "%s of %s" % (db._qty(parts["left"]), size)
+        r = parts["r"]
         r_txt = "-" if r is None else "[%s]%+.2f[/]" % ("green" if r > 0 else "red", r)
         table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                      format_price(t["entry"]), format_price(t["stop"]),
-                      format_price(t["exit_price"]) if t["exit_price"] else "-",
+                      format_price(t["entry"]), format_price(t["stop"]), size,
+                      format_price(parts["avg_exit"]) if parts["avg_exit"] else "-",
                       r_txt, t["status"], _age(t["ts_opened"]))
     console.print(Panel(table, title="Trades", border_style="cyan"))
+    if any(exits.get(t["id"]) and t["status"] == "open" for t in trades):
+        console.print("[dim]For a position closed in part, the exit and R are of what "
+                      "is closed so far, the R counted against the whole position.[/]")
     return 0
 
 
@@ -372,6 +508,11 @@ def cmd_stats(args, conn) -> int:
                 "Treat everything above as provisional until you pass about "
                 "thirty.[/]" % s["trades"])
     console.print(Panel(t, title="Paper trading performance", border_style="blue"))
+    if s.get("open_in_part"):
+        console.print("[dim]Not counted above: %.2f taken by closing part of %d "
+                      "position%s still open. A trade counts once it is closed in "
+                      "full.[/]" % (s["open_realised"], s["open_in_part"],
+                                    "" if s["open_in_part"] == 1 else "s"))
     if note:
         console.print(note)
     return 0
@@ -474,6 +615,10 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--interval", default="5m")
     o.add_argument("--note", help="which strategy or reason drove this")
     o.add_argument("--notes")
+    o.add_argument("--trail", type=float, metavar="PCT",
+                   help="trail the stop this many percent behind the best price")
+    o.add_argument("--trail-atr", type=float, metavar="N",
+                   help="trail the stop N times the ATR behind the best price")
     o.set_defaults(func=cmd_open)
 
     t = sub.add_parser("take", help="open a position from the bot's last plan")
@@ -486,13 +631,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="take the plan even if stale or marked WAIT")
     t.set_defaults(func=cmd_take)
 
-    c = sub.add_parser("close", help="close an open position")
+    c = sub.add_parser("close", help="close an open position, or part of it")
     c.add_argument("trade_id", type=int)
     c.add_argument("--price", type=float, required=True)
+    c.add_argument("--qty", type=float,
+                   help="close only this much of it; the rest stays open")
+    c.add_argument("--today", action="store_true",
+                   help="the price and size are in today's shares, after a split")
     c.add_argument("--reason", default="manual",
                    choices=["target", "stop", "manual", "timeout", "scratch"])
     c.add_argument("--notes")
     c.set_defaults(func=cmd_close)
+
+    tr = sub.add_parser("trail", help="trail an open position's stop")
+    tr.add_argument("trade_id", type=int)
+    tr.add_argument("--pct", type=float, help="this many percent behind the best price")
+    tr.add_argument("--atr", type=float, help="this many ATR behind the best price")
+    tr.set_defaults(func=cmd_trail)
 
     dl = sub.add_parser("delete", help="remove a trade entirely")
     dl.add_argument("trade_id", type=int)

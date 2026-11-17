@@ -1326,47 +1326,122 @@ def trades():
         closed = db_mod.list_trades(conn, status="closed", limit=100,
                                     user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
+        every = list(open_trades) + list(closed)
+        exits = db_mod.exits_for(conn, [t["id"] for t in every])
+        # What each trade's exits add up to: what is left of a position
+        # closed in part, and the whole of one closed in parts.
+        parts = {t["id"]: db_mod.trade_parts(t, exits.get(t["id"], [])) for t in every}
         live = _mark_to_market(open_trades)
+        _keep_trail_bests(conn, open_trades, live)
     finally:
         conn.close()
+    # Said once, after an exit, by the request that wrote it. Kept in the
+    # session rather than the address, so a link cannot put words here; and
+    # looked for first, so a visitor's session is not touched.
+    said = session.pop(EXIT_SAID, "") if EXIT_SAID in session else ""
     return render_template("trades.html", open_trades=open_trades,
-                           closed=closed, summary=summary, live=live)
+                           closed=closed, summary=summary, live=live,
+                           parts=parts, said=said)
+
+
+def _keep_trail_bests(conn, open_trades, marks) -> None:
+    """Keep the best price each trailing stop was just read with.
+
+    Read here over the trade's whole history, it holds the trail up for a
+    reader with fewer bars, such as the background check. Only ever raises
+    a long's best (lowers a short's), so it changes nothing else.
+    """
+    for t in open_trades:
+        mark = marks.get(t["id"]) or {}
+        if mark.get("trail") is not None and mark.get("best_at") is not None:
+            db_mod.trail_seen(conn, int(t["id"]), mark["best"], mark["best_at"])
+
+
+# The session key for what the journal says once after an exit.
+EXIT_SAID = "journal_exit_said"
+
+
+def _exit_words(symbol: str, done: Dict, typed: float, typed_qty: Optional[float],
+                shares: str, split: float) -> str:
+    """What the journal says once an exit is written: what was kept, and how.
+
+    done is what exit_trade returned. A price typed in today's shares is
+    said beside what it became in the shares the trade was opened with, so
+    the conversion can be checked; shares is "today", "opened", or "" when
+    there was no split to choose about.
+    """
+    q = db_mod._qty
+    turned = shares == "today" and split != 1.0
+    opened = " in the shares you opened with" if shares else ""
+    if not done["closed"]:
+        if turned:
+            return ("Recorded: %s of today's %s shares at %s, which is %s at %s in the "
+                    "shares you opened with. %s of those is still open."
+                    % (q(typed_qty), symbol, format_price(typed), q(done["quantity"]),
+                       format_price(done["exit"]), q(done["left"])))
+        return ("Recorded: %s of %s closed at %s%s. %s of it is still open."
+                % (q(done["quantity"]), symbol, format_price(done["exit"]), opened,
+                   q(done["left"])))
+    said = ("Closed %s at %s%s: %sR." % (symbol, format_price(done["exit"]), opened,
+                                         _signed(done["r_multiple"])))
+    if done["parts"]:
+        said = ("Closed %s in %d parts at %s on average%s: %sR on the whole position."
+                % (symbol, done["parts"], format_price(done["average"]), opened,
+                   _signed(done["r_multiple"])))
+    if turned:
+        said += (" %s in today's shares is %s in the shares you opened with."
+                 % (format_price(typed), format_price(done["exit"])))
+    return said
+
+
+def _trade_bars(trade):
+    """A journal trade's own bars, and its shares today per share the day it opened.
+
+    The bars the journal marks it with. The split is over the trade's whole
+    life: an intraday chart reaches back sixty days, and a split older than
+    that is not in its bars. Raises DataError when either cannot be had.
+    """
+    bars = market_mod.fetch_bars(trade["symbol"], trade["interval"] or "1d")
+    return bars, market_mod.split_factor_since(trade["symbol"],
+                                               int(trade["ts_opened"]), bars)
 
 
 def _mark_one(trade):
-    """Current price, open R and state for a single position.
+    """Current price, open R, the stop in force and the state of one position.
 
     In the shares of the day it opened, as its entry, stop and target are.
     After a split Yahoo quotes today's shares, so the quote is turned back,
-    and what it is today is said beside it.
+    and what it is today is said beside it. The stop is read by the rule the
+    portfolio, paper.py and the background notice read it by
+    (portfolio.read_stop), so a trail moves it the same way everywhere.
     """
-    from bot.market import fetch_bars, split_factor_since, split_words
-    bars = fetch_bars(trade["symbol"], trade["interval"] or "1d")
-    # Over the trade's whole life: an intraday chart reaches back sixty days,
-    # and a split older than that is not in its bars.
-    split = split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
-    price = bars.last_price * split
+    bars, split = _trade_bars(trade)
     direction = int(trade["direction"])
     entry, stop = float(trade["entry"]), float(trade["stop"])
+    read = portfolio_mod.read_trade_stop(trade, bars, split)
+    price = read.price
+    # R is measured from the stop the trade opened with, wherever it is now.
     risk = abs(entry - stop)
     r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
 
     target = trade["target1"]
     status = "open"
     # A stop that traded and recovered was still hit: the plan said get out.
-    touched_at, touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
-                                                     stop / split, direction)
-    if ((price <= stop) if direction > 0 else (price >= stop)) or touched_at:
+    if read.hit:
         status = "past stop"
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
         status = "past target"
     return {"price": price, "r": r_now, "status": status,
             "as_of": alerts_mod.as_of(bars), "quoted": bars.last_price,
-            "split_words": split_words(split) if split != 1.0 else "",
+            "split": split,
+            "split_words": market_mod.split_words(split) if split != 1.0 else "",
+            # The stop in force now, and how a trail has moved it.
+            "stop": read.stop, "moved": read.moved, "trail": read.trail,
+            "best": read.best, "best_at": read.best_at,
             # Where and when the stop was traded through, in the same shares.
-            "touched": touched * split if touched_at else None,
-            "touched_at": touched_at}
+            "touched": read.touched, "touched_at": read.touched_at,
+            "touched_stop": read.touched_stop}
 
 
 def _mark_to_market(open_trades):
@@ -1394,15 +1469,161 @@ def _mark_to_market(open_trades):
     return out
 
 
+def _form_number(name: str, label: str, required: bool = True) -> Optional[float]:
+    """A number typed into a form, or a ValueError that says which, in words."""
+    import math
+    raw = (request.form.get(name) or "").strip()
+    if not raw:
+        if required:
+            raise ValueError("%s is needed." % label)
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError("%s must be a number." % label)
+    if not math.isfinite(value):
+        raise ValueError("%s must be an ordinary number." % label)
+    return value
+
+
+def _own_trade(conn, trade_id: int):
+    """One of the signed-in person's own journal trades, or a ValueError."""
+    sql, args = db_mod._own("SELECT * FROM trades WHERE id=?", [trade_id], uid())
+    row = conn.execute(sql, args).fetchone()
+    if row is None:
+        raise ValueError("There is no such trade in your journal.")
+    return row
+
+
+def _trail_asked(symbol: str, interval: str) -> Dict:
+    """The trailing stop a form asks for on a new trade, as open_trade takes it.
+
+    Empty when none is asked for. An ATR trail is measured now, on the bars
+    the journal will mark the trade with. When they cannot be read, the trade
+    is refused with the reason, rather than logged without the trail asked for.
+    """
+    amount = _form_number("trail", "The trail", required=False)
+    if amount is None:
+        return {}
+    if request.form.get("trail_kind") != "atr":
+        db_mod.check_trail(amount / 100.0, None, None)
+        return {"trail_pct": amount / 100.0}
+    db_mod.check_trail(None, None, amount)
+    try:
+        unit = portfolio_mod.atr_of(market_mod.fetch_bars(symbol, interval))
+    except DataError:
+        unit = None
+        why = "Could not read %s's prices just now to measure its ATR." % symbol
+    else:
+        why = "There is not enough price history to measure %s's ATR." % symbol
+    if unit is None:
+        raise ValueError(why + " Trail it by a percentage instead, or add the trail "
+                               "from the journal later.")
+    return {"trail_dist": amount * unit, "trail_atr": amount}
+
+
+# The reasons an exit can be filed under: the form's three, and two more
+# paper.py offers.
+EXIT_REASONS = ("target", "stop", "manual", "timeout", "scratch")
+
+
 @app.route("/trades/close", methods=["POST"])
 def close_trade():
+    """Close a position, or part of it, at a price.
+
+    The journal keeps a trade in the shares it was opened with. After a split
+    the form asks which shares the typed price (and size) are in, defaulting
+    to today's, which is what a broker shows, and one in today's shares is
+    turned into the trade's own here. The split is looked up again rather
+    than taken from the page. The form says what it last saw open, so a
+    second press of Close does not close a second part.
+    """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        db_mod.close_trade(conn, int(request.form["trade_id"]),
-                           float(request.form["price"]),
-                           request.form.get("reason", "manual"),
-                           request.form.get("notes", ""), user=uid())
-    except (ValueError, KeyError) as exc:
+        trade_id = int(_form_number("trade_id", "The trade"))
+        price = _form_number("price", "The exit price")
+        quantity = _form_number("quantity", "The size to close", required=False)
+        # What the page showed still open: a size, or "all" for a trade
+        # logged without one. Anything else is not from the page, and is
+        # not held against the trade.
+        seen = (request.form.get("left") or "").strip()
+        try:
+            expect_left = float(seen) if seen and seen != "all" else None
+        except ValueError:
+            seen, expect_left = "", None
+        reason = request.form.get("reason", "manual")
+        if reason not in EXIT_REASONS:
+            reason = "manual"
+        shares = request.form.get("shares", "")
+        shares = shares if shares in ("today", "opened") else ""
+        typed, typed_qty, split = price, quantity, 1.0
+        row = _own_trade(conn, trade_id)
+        if shares == "today":
+            try:
+                _bars, split = _trade_bars(row)
+            except DataError as exc:
+                wait = _source_wait(exc)
+                page = app.make_response((render_template(
+                    "error.html", symbol="", throttled=wait is not None,
+                    message="Could not check %s for a share split just now, so a price "
+                            "in today's shares cannot yet be turned into the shares you "
+                            "opened with. Try again in a minute, or give the price in "
+                            "the shares you opened with." % row["symbol"]), 503))
+                page.headers["Retry-After"] = str(wait or UNAVAILABLE_RETRY)
+                return page
+            price *= split
+            if quantity is not None:
+                quantity /= split
+        done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
+                                 request.form.get("notes", ""), user=uid(),
+                                 expect_left=expect_left, expect_open=bool(seen))
+        session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
+                                         split)
+    except db_mod.TradeChanged:
+        # Most often Close pressed twice: the first press did the work.
+        return redirect(url_for("trades", changed=trade_id))
+    except ValueError as exc:
+        return render_template("error.html", message=str(exc), symbol=""), 400
+    finally:
+        conn.close()
+    return redirect(url_for("trades"))
+
+
+@app.route("/trades/trail", methods=["POST"])
+def trail_trade():
+    """Trail an open position's stop behind the best price since it opened.
+
+    By a share of that price, or by a multiple of the ATR of the trade's own
+    bars, measured now and kept as it is. The stop only ever tightens, so a
+    trail that would loosen it, put it past today's price, or move the stop
+    of a position already past it is refused, saying why.
+    """
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        trade_id = int(_form_number("trade_id", "The trade"))
+        amount = _form_number("trail", "The trail")
+        atr = request.form.get("trail_kind") == "atr"
+        pct = None if atr else amount / 100.0
+        db_mod.check_trail(pct, None, amount if atr else None)
+        row = _own_trade(conn, trade_id)
+        if row["status"] != "open":
+            raise ValueError("That trade is closed, so it has no stop to trail.")
+        try:
+            bars, split = _trade_bars(row)
+        except DataError as exc:
+            return _no_prices(exc, status=503, message=(
+                "Could not read %s's prices just now, so the trail cannot be set "
+                "yet. Try again in a minute." % row["symbol"]))
+        trail, before, after = portfolio_mod.trail_from(
+            row, bars, split, pct=pct, atr=amount if atr else None)
+        problem = portfolio_mod.trail_problem(row["symbol"], int(row["direction"]),
+                                              before, after)
+        if problem:
+            raise ValueError(problem)
+        db_mod.set_trail(conn, trade_id, pct=trail.pct, distance=trail.distance,
+                         atr=trail.atr, best=after.best, best_at=after.best_at,
+                         user=uid())
+    except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
@@ -1575,7 +1796,8 @@ def take_trade():
                           target2=size["target2"], quantity=size["quantity"],
                           risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
-                          user=uid())
+                          user=uid(),
+                          **_trail_asked(row["symbol"], row["interval"] or "1d"))
         events_mod.bump(conn, "paper_trade")
     except (ValueError, KeyError) as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
@@ -1604,20 +1826,22 @@ def open_trade_manual():
         # "btc" is Bitcoin, priced as BTC-USD, where it was the fund listed
         # as BTC. Picked from the suggestions with exact=1, BTC is that fund.
         # A journal entry is priced by its symbol as stored, so it is stored
-        # as Yahoo's own.
+        # as Yahoo's own, and its trail is measured on that same symbol.
         symbol, exact = _symbol_from(request.form)
         if not symbol:
             raise KeyError("symbol")
+        symbol = market_mod.normalise_symbol(symbol, exact=exact)
+        interval = request.form.get("interval") or "1d"
         db_mod.open_trade(
             conn,
-            symbol=market_mod.normalise_symbol(symbol, exact=exact),
-            interval=request.form.get("interval") or "1d",
+            symbol=symbol, interval=interval,
             direction=direction, entry=entry, stop=stop,
             target1=float(target) if target else None,
             quantity=float(qty) if qty else None,
             risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
             account="paper", strategy_note="entered by hand",
-            notes=request.form.get("notes", ""), user=uid())
+            notes=request.form.get("notes", ""), user=uid(),
+            **_trail_asked(symbol, interval))
         events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
@@ -2915,7 +3139,8 @@ def portfolio():
     cfg = _cfg()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        rows = db_mod.list_trades(conn, status="open", limit=100, user=uid())
+        # What is held: a position closed in part counts only what is left.
+        rows = db_mod.open_positions(conn, limit=100, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()

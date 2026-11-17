@@ -227,7 +227,8 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     step("Marking positions to market")
-    rows = db.list_trades(conn, status="open", user=user)
+    # What is held: a position closed in part counts only what is left.
+    rows = db.open_positions(conn, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return
@@ -246,12 +247,18 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
                       else (p.price <= p.target)))
         if p.breached:
             # Said once, here, as a step pointing at the trade; the portfolio
-            # warnings below skip it rather than saying it twice.
+            # warnings below skip it rather than saying it twice. A trailing
+            # stop traded through and come back is named at the level it was
+            # crossed at, not where it has trailed to since.
+            crossed = p.stop
+            if p.touched_stop is not None and (p.price - p.stop) * p.direction > 0:
+                crossed = p.touched_stop
             report.steps.append(Step(
                 "Position: %s" % p.symbol,
-                "%s is at %s and has crossed its stop of %s. Close it, or set a "
+                "%s is at %s and has crossed its %sstop of %s. Close it, or set a "
                 "new stop on purpose." % (p.symbol, format_price(p.price),
-                                          format_price(p.stop)),
+                                          "trailing " if p.trail is not None else "",
+                                          format_price(crossed)),
                 "attention", {"trade_id": p.trade_id}))
         elif at_target:
             report.steps.append(Step(

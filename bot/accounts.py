@@ -439,6 +439,10 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
             cur = conn.execute("DELETE FROM %s WHERE run_id IN (%s)"
                                % (child, marks), run_ids)
             removed[child] = cur.rowcount
+    # Parts of trades closed in parts point at their trade, so they go first.
+    cur = conn.execute("DELETE FROM trade_exits WHERE trade_id IN "
+                       "(SELECT id FROM trades WHERE user_id=?)", (user_id,))
+    removed["trade_exits"] = cur.rowcount
     for table in OWNED_TABLES:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
