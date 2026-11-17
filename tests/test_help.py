@@ -100,7 +100,9 @@ check("the size rule", "loses 0.5% of the 25,000 account" in said["size"]["text"
       and "never more than 20% of the account" in said["size"]["text"], said["size"]["text"])
 check("the costs", "0.05% of the price for a stock or fund and 0.1% for a coin"
       in said["costs"]["text"], said["costs"]["text"])
-check("the smallest sample trusted", "Fewer than 30" in said["sample"]["text"])
+check("the smallest sample trusted", "fewer than 30" in said["sample"]["text"])
+check("and what separate tests are", "count as fewer separate tests"
+      in said["sample"]["text"])
 check("the news's share of the say", "20% of the say" in said["with_news"]["text"]
       and "20% of the say" in said["news"]["text"])
 check("the holding window, in the bars' own time",

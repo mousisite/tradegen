@@ -305,8 +305,10 @@ HELP: Dict[str, Dict[str, str]] = {
         "stop and target alone suggest.")},
     "sample": {"name": "the sample", "text": (
         "How many past trades these figures come from: setups scored about as "
-        "strongly as today's, on the same side. Fewer than {minimum}, or a "
-        "history too short to test well, is called too few to trust.")},
+        "strongly as today's, on the same side, and fewer than {minimum}, or a "
+        "history too short to test well, is called too few to trust. Trades a "
+        "few bars apart share most of their bars, so they count as fewer "
+        "separate tests when the 95% range is worked out.")},
     "hold": {"name": "the typical hold", "text": (
         "The average number of bars these past trades lasted: until the target "
         "or the stop, or until the {bars}-bar limit, when they were closed at "
