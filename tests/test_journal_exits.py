@@ -503,6 +503,13 @@ try:
           and pos.breached and close(pos.touched_stop, 104.5) and "STOP HIT" in said
           and len(told) == 1 and "the trailing stop of 104.5" in told[0].message,
           (mark.get("status"), pos.breached, said, [f.message for f in told]))
+    from bot import workflows  # noqa: E402
+    routine = workflows.RunReport(name="positions", started=0, finished=0)
+    workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH), routine,
+                               lambda _label: None, user=alice.id)
+    named = [s.detail for s in routine.steps if s.label == "Position: ZZF"]
+    check("and a routine names the trailing stop at the level it was crossed",
+          named and "has crossed its trailing stop of 104.5" in named[0], named)
     mark, pos, said, told = four("ZZG")
     check("a trail not hit: the journal, the portfolio, paper.py and the notice agree",
           close(mark["stop"], 104.5) and mark["status"] == "open" and close(pos.stop, 104.5)
