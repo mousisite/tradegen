@@ -1092,7 +1092,15 @@ def analyse():
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
     except Exception as exc:                        # keep the app usable
-        return render_template("error.html", message=str(exc), symbol=symbol), 500
+        # The log keeps the exception. Its text can carry paths and internal
+        # names, so only whoever runs the server is shown it, to fix it. No
+        # symbol for the page: its advice about tickers that do not exist is
+        # for a ticker the source refused, not for this.
+        app.logger.exception("Could not analyse %s", symbol[:20])
+        said = ("Something broke while analysing %s. Try again in a minute."
+                % symbol.upper()[:20])
+        return render_template("error.html", symbol="", message=(
+            "%s (%s)" % (said, exc) if _is_operator() else said)), 500
     _spend_view(symbol, interval)
 
     families = _family_rollup(result)

@@ -25,7 +25,9 @@ for key in ("ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "GOOGLE
 import numpy as np  # noqa: E402
 
 import web  # noqa: E402
+from bot import accounts as A  # noqa: E402
 from bot import calibrate, catalysts, config, engine, indicators, learning, plain  # noqa: E402
+from bot import database as db  # noqa: E402
 from bot import sentiment as sentiment_mod  # noqa: E402
 from bot import strategies  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -294,6 +296,40 @@ try:
           not re.search(r"ANTHROPIC|API key|\.env|restart", page), re.findall(
               r".{40}(?:ANTHROPIC|API key|\.env|restart).{40}", page)[:2])
     check("and says how the news was scored", "Scored by a list of finance words." in page)
+
+    head("AN ANALYSIS THAT BREAKS SAYS SO IN WORDS")
+
+    def broken(symbol, interval):
+        raise RuntimeError(r"C:\srv\orenth\bot\engine.py line 42: boom")
+
+    engine.fetch_bars = broken
+    web._CACHE.clear()
+    web.app.logger.disabled = True
+    try:
+        r = c.get("/analyse?symbol=ZZFAIL&interval=1d&news=0")
+        page = r.data.decode("utf-8", "replace")
+        check("whoever runs it on their own machine is shown what broke, to fix it",
+              r.status_code == 500 and "Something broke while analysing ZZFAIL" in page
+              and "boom" in page, page[-1500:])
+        check("with no advice about tickers that do not exist",
+              "the ticker does not exist" not in page)
+        _os.environ["GOOGLE_CLIENT_ID"] = "1.apps.googleusercontent.com"
+        _os.environ["GOOGLE_CLIENT_SECRET"] = "x"
+        conn = db.connect(DB)
+        reader = A.upsert_email_user(conn, "reader@example.com")
+        token = A.start_session(conn, reader.id, "test")
+        conn.close()
+        with c.session_transaction() as sess:
+            sess[web.SESSION_KEY] = token
+        r = c.get("/analyse?symbol=ZZFAIL&interval=1d&news=0")
+        page = r.data.decode("utf-8", "replace")
+        check("anyone else gets the sentence, never the exception's text",
+              r.status_code == 500 and "Something broke while analysing ZZFAIL" in page
+              and "boom" not in page and "engine.py" not in page, page[-1500:])
+    finally:
+        web.app.logger.disabled = False
+        for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
+            _os.environ.pop(key, None)
 finally:
     engine.resolve, engine.fetch_bars = real["resolve"], real["bars"]
     catalysts.fetch = real["calendar"]
