@@ -2,9 +2,11 @@
 
 No network: every price is a stand-in. Four places read a position's stop,
 the portfolio, the journal, paper.py and the background stop notice, and they
-must agree, trail and split included. A position closed in parts must count
-right everywhere: its R, the journal's statistics, the portfolio's size and
-risk, the export, deleting it, and an older version reading the same file.
+must agree, trail and split included, on the trade's own bars, and so must
+the front page: a crossing any of them saw stays one. A position closed in
+parts must count right everywhere: its R, the journal's statistics, the
+portfolio's size and risk, the front page, the export, deleting it, and an
+older version reading the same file.
 """
 import csv
 import html
@@ -887,6 +889,14 @@ try:
     check("the front page names a crossed trailing stop at the level it was crossed",
           "<b>ZZF</b> long: traded through its trailing stop of 104.5 at 104.4" in body,
           body[body.find("ZZF") - 100:][:400])
+    check("and so does it for an hourly trade, and for a crossing kept from when it was seen",
+          "<b>ZZK</b> long: traded through its trailing stop of 106.7 at 106" in body
+          and "<b>ZZJ</b> long: traded through its trailing stop of 114 at 113" in body,
+          [body[body.find(s) - 20:][:200] for s in ("<b>ZZK</b>", "<b>ZZJ</b>")])
+    page = flat(text(c.get("/portfolio")))
+    check("as does the portfolio page",
+          "Stop breached on ZZK: it traded through its trailing stop of 106.7" in page
+          and "Stop breached on ZZJ: it traded through its trailing stop of 114" in page)
 
     # Its table of open positions shows the stop in force, which a trail
     # moves, and what that stop risks from the entry on what is still held.
