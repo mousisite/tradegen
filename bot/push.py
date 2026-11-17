@@ -398,11 +398,21 @@ def _kept_key(path: str) -> "ec.EllipticCurvePrivateKey":
     """
     try:
         with open(path, "rb") as fh:
-            return private_key(fh.read().decode("ascii"))
+            kept = fh.read()
+        if kept.strip():
+            return private_key(kept.decode("ascii"))
+        # Empty: a start-up stopped between making the file and writing it.
+        # No browser can have subscribed to a key that never existed, so it
+        # is made again, once the file is old enough not to be another
+        # process still writing it.
+        if time.time() - os.path.getmtime(path) < 60:
+            raise ValueError("the key file %s is still being written" % path)
+        os.remove(path)
     except FileNotFoundError:
         pass
-    except Exception:
-        raise ValueError("the key file %s could not be read" % path)
+    except Exception as exc:
+        raise ValueError(str(exc) if "key file" in str(exc)
+                         else "the key file %s could not be read" % path)
     key = ec.generate_private_key(ec.SECP256R1())
     pem = key.private_bytes(serialization.Encoding.PEM,
                             serialization.PrivateFormat.PKCS8,

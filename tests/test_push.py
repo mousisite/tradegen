@@ -277,6 +277,19 @@ try:
         check("readable by the server alone", (_os.stat(kept).st_mode & 0o777) == 0o600)
     push._VAPID.clear()
     check("the same key after a restart", push.vapid_keys().public == keys.public)
+    # A start-up that stopped between making the key file and writing it.
+    push._VAPID.clear()
+    _os.replace(kept, kept + ".kept")
+    open(kept, "wb").close()
+    check("an empty key file still being written is waited for, never replaced",
+          push.vapid_keys() is None and "still being written" in push.why_not()["web"])
+    stale = time.time() - 3600
+    _os.utime(kept, (stale, stale))
+    check("an empty one a stopped start-up left behind is made again",
+          push.vapid_keys() is not None and _os.path.getsize(kept) > 0)
+    _os.replace(kept + ".kept", kept)
+    push._VAPID.clear()
+    check("and the kept key is the one in use again", push.vapid_keys().public == keys.public)
     _os.environ["VAPID_PRIVATE_KEY"] = AS_PRIVATE
     check("VAPID_PRIVATE_KEY wins over the kept one, in base64url",
           push.vapid_keys().public == AS_PUBLIC)
