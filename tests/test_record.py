@@ -587,6 +587,195 @@ try:
 finally:
     conn.close()
 
+
+def on_page(path, db_path):
+    """A page as a visitor sees it, read from another database."""
+    was = web.app.config["DB_PATH"]
+    web.app.config["DB_PATH"] = db_path
+    try:
+        return text(path)
+    finally:
+        web.app.config["DB_PATH"] = was
+
+
+def outcomes(paths, atr):
+    """What a buy did over each path of log moves from its price: the
+    record's pretend trade, stop 1.5 ATR below, target 2.25 ATR above, the
+    stop first when both are touched, and half the stop's distance at the
+    end to count as up or down."""
+    stop, target, h = -1.5 * atr, 2.25 * atr, paths.shape[-1]
+    hit_stop, hit_target = paths <= stop, paths >= target
+    first_stop = np.where(hit_stop.any(-1), hit_stop.argmax(-1), h)
+    first_target = np.where(hit_target.any(-1), hit_target.argmax(-1), h)
+    r = paths[..., -1] / (1.5 * atr)
+    how = np.where(r >= 0.5, "up", np.where(r <= -0.5, "down", "flat")).astype(object)
+    how[first_target < first_stop] = "target"
+    how[(first_stop <= first_target) & (first_stop < h)] = "stop"
+    return how
+
+
+SIM_SIGMA, SIM_ATR = 0.02, 0.028
+
+
+def avoid_calls(rng, stocks, days, together, start_day=20000):
+    """An AVOID every trading day on each of `stocks` stocks for `days` days,
+    scored as the record scores them. Each day's moves share a market move
+    with weight `together`: 0 is stocks moving apart."""
+    m = rng.normal(0, 1, days + 10)
+    e = rng.normal(0, 1, (stocks, days + 10))
+    moves = SIM_SIGMA * (math.sqrt(together) * m + math.sqrt(1 - together) * e)
+    cum = np.concatenate([np.zeros((stocks, 1)), np.cumsum(moves, axis=1)], axis=1)
+    paths = np.stack([cum[:, d + 1:d + 11] - cum[:, d:d + 1] for d in range(days)], axis=1)
+    how = outcomes(paths, SIM_ATR)
+    rows = []
+    for d in range(days):
+        day = start_day + d + 2 * (d // 5)              # weekdays only
+        for s in range(stocks):
+            h = how[s, d]
+            rows.append({"symbol": "S%02d" % s, "at": day * DAY + 21 * 3600,
+                         "session_at": day * DAY, "horizon": 10, "action": "AVOID",
+                         "how": h, "outcome": ("right" if h in ("stop", "down") else
+                                               "flat" if h == "flat" else "wrong"),
+                         "price": 100.0, "stop": 100.0 * (1 - 1.5 * SIM_ATR),
+                         "exit_price": 100.0 * math.exp(paths[s, d, -1])})
+    return rows
+
+
+# ---------------------------------------------------------------------------
+head("A RANGE THAT ALLOWS FOR THE WHOLE MARKET MOVING")
+# ---------------------------------------------------------------------------
+# The record counted calls on different stocks as separate tests, though on
+# a day the whole market moves they settle alike, so its 95% ranges were
+# too narrow to mean 95%.
+check("the t multiplier: 12.706 at one degree of freedom, 2.042 at 30, 1.96 at very many",
+      public.t_95(1) == 12.706 and public.t_95(2) == 4.303 and public.t_95(30) == 2.042
+      and abs(public.t_95(31) - 2.0395) < 1e-3 and abs(public.t_95(10 ** 6) - 1.95996) < 1e-4)
+
+
+def hand(symbol, day, right):
+    return {"symbol": symbol, "at": (20000 + day) * DAY + 3600, "horizon": 10,
+            "session_at": (20000 + day) * DAY, "outcome": "right" if right else "wrong"}
+
+
+cases = [hand("BTC-USD", 0, 1), hand("AAA", 0, 1), hand("BBB", 0, 1),
+         hand("BTC-USD", 12, 1), hand("AAA", 12, 1),
+         hand("AAA", 30, 0), hand("BBB", 30, 0),
+         hand("BTC-USD", 44, 0), hand("AAA", 44, 0), hand("BBB", 44, 0)]
+ones = [1.0 if r["outcome"] == "right" else 0.0 for r in cases]
+var, df = public._together(cases, ones)
+# By hand. The average is 0.5. Each call's distance from it, summed by
+# market day and window (a coin's is 10 days, a stock's 10 trading days, 14
+# calendar days):
+#   day 0: coin +0.5, stocks +1.0     day 12: coin +0.5, stock +0.5
+#   day 30: stocks -1.0               day 44: coin -0.5, stocks -1.0
+# Squares: 0.25 + 1 + 0.25 + 0.25 + 1 + 0.25 + 1 = 4.0. Overlapping pairs,
+# twice each: day 0's coin and stocks 1.0; day 0's stocks with day 12's coin
+# and stock, 12 days apart, inside the stocks' 14: 1.0 + 1.0; day 12's two,
+# 0.5; day 44's two, 1.0. Day 0's coin and day 12's calls are 12 days apart,
+# past the coin's 10, and days 30 and 44 are 14 apart: none of those count.
+# Total 8.5, above the calls' own 10 x 0.25 = 2.5. The 45 days hold 45 / 14
+# = 3.21 windows of market, but counted where calls are (from day 0, then
+# from day 30, then from day 44) only 3. So it is scaled by 3 / 2 and divided
+# by 10 squared, with 3 - 1 = 2 degrees of freedom.
+expect = 8.5 * 3.0 / 2.0 / 100.0
+check("calls whose days overlap count as moving together, on one stock or two",
+      abs(var - expect) < 1e-12 and df == 2, (var, df, expect))
+check("calls that cover too few weeks of market give no such range",
+      public._together(cases[:5], ones[:5]) is None)
+bunched = [hand(sym, day, (day + k) % 2) for k, sym in enumerate(("AAA", "BBB"))
+           for day in (0, 1, 2, 60, 61, 62, 120, 121, 122)]
+check("calls bunched into three weeks are three spells of market, not the months between",
+      public._together(bunched, [1.0 if r["outcome"] == "right" else 0.0
+                                 for r in bunched])[1] == 2)
+scored = [dict(r, how="stop" if r["outcome"] == "right" else "target", price=1.0,
+               stop=0.9, exit_price=0.95 if r["outcome"] == "right" else 1.135)
+          for r in cases]
+young = public._stats(scored[:5], {})
+wide = public._stats(scored, {})
+apart = calibrate.wilson_interval(0.5 * wide["separate"], wide["separate"])
+check("a kind of call too young for it says so, keeping the range per stock",
+      young["together"] is False and young["lo"] is not None and young["move_lo"] is None)
+check("once old enough, the range is the wider of the two at each end",
+      wide["together"] is True and wide["lo"] <= apart[0] and wide["hi"] >= apart[1]
+      and wide["move_lo"] < wide["mean_move"] < wide["move_hi"], (wide["lo"], apart))
+
+# Coverage. Stocks that share a daily market move, and calls with no skill
+# in them: the true right rate is the share of buys that lost, the same
+# whatever the stocks share. Over a hundred and fifty made-up records of
+# thirty stocks and sixty trading days, how often does each range hold it?
+rng = np.random.RandomState(21)
+lone = outcomes(np.cumsum(rng.normal(0, SIM_SIGMA, (200000, 10)), axis=1), SIM_ATR)
+decided = lone[lone != "flat"]
+truth = float(np.mean((decided == "stop") | (decided == "down")))
+
+
+def coverage(together, runs=150):
+    old_held = new_held = 0
+    for _ in range(runs):
+        st = public._stats(avoid_calls(rng, 30, 60, together), {})
+        n_eff = max(1, min(st["separate"], st["decided"]))
+        lo, hi = calibrate.wilson_interval(st["rate"] * n_eff, n_eff)
+        old_held += lo <= truth <= hi
+        new_held += st["together"] and st["lo"] <= truth <= st["hi"]
+    return old_held / float(runs), new_held / float(runs)
+
+
+old_cov, new_cov = coverage(0.4)
+check("when stocks share a market move, counting them apart held the truth far less than 95%",
+      old_cov < 0.7, old_cov)
+check("and the range that allows for it holds it close to 95% of the time",
+      new_cov >= 0.88 and new_cov - old_cov >= 0.25, (old_cov, new_cov))
+old_cov, new_cov = coverage(0.0, runs=100)
+check("when they move apart, it still holds it at least as often as before",
+      new_cov >= 0.94 and new_cov >= old_cov - 0.02, (old_cov, new_cov))
+
+# The page, on a record old enough, and on one too young.
+now = int(time.time())
+grown_path = _os.path.join(tempfile.mkdtemp(prefix="stockbot-test-grown-"), "data", "g.db")
+grown = db.connect(grown_path)
+try:
+    first = now // DAY - 110
+    for r in avoid_calls(np.random.RandomState(4), 12, 60, 0.4, start_day=first):
+        grown.execute(
+            "INSERT INTO calls (symbol, day, action, price, stop, target, horizon, at, "
+            "outcome, how, exit_price, settled, price_day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["symbol"], time.strftime("%Y-%m-%d", time.gmtime(r["at"])), "AVOID",
+             r["price"], r["stop"], 100.0 * (1 + 2.25 * SIM_ATR), 10, r["at"],
+             r["outcome"], r["how"], r["exit_price"], r["at"] + 15 * DAY,
+             r["session_at"] // DAY))
+    grown.commit()
+    rec = public.record(grown)
+    avoid = {c["action"]: c for c in rec["classes"]}["AVOID"]
+    check("an old enough record's ranges allow for the market",
+          avoid["together"] and avoid["move_lo"] is not None, avoid["together"])
+finally:
+    grown.close()
+page = on_page("/record", grown_path)
+check("and the page gives them, with what they allow for",
+      "(95% range " + "%.0f%%" % (avoid["lo"] * 100) in page
+      and "allow for calls on different stocks settling alike, as they do on a day "
+          "the whole market moves" in page
+      and "(95% range " in page.split("on average")[1][:40], page[:0])
+check("and says how long that takes", "spread over about 6 weeks of the market" in page)
+young_path = _os.path.join(tempfile.mkdtemp(prefix="stockbot-test-young2-"), "data", "y.db")
+young_db = db.connect(young_path)
+try:
+    for r in avoid_calls(np.random.RandomState(5), 12, 12, 0.4, start_day=now // DAY - 40):
+        young_db.execute(
+            "INSERT INTO calls (symbol, day, action, price, stop, target, horizon, at, "
+            "outcome, how, exit_price, settled, price_day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["symbol"], time.strftime("%Y-%m-%d", time.gmtime(r["at"])), "AVOID",
+             r["price"], r["stop"], 100.0 * (1 + 2.25 * SIM_ATR), 10, r["at"],
+             r["outcome"], r["how"], r["exit_price"], r["at"] + 15 * DAY,
+             r["session_at"] // DAY))
+    young_db.commit()
+finally:
+    young_db.close()
+page = on_page("/record", young_path)
+check("a record too young for that range gives none, and says why",
+      "(too early for a 95% range)" in page and "95% range " not in page.split("How it is scored")[0]
+      and "Not yet distinguishable from chance: these calls cover too few weeks" in page)
+
 print()
 print("%d failure(s)" % len(fails))
 print("RECORD OK" if not fails else "FAILURES: %s" % fails)

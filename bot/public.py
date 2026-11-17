@@ -26,7 +26,7 @@ import secrets
 import sqlite3
 import time
 from collections import OrderedDict
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # What people search for, roughly in that order. Names are here rather than
 # fetched so a page title never depends on a data source being up.
@@ -865,6 +865,13 @@ def _median(values: List[float]) -> Optional[float]:
     return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
 
 
+def _window_days(r) -> int:
+    """How many calendar days a call's window spans: its horizon, which for
+    a stock is in trading days."""
+    days = int(r["horizon"] or 10)
+    return days if _is_coin(r["symbol"]) else (days * 7 + 4) // 5
+
+
 def _separate_tests(rows) -> int:
     """How many of these calls are separate tests of the method.
 
@@ -873,14 +880,12 @@ def _separate_tests(rows) -> int:
     often than not. Per stock, a call counts only once the last counted one's
     days have run out, and SPY and VOO count as one stock. Different stocks
     are still counted apart, though on a day the whole market moves they
-    settle alike, so the true range is wider still.
+    settle alike: _together allows for that.
     """
     last: Dict[str, int] = {}
     count = 0
     for r in sorted(rows, key=lambda r: r["at"]):
-        days = int(r["horizon"] or 10)
-        if not _is_coin(r["symbol"]):
-            days = (days * 7 + 4) // 5          # trading days in calendar time
+        days = _window_days(r)
         key = SAME_AS.get(r["symbol"], r["symbol"])
         prev = last.get(key)
         if prev is None or int(r["at"]) - prev >= days * 86400:
@@ -889,26 +894,147 @@ def _separate_tests(rows) -> int:
     return count
 
 
+# A range that allows for calls settling together needs the calls to cover
+# at least this many windows' worth of market days. Each window is about one
+# separate spell of the market, and with fewer the spread between spells
+# cannot be measured: the page then says it is too early for a range.
+MIN_STRETCHES = 3
+
+# The t distribution's 97.5th percentile for 1 to 30 degrees of freedom: what
+# a 95% range is wide by when its spread is measured from few separate
+# pieces. Past the table, the Cornish-Fisher series in 1/df, which is within
+# 0.001 of it from 30 on.
+_T975 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+         2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
+         2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042)
+
+
+def t_95(df: int) -> float:
+    """The multiplier of a two-sided 95% range with df degrees of freedom."""
+    df = max(1, int(df))
+    if df <= len(_T975):
+        return _T975[df - 1]
+    z, v = 1.959963984540054, float(df)
+    return (z + (z ** 3 + z) / (4 * v) + (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * v * v)
+            + (3 * z ** 7 + 19 * z ** 5 + 17 * z ** 3 - 15 * z) / (384 * v ** 3))
+
+
+def _market_day(r) -> int:
+    """The day number of the market day a call's price belongs to: its
+    session, or the day it was written down if that is not known."""
+    when = r.get("session_at")
+    if when is None:
+        when = r["price_day"] * 86400 if r.get("price_day") is not None else r["at"]
+    return int(when) // 86400
+
+
+def _together(rows: List[Dict], values: List[float]) -> Optional[Tuple[float, int]]:
+    """(variance of the average of values, degrees of freedom), allowing for
+    calls that settle together; None when they cover too few market days.
+
+    Two calls settle together when their windows share market days. The
+    next day's call on one stock shares nine of its ten, and on a day the
+    whole market falls, calls on every stock fall with it. So every pair of
+    calls whose windows overlap counts in full, on one stock or on two: the
+    equal-weight rule the strategy tests use for overlapping trades
+    (learning.StrategyStat.spread), here across stocks as well. Each call's
+    distance from the average is first summed by market day and length of
+    window, and the sums of days less than a window apart are multiplied
+    together; a call's window starts on its own market day.
+
+    The calls cover their span of days in about span / window separate
+    spells of the market, which is what the spread is measured from; fewer
+    when they bunch into a few weeks with gaps between, so spells are also
+    counted window by window, only where calls are, and the smaller count is
+    used. The variance is scaled up by spells / (spells - 1), as a variance
+    is for measuring its own average, and the degrees of freedom are one
+    less than the whole spells. It is never less than the calls' own spread:
+    overlap cannot make calls worth more than their count.
+
+    On made-up calls on 30 to 47 stocks whose prices share a daily market
+    move, the 95% range built on this held the true rate 89% to 95% of the
+    time once the calls covered six weeks or more, where counting the stocks
+    apart held it about 40% of the time (test_record.py simulates it).
+    """
+    n = len(values)
+    if n < 2:
+        return None
+    days = [_market_day(r) for r in rows]
+    windows = [_window_days(r) for r in rows]
+    widest = max(windows)
+    held, start = 0, None
+    for day in sorted(set(days)):
+        if start is None or day - start >= widest:
+            held, start = held + 1, day
+    spells = min((max(days) - min(days) + 1) / float(widest), float(held))
+    if spells < MIN_STRETCHES:
+        return None
+    mean = sum(values) / n
+    sums: Dict[Tuple[int, int], float] = {}
+    for day, window, v in zip(days, windows, values):
+        sums[(day, window)] = sums.get((day, window), 0.0) + (v - mean)
+    keys = sorted(sums)
+    total = 0.0
+    for a, (day, window) in enumerate(keys):
+        s = sums[(day, window)]
+        total += s * s
+        for later in keys[a + 1:]:
+            gap = later[0] - day
+            if gap >= widest:
+                break
+            if gap < window:
+                total += 2.0 * s * sums[later]
+    own = sum((v - mean) ** 2 for v in values)
+    var = max(own, total) * spells / (spells - 1.0)
+    return var / (n * n), int(spells) - 1
+
+
 def _stats(rows, costs: Dict[str, float]) -> Dict:
     """One kind of call: counts, right rate with its 95% range, and what a buy
-    after these calls did, after costs.
+    after these calls did, after costs, with its own 95% range.
 
-    The range is computed on the calls that are separate tests, not on every
-    call: counted as independent, a run of daily calls on one stock made the
-    range one and a half to two times too narrow, and "beyond the margin of
-    error" came too easily. The right rate itself is still over every call."""
+    The right rate is over every call, and its range allows for calls that
+    are not separate tests in two ways. Counted per stock, one call per
+    window: counted as independent, a run of daily calls on one stock made
+    the range one and a half to two times too narrow. And allowing for calls
+    on different stocks settling together on the days the market moves
+    (_together): on made-up stocks sharing a market move, that made it about
+    three times wider again, and only then did it hold the true rate close
+    to 95% of the time. The range given is the wider of the two at each end.
+
+    "together" says whether the second could be measured. Until the calls
+    cover MIN_STRETCHES windows of market days it cannot: "lo" and "hi" are
+    then the first alone, kept for anything that reads them, and the page
+    gives no range. "move_lo" and "move_hi" are the 95% range of the average
+    move, by _together alone, None until then.
+    """
     from .calibrate import wilson_interval
     out = _tally(rows)
     out["total"] = len(rows)
     out["scored"] = out["right"] + out["wrong"] + out["flat"]
     decided = [r for r in rows if r["outcome"] in ("right", "wrong")]
     out["separate"] = _separate_tests(decided)
+    out["together"] = False
     if out["decided"]:
         n_eff = float(max(1, min(out["separate"], out["decided"])))
         out["lo"], out["hi"] = wilson_interval(out["rate"] * n_eff, n_eff)
+        spread = _together(decided, [1.0 if r["outcome"] == "right" else 0.0
+                                     for r in decided])
+        if spread is not None:
+            var, df = spread
+            p = out["rate"]
+            n = float(out["decided"])
+            # As a count of separate calls, so the range keeps Wilson's shape
+            # near 0% and 100%: what a sample that size would need to vary
+            # this much. Never more than the calls there are.
+            worth = max(1.0, min(n, p * (1 - p) / var)) if var > 0 else n
+            lo, hi = wilson_interval(p * worth, worth, z=t_95(df))
+            out["lo"], out["hi"] = min(out["lo"], lo), max(out["hi"], hi)
+            out["together"] = True
     else:
         out["lo"], out["hi"] = None, None
-    results = [_buy_result(r, costs) for r in rows if r["outcome"]]
+    scored = [r for r in rows if r["outcome"]]
+    results = [_buy_result(r, costs) for r in scored]
     moves = [x["move"] for x in results]
     rs = [x["r"] for x in results]
     wins = [r for r in rs if r > 0]
@@ -917,7 +1043,12 @@ def _stats(rows, costs: Dict[str, float]) -> Dict:
                median_move=_median(moves),
                mean_r=sum(rs) / len(rs) if rs else None,
                avg_win_r=sum(wins) / len(wins) if wins else None,
-               avg_loss_r=sum(losses) / len(losses) if losses else None)
+               avg_loss_r=sum(losses) / len(losses) if losses else None,
+               move_lo=None, move_hi=None)
+    spread = _together(scored, moves) if moves else None
+    if spread is not None:
+        margin = t_95(spread[1]) * math.sqrt(spread[0])
+        out.update(move_lo=out["mean_move"] - margin, move_hi=out["mean_move"] + margin)
     return out
 
 
@@ -970,12 +1101,17 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     settled = [r for r in counted if r["outcome"]]
     latest = sorted(settled, key=lambda r: -(r["settled"] or 0))
     first_at = counted[0]["at"] if counted else None
+    # How long a stock's calls need to span before a range can allow for
+    # calls settling together (_together), in weeks, for the page.
+    stock_window = _window_days({"symbol": "SPY",
+                                 "horizon": counted[-1]["horizon"] if counted else 10})
     return {"total": len(counted),
             "first_at": first_at,
             "all": _tally(counted),
             "scored": len(scored),
             "early": sum(1 for r in settled if r["at"] > cutoff),
             "mature_days": MATURE_DAYS,
+            "range_weeks": int(round(MIN_STRETCHES * stock_window / 7.0)),
             "counts_from": first_at + MATURE_DAYS * 86400 if first_at else None,
             "classes": classes,
             "baseline": base,

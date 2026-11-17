@@ -60,6 +60,11 @@
       {{ (1 - rec.buy_worked)|pct(0) }}: that is what calling BUY, or calling
       AVOID, on every one of them would have scored. A kind of call shows skill
       only if it clearly beats that.{% endif %}</p>
+    {% if rec.classes|selectattr('together')|list %}
+    <p class="prose">The 95% ranges allow for calls on different stocks
+      settling alike, as they do on a day the whole market moves, which makes
+      them wider than the number of calls alone would.</p>
+    {% endif %}
   </div>
 
   <div class="plans" style="margin-top:var(--s3)">
@@ -68,7 +73,7 @@
         <span class="eyebrow">{{ c.label }}</span>
         {% if c.decided %}
           <p class="lead" style="margin:0">Right {{ c.rate|pct(0) }}
-            <span class="soft" style="font-size:var(--t-sm)">(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }})</span></p>
+            <span class="soft" style="font-size:var(--t-sm)">{% if c.together %}(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }}){% else %}(too early for a 95% range){% endif %}</span></p>
           <p class="prose" style="margin:0">Right {{ times(c.right) }}, wrong
             {{ times(c.wrong) }}{% if c.flat %}, {{ c.flat }} went nowhere{% endif %}.
             {{ c.decided }} decided call{{ '' if c.decided == 1 else 's' }}, about
@@ -76,13 +81,16 @@
             {% if c.waiting %}{{ c.waiting }} more still to count.{% endif %}</p>
           {% if c.chance is not none %}
             <p class="prose" style="margin:0">Chance level: {{ c.chance|pct(0) }}.
-              {% if c.lo > c.chance %}Above it, beyond the margin of error.
+              {% if not c.together %}Not yet distinguishable from chance: these
+              calls cover too few weeks of the market to tell.
+              {% elif c.lo > c.chance %}Above it, beyond the margin of error.
               {% elif c.hi < c.chance %}Below it, beyond the margin of error.
               {% else %}Not yet distinguishable from chance.{% endif %}</p>
           {% endif %}
           <p class="prose faint" style="margin:0;font-size:var(--t-xs)">A buy after
-            these calls moved {{ move(c.mean_move) }} on average (median
-            {{ move(c.median_move) }}), after costs{% if c.mean_r is not none %}:
+            these calls moved {{ move(c.mean_move) }} on average{% if c.move_lo is not none %}
+            (95% range {{ (c.move_lo * 100)|signed(1) }}% to {{ (c.move_hi * 100)|signed(1) }}%){% endif %},
+            median {{ move(c.median_move) }}, after costs{% if c.mean_r is not none %}:
             {{ c.mean_r|signed(2) }}R a trade{% endif %}.</p>
         {% else %}
           <p class="prose">Nothing scored yet{% if c.waiting %}: {{ c.waiting }} still to count{% endif %}.</p>
@@ -162,12 +170,17 @@
       quickly, so counting them sooner would favour calls that said not to
       buy.</li>
     <li>The 95% range is how far the right rate could be from its true value.
-      It is worked out on separate tests, not on every call: the next day's
-      call on a stock shares most of its {{ method.days }} days, so per stock a
-      call counts as a new test only once the last one's days are over, and
-      SPY and VOO, which hold the same companies, count as one. Stocks still
-      settle alike on days the whole market moves, so even this range is on
-      the narrow side.</li>
+      It allows for calls that are not separate tests, in two ways. The next
+      day's call on a stock shares most of its {{ method.days }} days, so per
+      stock a call counts as a new test only once the last one's days are
+      over, and SPY and VOO, which hold the same companies, count as one. And
+      on a day the whole market moves, calls on different stocks settle
+      alike, so any two calls whose days overlap are counted as moving
+      together, by as much as they actually did. The range given is the
+      wider of the two. The second needs calls spread over about
+      {{ rec.range_weeks }} weeks of the market; until then, no range is
+      given. The average move after a kind of call has its range worked out
+      the second way.</li>
     <li>Moves are after trading costs: {{ method.equity }}% a round trip for
       stocks, {{ method.crypto }}% for crypto.</li>
     {% if splits %}<li>When a stock splits, a call made before the split is
