@@ -13,8 +13,9 @@ Three safeguards:
   evidence is insufficient, which is the behaviour that makes it useful rather
   than merely fluent.
 * **Nothing here is required.** With no API key the rest of the bot works
-  unchanged, and the interface says the reasoning step is unavailable instead
-  of quietly degrading.
+  unchanged. The owner of a copy is told the reasoning step is off and what it
+  needs, instead of it quietly degrading; a visitor to a public site is not
+  shown a step that site does not offer.
 """
 from __future__ import annotations
 
