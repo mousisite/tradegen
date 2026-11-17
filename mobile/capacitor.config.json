@@ -1,0 +1,31 @@
+{
+  "appId": "app.orenth.ios",
+  "appName": "Orenth",
+  "webDir": "www",
+  "backgroundColor": "#f4f3ee",
+  "server": {
+    "url": "https://orenth.app",
+    "errorPath": "offline.html",
+    "allowNavigation": []
+  },
+  "ios": {
+    "appendUserAgent": "OrenthApp/1",
+    "contentInset": "never"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "launchShowDuration": 800,
+      "backgroundColor": "#f4f3ee",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "overlaysWebView": false,
+      "style": "DEFAULT",
+      "backgroundColor": "#f4f3ee"
+    },
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "banner", "list"]
+    }
+  }
+}
