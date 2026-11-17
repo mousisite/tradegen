@@ -844,18 +844,26 @@
   bar.hidden = false;
   // Mark the section being read, so the bar also says where you are.
   var links = bar.children;
+  var marked = -1;
   function mark() {
     var line = (bar.getBoundingClientRect().bottom || 0) + 24;
     var current = 0;
     heads.forEach(function (h, i) { if (h.getBoundingClientRect().top <= line) { current = i; } });
+    if (current === marked) { return; }
+    marked = current;
     for (var i = 0; i < links.length; i++) {
-      if (i === current) {
-        links[i].setAttribute('aria-current', 'true');
-        if (links[i].scrollIntoView) { links[i].scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
-      } else {
-        links[i].removeAttribute('aria-current');
-      }
+      if (i === current) { links[i].setAttribute('aria-current', 'true'); }
+      else { links[i].removeAttribute('aria-current'); }
     }
+    // The bar scrolls sideways to show the marked link; the page stays put.
+    // scrollIntoView moved the page too: on a phone, where the bar starts
+    // below the first screen, the page scrolled itself down on opening and
+    // pulled back down whenever someone scrolled up past the bar.
+    var link = links[current];
+    var left = link.offsetLeft - 8;
+    var right = link.offsetLeft + link.offsetWidth + 8;
+    if (left < bar.scrollLeft) { bar.scrollLeft = left; }
+    else if (right > bar.scrollLeft + bar.clientWidth) { bar.scrollLeft = right - bar.clientWidth; }
   }
   var waiting = false;
   window.addEventListener('scroll', function () {
