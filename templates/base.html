@@ -463,31 +463,6 @@
     var dismiss = document.getElementById('firedismiss');
     if (!bar || !window.fetch) { return; }
 
-    // A desktop notice, offered on the Monitor page. It can only come from an
-    // open Orenth page, which the note beside the button says.
-    var ask = document.getElementById('notifyask');
-    if (ask && window.Notification) {
-      var wrap = document.getElementById('notifywrap');
-      var said = document.getElementById('notifynote');
-      var settle = function () {
-        var p = Notification.permission;
-        ask.hidden = p !== 'default';
-        if (p === 'granted') {
-          said.textContent = 'On. A fired alert pops up on your screen while any '
-            + 'Orenth page is open in this browser.';
-        } else if (p === 'denied') {
-          said.textContent = 'Desktop notices are blocked for this site in your '
-            + 'browser settings.';
-        }
-        wrap.hidden = false;
-      };
-      ask.addEventListener('click', function () {
-        var asked = Notification.requestPermission(settle);
-        if (asked && asked.then) { asked.then(settle); }
-      });
-      settle();
-    }
-
     // The id of the last fire this browser was shown, for this account. Ids
     // only grow, so two fires in the same second cannot hide each other.
     var KEY = 'orenth-alerts-after-{{ current_user.id if current_user else 0 }}';
@@ -514,7 +489,12 @@
         + (first.as_of ? '; price as of ' + first.as_of : '') + ')';
       text.textContent = line;
       bar.hidden = false;
-      if (window.Notification && Notification.permission === 'granted') {
+      // A notice on the screen as well, for a browser that allowed them
+      // before notifications came from the server. Where they are on for
+      // this account (static/notify.js), the server's own notification has
+      // already said it, and a second would only repeat it.
+      if (window.Notification && Notification.permission === 'granted'
+          && !(window.OrenthNotify && window.OrenthNotify.mine())) {
         try {
           new Notification('Orenth', { body: line });
         } catch (e) {}
@@ -557,5 +537,10 @@
     });
   }
 </script>
+{# Notifications on this device: the switch on the Monitor and Settings pages,
+   and, inside the iPhone app, what a tapped notification opens. #}
+<script src="{{ url_for('static', filename='notify.js') }}" defer
+        data-user="{{ current_user.id if current_user and not demo else '' }}"
+        data-mark="{{ push_mark }}"></script>
 </body>
 </html>
