@@ -60,7 +60,9 @@
       {% if email_ready or phone_ready %}Email and phone sign-in send you a
       six-digit code instead of using a password.{% endif %}
     </p>
-  {% else %}
+  {% elif setup %}
+    {# Only on a copy run on its own machine, where whoever reads this is
+       whoever can set it up. #}
     <div class="card" style="text-align:left">
       <span class="eyebrow">Not set up yet</span>
       <p class="prose" style="margin-top:var(--s1)">
@@ -72,6 +74,14 @@
         <span class="fig">GOOGLE_CLIENT_ID</span> and
         <span class="fig">GOOGLE_CLIENT_SECRET</span> only when putting this
         somewhere other people can reach.
+      </p>
+    </div>
+  {% else %}
+    <div class="card" style="text-align:left">
+      <span class="eyebrow">Signing in is off for now</span>
+      <p class="prose" style="margin-top:var(--s1)">
+        Accounts cannot be opened or signed in to on this site just now. You
+        can still look around the example account.
       </p>
     </div>
   {% endif %}

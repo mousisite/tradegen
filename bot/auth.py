@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 import secrets
 from typing import Dict, Optional, Tuple
@@ -29,9 +30,20 @@ USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 SCOPES = "openid email profile"
 TIMEOUT = 15
 
+log = logging.getLogger(__name__)
+
 
 class AuthError(RuntimeError):
-    """Something went wrong signing in, phrased for the person who sees it."""
+    """Something went wrong signing in, phrased for the person who sees it.
+
+    `setup` marks a fault in how this copy is set up with Google, which only
+    whoever runs it can fix. The message says how, for them; a public site
+    tells a visitor plainly instead (web.py).
+    """
+
+    def __init__(self, message: str, setup: bool = False):
+        super().__init__(message)
+        self.setup = setup
 
 
 def _first_line(raw: str) -> str:
@@ -118,7 +130,7 @@ def authorization_url(redirect_uri: str, state: str, verifier: str,
                       login_hint: str = "") -> str:
     """Where to send the browser to sign in."""
     if not configured():
-        raise AuthError(why_not())
+        raise AuthError(why_not(), setup=True)
     params = {
         "client_id": client_id(),
         "redirect_uri": redirect_uri,
@@ -143,7 +155,7 @@ def authorization_url(redirect_uri: str, state: str, verifier: str,
 def exchange_code(code: str, redirect_uri: str, verifier: str) -> Dict:
     """Turn the one-time code into tokens, server to server."""
     if not configured():
-        raise AuthError(why_not())
+        raise AuthError(why_not(), setup=True)
     try:
         response = requests.post(TOKEN_URL, timeout=TIMEOUT, data={
             "code": code,
@@ -154,7 +166,10 @@ def exchange_code(code: str, redirect_uri: str, verifier: str) -> Dict:
             "code_verifier": verifier,
         })
     except requests.RequestException as exc:
-        raise AuthError("Could not reach Google to complete sign-in: %s" % exc)
+        # The library's words name hosts and sockets: the log keeps them.
+        log.warning("Could not reach Google's token endpoint: %s", exc)
+        raise AuthError("Could not reach Google to complete sign-in. Try again "
+                        "in a minute.")
 
     if response.status_code != 200:
         # Google's error body names the cause, and the two common ones are
@@ -169,11 +184,14 @@ def exchange_code(code: str, redirect_uri: str, verifier: str) -> Dict:
             raise AuthError(
                 "Google rejected the redirect address. The exact address this "
                 "app is using is %s, and that string has to appear in the "
-                "OAuth client's authorised redirect URIs." % redirect_uri)
+                "OAuth client's authorised redirect URIs." % redirect_uri,
+                setup=True)
         if "invalid_client" in detail:
-            raise AuthError("Google did not recognise the client id and secret.")
+            raise AuthError("Google did not recognise the client id and secret.",
+                            setup=True)
         raise AuthError("Google refused the sign-in: %s" % (detail or
-                                                            response.status_code))
+                                                            response.status_code),
+                        setup=True)
     return response.json()
 
 
@@ -184,7 +202,9 @@ def fetch_profile(access_token: str) -> Dict:
             USERINFO_URL, timeout=TIMEOUT,
             headers={"Authorization": "Bearer %s" % access_token})
     except requests.RequestException as exc:
-        raise AuthError("Could not read the Google profile: %s" % exc)
+        log.warning("Could not reach Google's profile endpoint: %s", exc)
+        raise AuthError("Could not read your Google profile just now. Try again "
+                        "in a minute.")
     if response.status_code != 200:
         raise AuthError("Google would not return the profile (%d)."
                         % response.status_code)

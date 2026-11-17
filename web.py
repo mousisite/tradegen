@@ -502,6 +502,17 @@ def _too_often(what: str):
                                    "while, then try again." % what), 429
 
 
+def _plainly(exc: Exception, plain: str) -> str:
+    """What an error page says about a failure nobody planned for.
+
+    The exception's own text names files, hosts and libraries. It helps the
+    one person who can act on it, whoever runs this copy, so they are shown
+    it, and it goes to the log for them too. Anyone else reads plain words.
+    """
+    app.logger.warning("%s failed: %s", request.path, exc, exc_info=exc)
+    return str(exc) if _is_operator() else plain
+
+
 # Seconds to wait when the source did not answer and said nothing of when.
 UNAVAILABLE_RETRY = 60
 
@@ -1074,7 +1085,8 @@ def analyse():
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
     except Exception as exc:                        # keep the app usable
-        return render_template("error.html", message=str(exc), symbol=symbol), 500
+        return render_template("error.html", symbol=symbol, message=_plainly(
+            exc, "The analysis could not be finished. Try again in a minute.")), 500
     _spend_view(symbol, interval)
 
     families = _family_rollup(result)
@@ -1553,9 +1565,14 @@ def analyse_image():
                                message="No image was attached."), 400
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
+        # Only the owner of a copy on their own machine can add a key, so
+        # only they are told one is missing; the page goes on to say how.
         return render_template("error.html", symbol="", no_key=True,
-                               message="Reading a chart image needs an Anthropic "
-                                       "API key, and none is set."), 400
+                               message=("Reading a chart image needs an Anthropic "
+                                        "API key, and none is set."
+                                        if g.user.is_local else
+                                        "Reading a chart from a picture is not "
+                                        "switched on here.")), 400
 
     # A free account with no looks left could not open what the picture shows,
     # so it is not read at all rather than paid for and then refused.
@@ -1619,7 +1636,9 @@ def analyse_image():
     try:
         read = read_chart(png)
     except VisionError as exc:
-        return render_template("error.html", symbol="", message=str(exc)), 502
+        return render_template("error.html", symbol="", message=_plainly(
+            exc, "The picture could not be read just now. Try again in a "
+                 "minute, or type the ticker.")), 502
 
     if not read.symbol:
         return render_template("error.html", symbol="",
@@ -1877,14 +1896,42 @@ def reopen_thesis():
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
 
 
+# What the sign-in page can be asked to say, by name. Words taken from the
+# address itself would let any link put a sentence of its choosing on the
+# site, in the site's own notice box.
+SIGNIN_SAID = {"out": "You are signed out.",
+               "deleted": "That account and everything in it has been deleted."}
+
+# Said on a public site when signing in with Google is broken by how the site
+# is set up, which a visitor cannot fix. The detail goes to the log.
+SIGN_IN_BROKEN = ("Signing in with Google is not working on this site just "
+                  "now. Try again later.")
+
+
+def _sign_in_trouble(exc) -> str:
+    """A sign-in error, in words for whoever is signing in.
+
+    A fault in how this copy is set up with Google is said in full on a copy
+    run on its own machine, where whoever reads it is whoever runs it. On a
+    public site the visitor is told plainly, and the detail goes to the log.
+    """
+    if getattr(exc, "setup", False) and _served_publicly():
+        app.logger.warning("Google sign-in is not working: %s", exc)
+        return SIGN_IN_BROKEN
+    return str(exc)
+
+
 @app.route("/signin")
 def signin():
     """The page you land on when you are not signed in."""
     if getattr(g, "user", None) is not None:
         return redirect(url_for("index"))
+    # How to set sign-in up is for whoever runs this copy on their own
+    # machine. A visitor to a public site cannot set anything.
+    setup = not _served_publicly()
     return render_template("signin.html",
-                           reason=request.args.get("reason", ""),
-                           why_not=auth_mod.why_not(),
+                           reason=SIGNIN_SAID.get(request.args.get("said", ""), ""),
+                           setup=setup, why_not=auth_mod.why_not() if setup else "",
                            next_url=_safe_back(request.args.get("next"), ""))
 
 
@@ -1892,8 +1939,10 @@ def signin():
 def google_start():
     """Begin the Google sign-in flow."""
     if not auth_mod.configured():
-        return render_template("signin.html", reason=auth_mod.why_not(),
-                               why_not=auth_mod.why_not(), next_url=""), 503
+        setup = not _served_publicly()
+        why = auth_mod.why_not() if setup else ""
+        return render_template("signin.html", reason=why, setup=setup,
+                               why_not=why, next_url=""), 503
 
     state = auth_mod.new_state()
     verifier = auth_mod.new_verifier()
@@ -1906,7 +1955,7 @@ def google_start():
     try:
         url = auth_mod.authorization_url(_redirect_uri(), state, verifier)
     except auth_mod.AuthError as exc:
-        return render_template("signin.html", reason=str(exc),
+        return render_template("signin.html", reason=_sign_in_trouble(exc),
                                why_not="", next_url=""), 503
     return redirect(url)
 
@@ -1919,10 +1968,14 @@ def google_callback():
     next_url = session.pop("oauth_next", "")
 
     if request.args.get("error"):
+        # Google's own code, such as access_denied, is not repeated: it means
+        # nothing to the person, and the address can carry any text at all.
         return render_template(
             "signin.html", why_not="", next_url="",
-            reason="Google did not complete the sign-in: %s"
-                   % request.args.get("error")), 400
+            reason=("You cancelled the sign-in at Google."
+                    if request.args.get("error") == "access_denied" else
+                    "Google did not complete the sign-in. Start again from "
+                    "this page.")), 400
 
     state = request.args.get("state", "")
     # Constant time, because this is a secret being compared.
@@ -1940,8 +1993,8 @@ def google_callback():
     try:
         profile = auth_mod.sign_in(code, _redirect_uri(), verifier)
     except auth_mod.AuthError as exc:
-        return render_template("signin.html", reason=str(exc), why_not="",
-                               next_url=""), 400
+        return render_template("signin.html", reason=_sign_in_trouble(exc),
+                               why_not="", next_url=""), 400
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -2059,10 +2112,15 @@ def code_verify(channel):
 
 @app.route("/pricing")
 def pricing():
-    """Free and Pro, side by side. Only exists once billing is set up."""
+    """Free and Pro, side by side. Only exists once billing is set up.
+
+    Its notice box says why someone was sent here only when this app sends
+    them (_upgrade), never from the address: a ?reason= in a link let anyone
+    write in it.
+    """
     if not billing_mod.ready():
         abort(404)
-    return _pricing_page(request.args.get("reason", ""))
+    return _pricing_page()
 
 
 CODE_ERROR = ("That code does not work, or it has run out. Check the "
@@ -2199,7 +2257,7 @@ def signout():
         finally:
             conn.close()
     session.clear()
-    return redirect(url_for("signin", reason="You are signed out."))
+    return redirect(url_for("signin", said="out"))
 
 
 @app.route("/account", methods=["GET"])
@@ -2259,8 +2317,7 @@ def delete_account():
     finally:
         conn.close()
     session.clear()
-    return redirect(url_for("signin", reason="That account and everything in "
-                                             "it has been deleted."))
+    return redirect(url_for("signin", said="deleted"))
 
 
 def _redirect_uri() -> str:
@@ -2302,11 +2359,12 @@ def _is_operator() -> bool:
 def usage():
     """What people actually do with it. Operator only."""
     if not _is_operator():
+        # How to become the operator is in DEPLOY.md, for whoever runs it;
+        # an ordinary account cannot set anything on the server.
         return render_template(
             "error.html", symbol="",
             message="This page covers activity across every account, so it is "
-                    "limited to whoever runs this installation. Set "
-                    "STOCKBOT_ADMIN_EMAIL to your address to see it."), 403
+                    "limited to whoever runs this installation."), 403
 
     try:
         days = max(1, min(365, int(request.args.get("days", "30"))))
@@ -2558,8 +2616,8 @@ def ideas():
             # one press away.
             busy = str(exc)
         except Exception as exc:
-            return render_template("error.html", symbol="",
-                                   message="The scan failed: %s" % exc), 502
+            return render_template("error.html", symbol="", message=_plainly(
+                exc, "The scan could not be finished. Try again in a minute.")), 502
     if result is not None:
         result = dict(result)
         result.setdefault("passed_total", len(result["passed"]))
@@ -2601,6 +2659,9 @@ def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     return ideas_mod.find(market, horizon, cfg, risk, wait=ideas_mod.PAGE_WAIT,
                           ttl=DEMO_SCAN_TTL, join_wait=0)
+
+
+SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
 
 
 @app.route("/screener", methods=["GET"])
@@ -2676,7 +2737,8 @@ def screener():
         except _NotKept as kept:
             result = kept.found
         except Exception as exc:
-            return render_template("error.html", message=str(exc), symbol=""), 500
+            return render_template("error.html", symbol="", message=_plainly(
+                exc, SCREEN_FAILED)), 500
     elif request.args.get("go") or preset:
         symbols = [s.strip() for s in symbols_raw.replace(",", " ").split()
                    ] if symbols_raw else None
@@ -2684,7 +2746,8 @@ def screener():
             result = screener_mod.run(symbols=symbols, universe=universe,
                                       filters=filters, limit=40)
         except Exception as exc:
-            return render_template("error.html", message=str(exc), symbol=""), 500
+            return render_template("error.html", symbol="", message=_plainly(
+                exc, SCREEN_FAILED)), 500
 
     return render_template("screener.html", result=result, presets=screener_mod.PRESETS,
                            universes=screener_mod.UNIVERSES, filters=filters,
@@ -2991,7 +3054,8 @@ def settings():
                 _RESEARCH_CACHE.clear()
             return redirect(url_for("settings", saved="1"))
         except Exception as exc:
-            error = str(exc)
+            error = _plainly(exc, "The settings could not be put back just now. "
+                                  "Try again in a minute.")
 
     if request.method == "POST" and request.form.get("reset") != "1":
         cfg = _cfg()
