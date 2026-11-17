@@ -462,6 +462,12 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     conn.executescript(_EVENTS)
     cur = conn.execute("DELETE FROM alert_events WHERE user_id=?", (user_id,))
     removed["alert_events"] = cur.rowcount
+    # The phones and browsers notifications went to. Before the users row,
+    # which they point at.
+    from . import push
+    push.ensure_schema(conn)
+    cur = conn.execute("DELETE FROM push_devices WHERE user_id=?", (user_id,))
+    removed["push_devices"] = cur.rowcount
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()

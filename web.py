@@ -62,6 +62,7 @@ from bot import market as market_mod
 from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
+from bot import push as push_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import strategies as strategies_mod
@@ -2195,6 +2196,9 @@ def signout():
     if token:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
+            # Notifications switched on in this sign-in go with it, so the
+            # next person on a shared phone is not shown this one's alerts.
+            push_mod.forget_session(conn, _session_ref(token))
             accounts_mod.end_session(conn, token)
         finally:
             conn.close()
@@ -2912,6 +2916,236 @@ def alert_email():
     return redirect(url_for("monitor"))
 
 
+# Notifications on phones and browsers: the device a person is on tells the
+# server where to send, and bot/push.py sends there when an alert fires.
+# Switching a device on or off, and testing it, are generous for a person
+# and refused to a script doing it over and over.
+PUSH_CHANGES_PER_HOUR = 60
+PUSH_TESTS_PER_HOUR = 6
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of an address, as a browser writes an Origin."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url or "")
+        port = parts.port
+    except ValueError:
+        return ""
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
+    if not scheme or not host:
+        return ""
+    if ":" in host:
+        host = "[%s]" % host
+    default = {"http": 80, "https": 443}.get(scheme)
+    return "%s://%s%s" % (scheme, host, "" if port in (None, default) else ":%d" % port)
+
+
+def _push_post_refused():
+    """Why a post to the notification endpoints is refused, or None.
+
+    These decide what reaches someone's phone, so beyond the session cookie
+    (SameSite=Lax, which another site's form never carries) the browser's own
+    account of where the request came from is checked: an Origin other than
+    this site's is refused, and so is a body that is not JSON, which a page
+    elsewhere could only send after a check this server never answers. This
+    site is its public address, or the address the request was sent to,
+    which a page on another site cannot choose for its visitor's browser.
+    """
+    if getattr(g, "user", None) is None or g.demo:
+        return jsonify({"error": "Not signed in."}), 401
+    origin = request.headers.get("Origin")
+    ours = {_origin_of(_public_base()), _origin_of(request.host_url)}
+    if (origin is not None and _origin_of(origin) not in ours - {""}) \
+            or request.headers.get("Sec-Fetch-Site") == "cross-site":
+        return jsonify({"error": "That request came from another site."}), 403
+    if (request.content_length or 0) > 16384:
+        return jsonify({"error": "That is far more than a device's details."}), 413
+    # The same cap for a body sent in chunks, which states no length up front.
+    request.max_content_length = 16384
+    if not isinstance(request.get_json(silent=True), dict):
+        return jsonify({"error": "Send the details as JSON."}), 400
+    return None
+
+
+def _session_ref(token: Optional[str] = None, purpose: str = "push") -> str:
+    """A hash naming this sign-in, kept on the devices it switches on.
+
+    Signing out forgets them, so the next person to sign in on a shared phone
+    is not sent the last one's alerts. A hash, so the table never holds a
+    token that could be used to sign in.
+    """
+    import hashlib
+    token = session.get(SESSION_KEY, "") if token is None else token
+    if not token:
+        return ""
+    return hashlib.sha256(("%s|%s" % (purpose, token)).encode("utf-8")).hexdigest()[:32]
+
+
+@app.context_processor
+def _push_mark():
+    """A mark that changes with each sign-in, for static/notify.js.
+
+    It reminds the server of a device with notifications on once a visit,
+    and has to know when a new sign-in has started, since signing out forgot
+    the device. A hash of its own, so the page holds nothing the database
+    or the session cookie does.
+    """
+    return {"push_mark": _session_ref(purpose="page")[:12]}
+
+
+@app.route("/api/push/config")
+def push_config():
+    """What a page needs to switch notifications on for its device."""
+    if g.demo:
+        abort(404)
+    keys = push_mod.vapid_keys()
+    out = {"web": {"enabled": keys is not None,
+                   "public_key": keys.public if keys else ""},
+           "apns": {"enabled": push_mod.apns_ready()}}
+    # Why it is off, for whoever runs this copy on their own machine only.
+    if g.user.is_local and keys is None:
+        out["web"]["note"] = push_mod.why_not()["web"]
+    return jsonify(out)
+
+
+@app.route("/api/push/subscribe", methods=["POST"])
+def push_subscribe():
+    """Send this person's alerts to the device this request came from.
+
+    From a tap on "Turn on", the device is kept for this person, and moved
+    to them if someone else had it. With "check", or "replaces" naming the
+    address the device had before, it is only kept when it is already this
+    person's: that is how a page or the service worker keeps a device up to
+    date without bringing back one that was switched off, removed from
+    another device, or forgotten when its sign-in ended. "known" in the
+    answer says which.
+    """
+    refused = _push_post_refused()
+    if refused is not None:
+        return refused
+    if _rate_limited("push", PUSH_CHANGES_PER_HOUR):
+        return jsonify({"error": "Notifications were switched on and off a lot "
+                                 "in the last hour. Wait a while, then try "
+                                 "again."}), 429
+    data = request.get_json(silent=True)
+    kind = data.get("kind")
+    check = data.get("check") is True
+    old = data.get("replaces") if isinstance(data.get("replaces"), str) else ""
+    label = push_mod.clean_label(data.get("label"), request.headers.get("User-Agent", ""))
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        if kind == "web":
+            if push_mod.vapid_keys() is None:
+                return jsonify({"error": "Browser notifications are off on this "
+                                         "server."}), 409
+            address, p256dh, auth = push_mod.clean_subscription(data.get("subscription"))
+            extra = {"p256dh": p256dh, "auth": auth}
+        elif kind == "apns":
+            if not push_mod.apns_ready():
+                return jsonify({"error": "Notifications to the iPhone app are not "
+                                         "switched on here."}), 409
+            address = push_mod.clean_token(data.get("token"))
+            old = old.strip().lower()
+            environment = data.get("environment")
+            extra = {"environment": environment if environment in push_mod.APNS_HOSTS
+                     else ""}
+        else:
+            return jsonify({"error": "kind must be web or apns."}), 400
+        if (check or old) and not push_mod.owns(conn, uid(), kind, address) \
+                and not (old and push_mod.owns(conn, uid(), kind, old)):
+            return jsonify({"ok": True, "known": False})
+        device = push_mod.register(conn, uid(), kind, address, label=label,
+                                   session_ref=_session_ref(), **extra)
+        if old and old != address:
+            push_mod.forget(conn, uid(), kind, old)
+    except push_mod.PushError as exc:
+        return jsonify({"error": str(exc)}), 400
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "known": True, "id": device})
+
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+def push_unsubscribe():
+    """Stop sending to the device named.
+
+    Only this person's, unless "release" is set: then whoever had it, for a
+    browser or phone where someone else is signed in now. Only the device
+    itself knows its address, so naming it is proof enough.
+    """
+    refused = _push_post_refused()
+    if refused is not None:
+        return refused
+    if _rate_limited("push", PUSH_CHANGES_PER_HOUR):
+        return jsonify({"error": "Notifications were switched on and off a lot "
+                                 "in the last hour. Wait a while, then try "
+                                 "again."}), 429
+    data = request.get_json(silent=True)
+    kind, address = push_mod.address_of(data)
+    if not kind:
+        return jsonify({"error": "Name a web endpoint or an iPhone token."}), 400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        if data.get("release") is True:
+            removed = push_mod.release(conn, kind, address)
+        else:
+            removed = push_mod.forget(conn, uid(), kind, address)
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "removed": removed})
+
+
+@app.route("/api/push/test", methods=["POST"])
+def push_test():
+    """Send "Notifications are on" to this person's devices, or to the one named.
+
+    Sent while the request waits, so the page can say whether it went.
+    """
+    refused = _push_post_refused()
+    if refused is not None:
+        return refused
+    if _rate_limited("push_test", PUSH_TESTS_PER_HOUR):
+        return jsonify({"error": "Several tests were sent in the last hour. Wait "
+                                 "a while, then try again."}), 429
+    kind, address = push_mod.address_of(request.get_json(silent=True))
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        # The configured address, as the alert loop uses, never one read
+        # from this request's Host header.
+        result = push_mod.send_test(conn, uid(), _public_base_offline(), kind, address)
+    finally:
+        conn.close()
+    if not result["devices"]:
+        return jsonify({"ok": False, "sent": 0, "failed": 0,
+                        "error": "Notifications are not on for this device."}), 404
+    return jsonify({"ok": result["sent"] > 0, "sent": result["sent"],
+                    "failed": result["failed"] + result["dropped"],
+                    "errors": [e["error"] for e in result["errors"]][:5]})
+
+
+@app.route("/settings/notifications/remove", methods=["POST"])
+def push_remove():
+    """Stop notifications to one of this person's devices, from any device.
+
+    For a phone that was lost or sold, which cannot be switched off from
+    itself any more.
+    """
+    if g.demo:
+        abort(404)
+    try:
+        device = int(request.form.get("device_id") or "")
+    except ValueError:
+        return render_template("error.html", symbol="",
+                               message="No device was named."), 400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        push_mod.forget_ids(conn, uid(), [device])
+    finally:
+        conn.close()
+    return redirect(url_for("settings") + "#notifications")
+
+
 @app.route("/watch/<action>", methods=["POST"])
 def watch(action):
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -3057,9 +3291,12 @@ def settings():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         export_counts = export_mod.counts(conn, user=uid())
+        # Every device this person gets notifications on, so a lost phone
+        # can be switched off from another one.
+        push_devices = [] if g.demo else push_mod.devices(conn, uid())
     finally:
         conn.close()
-    return render_template("settings.html", cfg=cfg,
+    return render_template("settings.html", cfg=cfg, push_devices=push_devices,
                            personal=personal, operator=operator,
                            datasets=export_mod.DATASETS,
                            export_counts=export_counts,
@@ -3580,6 +3817,15 @@ def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True) -> Dic
     crossed = (alerts_mod.check_stops(conn, user=user) if stops
                else {"checked": 0, "fired": [], "errors": []})
     fired = list(result["fired"]) + list(crossed["fired"])
+    if fired:
+        # To the phones and browsers people switched on, from push_mod's own
+        # thread: a push service that is slow or down must never hold up a
+        # check or a page, and its failure is kept on each device instead.
+        try:
+            push_mod.deliver_later(app.config.get("DB_PATH"), fired,
+                                   _public_base_offline())
+        except Exception:
+            app.logger.exception("Could not hand fired alerts to the notification sender")
     if fired and codes_mod.email_ready():
         alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
