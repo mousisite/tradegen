@@ -372,6 +372,28 @@ try:
         check("on %s, the host is named, with the disk it holds" % name,
               "the disk that holds the database and its backups" in row
               and "Running the server" in row, row or page[-1500:])
+
+    # -----------------------------------------------------------------------
+    head("COPIES OF THE DATABASE: THE ONES BEFORE EACH NEW VERSION TOO")
+    # -----------------------------------------------------------------------
+    # serve.py copies the whole database whenever a new version starts and
+    # keeps the last few by count, not by age, so a deleted account can stay
+    # in one for as long as the next versions take: not "about a week".
+    import serve  # noqa: E402
+    folder = _os.path.dirname(harness.DB_PATH)
+    _os.environ["RENDER_GIT_COMMIT"] = "privacy-test-release"
+    try:
+        serve._copy_before_release(harness.DB_PATH)
+    finally:
+        _os.environ.pop("RENDER_GIT_COMMIT", None)
+    copies = _os.path.join(folder, "backups", "before-release")
+    check("a new version starting copies the database",
+          _os.path.isdir(copies) and any(f.endswith(".db") for f in _os.listdir(copies)))
+    page = flat(text(visitor.get("/privacy")))
+    check("the page says so, and how long such a copy can stay",
+          "The server also copies the database each time a new version of Orenth "
+          "starts, and keeps the last few of those copies" in page
+          and "can stay until newer versions replace it, however long that takes" in page)
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):

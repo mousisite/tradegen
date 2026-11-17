@@ -236,7 +236,10 @@
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
     A backup made before you deleted your account still holds a copy until it
-    is replaced by newer ones, which takes about a week.
+    is replaced by newer ones, which takes about a week. The server also
+    copies the database each time a new version of Orenth starts, and keeps
+    the last few of those copies; one made before you deleted your account
+    can stay until newer versions replace it, however long that takes.
     {% if offsite.provider %}Copies of the backups are also kept off this
     server: the newest from each of the last {{ offsite.days }} days and the
     oldest from each of the last {{ offsite.months }} months. So a copy made
