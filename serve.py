@@ -39,6 +39,24 @@ except ImportError:
 KEEP_RELEASE_COPIES = 3
 
 
+def _code_fingerprint() -> str:
+    """A stand-in for the release name when the host gives none: a hash of
+    the code that decides the database's shape, which changes whenever a
+    release could change it. Empty if the files cannot be read."""
+    import glob
+    import hashlib
+    here = os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    try:
+        for path in sorted([os.path.join(here, "web.py")]
+                           + glob.glob(os.path.join(here, "bot", "*.py"))):
+            with open(path, "rb") as fh:
+                digest.update(os.path.basename(path).encode("utf-8") + b"/" + fh.read())
+    except OSError:
+        return ""
+    return "code-" + digest.hexdigest()[:16]
+
+
 def _copy_before_release(db_path) -> None:
     """Back the database up before a new release's migrations touch it.
 
@@ -48,7 +66,7 @@ def _copy_before_release(db_path) -> None:
     not stop the start: the migrations only ever add, and the timed backups
     carry on either way.
     """
-    release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip()
+    release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or _code_fingerprint()
     if not release or not db_path or not os.path.exists(db_path):
         return
     folder = os.path.dirname(os.path.abspath(db_path))

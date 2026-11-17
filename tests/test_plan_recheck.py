@@ -156,8 +156,14 @@ check("start_background_jobs schedules it hourly",
 head("A COPY OF THE DATABASE BEFORE A NEW RELEASE")
 folder = _os.path.dirname(DB)
 copies = _os.path.join(folder, "backups", "before-release")
+real_fingerprint = serve._code_fingerprint
+check("without a release name, the code's own fingerprint stands in",
+      real_fingerprint().startswith("code-") and len(real_fingerprint()) == 21,
+      real_fingerprint())
+serve._code_fingerprint = lambda: ""
 serve._copy_before_release(DB)
-check("no release named: no copy", not _os.path.isdir(copies))
+check("no release name and no fingerprint: no copy", not _os.path.isdir(copies))
+serve._code_fingerprint = real_fingerprint
 _os.environ["RENDER_GIT_COMMIT"] = "aaaa1111"
 serve._copy_before_release(DB)
 made = sorted(_os.listdir(copies)) if _os.path.isdir(copies) else []
