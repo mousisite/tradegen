@@ -187,6 +187,79 @@ written reasoning on the research page.
 
 ---
 
+## 6. Recommended: copies of the backups somewhere else
+
+The automatic backups sit on the same 1 GB disk as the database, so losing that
+disk loses both. With four settings, the server also copies each backup to a
+Cloudflare R2 bucket as soon as it is taken, and checks that the copy there is
+whole. It keeps the newest three copies, the newest of each of the last 30 days
+and the oldest of each of the last 12 months, so 45 at most, and deletes the
+older ones it made. Nothing else in the bucket is touched.
+
+**What it costs.** R2's free allowance includes 10 GB of storage a month. 45
+copies of a 20 MB database come to 0.9 GB, so a small database stays inside it;
+`/usage` shows how big yours is. Past the allowance R2 charges by the gigabyte.
+Cloudflare may ask for a payment method before it turns R2 on, even if you
+never go past the allowance. Prices change, so check Cloudflare's R2 pricing
+page yourself.
+
+**The copies hold personal data.** Each one is the whole database: every
+account's email address, journal and notes. The bucket must stay private, which
+is how R2 makes it. Do not turn on its public `r2.dev` address or connect a
+domain to it, and give the key access to this one bucket only. Once copies are
+on, the privacy page names Cloudflare and says how long copies are kept.
+
+1. Sign in at dash.cloudflare.com and open **R2 Object Storage**. Press
+   **Create bucket**, name it `orenth-backups`, leave everything else as it is,
+   and create it.
+2. Go back to the R2 page and open **Manage API tokens**. Press **Create API
+   token**. Give it a name, choose the permission **Object Read & Write**, and
+   under the buckets choose **Apply to specific buckets only** and pick
+   `orenth-backups`. Create it.
+3. The next page shows an **Access Key ID**, a **Secret Access Key** and an
+   endpoint like `https://<account id>.r2.cloudflarestorage.com` (the one
+   marked Default, if two are shown). Copy all three now: the secret is shown
+   only once.
+4. In Render, open the service, then **Environment**, and add:
+
+   ```
+   BACKUP_S3_ENDPOINT          = https://<account id>.r2.cloudflarestorage.com
+   BACKUP_S3_BUCKET            = orenth-backups
+   BACKUP_S3_ACCESS_KEY_ID     = <the Access Key ID>
+   BACKUP_S3_SECRET_ACCESS_KEY = <the Secret Access Key>
+   ```
+
+   Save. Render restarts the app, and its log shows
+   `off-site  each backup copied to orenth-backups at ...`.
+5. The next day, open `/usage`. Under **Copies kept elsewhere** it shows when
+   the last copy was made, its size and **Checked**. If it says **Failed**, the
+   reason is written next to it.
+
+To copy one now instead of waiting, use the service's **Shell** in Render:
+
+```
+python backup.py --offsite /data/backups/<the newest stockbot-....db>
+python backup.py --offsite-list
+```
+
+To bring a copy back for a restore, fetch it by a name from that list. It is
+downloaded, checked against the backup that was uploaded, and opened to check
+the database inside is intact:
+
+```
+python backup.py --fetch <its name> --out /data/restore
+```
+
+The app only ever deletes copies named the way its backups are named. So to
+keep one for good, copy a backup by hand under another name, such as
+`keep-2026-11.db`, with `--offsite`; it stays until you delete it in
+Cloudflare. Two more settings are optional: `BACKUP_S3_REGION`
+(default `auto`, which R2 uses) and `BACKUP_S3_PREFIX` (default `orenth/`, the
+folder in the bucket). Any storage that speaks the S3 protocol works, not only
+R2.
+
+---
+
 ## The whole environment, in one place
 
 | Variable | Needed | What it does |
@@ -207,6 +280,8 @@ written reasoning on the research page.
 | `STOCKBOT_BACKUP_HOURS` | no | Hours between automatic backups, default 12. Set 0 to switch off |
 | `STOCKBOT_BACKUP_DIR` | no | Where they go, default `<database folder>/backups` |
 | `STOCKBOT_BACKUP_KEEP` | no | How many to keep, default 8 |
+| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | recommended | All four copy each backup to a private storage bucket off the server, such as Cloudflare R2. See section 6 |
+| `BACKUP_S3_REGION`, `BACKUP_S3_PREFIX` | no | The bucket's region, default `auto` (R2's), and the folder in it, default `orenth/` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | for email sign-in | All five turn on "Continue with email". Port defaults to 587; 465 uses SSL |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SID` | for phone sign-in | All three turn on "Continue with phone", through Twilio Verify |
 | `PHONE_ALLOWED_PREFIXES` | no | Country codes allowed to get texts, e.g. `+1,+44`. Limits SMS fraud |
@@ -245,7 +320,7 @@ being kept, and prune to the newest eight. Each is a copy of the database and
 four CSV exports, and pruning deletes them together. A deploy restarts the
 server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
-disk as the database: see "Back it up" below for the copy you keep elsewhere.
+disk as the database: section 6 copies each one somewhere else as it is taken.
 
 ---
 
@@ -307,7 +382,9 @@ The automatic backups sit on the same 1 GB disk as the database. They cover a
 bad write or a mistake, not losing the disk or the account. Render also keeps
 daily snapshots of the disk for a few days (check its disk documentation for the
 current terms), but those stay with Render too. So keeping a copy somewhere else
-is a step for you, the operator, and it is the one that matters most:
+is the step that matters most. Section 6 does it for you: each backup is copied
+to a storage bucket and checked there. Without it, it is a step for you, the
+operator:
 
 - Every week or so, download the newest `stockbot-<date>.db` from
   `/data/backups` (over the host's SSH access, as in the commands below) and
@@ -322,7 +399,9 @@ is a step for you, the operator, and it is the one that matters most:
   `.db` file is the backup.
 - Backups hold every account's data. A deleted account is gone from them once
   the last copy taken before the deletion is pruned, about four days at the
-  defaults, and from any copy you downloaded only when you delete that.
+  defaults, and from any copy you downloaded only when you delete that. With
+  copies kept off the server (section 6), the monthly ones keep it for up to
+  12 months, and the privacy page says so.
 
 Do not `cat` or `cp` the database. It runs in WAL mode, so at any moment some
 committed data lives in the `-wal` file rather than the main one; a copy taken

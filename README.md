@@ -135,7 +135,7 @@ otherwise. Each links to where the work happens.
 | 19 | Published scoring models | `bot/quality.py` | Piotroski F-Score, Altman Z-Score, Beneish M-Score and the accruals ratio, computed from filed figures. Not invented here: each was published and tested against decades of filings |
 | 20 | Charts | `bot/charts.py` | Price history and filed financials, drawn as inline SVG with no charting library and no third-party script |
 | 21 | Error reporting | `bot/monitoring.py` | Optional Sentry, with personal data and credentials stripped before anything is sent, and expected failures never reported |
-| 22 | Scheduled backups | `backup.py`, `serve.py` | A verified snapshot on a timer, pruned to the newest few |
+| 22 | Scheduled backups | `backup.py`, `serve.py`, `bot/offsite.py` | A verified snapshot on a timer, pruned to the newest few, and copied to a private storage bucket off the server when that is set up |
 | 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
 | 24 | Find something | `bot/ideas.py` | Pick stocks or crypto and how long you hold; it back-tests a list and shows only what cleared the bar. Refuses to pad the list |
 | 25 | Plain English | `bot/plain.py` | The same answer without the jargon, above the technical one. A test fails if jargon leaks in |
@@ -726,6 +726,7 @@ bot/
   quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
+  offsite.py        each backup copied to a storage bucket, checked, history kept
   usage.py          what people actually do, from rows already written
   ideas.py          the Find page: scan a list, rank by measured edge
   plain.py          the same answer in words a beginner can act on
