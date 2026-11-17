@@ -307,18 +307,20 @@
   function appSync() {
     var push = native(), token = read(TOKEN);
     if (!push || !token) { return Promise.resolve(); }
+    // Only once the server has let the device go. Nothing at Apple ever
+    // retires a token, as a browser's push service does, so a device
+    // forgotten here first would keep showing alerts and never be asked
+    // about again. If the server could not be told, a later page asks.
     function forget() { write(OWNER, ''); write(TOKEN, ''); }
     if (read(OWNER) !== me) {
       // Turned on in the app by another account: its alerts stop coming here.
-      return post(UNSUBSCRIBE, { kind: 'apns', token: token, release: true })
-        .catch(function () {}).then(forget);
+      return post(UNSUBSCRIBE, { kind: 'apns', token: token, release: true }).then(forget);
     }
     if (!firstThisVisit(visit)) { return Promise.resolve(); }
     return push.checkPermissions().then(function (p) {
       if (p.receive !== 'granted') {
         // Switched off in the iPhone's Settings: the server stops sending.
-        return post(UNSUBSCRIBE, { kind: 'apns', token: token })
-          .catch(function () {}).then(forget);
+        return post(UNSUBSCRIBE, { kind: 'apns', token: token }).then(forget);
       }
       // Apple can change a device's token, so the current one is sent, in
       // place of the one the server has.
@@ -369,13 +371,16 @@
 
   function appDisable() {
     var token = read(TOKEN);
-    write(OWNER, '');
-    write(TOKEN, '');
-    if (!token) { return Promise.resolve('off'); }
+    if (!token) { write(OWNER, ''); return Promise.resolve('off'); }
     // The token stays with the iPhone; only the server forgets it. Apple
     // asks apps not to unregister from notifications to switch them off.
-    return post(UNSUBSCRIBE, { kind: 'apns', token: token })
-      .catch(function () {}).then(function () { return 'off'; });
+    // So they are off only once the server says so: if it cannot be told,
+    // the card says that did not work, rather than "Off" while alerts come.
+    return post(UNSUBSCRIBE, { kind: 'apns', token: token }).then(function () {
+      write(OWNER, '');
+      write(TOKEN, '');
+      return 'off';
+    });
   }
 
   // --- the page's switch ------------------------------------------------------

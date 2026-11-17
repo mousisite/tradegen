@@ -9,7 +9,9 @@ icons. No network: every push service is a stand-in.
 import json
 import os as _os
 import re
+import shutil
 import struct
+import subprocess
 import sys as _sys
 import tempfile
 import threading
@@ -187,6 +189,154 @@ def device_rows(user_id):
         return push.devices(conn, user_id)
     finally:
         conn.close()
+
+
+NODE = shutil.which("node")
+
+
+def run_node(script, *args):
+    """Run a script under Node and return the JSON it printed last.
+
+    The page scripts and the service workers are run for real where Node is
+    installed. Returns None without it, and {"error": ...} if the script
+    itself failed.
+    """
+    if not NODE:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".js", prefix="orenth-test-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    try:
+        proc = subprocess.run([NODE, path] + list(args), capture_output=True, text=True,
+                              encoding="utf-8", timeout=120)
+    finally:
+        _os.remove(path)
+    lines = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        return {"error": (proc.stderr or proc.stdout or "no output")[-1500:]}
+    return json.loads(lines[-1])
+
+
+# static/notify.js inside the iPhone app, with stand-ins for Capacitor's push
+# plugin, fetch, the page's storage and one notifications card.
+NOTIFY_IN_APP = r"""
+const fs = require('fs');
+const vm = require('vm');
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const TOKEN = 'ab'.repeat(32);
+const OWNER = 'orenth-push-owner', KEPT = 'orenth-apns-token';
+
+function store(init) {
+  const m = new Map(Object.entries(init || {}));
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null),
+           setItem: (k, v) => { m.set(k, String(v)); },
+           removeItem: (k) => { m.delete(k); }, dump: () => Object.fromEntries(m) };
+}
+function element() {
+  const on = {};
+  return { hidden: true, disabled: false, textContent: '', className: '',
+           addEventListener: (type, fn) => { on[type] = fn; },
+           click: () => { if (on.click) { on.click(); } } };
+}
+// One page in the app, signed in as `user`; net(url, body) answers each request.
+function page(user, local, net, permission) {
+  const calls = [];
+  const parts = {};
+  for (const sel of ['[data-notify-state]', '[data-notify-said]', '[data-notify-act="on"]',
+                     '[data-notify-act="off"]', '[data-notify-act="test"]']) {
+    parts[sel] = element();
+  }
+  const card = { hidden: true, querySelector: (sel) => parts[sel] || null };
+  const push = {
+    addListener: (ev, fn) => { push['_' + ev] = fn; return Promise.resolve({ remove() {} }); },
+    register: () => {
+      setTimeout(() => push._registration && push._registration({ value: TOKEN }), 0);
+      return Promise.resolve();
+    },
+    checkPermissions: () => Promise.resolve({ receive: permission || 'granted' }),
+    requestPermissions: () => Promise.resolve({ receive: permission || 'granted' }),
+  };
+  const ctx = {
+    console, setTimeout, Promise, JSON, Uint8Array, URL, Error,
+    localStorage: local, sessionStorage: store(),
+    Capacitor: { isNativePlatform: () => true, Plugins: { PushNotifications: push } },
+    navigator: { userAgent: 'Mozilla/5.0 (iPhone) OrenthApp/1' },
+    location: { origin: 'https://orenth.app' },
+    document: {
+      readyState: 'complete',
+      currentScript: { getAttribute: (a) => ({ 'data-user': user, 'data-mark': 'm' + user })[a] },
+      querySelectorAll: (sel) => (sel === '[data-notify]' ? [card] : []),
+      addEventListener() {},
+    },
+    fetch: (url, opts) => {
+      const body = opts && opts.body ? JSON.parse(opts.body) : null;
+      calls.push({ url: url, body: body });
+      return net(url, body);
+    },
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  return { calls: calls, chip: parts['[data-notify-state]'], said: parts['[data-notify-said]'],
+           off: parts['[data-notify-act="off"]'] };
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+const answer = (status, body) => Promise.resolve({
+  ok: status >= 200 && status < 300, status: status, json: () => Promise.resolve(body) });
+const fine = (url) => answer(200, url.indexOf('/config') !== -1
+  ? { web: { enabled: false }, apns: { enabled: true } } : { ok: true, known: true, removed: 1 });
+const FAILURES = {
+  'no connection': () => Promise.reject(new TypeError('Load failed')),
+  'a 502 during a deploy': () => answer(502, {}),
+  'a 429': () => answer(429, { error: 'Wait a while.' }),
+};
+const released = (calls) => calls.some((c) => c.url.indexOf('/unsubscribe') !== -1
+  && c.body && c.body.release === true && c.body.token === TOKEN);
+
+(async () => {
+  const out = { handover: {} };
+  // Someone else's phone: account 1 turned notifications on, account 2 signs in.
+  for (const name of Object.keys(FAILURES)) {
+    const local = store({ [OWNER]: '1', [KEPT]: TOKEN });
+    const first = page('2', local, FAILURES[name]);
+    await settle();
+    const kept = local.dump();
+    const next = page('2', local, fine);
+    await settle();
+    out.handover[name] = { asked: released(first.calls), kept: kept,
+                           asked_again: released(next.calls), after: local.dump() };
+  }
+  // Turning them off while the connection drops, then once it is back.
+  {
+    const local = store({ [OWNER]: '2', [KEPT]: TOKEN });
+    let net = fine;
+    const p = page('2', local, (url, body) => net(url, body));
+    await settle();
+    const before = p.chip.textContent;
+    net = FAILURES['no connection'];
+    p.off.click();
+    await settle();
+    const failed = { chip: p.chip.textContent, said: p.said.textContent, kept: local.dump() };
+    net = fine;
+    p.calls.length = 0;
+    p.off.click();
+    await settle();
+    out.turn_off = { before: before, failed: failed,
+                     then: { chip: p.chip.textContent, said: p.said.textContent,
+                             kept: local.dump(),
+                             told: p.calls.some((c) => c.url.indexOf('/unsubscribe') !== -1
+                                                && c.body && c.body.token === TOKEN) } };
+  }
+  // Switched off in the iPhone's Settings, and the server cannot be told.
+  {
+    const local = store({ [OWNER]: '2', [KEPT]: TOKEN });
+    page('2', local, FAILURES['no connection'], 'denied');
+    await settle();
+    out.revoked = local.dump();
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
 
 
 SITE = "https://orenth.app"
@@ -994,6 +1144,43 @@ try:
           all(w in privacy for w in ("Apple's", "Google's", "Mozilla's", "Microsoft's",
                                      "encrypted for that browser", 'id="notifications"'))
           and "which can read them" in privacy)
+
+    section("THE IPHONE APP FORGETS ITS DEVICE ONLY ONCE THE SERVER HAS")
+    # Nothing at Apple ever retires an iPhone's token, so a device the app
+    # forgets before the server has let it go keeps getting alerts for good.
+    notify_js = _os.path.join(ROOT, "static", "notify.js")
+    phone = {"orenth-push-owner": "2", "orenth-apns-token": "ab" * 32}
+    got = run_node(NOTIFY_IN_APP, notify_js)
+    if got is None:
+        print("   (Node is not installed, so notify.js is read here rather than run)")
+        source = open(notify_js, encoding="utf-8").read()
+        disable = source[source.index("function appDisable("):
+                         source.index("// --- the page's switch")]
+        check("a release or a switch-off that fails never forgets the device",
+              ".catch(function () {}).then(forget)" not in source)
+        check("Turn off forgets it here only after the server has",
+              disable.index("post(UNSUBSCRIBE") < disable.index("write(TOKEN, '')"))
+    elif "error" in got:
+        check("notify.js runs as the app runs it", False, got["error"])
+    else:
+        for name, seen in sorted(got["handover"].items()):
+            check("another account's phone asks the server to let it go (%s)" % name,
+                  seen["asked"], seen)
+            check("and when that fails, keeps the device to ask again (%s)" % name,
+                  seen["kept"] == dict(phone, **{"orenth-push-owner": "1"}), seen["kept"])
+            check("the next page asks again, and only then forgets it (%s)" % name,
+                  seen["asked_again"] and seen["after"] == {}, seen)
+        off = got["turn_off"]
+        check("Turn off with no connection says it did not work, and stays On",
+              off["before"] == "On" and off["failed"]["chip"] == "On"
+              and off["failed"]["said"].startswith("That did not work"), off)
+        check("and keeps the device, so it can be turned off again",
+              off["failed"]["kept"] == phone, off["failed"])
+        check("once the server is told, it says Off and forgets the device",
+              off["then"]["told"] and off["then"]["chip"] == "Off"
+              and off["then"]["kept"] == {}, off["then"])
+        check("switched off in the iPhone's Settings, it is kept until the server is told",
+              got["revoked"] == phone, got["revoked"])
 finally:
     push._web_post = REAL_WEB_POST
     web.market_mod.split_history = REAL_HISTORY
