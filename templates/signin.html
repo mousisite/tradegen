@@ -91,12 +91,8 @@
     <a href="{{ url_for('analyse', symbol='NVDA', interval='1d') }}">Look around first</a>,
     no account needed.
   </p>
-
-  <p class="legal" style="border-top:0;padding-top:0;margin-top:var(--s4)">
-    <b>Analysis software, not financial advice.</b>
-    Every figure this produces is measured from historical price data and can
-    stop describing the future at any moment.
-  </p>
+  {# The footer says "Analysis software, not financial advice" right below,
+     in the same words, so the page does not say it a second time. #}
 </div>
 
 {% endblock %}
