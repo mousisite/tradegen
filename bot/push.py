@@ -61,13 +61,20 @@ log = logging.getLogger(__name__)
 # will post to, and a page can hand over any address it likes, so only these
 # are accepted: anything else would let a visitor point the server at itself,
 # or at a machine on its private network. Chrome, Samsung Internet and Opera
-# use Google's; Firefox, Mozilla's; Safari, Apple's; Edge, Microsoft's.
+# use Google's; Firefox, Mozilla's; Safari, Apple's; Edge, Microsoft's. Only
+# Microsoft's is spread over hosts of its own (wns2-par02p.notify.windows.com
+# and the like); the others are taken at that exact host, so nobody can name
+# hosts of their own under them to keep the sender waiting on each in turn.
 PUSH_SERVICES = ("fcm.googleapis.com", "android.googleapis.com",
-                 "push.services.mozilla.com", "push.apple.com",
+                 "updates.push.services.mozilla.com", "web.push.apple.com",
                  "notify.windows.com")
+_SPREAD = ("notify.windows.com",)
 
 MAX_DEVICES = 10            # per person; the one quiet longest makes way
 MAX_FAILURES = 8            # notices failed in a row before a device is forgotten
+STALE_AFTER = 30 * 86400    # with no notice through for this long, a push
+                            # service's own failures count against the device
+TEST_BUDGET = 20.0          # seconds a test may spend before it tries no more devices
 ALERT_TTL = 6 * 3600        # how long a push service keeps trying a phone that is off
 TEST_TTL = 10 * 60
 VAPID_LIFETIME = 12 * 3600  # RFC 8292 allows a token up to a day
@@ -150,7 +157,15 @@ def push_service(endpoint: str) -> bool:
     if parts.scheme != "https" or not host or port not in (None, 443) \
             or parts.username is not None or parts.password is not None:
         return False
-    return any(host == known or host.endswith("." + known) for known in PUSH_SERVICES)
+    return bool(_push_host(host))
+
+
+def _push_host(host: str) -> str:
+    """The entry in PUSH_SERVICES a host belongs to, or ''."""
+    for known in PUSH_SERVICES:
+        if host == known or (known in _SPREAD and host.endswith("." + known)):
+            return known
+    return ""
 
 
 def clean_subscription(raw) -> Tuple[str, str, str]:
@@ -666,6 +681,8 @@ class Sent:
     blame: bool = True          # counts toward forgetting a device that keeps failing
     stop: bool = False          # no use trying this service again this round
     environment: str = ""       # APNs: where the token turned out to live
+    soft: bool = False          # the push service's own failure: counts only once
+                                # no notice has got through for STALE_AFTER
 
 
 WebPost = Callable[[str, bytes, Dict[str, str]], int]
@@ -705,7 +722,7 @@ def send_web(row, note: Note, keys: VapidKeys, sub: str,
         # Waiting on a service that does not answer is what costs the round
         # time, so the rest of the round leaves that service alone.
         return Sent(False, "the push service did not answer (%s)" % type(exc).__name__,
-                    blame=False, stop=True)
+                    blame=False, stop=True, soft=True)
     if 200 <= status < 300:
         return Sent(True)
     if status in (404, 410):
@@ -713,9 +730,10 @@ def send_web(row, note: Note, keys: VapidKeys, sub: str,
     # A quick refusal costs no waiting, and may be about this browser alone,
     # so the others on the same service are still sent theirs.
     if status == 429:
-        return Sent(False, "the push service asked Orenth to slow down (429)", blame=False)
+        return Sent(False, "the push service asked Orenth to slow down (429)",
+                    blame=False, soft=True)
     if status >= 500:
-        return Sent(False, "the push service failed (%d)" % status, blame=False)
+        return Sent(False, "the push service failed (%d)" % status, blame=False, soft=True)
     return Sent(False, "the push service refused it (%d)" % status)
 
 
@@ -894,9 +912,12 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
 # --- a round ------------------------------------------------------------------------------
 
 def _service(row) -> str:
+    """Which push service a device is on: Apple's, or the browser service in
+    PUSH_SERVICES its address falls under, however many hosts that uses."""
     if row["kind"] == "apns":
         return "apns"
-    return (urlsplit(row["address"]).hostname or "").lower()
+    host = (urlsplit(row["address"]).hostname or "").lower().rstrip(".")
+    return _push_host(host) or host
 
 
 def _record(conn: sqlite3.Connection, row, result: Sent) -> str:
@@ -909,7 +930,13 @@ def _record(conn: sqlite3.Connection, row, result: Sent) -> str:
                      (int(time.time()), result.environment, result.environment, device))
         conn.commit()
         return "sent"
-    failures = int(row["failures"] or 0) + (1 if result.blame else 0)
+    # A push service that does not answer may be down for everybody, so at
+    # first that is not held against the device. Once no notice has got
+    # through for STALE_AFTER it is, so an address that leads nowhere is
+    # forgotten in the end, like one that keeps being refused.
+    reached = int(row["last_ok_ts"] or row["created_ts"] or 0)
+    counts = result.blame or (result.soft and reached < time.time() - STALE_AFTER)
+    failures = int(row["failures"] or 0) + (1 if counts else 0)
     if result.drop or failures >= MAX_FAILURES:
         conn.execute("DELETE FROM push_devices WHERE id=?", (device,))
         conn.commit()
@@ -922,13 +949,15 @@ def _record(conn: sqlite3.Connection, row, result: Sent) -> str:
 
 def _send_all(conn: sqlite3.Connection, rows, note: Note, site: str,
               halted: Optional[set] = None, web_post: Optional[WebPost] = None,
-              apns_post: Optional[ApnsPost] = None) -> Dict:
+              apns_post: Optional[ApnsPost] = None,
+              deadline: Optional[float] = None) -> Dict:
     """One notice to each of these devices, each outcome written down.
 
     halted holds services that did not answer, or refused in a way every
     device on them would (Apple refusing this server's key, or asking the
     server itself to slow down), so the rest of the round skips them instead
-    of waiting on each in turn. A quick refusal of one device does not.
+    of waiting on each in turn. A quick refusal of one device does not. Past
+    deadline, if one is given, no more devices are tried.
     """
     halted = set() if halted is None else halted
     keys = vapid_keys() if any(r["kind"] == "web" for r in rows) else None
@@ -936,7 +965,10 @@ def _send_all(conn: sqlite3.Connection, rows, note: Note, site: str,
     out = {"devices": len(rows), "sent": 0, "failed": 0, "dropped": 0, "errors": []}
     for row in rows:
         service = _service(row)
-        if service in halted:
+        if deadline is not None and time.time() >= deadline:
+            result = Sent(False, "not tried this time: the others took too long",
+                          blame=False)
+        elif service in halted:
             result = Sent(False, "not tried this time: its push service had just "
                                  "failed for another device", blame=False)
         elif row["kind"] == "web":
@@ -994,11 +1026,16 @@ def deliver(conn: sqlite3.Connection, fired, site: str,
 def send_test(conn: sqlite3.Connection, user_id: int, site: str, kind: str = "",
               address: str = "", web_post: Optional[WebPost] = None,
               apns_post: Optional[ApnsPost] = None) -> Dict:
-    """"Notifications are on", to this person's devices, or to the one named."""
+    """"Notifications are on", to this person's devices, or to the one named.
+
+    Sent while a page waits, so it stops starting on more devices once it
+    has taken TEST_BUDGET seconds.
+    """
     rows = devices(conn, user_id)
     if kind and address:
         rows = [r for r in rows if r["kind"] == kind and r["address"] == address]
-    return _send_all(conn, rows, switched_on_note(), site, None, web_post, apns_post)
+    return _send_all(conn, rows, switched_on_note(), site, None, web_post, apns_post,
+                     deadline=time.time() + TEST_BUDGET)
 
 
 # --- off the alert loop's thread ------------------------------------------------------------

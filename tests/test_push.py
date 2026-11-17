@@ -484,9 +484,14 @@ try:
 
     section("WHICH ADDRESSES A PAGE MAY HAND OVER")
     for url, ok in (("https://fcm.googleapis.com/fcm/send/x", True),
+                    ("https://android.googleapis.com/gcm/send/x", True),
                     ("https://updates.push.services.mozilla.com/wpush/v2/x", True),
                     ("https://web.push.apple.com/QGx", True),
                     ("https://wns2-par02p.notify.windows.com/w/?token=x", True),
+                    # Only Microsoft's is spread over hosts of its own.
+                    ("https://x.push.apple.com/abc", False),
+                    ("https://h7.fcm.googleapis.com/x", False),
+                    ("https://other.push.services.mozilla.com/x", False),
                     ("http://fcm.googleapis.com/fcm/send/x", False),
                     ("https://fcm.googleapis.com:8443/x", False),
                     ("https://fcm.googleapis.com@evil.example/x", False),
@@ -717,6 +722,61 @@ try:
     out = push.deliver(conn, busy, SITE, web_post=post)
     check("one that does not answer at all is not waited on again this round",
           len(post.calls) == 1 and out["failed"] == 3, out)
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    section("A PUSH SERVICE THAT NEVER ANSWERS")
+    stalled = person("stalled@example.com")
+    for n in range(10):
+        endpoint, p256dh, auth = push.clean_subscription(
+            subscription("https://h%d.notify.windows.com/w/?token=t%d" % (n, n)))
+        push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    post = Recorder(TimeoutError("no answer"))
+    push.deliver(conn, [alerts.Fired(90, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                     stalled.id, "")], SITE, web_post=post)
+    check("ten addresses on ten hosts of one push service are waited on once a round",
+          len(post.calls) == 1, len(post.calls))
+    post = Recorder(TimeoutError("no answer"))
+    push.send_test(conn, stalled.id, SITE, web_post=post)
+    check("and once a test", len(post.calls) == 1, len(post.calls))
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    month_ago = int(time.time()) - 31 * 86400
+    endpoint, p256dh, auth = push.clean_subscription(subscription(FCM + "stalled"))
+    push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    conn.execute("UPDATE push_devices SET created_ts=? WHERE address=?", (month_ago, endpoint))
+    conn.commit()
+    for _ in range(push.MAX_FAILURES):
+        push.send_test(conn, stalled.id, SITE, web_post=Recorder(TimeoutError("no answer")))
+    check("an address no notice has reached in a month, still not answering, is forgotten",
+          not device_rows(stalled.id))
+    push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    conn.execute("UPDATE push_devices SET created_ts=?, last_ok_ts=? WHERE address=?",
+                 (month_ago, int(time.time()) - 86400, endpoint))
+    conn.commit()
+    for _ in range(push.MAX_FAILURES + 2):
+        push.send_test(conn, stalled.id, SITE, web_post=Recorder(TimeoutError("no answer")))
+    rows = device_rows(stalled.id)
+    check("one a notice reached yesterday is kept through an outage",
+          rows and rows[0]["failures"] == 0, [dict(r) for r in rows])
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    budget = getattr(push, "TEST_BUDGET", 20.0)
+    push.TEST_BUDGET = 0.5
+    try:
+        for url in (FCM + "slow", "https://android.googleapis.com/gcm/send/slow",
+                    "https://updates.push.services.mozilla.com/wpush/v2/slow",
+                    "https://web.push.apple.com/slow"):
+            endpoint, p256dh, auth = push.clean_subscription(subscription(url))
+            push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+        post = Recorder(201, delay=0.3)
+        out = push.send_test(conn, stalled.id, SITE, web_post=post)
+        check("a test stops starting on more devices once its time is up",
+              len(post.calls) == 2 and out["sent"] == 2 and out["failed"] == 2, out)
+    finally:
+        push.TEST_BUDGET = budget
     conn.execute("DELETE FROM push_devices")
     conn.commit()
 
