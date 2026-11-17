@@ -342,9 +342,10 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
             customer = billing_mod.customer_of(conn, user.id)
         finally:
             conn.close()
+    # Inside the iPhone app no web price is shown, so Stripe is not asked.
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
-                           offer=billing_mod.offers(),
+                           offer={} if _in_app() else billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
                            has_customer=bool(customer)), status
@@ -558,6 +559,34 @@ def _expose_user():
                        and not getattr(g, "demo", False) and not _pro()),
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured()}
+
+
+# The iPhone app is this same site inside a native shell, and it says so by
+# adding this to its User-Agent. Knowing it changes only what is drawn: no
+# visit counting by a third party, no web prices or Stripe buttons (inside an
+# App Store app, Pro may only be sold through Apple), and the small script
+# that reaches the phone's share sheet, status bar and sign-in sheets. It is
+# never a reason to trust a request, because anyone can send any User-Agent.
+APP_AGENT = "OrenthApp/"
+
+
+def _in_app() -> bool:
+    """Whether this page is being drawn inside the Orenth iPhone app."""
+    found = g.get("in_app")
+    if found is None:
+        found = APP_AGENT in (request.headers.get("User-Agent") or "")
+        g.in_app = found
+    return found
+
+
+@app.before_request
+def _note_app():
+    g.in_app = APP_AGENT in (request.headers.get("User-Agent") or "")
+
+
+@app.context_processor
+def _app_mode():
+    return {"in_app": _in_app()}
 
 
 def uid() -> int:
@@ -2082,7 +2111,8 @@ def billing_code():
     the box. Without JavaScript, Apply posts to checkout instead, which says
     the same thing by drawing the whole page again.
     """
-    if not billing_mod.ready() or g.demo:
+    # Never inside the iPhone app, where nothing is sold through Stripe.
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
@@ -2099,7 +2129,7 @@ def billing_code():
 @app.route("/billing/checkout", methods=["POST"])
 def billing_checkout():
     """Send someone to Stripe's own page to pay."""
-    if not billing_mod.ready() or g.demo:
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     if _pro():
         return redirect(url_for("account"))
@@ -2146,7 +2176,7 @@ def billing_done():
 @app.route("/billing/portal", methods=["POST"])
 def billing_portal():
     """Stripe's own page for cancelling, changing card and receipts."""
-    if not billing_mod.ready() or g.demo:
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:

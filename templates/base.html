@@ -85,8 +85,9 @@
 {# Counts visits for Metricool. Their tag loads a script that sends the full
    address, query string and all, and /email/stop carries a token there. This
    sends their same counter request with the path only, so no third-party
-   script runs and no cookie is set. Signed-in pages are never counted. #}
-{% if not current_user or demo %}
+   script runs and no cookie is set. Signed-in pages are never counted, and
+   nothing is counted inside the iPhone app, which declares no tracking. #}
+{% if (not current_user or demo) and not in_app %}
 <script>new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
   + encodeURIComponent(location.origin + location.pathname) + "&bw=" + innerWidth + "&bh=" + innerHeight
   + (document.referrer ? "&ref=" + encodeURIComponent(document.referrer.split("?")[0]) : "");</script>
@@ -533,5 +534,11 @@
     window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
   })();
 </script>
+{# The iPhone app's bridge to the phone: share sheet, status bar, sign-in
+   sheets, deep links. On every page, because the app forgets its listeners
+   each time a page loads. Never sent to a browser. #}
+{% if in_app %}
+<script src="{{ url_for('static', filename='native.js') }}"></script>
+{% endif %}
 </body>
 </html>

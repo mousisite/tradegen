@@ -45,7 +45,8 @@
     {% if plan.pro %}
       <p class="prose"><b>Pro.</b> No limits.{% if plan.bonus_until and not plan.customer %}
         Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
-      {% if plan.customer %}
+      {# Stripe's own page, so never inside the iPhone app. #}
+      {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
