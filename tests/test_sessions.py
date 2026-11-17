@@ -508,6 +508,65 @@ finally:
     web.engine.analyse, web.public_mod.verdict = real
     web._CALLS.clear()
 
+head("A CALL ALERT ACROSS A RESTART AFTER THE CLOSE")
+# AAPL's public check was written at 19:00 on Friday, mid-session, and says
+# WAIT; the finished day, analysed after the close, says BUY. The loop reads
+# that change at 22:05, then the server restarts at 23:00 and forgets every
+# market's hours until a download says them again.
+sessions._SEEN.clear()
+alerts._STOPS_LOOKED.clear()
+web._CALLS.clear()
+conn = db.connect(DB)
+conn.execute("UPDATE alerts SET active=0")
+conn.commit()
+watching = db.alert_add(conn, "AAPL", "call_changes", user=alice.id, repeat=True)
+conn.close()
+CLOCK = {"t": 0}
+PUBLIC = {"at": at(2026, 11, 13, 19, 0), "action": "WAIT"}
+real = (web.engine.analyse, web.public_mod.verdict, web._call_now, alerts.fetch_bars)
+real_call_now = web._call_now
+web.engine.analyse = analyse
+web.public_mod.verdict = lambda conn, symbol: (
+    dict(PUBLIC, symbol=symbol) if symbol == "AAPL" else None)
+# The loop's own call, on this test's clock rather than the machine's.
+web._call_now = lambda symbol, interval="1d", exact=False: real_call_now(
+    symbol, interval, now=CLOCK["t"], exact=exact)
+alerts.fetch_bars = bars_for
+
+
+def told_at(when):
+    """One round of the loop at `when`, and the call changes it told."""
+    CLOCK["t"] = when
+    out, _asked = round_at(when)
+    return [f.message for f in out["fired"] if f.kind == "call_changes"]
+
+
+try:
+    DESCRIBED["day"] = date(2026, 11, 13)
+    told_at(at(2026, 11, 13, 19, 30))
+    told = told_at(at(2026, 11, 13, 22, 5))
+    check("the first round after Friday's close settles tells the change",
+          told == ["AAPL's call changed from WAIT to BUY, at 200."], told)
+    sessions._SEEN.clear()
+    alerts._STOPS_LOOKED.clear()
+    web._CALLS.clear()
+    told = told_at(at(2026, 11, 13, 23, 5))
+    conn = db.connect(DB)
+    row = conn.execute("SELECT state, last_checked FROM alerts WHERE id=?",
+                       (watching,)).fetchone()
+    conn.close()
+    check("after a restart the call written before the close is not told as a change",
+          told == [] and row["state"] == "BUY"
+          and row["last_checked"] == at(2026, 11, 13, 23, 5), (told, dict(row)))
+    # Over the weekend the public check is written again, from the finished day.
+    PUBLIC.update({"at": at(2026, 11, 16, 13, 0), "action": "BUY"})
+    DESCRIBED["day"] = date(2026, 11, 16)
+    told = told_at(at(2026, 11, 16, 14, 35))
+    check("and Monday's open does not tell Friday's change again", told == [], told)
+finally:
+    web.engine.analyse, web.public_mod.verdict, web._call_now, alerts.fetch_bars = real
+    web._CALLS.clear()
+
 head("THE PAGES SAY WHEN ALERTS ARE CHECKED")
 loop = scheduler.Scheduler(lambda: {}, interval_seconds=300, name="test-page")
 loop.start()

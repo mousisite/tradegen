@@ -481,21 +481,6 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
-    calls: Dict = {}
-    if call_of is not None:
-        # The price is fetched as stored either way. The call is an analysis,
-        # which reads a bare LINK as the Chainlink coin, so an alert saved for
-        # Interlink Electronics asks for it exactly; only then, so a call_of
-        # taking a symbol and a bar size alone serves every other alert.
-        for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
-                    if r["kind"] in CALL_KINDS}:
-            symbol, interval, exact = key
-            try:
-                calls[key] = (call_of(symbol, interval, exact=True) if exact
-                              else call_of(symbol, interval))
-            except Exception:
-                calls[key] = None
-
     # One fetch per symbol and bar size, shared by every alert on it.
     wanted = {(r["symbol"], _bars_for(r)) for r in rows}
     data, errors = {}, []
@@ -516,6 +501,27 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             else:
                 data[key] = result
                 sessions.note(key[0], result, now)
+
+    calls: Dict = {}
+    if call_of is not None:
+        # Asked after the fetch, which notes each market's hours: a call
+        # worked out before the last close settled is not used once it has,
+        # and just after a restart only this round's download says when that
+        # was. Asked before it, a popular stock's public call from before
+        # Friday's close came back that evening as a change, and again on
+        # Monday. The price is fetched as stored either way. The call is an analysis,
+        # which reads a bare LINK as the Chainlink coin, so an alert saved for
+        # Interlink Electronics asks for it exactly; only then, so a call_of
+        # taking a symbol and a bar size alone serves every other alert. One
+        # with no price fails for that below, so its call is not asked for.
+        for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
+                    if r["kind"] in CALL_KINDS and (r["symbol"], _bars_for(r)) in data}:
+            symbol, interval, exact = key
+            try:
+                calls[key] = (call_of(symbol, interval, exact=True) if exact
+                              else call_of(symbol, interval))
+            except Exception:
+                calls[key] = None
 
     fired: List[Fired] = []
     for row in rows:
