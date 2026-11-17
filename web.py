@@ -213,8 +213,9 @@ def auth_required() -> bool:
     when the app is served publicly, so running it on your own machine needs
     no login and nothing to configure. A public deployment whose sign-in keys
     went missing used to fall back to the local account, which is the
-    operator, for every visitor. Now it shows the sign-in page saying what is
-    missing, unless auth_mode is set to "off" on purpose.
+    operator, for every visitor. Now it shows the sign-in page, saying
+    signing in is off for now (the start-up log says what is missing),
+    unless auth_mode is set to "off" on purpose.
     """
     mode = app.config.get("AUTH_MODE")
     if mode is None:

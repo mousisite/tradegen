@@ -639,8 +639,11 @@ try:
           r.status_code == 302 and "/signin" in r.headers.get("Location", ""),
           r.status_code)
     check("nor the page about everyone's use", nobody.get("/usage").status_code == 302)
-    check("and the sign-in page says what is missing",
-          "GOOGLE_CLIENT_ID" in nobody.get("/signin").data.decode("utf-8", "replace"))
+    # Which keys are missing is for whoever runs it, in the start-up log; a
+    # visitor is told only that signing in is off.
+    door = nobody.get("/signin").data.decode("utf-8", "replace")
+    check("and the sign-in page says signing in is off, naming no setting",
+          "Signing in is off for now" in door and "GOOGLE_CLIENT_ID" not in door)
     web.app.config["AUTH_MODE"] = "off"
     check("unless sign-in is switched off on purpose", web.auth_required() is False)
 finally:
