@@ -121,6 +121,26 @@ check("ATR and RSI over 14 bars",
       and "ind.rsi(c, 14)" in open(_os.path.join(ROOT, "bot", "strategies.py")).read())
 check("the weight given runs from the learner's floor to its ceiling",
       "from %g to %g" % (learning.MIN_MULT, learning.MAX_MULT) in filled["weight_given"]["text"])
+# The Weight column is the strategy's own say for today's reading (half, for
+# a breakout strategy inside its channel) times its starting weight, the fit
+# to today's market and its record. The help named only the last three, so
+# 0.55 on the page could not be worked out from it.
+_real_registry = strategies.REGISTRY
+strategies.REGISTRY = [strategies.Strategy(
+    "unsure", "breakout",
+    lambda ctx, i: strategies.Signal("unsure", 0.0, 0.5, "inside the channel"),
+    "a stand-in", suits=(strategies.TRENDING,))]
+try:
+    shown = strategies.evaluate(None, 0, weights={"unsure": 0.85}, learned={"unsure": 1.0},
+                                regime=strategies.Regime(strategies.TRENDING, "normal", 1,
+                                                         30.0))[0][0].weight
+finally:
+    strategies.REGISTRY = _real_registry
+check("the weight help names the strategy's own say for today, which the column "
+      "multiplies in",
+      abs(shown - 0.5 * 0.85 * 1.30) < 1e-9
+      and "how sure the strategy is of today's reading" in filled["weight"]["text"],
+      (shown, filled["weight"]["text"]))
 check("the stop is within 2.5 ATR when it sits past a level",
       "2.5 ATR" in filled["stop"]["text"]
       and "2.5 * atr_value" in open(_os.path.join(ROOT, "bot", "decision.py")).read())
