@@ -352,9 +352,10 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
             customer = billing_mod.customer_of(conn, user.id)
         finally:
             conn.close()
+    # Inside the iPhone app no web price is shown, so Stripe is not asked.
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
-                           offer=billing_mod.offers(),
+                           offer={} if _in_app() else billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
                            has_customer=bool(customer), fair=_fair_use()), status
@@ -618,6 +619,34 @@ def _in_app() -> bool:
     User-Agent.
     """
     return "OrenthApp/" in request.headers.get("User-Agent", "")
+
+
+# The iPhone app is this same site inside a native shell, and it says so by
+# adding this to its User-Agent. Knowing it changes only what is drawn: no
+# visit counting by a third party, no web prices or Stripe buttons (inside an
+# App Store app, Pro may only be sold through Apple), and the small script
+# that reaches the phone's share sheet, status bar and sign-in sheets. It is
+# never a reason to trust a request, because anyone can send any User-Agent.
+APP_AGENT = "OrenthApp/"
+
+
+def _in_app() -> bool:
+    """Whether this page is being drawn inside the Orenth iPhone app."""
+    found = g.get("in_app")
+    if found is None:
+        found = APP_AGENT in (request.headers.get("User-Agent") or "")
+        g.in_app = found
+    return found
+
+
+@app.before_request
+def _note_app():
+    g.in_app = APP_AGENT in (request.headers.get("User-Agent") or "")
+
+
+@app.context_processor
+def _app_mode():
+    return {"in_app": _in_app()}
 
 
 def uid() -> int:
@@ -2913,6 +2942,94 @@ def code_verify(channel):
                            to=pending["to"], error=error)
 
 
+# Apple's reviewers must be able to sign in to the iPhone app, and they cannot
+# receive an email or a text, so a code sign-in alone fails review. Two
+# settings let one named account in with a fixed code instead:
+# REVIEW_LOGIN_EMAIL and REVIEW_LOGIN_CODE. With either missing, or a code
+# shorter than REVIEW_CODE_MIN, this door does not exist. Nothing links to it;
+# the address and the code go only in App Store Connect's review notes.
+REVIEW_CODE_MIN = 16
+# Tries an hour, counted per network at three times this (see _rate_limited).
+REVIEW_TRIES_PER_HOUR = 5
+REVIEW_ERROR = "That email and code do not match. Check both, then try again."
+REVIEW_TOO_OFTEN = "Too many tries from this network. Wait an hour, then try again."
+
+
+def _review_login() -> Optional[Tuple[str, str]]:
+    """The review account's address and code, or None when switched off."""
+    email = (os.environ.get("REVIEW_LOGIN_EMAIL") or "").strip().lower()
+    code = (os.environ.get("REVIEW_LOGIN_CODE") or "").strip()
+    if not email or len(code) < REVIEW_CODE_MIN:
+        return None
+    return email, code
+
+
+def _review_account(conn, email: str):
+    """The review account, made on first use with the email provider.
+
+    Never the local account, the example account, an operator, or an account
+    someone signs in to another way: a fixed code must open nothing but the
+    one account kept for App Review.
+    """
+    operators = {e.strip().lower()
+                 for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+                 if e.strip()}
+    if email in operators:
+        return None
+    row = conn.execute("SELECT provider, is_local FROM users WHERE email=?",
+                       (email,)).fetchone()
+    if row is not None and (row["is_local"] or row["provider"] != "email"):
+        return None
+    try:
+        return accounts_mod.upsert_email_user(conn, email)
+    except ValueError:
+        return None
+
+
+@app.route("/signin/review", methods=["GET", "POST"])
+def review_signin():
+    """The App Review account's way in: one address, one fixed code."""
+    login = _review_login()
+    if login is None:
+        abort(404)
+    if getattr(g, "user", None) is not None:
+        return redirect(url_for("index"))
+    error = ""
+    email = ""
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip()[:200]
+        if _rate_limited("review_signin", REVIEW_TRIES_PER_HOUR):
+            return render_template("review_signin.html", error=REVIEW_TOO_OFTEN,
+                                   email=email), 429
+        want_email, want_code = login
+        code = (request.form.get("code") or "").strip()[:200]
+        # Both compared every time, in constant time, so neither the answer
+        # nor how long it took says which of the two was wrong.
+        email_ok = hmac.compare_digest(email.lower().encode("utf-8"),
+                                       want_email.encode("utf-8"))
+        code_ok = hmac.compare_digest(code.encode("utf-8"),
+                                      want_code.encode("utf-8"))
+        user = None
+        if email_ok and code_ok:
+            conn = db_mod.connect(app.config.get("DB_PATH"))
+            try:
+                user = _review_account(conn, want_email)
+            finally:
+                conn.close()
+        if user is not None:
+            # An invite link opened earlier in this browser would hand the
+            # account free Pro, and the reviewer must see the account as Free.
+            session.pop("ref", None)
+            return _finish_sign_in(user, "")
+        error = REVIEW_ERROR
+    return render_template("review_signin.html", error=error,
+                           email=email), (400 if error else 200)
+
+
+# Reachable signed out, like the other ways in.
+PUBLIC_ENDPOINTS.add("review_signin")
+
+
 @app.route("/pricing")
 def pricing():
     """Free and Pro, side by side. Only exists once billing is set up.
@@ -2943,7 +3060,8 @@ def billing_code():
     the box. Without JavaScript, Apply posts to checkout instead, which says
     the same thing by drawing the whole page again.
     """
-    if not billing_mod.ready() or g.demo:
+    # Never inside the iPhone app, where nothing is sold through Stripe.
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
@@ -2960,7 +3078,7 @@ def billing_code():
 @app.route("/billing/checkout", methods=["POST"])
 def billing_checkout():
     """Send someone to Stripe's own page to pay."""
-    if not billing_mod.ready() or g.demo:
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     if _pro():
         return redirect(url_for("account"))
@@ -3007,7 +3125,7 @@ def billing_done():
 @app.route("/billing/portal", methods=["POST"])
 def billing_portal():
     """Stripe's own page for cancelling, changing card and receipts."""
-    if not billing_mod.ready() or g.demo:
+    if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:

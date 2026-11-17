@@ -9,8 +9,11 @@
  * here, together with a secret that only this page held. A code caught by
  * another app on the phone is useless without that secret.
  *
- * When the app has Apple's own sign-in plugin, the Apple button uses the
- * system's Apple sheet, with Face ID, and no browser at all.
+ * The app's own bridge, window.OrenthNative (static/native.js), is used when
+ * it is there: its webAuth opens the sheet with ASWebAuthenticationSession,
+ * which hands the answer back to this app alone and needs no app link, and
+ * its appleSignIn uses the system's Apple sheet, with Face ID, and no browser
+ * at all. Without it, the Browser and App plugins carry the same steps.
  *
  * Outside the app this does nothing: window.Capacitor does not exist there.
  */
@@ -26,6 +29,18 @@
   if (!box) { return; }
 
   var FINISH = 'app.orenth.ios://auth/finish';
+  // The app's bridge, when this version of the app has one.
+  var native = window.OrenthNative && window.OrenthNative.available
+    ? window.OrenthNative : null;
+  function pluginThere(name) {
+    if (typeof cap.isPluginAvailable === 'function') { return cap.isPluginAvailable(name); }
+    return !!plugins[name];
+  }
+  // Apple's own sheet: the bridge's appleSignIn over the AppleSignIn plugin,
+  // or, in an older build, @capacitor-community/apple-sign-in.
+  function nativeApple() {
+    return (native && pluginThere('AppleSignIn')) || !!plugins.SignInWithApple;
+  }
   var KEY = 'orenth-app-signin';
   var said = document.querySelector('[data-app-said]');
   // Set while a sign-in is being started, so a second tap before the sheet
@@ -81,7 +96,8 @@
 
   // Google, or Apple without its plugin: the system browser sheet.
   function inSheet(link) {
-    if (!Browser || !window.crypto || !window.crypto.subtle || !window.TextEncoder) {
+    if ((!native && !Browser) || !window.crypto || !window.crypto.subtle
+        || !window.TextEncoder) {
       say(WORDS.update);
       return;
     }
@@ -93,10 +109,22 @@
         start.searchParams.set('app', '1');
         start.searchParams.set('challenge', b64url(new Uint8Array(hash)));
         keep({ verifier: verifier, next: start.searchParams.get('next') || '' });
+        if (native) {
+          // Resolves with the address the site sent the sheet to, once the
+          // person is done there; the sheet has closed itself by then.
+          return native.webAuth(start.href).then(function (url) {
+            starting = false;
+            finish(url, false);
+          });
+        }
         return Browser.open({ url: start.href, presentationStyle: 'popover' });
       })
       .then(function () { starting = false; })
-      .catch(function () { starting = false; forget(); say(WORDS.failed); });
+      .catch(function (err) {
+        starting = false;
+        forget();
+        say(err && err.code === 'CANCELLED' ? WORDS.cancelled : WORDS.failed);
+      });
   }
 
   // What the sheet hands back: FINISH?code=... or FINISH?error=<a word>.
@@ -149,6 +177,10 @@
       if (!answer.ok) { throw new Error('no nonce'); }
       return answer.json();
     }).then(function (got) {
+      if (native && pluginThere('AppleSignIn')) {
+        // Already in the shape the server takes: identityToken and the rest.
+        return native.appleSignIn(got.nonce).then(function (r) { return { response: r }; });
+      }
       return plugin.authorize({
         clientId: link.getAttribute('data-client'),
         redirectURI: box.getAttribute('data-apple-redirect'),
@@ -192,7 +224,7 @@
     if (starting) { return; }
     if (said) { said.hidden = true; }
     var apple = link.getAttribute('data-app-via') === 'apple';
-    if (apple && plugins.SignInWithApple && link.getAttribute('data-native') === '1'
+    if (apple && nativeApple() && link.getAttribute('data-native') === '1'
         && box.getAttribute('data-apple-native')) {
       withApple(link);
     } else if (apple && link.getAttribute('data-web') !== '1') {

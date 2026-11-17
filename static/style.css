@@ -449,6 +449,9 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 .call.wait  .word { color: var(--hold); }
 .call.skip  { background: var(--sunken); border-color: var(--rule); }
 .call.skip  .word { color: var(--ink-2); }
+/* "skip" is also the skip link's class, which lifts it off the top of the
+   page. Without this an AVOID call sat over the header on every page. */
+.call.skip  { position: static; color: inherit; font-weight: inherit; }
 
 /* ---------- figures row ---------- */
 

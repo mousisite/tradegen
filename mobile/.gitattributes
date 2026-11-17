@@ -1,0 +1,5 @@
+# The iPhone project is built on a Mac. Keep Unix line endings in every
+# working copy, including one checked out on Windows and then copied over.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

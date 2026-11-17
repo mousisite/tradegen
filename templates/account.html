@@ -51,7 +51,8 @@
     {% if plan.pro %}
       <p class="prose"><b>Pro.</b> No limits.{% if plan.bonus_until and not plan.customer %}
         Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
-      {% if plan.customer %}
+      {# Stripe's own page, so never inside the iPhone app. #}
+      {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
@@ -86,8 +87,9 @@
 {% endif %}
 
 {# Installing Orenth as an app. Hidden until the script below knows how this
-   browser does it, and for good once Orenth is installed or inside the
-   iPhone app. Said here once, never popped up. #}
+   browser does it, and for good once Orenth is installed. Never sent to the
+   iPhone app at all: App Review reads the page, not just what is shown. #}
+{% if not in_app %}
 <section id="install" hidden>
   <div class="sechead"><h2>Add Orenth to your home screen</h2></div>
   <div class="card">
@@ -99,6 +101,7 @@
             style="margin-top:var(--s2)">Install Orenth</button>
   </div>
 </section>
+{% endif %}
 
 {% if weekly.ready %}
 <section id="weekly">
@@ -207,6 +210,7 @@
 {% endif %}
 
 <script>
+{% if not in_app %}
 (function () {
   var box = document.getElementById('install');
   var cap = window.Capacitor;
@@ -251,6 +255,7 @@
     say('Open your browser’s menu and choose Install app, or Add to Home screen.');
   }
 })();
+{% endif %}
 
 (function () {
   var bar = document.querySelector('#invite .sharebar');

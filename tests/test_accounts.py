@@ -918,6 +918,10 @@ for folder, _dirs, files in _os.walk(ROOT):
     if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests",
                                        ".claude", "node_modules", "mobile")):
         continue
+    # The iPhone app's build tools (mobile/scripts: screenshots, icons) run on
+    # a developer's machine, never in the server's container.
+    if _os.path.relpath(folder, ROOT).split(_os.sep)[0] == "mobile":
+        continue
     for fname in files:
         if not fname.endswith(".py"):
             continue

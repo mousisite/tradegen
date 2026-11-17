@@ -11,7 +11,7 @@
 <div class="plans">
   <div class="card plan">
     <span class="eyebrow">Free</span>
-    <p class="price">$0</p>
+    {% if not in_app %}<p class="price">$0</p>{% endif %}
     <ul class="list">
       <li>{{ limits.analyses_per_day }} different stocks or coins analysed a day</li>
       <li>The top {{ limits.find_results }} in every Find list</li>
@@ -26,11 +26,14 @@
 
   <div class="card plan pro">
     <span class="eyebrow">Pro</span>
-    {# Both prices come from Stripe, so they always match the charge. #}
+    {# Both prices come from Stripe, so they always match the charge. The
+       iPhone app shows no web price at all. #}
+    {% if not in_app %}
     <p class="price">{{ offer.monthly.label if offer.monthly else 'Pro' }}</p>
     {% if offer.yearly %}
       <p class="soft" style="margin:0">or {{ offer.yearly.label }}{% if offer.save %},
         which saves {{ offer.save }}%{% endif %}</p>
+    {% endif %}
     {% endif %}
     <ul class="list">
       <li>As many stocks and coins a day as you like</li>
@@ -45,11 +48,21 @@
       and Find scans wait their turn when the server is busy.</p>
     {% if is_pro and current_user and not demo %}
       <p class="prose"><b>You have Pro.</b></p>
-      {% if has_customer %}
+      {% if has_customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
       {% endif %}
+    {% elif in_app %}
+      {# ===================== app_purchase =====================
+         Inside the iPhone app, Pro may only be sold through Apple (App Store
+         rule 3.1.1). Apple's purchase buttons replace what is inside this
+         block. Never put a Stripe form, a Stripe link, a web price or the
+         discount box in here. #}
+      {% block app_purchase %}
+        <p class="prose" data-app-purchase>Upgrading is not available in the
+          app yet.</p>
+      {% endblock %}
     {% elif current_user and not demo %}
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the
@@ -75,10 +88,12 @@
     {% else %}
       <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create account to upgrade</a>
     {% endif %}
+    {% if not in_app %}
     <p class="fine">Pro renews
       automatically every {{ 'month or year, whichever you pick,' if offer.yearly else 'month' }}
       until you cancel. Cancel any time from your Account page. Payments are
       handled by Stripe; your card details never reach Orenth.</p>
+    {% endif %}
   </div>
 </div>
 

@@ -63,6 +63,7 @@ SUITES = [
     ("test_help.py",         False, "help beside each figure; no setup words or errors to visitors"),
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
     ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
+    ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it, the review sign-in"),
 ]
 
 TIMEOUT = 900
