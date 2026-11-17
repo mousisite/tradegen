@@ -64,7 +64,8 @@ def _copy_before_release(db_path) -> None:
     RENDER_GIT_COMMIT), remembered in a file beside the database, so a restart
     of the same release takes no copy. A failed copy is said loudly but does
     not stop the start: the migrations only ever add, and the timed backups
-    carry on either way.
+    carry on either way. A copy that does not verify is deleted, as a timed
+    backup's is, and the release is not noted, so the next start tries again.
     """
     release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or _code_fingerprint()
     if not release or not db_path or not os.path.exists(db_path):
@@ -80,9 +81,14 @@ def _copy_before_release(db_path) -> None:
     try:
         import backup as backup_mod
         target = os.path.join(folder, "backups", "before-release")
-        path = backup_mod.take(target)
+        path = backup_mod.take(target, source=db_path)
         if not backup_mod.verify(path):
-            raise RuntimeError("the copy at %s did not verify" % path)
+            # Kept, it would be trusted on the day a release is undone.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise RuntimeError("the copy at %s did not verify, so it was deleted" % path)
         backup_mod.prune(target, KEEP_RELEASE_COPIES)
         with open(marker, "w", encoding="utf-8") as fh:
             fh.write(release)
@@ -124,13 +130,19 @@ def main(argv=None) -> int:
     # Before anything else, so a failure during start-up is reported too.
     monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
 
+    # The database every connection opens. DB_PATH is set only by web.main(),
+    # which this file never calls, so here it is STOCKBOT_DB or the default,
+    # as database.connect() works it out. Passing DB_PATH alone handed the copy
+    # below None on the host, and it was quietly never taken.
+    db_path = web.app.config.get("DB_PATH") or db_mod.default_path()
+
     # A copy of the database as the previous release left it, taken before this
     # release changes anything in it. Once per release, not per restart.
-    _copy_before_release(web.app.config.get("DB_PATH"))
+    _copy_before_release(db_path)
 
     # Once, on this one thread, before anything else can open the database:
     # new columns are added here rather than raced for by the first requests.
-    db_mod.migrate(web.app.config.get("DB_PATH"))
+    db_mod.migrate(db_path)
 
     cfg = web.config_mod.load(web.app.config.get("CFG_PATH"))
     loop = web.start_alert_loop(cfg)

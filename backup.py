@@ -63,11 +63,11 @@ def _free_bytes(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
-def take(out_dir: str, with_csv: bool = False) -> str:
-    """Copy a consistent snapshot of the live database."""
+def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> str:
+    """Copy a consistent snapshot of the live database, or of source."""
     from bot import database as db_mod
 
-    source_path = db_mod.default_path()
+    source_path = source or db_mod.default_path()
     if not os.path.exists(source_path):
         # A normal exception, not SystemExit. This is called from a scheduler
         # as well as from a command line, and a library that kills the process

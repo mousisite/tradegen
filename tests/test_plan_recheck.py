@@ -188,6 +188,79 @@ for n, release in enumerate(("bbbb2222", "cccc3333", "dddd4444", "eeee5555")):
     _os.environ["RENDER_GIT_COMMIT"] = release
     serve._copy_before_release(DB)
 check("only the last few are kept", len(held()) == serve.KEEP_RELEASE_COPIES, held())
+
+head("THE SERVER ITSELF TAKES THAT COPY WHEN IT STARTS")
+# serve.main([]) as the host runs it. Only web.main() sets DB_PATH, and
+# serve.py never calls it: STOCKBOT_DB names the database, as render.yaml and
+# the Dockerfile do. The copy was once asked of a path that was None there,
+# and quietly never taken.
+import waitress  # noqa: E402
+import backup as backup_mod  # noqa: E402
+from bot import scheduler as scheduler_mod  # noqa: E402
+
+jobs = []
+
+
+class Held:
+    """Stands in for the timed backups' scheduler, and keeps its job."""
+
+    def __init__(self, job, **_kw):
+        jobs.append(job)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def check_now(self):
+        pass
+
+
+marker = _os.path.join(folder, "release.txt")
+
+
+def release_noted():
+    with open(marker, encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+before = held()
+real = (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+        scheduler_mod.Scheduler)
+waitress.serve = lambda *a, **k: None
+web.start_alert_loop = lambda cfg: None
+web.start_background_jobs = lambda: None
+scheduler_mod.Scheduler = Held
+web.app.config["DB_PATH"] = None
+for key in [k for k in _os.environ if k.startswith("BACKUP_S3_")] + [
+        "SENTRY_DSN", "STOCKBOT_BACKUP_DIR", "STOCKBOT_BACKUP_HOURS"]:
+    _os.environ.pop(key, None)
+_os.environ["RENDER_GIT_COMMIT"] = "ffff6666"
+try:
+    started = serve.main([])
+finally:
+    (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+     scheduler_mod.Scheduler) = real
+    web.app.config["DB_PATH"] = DB
+new = sorted(set(held()) - set(before))
+check("serve.main takes the copy for a new release, and notes the release",
+      started == 0 and len(new) == 1 and release_noted() == "ffff6666",
+      (started, new, release_noted()))
+check("the timed backups are set up beside it", len(jobs) == 1, jobs)
+
+head("A COPY THAT DOES NOT VERIFY IS NOT KEPT")
+before = held()
+real_verify = backup_mod.verify
+backup_mod.verify = lambda path: False
+_os.environ["RENDER_GIT_COMMIT"] = "gggg7777"
+try:
+    serve._copy_before_release(DB)
+finally:
+    backup_mod.verify = real_verify
+check("it is deleted, not left to be trusted", held() == before, (before, held()))
+check("and the release is not noted, so the next start tries again",
+      release_noted() == "ffff6666", release_noted())
 _os.environ.pop("RENDER_GIT_COMMIT", None)
 
 print()
