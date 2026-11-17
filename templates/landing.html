@@ -15,7 +15,7 @@
     {% with size=56 %}{% include "_mark.html" %}{% endwith %}
   </div>
   <h1>Know when <em>not</em> to buy.</h1>
-  <p class="lede">Orenth checks how often a setup actually worked before, and
+  <p class="lede">Orenth tests how often a setup worked on past prices, and
     tells you straight when there is no edge.</p>
   <div class="cta">
     <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
@@ -39,9 +39,12 @@
            else 'hold' if example.action == 'WAIT' else 'mute' }}">{{ example.action }}</span>
       {{ example.headline }}
     </span>
+    {# The counts are pretend trades on past prices, and say what "worked"
+       measured, in the same words as every other page that gives them. #}
     {% if example.samples %}
-      <span class="prose">Found this setup {{ example.samples }} times before.
-        It worked {{ example.worked }} of them.</span>
+      <span class="prose">{{ counts_line(example) }}{% if example.fall %} Here,
+        worked means a bet on the price falling paid off.{% endif %} A test,
+        not a promise.</span>
     {% endif %}
     <span class="go">See the whole analysis &rarr;</span>
     {# Kept for the tests and for anyone reading the page source: this is a
@@ -113,7 +116,7 @@
            stroke-linejoin="round" aria-hidden="true">
         <path d="M5 20V10M12 20V4M19 20v-7"/></svg>
       <b>Strategies</b>
-      <span class="say">Which of {{ strategy_count }} trading strategies actually worked.</span>
+      <span class="say">Which of {{ strategy_count }} trading strategies worked in tests on past prices.</span>
     </a>
   </div>
 </section>

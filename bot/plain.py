@@ -55,6 +55,19 @@ _SHORT_WAIT = "Do not short yet. The app expects a fall, but not from today's pr
 _FALLING_AVOID = "Leave this one alone. The signals point to a fall."
 
 
+def counted(samples: int, worked: int) -> str:
+    """The past examples behind a call, said the same way everywhere.
+
+    They are pretend trades in a test on past prices, not trades anyone made,
+    and "worked" is what the test measured: the trade reached its target
+    before its stop. The public pages lead with this sentence and drop it
+    from the explanation below (public.snapshot), so it must not vary.
+    """
+    return ("In tests on past prices, this same setup came up %d times and "
+            "worked %d of them, reaching its target before its stop."
+            % (samples, worked))
+
+
 def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     """The trade plan, said plainly.
 
@@ -126,9 +139,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     sure = ""
     if plan.probability is not None and plan.prob_samples:
         worked = int(round(plan.probability * plan.prob_samples))
-        sure = ("The app looked at %d times this same setup happened before. "
-                "It worked %d of those times."
-                % (plan.prob_samples, worked))
+        sure = counted(plan.prob_samples, worked)
         if fall_odds:
             sure += (" Here, worked means a bet on the price falling paid off, "
                      "because that is the way the signals lean.")

@@ -771,6 +771,9 @@ def _strategy(name):
 
 # Whether a coin's newest finished day is one the source left blank.
 app.jinja_env.globals["blank_day"] = public_mod.blank_day
+# A call's past examples, said as the test on past prices they are, the same
+# way on every page that counts them.
+app.jinja_env.globals["counts_line"] = public_mod.counts_line
 
 
 @app.template_filter("day")
@@ -835,6 +838,9 @@ def _refresh_example() -> None:
                 "samples": samples,
                 "worked": (int(round(plan.probability * samples))
                            if plan.probability is not None and samples else 0),
+                # The odds are the side the signals lean. Leaning down, the
+                # examples are bets on a fall, and the front page says so.
+                "fall": (getattr(plan, "odds_direction", 0) or 0) < 0,
                 "action": result.plan.action,
                 "headline": said["headline"],
                 "sure": said["sure"],

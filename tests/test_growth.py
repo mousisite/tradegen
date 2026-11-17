@@ -103,9 +103,9 @@ try:
     check("and uses the familiar name", snap["name"] == "NVIDIA")
     said = public.snapshot(fake_result("NVDA", "AVOID", 83, 22), {
         "headline": "h",
-        "sure": "The app looked at 83 times this same setup happened before. "
-                "It worked 22 of those times. When it worked it made about 2.0 "
-                "times what you put at risk."})
+        "sure": "In tests on past prices, this same setup came up 83 times and "
+                "worked 22 of them, reaching its target before its stop. When "
+                "it worked it made about 2.0 times what you put at risk."})
     check("the counts are not said twice on the page",
           said["sure"].startswith("When it worked"), said["sure"])
 
@@ -139,7 +139,8 @@ try:
     r = c.get("/stock/nvda")
     page = r.data.decode("utf-8", "replace")
     check("the page shows the call", r.status_code == 200 and "Avoid" in page
-          and "It worked 22 of them" in page, r.status_code)
+          and "In tests on past prices, this same setup came up 83 times and "
+              "worked 22 of them" in page, r.status_code)
     check("titled the way people search", "NVIDIA (NVDA): buy, wait or avoid?" in page)
     check("open to search engines", "noindex" not in page)
     check("its link preview is its own card", "/stock/nvda/card.png" in page)
@@ -651,7 +652,7 @@ try:
           [m[0] for m in outbox] == ["reader@example.com"], [m[0] for m in outbox])
     to, subject, body, headers = outbox[0]
     check("it covers their watchlist", "NVDA" in body and "AVOID" in body
-          and "It worked 22 of them" in body)
+          and "came up 83 times and worked 22 of them" in body)
     check("and says plainly what could not be checked", "ZZZZ   could not be checked" in body)
     check("the subject names the calls", "NVDA avoid" in subject, subject)
     stop = "https://orenth.app/email/stop?u=%d&t=%s" % (

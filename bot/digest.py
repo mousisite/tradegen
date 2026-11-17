@@ -92,7 +92,7 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
     lines += ["", "STRONGEST SETUPS AMONG POPULAR STOCKS"]
     if picks:
         for p in picks:
-            lines.append("  %-6s BUY    worked %d of %d times before"
+            lines.append("  %-6s BUY    worked %d of %d times in tests on past prices"
                          % (public.short(p["symbol"]), p["worked"], p["samples"]))
     else:
         lines.append("  None this week. Nothing on the popular list clears the "

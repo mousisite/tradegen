@@ -535,8 +535,9 @@ check("and that its record is for a fall, not a reason to buy",
       "record for a fall" in out["sure"] and "cleared that bar" not in out["sure"],
       out["sure"])
 check("the counts still open the explanation, as the public page expects",
-      out["sure"].startswith("The app looked at 78 times this same setup happened "
-                             "before. It worked 28 of those times."), out["sure"])
+      out["sure"].startswith("In tests on past prices, this same setup came up 78 "
+                             "times and worked 28 of them, reaching its target "
+                             "before its stop."), out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="no_signal", odds_direction=-1)
 check("any AVOID whose odds lean down says what worked means",

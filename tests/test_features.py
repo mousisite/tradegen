@@ -223,7 +223,8 @@ try:
           in flat(top))
     check("today's BUY calls are a shortlist with their counts and age",
           "BUY calls in today's popular checks" in top
-          and "Found this setup 52 times before; it worked 34." in flat(top)
+          and "Tested on past prices: it hit its target before its stop 34 of 52 "
+              "times." in flat(top)
           and "Checked 2h ago at 182.4." in top and ">TSLA<" in top)
     check("labelled as a shortlist, not advice", "A shortlist to look into, not advice" in top)
     check("a WAIT and a three-day-old BUY are not on it",

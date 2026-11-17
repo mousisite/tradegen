@@ -125,8 +125,7 @@
             {% for v in att.buys %}
               <li><a href="{{ url_for('stock_page', sym=v.slug) }}"><b class="fig">{{ v.short }}</b></a>
                 <span class="soft">{{ v.name }}</span>.
-                {% if v.samples %}Found this setup {{ v.samples }} times before; it
-                worked {{ v.worked }}.{% else %}Too few past examples to count.{% endif %}
+                {{ counts_line(v, short=True) }}
                 <span class="faint">Checked {{ v.at|ago }} at {{ v.price|price }}{% if v.quote_day %}, the {{ v.quote_day }} close{% endif %}.</span></li>
             {% endfor %}
           </ul>
@@ -137,7 +136,7 @@
           <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
             A shortlist to look into, not advice. Each is the app's own daily
             check, made with the standard settings rather than yours, and how
-            often a setup worked before is no promise it works again.</p>
+            often a setup worked on past prices is no promise it works again.</p>
         {% elif att.checked %}
           <p class="prose">None of today's popular checks says BUY. A BUY needs
             an edge the past record shows, and on most days most of these do
