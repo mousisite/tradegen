@@ -538,6 +538,77 @@ try:
     check("and real figures as before", (web._pct(0.25), web._signed(-0.004),
                                          web._money(1234.5)) == ("25%", "0.00", "1,234.50"))
 
+    head("A NOTIFICATION THAT FAILED, AS THE PERSON READS IT")
+    # Settings lists each device with why its last notice failed, and "Send a
+    # test" says why it could not go. The reasons start as push services'
+    # codes, exception names and this server's own setup, none of which is
+    # the person's to read, on the website or in the iPhone app.
+    import httpx2
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from bot import push as push_mod
+
+    CODES = re.compile(r"\b[A-Z][a-z]+[A-Z][A-Za-z]*\b|\(\d+\)|on this server|set up")
+    APP_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 "
+              "(KHTML, like Gecko) Mobile/15E148 OrenthApp/1")
+    p8 = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode("ascii")
+    APNS = {"APPLE_TEAM_ID": "TEAM123456", "APNS_KEY_ID": "KEY1234567",
+            "APNS_PRIVATE_KEY": p8.strip().replace("\n", "\\n")}
+    apple_says = {"answer": (403, "InvalidProviderToken")}
+
+    def stalls(url, body, headers):
+        raise requests.ConnectTimeout("no answer")
+
+    real_push = (push_mod._web_post, push_mod._CLIENT["apns"])
+    push_mod._web_post = stalls
+    push_mod._CLIENT["apns"] = httpx2.Client(transport=httpx2.MockTransport(
+        lambda request: httpx2.Response(apple_says["answer"][0],
+                                        json={"reason": apple_says["answer"][1]})))
+    _os.environ.update(APNS)
+    said = {}
+    try:
+        browser_key = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        conn = db.connect(DB)
+        try:
+            push_mod.register(conn, free.id, "web", "https://fcm.googleapis.com/fcm/send/w",
+                              push_mod.b64url(browser_key), push_mod.b64url(b"0123456789abcdef"),
+                              label="Chrome on Android")
+            push_mod.register(conn, free.id, "apns", "ab" * 32, label="iPhone app")
+        finally:
+            conn.close()
+        phone = web.app.test_client()
+        sign_in(phone, free)
+        for case, answer, env_off in (("Apple refusing this server's key",
+                                       (403, "InvalidProviderToken"), False),
+                                      ("Apple asking it to wait", (429, "TooManyRequests"),
+                                       False),
+                                      ("the iPhone app's half not set up", None, True)):
+            if answer:
+                apple_says["answer"] = answer
+            if env_off:
+                for _k in APNS:
+                    _os.environ.pop(_k, None)
+            for where, headers in (("website", {}), ("app", {"User-Agent": APP_UA})):
+                r = phone.post("/api/push/test", json={}, base_url=BASE, headers=headers)
+                words = list((r.get_json() or {}).get("errors") or [])
+                page = text(phone.get("/settings", base_url=BASE, headers=headers))
+                words += re.findall(r"Last try failed: ([^<]*)<", page)
+                said[(case, where)] = words
+                push_mod._APNS_PAUSED["until"] = 0.0
+                web._RATE.clear()
+    finally:
+        push_mod._web_post, push_mod._CLIENT["apns"] = real_push
+        for _k in APNS:
+            _os.environ.pop(_k, None)
+        push_mod._APNS_PAUSED["until"] = 0.0
+    for (case, where), words in sorted(said.items()):
+        coded = [w for w in words if CODES.search(_html.unescape(w))]
+        check("%s, on the %s: the reasons are words, with no code or setup" % (case, where),
+              len(words) >= 4 and not coded, coded or words)
+
     head("THE APP STORE TEXT")
     # What the owner pastes into App Store Connect is read by more people than
     # any page here, so it says the counts the way the site does, and offers
