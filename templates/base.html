@@ -1,5 +1,7 @@
 <!doctype html>
-<html lang="en">
+{# "app" inside the iPhone app. There the page is on a phone at any width,
+   landscape included, so style.css keeps the tab bar for it up to 1000. #}
+<html lang="en"{% if in_app %} class="app"{% endif %}>
 <head>
 <meta charset="utf-8">
 {# viewport-fit=cover lets the page draw under a phone's notch and home bar;
@@ -236,6 +238,60 @@
 </footer>
 </div>
 
+{# The way round on a phone, as a phone app does it: the four places used
+   most along the bottom, in reach of a thumb, and More for the rest, which
+   opens the same menu the top bar has on a tablet. Shown on a phone, in the
+   installed app and in the iPhone app, where the row of links at the top
+   is not; style.css decides, and pads the page so nothing ends up under
+   it. The icons are the front page's for the same places. #}
+{% set more_keys = ['screener', 'portfolio', 'strategies', 'settings', 'account', 'legal'] %}
+<nav class="tabbar" aria-label="Sections">
+  <a href="{{ url_for('index') }}" {% if active == 'home' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    Analyse</a>
+  <a href="{{ url_for('ideas') }}" {% if active == 'ideas' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/>
+      <circle cx="12" cy="12" r="1"/></svg>
+    Find</a>
+  <a href="{{ url_for('trades') }}" {% if active == 'trades' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="5" y="3" width="14" height="18" rx="2"/>
+      <path d="M9 7h6M9 11h6M9 15h4"/></svg>
+    Journal</a>
+  <a href="{{ url_for('monitor') }}" {% if active == 'monitor' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+    Monitor</a>
+  <details class="more">
+    <summary{% if active in more_keys %} class="on"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/>
+        <circle cx="19" cy="12" r="1.9"/></svg>
+      More
+    </summary>
+    <div class="menu-panel">
+      {% for href, key, label in nav_items if key in more_keys %}
+        <a href="{{ href }}"
+           {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+      {% if current_user and not demo %}
+        <a href="{{ url_for('account') }}"
+           {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
+      {% endif %}
+      <p class="fine">
+        <a href="{{ url_for('terms') }}">Terms</a>
+        <a href="{{ url_for('privacy') }}">Privacy</a>
+      </p>
+    </div>
+  </details>
+</nav>
+
 {# An analysis back-tests 34 strategies over tens of thousands of bars. Without
    feedback the page reads as frozen and people submit a second time. #}
 <div class="overlay" id="working">
@@ -255,11 +311,9 @@
 <div class="sr" id="worksaid" role="status" aria-live="polite"></div>
 
 <script>
-  // The phone menu closes when you tap anywhere else, press Escape, or tab
-  // out of it.
-  (function () {
-    var menu = document.querySelector('details.menu');
-    if (!menu) { return; }
+  // The menus (the top bar's on a tablet, the tab bar's More on a phone)
+  // close when you tap anywhere else, press Escape, or tab out of them.
+  document.querySelectorAll('details.menu, details.more').forEach(function (menu) {
     document.addEventListener('click', function (e) {
       if (menu.open && !menu.contains(e.target)) { menu.open = false; }
     });
@@ -276,7 +330,7 @@
         menu.open = false;
       }
     });
-  })();
+  });
 
   // Suggestions under a ticker box as you type. Built here rather than with
   // a <datalist>, which filters on what was typed before the answers arrive

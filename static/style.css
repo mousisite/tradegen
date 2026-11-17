@@ -724,7 +724,7 @@ ul.list.ok li::marker { color: var(--gain); }
   .jump a { min-height: 44px; display: inline-flex; align-items: center; }
   .firebar button { min-height: 44px; }
   /* The "Edit" and "Trail the stop" openers were 21 pixels tall. */
-  details:not(.help):not(.menu) > summary { padding-block: 12px; }
+  details:not(.help):not(.menu):not(.more) > summary { padding-block: 12px; }
   /* A link standing on its own, as a table's action or a line of its own:
      the words stay where they are, and the padding round them is what the
      finger hits. Inline, so the padding moves nothing. */
@@ -1053,3 +1053,69 @@ ul.list.ok li::marker { color: var(--gain); }
 /* A safety net for any image added later. The one image on the site already
    constrains itself; this makes that true by default rather than by memory. */
 img { max-width: 100%; height: auto; }
+
+/* ---------- the tab bar ---------- */
+
+/* Five places along the bottom of a phone, as a phone app has them: the
+   four used most, and More for the rest. Within reach of a thumb, which the
+   menu in the top corner is not. On a phone, and in the installed app and
+   the iPhone app up to tablet width; wherever it shows, the top bar's Menu
+   goes, since More holds the same links. Here, at the end, so its padding of
+   the page wins over the notch section's. */
+.tabbar {
+  display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+           env(safe-area-inset-left, 0px);
+  background: var(--paper); border-top: 1px solid var(--rule);
+}
+.tabbar > a, .tabbar .more > summary {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; min-height: 56px; padding: 6px 2px 5px;
+  color: var(--ink-2); font: 500 var(--t-xs)/1.2 var(--sans);
+  list-style: none; cursor: pointer; user-select: none;
+}
+.tabbar svg { width: 24px; height: 24px; flex: none; }
+.tabbar > a:hover { text-decoration: none; color: var(--ink); }
+.tabbar > a[aria-current="page"], .tabbar .more > summary.on { color: var(--accent-text); }
+.tabbar .more > summary::-webkit-details-marker { display: none; }
+.tabbar .more[open] > summary { color: var(--ink); background: var(--sunken); }
+/* The keyboard's ring inside the tab, not cut off by the screen's edge. */
+.tabbar > a:focus-visible, .tabbar .more > summary:focus-visible { outline-offset: -4px; }
+/* More's panel is the top menu's, opening upwards from the bar's right. */
+.tabbar .menu-panel {
+  top: auto; bottom: calc(100% + 8px);
+  right: max(8px, env(safe-area-inset-right, 0px));
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, .14);
+}
+.tabbar .menu-panel .fine {
+  grid-column: 1 / -1; display: flex; gap: var(--s1); margin: 4px 0 0;
+  padding: 2px 10px 0; border-top: 1px solid var(--hairline);
+}
+.tabbar .menu-panel .fine a {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px;
+  color: var(--accent-text); font-weight: 400;
+}
+
+/* The page ends 48 pixels above the bar, whatever the bar covers. */
+@media (max-width: 760px), (display-mode: standalone) and (max-width: 1000px) {
+  .tabbar { display: grid; }
+  .topbar .menu { display: none; }
+  .wrap { padding-bottom: calc(var(--s5) + 57px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (max-width: 1000px) {
+  .app .tabbar { display: grid; }
+  .app .topbar .menu { display: none; }
+  .app .wrap { padding-bottom: calc(var(--s5) + 57px + env(safe-area-inset-bottom, 0px)); }
+}
+/* While a field is being typed in, the keyboard has the bottom of the
+   screen, and a bar pinned there would ride up over the page with it. It
+   comes back a moment after the field is left, not at once: tapping a
+   button where the bar would be (Apply, under the code box) moves the focus
+   first, and a bar back in place before the tap ended took the tap. */
+@media (pointer: coarse) {
+  .tabbar { transition: visibility 0s linear .3s; }
+  body:has(:is(input:not([type=hidden]):not([type=file]), textarea):focus) .tabbar {
+    visibility: hidden; transition-delay: 0s;
+  }
+}
