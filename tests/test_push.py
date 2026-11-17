@@ -928,6 +928,17 @@ try:
           r.status_code == 200 and any(d["address"] == "ab" * 32 and
                                        d["environment"] == "sandbox"
                                        for d in device_rows(alice.id)))
+    for odd in (["x"], {"a": 1}, 5):
+        try:
+            r = c.post("/api/push/subscribe", json={"kind": "apns", "token": "cd" * 32,
+                                                    "environment": odd})
+            answered = r.status_code == 200 and r.is_json and r.get_json()["ok"]
+        except Exception as exc:            # TESTING hands the server's error on
+            answered = exc
+        check("an environment that is not a name (%r) is left out, not an error" % (odd,),
+              answered is True and any(d["address"] == "cd" * 32 and d["environment"] == ""
+                                       for d in device_rows(alice.id)), answered)
+    c.post("/api/push/unsubscribe", json={"kind": "apns", "token": "cd" * 32})
     check("named the iPhone app when its browser says so", push.device_label(
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
         "(KHTML, like Gecko) Mobile/15E148 OrenthApp/1") == "iPhone app")

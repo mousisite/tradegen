@@ -4121,8 +4121,9 @@ def push_subscribe():
             address = push_mod.clean_token(data.get("token"))
             old = old.strip().lower()
             environment = data.get("environment")
-            extra = {"environment": environment if environment in push_mod.APNS_HOSTS
-                     else ""}
+            # Looked up only if it is text: a list or an object cannot be.
+            extra = {"environment": environment if isinstance(environment, str)
+                     and environment in push_mod.APNS_HOSTS else ""}
         else:
             return jsonify({"error": "kind must be web or apns."}), 400
         if (check or old) and not push_mod.owns(conn, uid(), kind, address) \
