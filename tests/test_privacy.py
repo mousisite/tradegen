@@ -181,6 +181,22 @@ try:
     check("but still says which page, and how long it took",
           all((e.get("request") or {}).get("url") and e.get("start_timestamp")
               and e.get("timestamp") for e in sent))
+    check("and nothing else about the request, its headers included",
+          not any("headers" in (e.get("request") or {}) for e in sent),
+          [sorted((e.get("request") or {})) for e in sent])
+    # "Send a test" posts to Apple at /3/device/<the phone's token>, inside
+    # the page load, so a call is named by its site alone.
+    token = "ab" * 32
+    cut = monitoring._scrub_sample({"type": "transaction", "request": {}, "spans": [
+        {"op": "http.client", "description": "POST https://api.push.apple.com/3/device/"
+                                             + token,
+         "data": {"url": "https://api.push.apple.com/3/device/" + token,
+                  "http.query": "x=1", "http.method": "POST"}}]})
+    check("a call the page made is named by the site it went to, not its path",
+          token not in json.dumps(cut)
+          and cut["spans"][0]["description"] == "POST https://api.push.apple.com"
+          and cut["spans"][0]["data"] == {"url": "https://api.push.apple.com",
+                                          "http.method": "POST"}, cut)
     _os.environ["SENTRY_TRACES_RATE"] = "0.05"
     monitoring.start(release="test")
     page = flat(text(visitor.get("/privacy")))

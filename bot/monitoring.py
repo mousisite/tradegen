@@ -124,19 +124,31 @@ def _before_send(event: Dict, hint: Optional[Dict] = None) -> Optional[Dict]:
 
 def _scrub_sample(event: Dict, hint: Optional[Dict] = None) -> Optional[Dict]:
     """A page load that worked, sampled for timing: scrubbed as an error report
-    is, and with no query string on the page or on any call it made, since no
-    fault needs explaining. Sentry does not run before_send on these."""
+    is, and then cut to the page's address and how long it and each call it
+    made took, since no fault needs explaining. No query string, no headers,
+    and a call is named by the site it went to, not its path, which can hold
+    a phone's push address. Sentry does not run before_send on these."""
     event = _scrub(event, hint)
     if event is None:
         return None
     try:
         event["request"].pop("query_string", None)
+        event["request"].pop("headers", None)
         for span in event.get("spans") or []:
+            data = span.get("data") or {}
             for key in ("http.query", "http.fragment"):
-                (span.get("data") or {}).pop(key, None)
+                data.pop(key, None)
+            if isinstance(data.get("url"), str):
+                data["url"] = _SITE.sub(r"\1", data["url"])
+            if isinstance(span.get("description"), str):
+                span["description"] = _SITE.sub(r"\1", span["description"])
     except Exception:
         return None
     return event
+
+
+# An address cut to its site: "POST https://host/path?q" becomes "POST https://host".
+_SITE = re.compile(r"(\w+://[^/\s?#]+)[^\s]*")
 
 
 def _sample_rate() -> float:
