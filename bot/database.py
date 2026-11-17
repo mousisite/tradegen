@@ -371,10 +371,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # reader trails from it whatever its bars reach back to. The stop
         # column keeps the stop the trade was opened with: R is measured from
         # it, and a version that knows nothing of trails reads it unchanged.
+        # trail_hit_*: the first crossing of a trailing stop any reader saw
+        # (when, the price, the stop in force then), so it stays a crossing
+        # for every reader once that day's bar is finished.
         "trades": [("breach_noticed", "INTEGER"), ("trail_pct", "REAL"),
                    ("trail_dist", "REAL"), ("trail_atr", "REAL"),
                    ("trail_ts", "INTEGER"), ("trail_best", "REAL"),
-                   ("trail_best_ts", "INTEGER")],
+                   ("trail_best_ts", "INTEGER"), ("trail_hit_ts", "INTEGER"),
+                   ("trail_hit_price", "REAL"), ("trail_hit_stop", "REAL")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
     # Looking and adding happen inside one write transaction, so a second
@@ -898,6 +902,26 @@ def trail_seen(conn: sqlite3.Connection, trade_id: int, best: float,
         "AND (trail_pct IS NOT NULL OR trail_dist IS NOT NULL) AND (trail_best IS NULL "
         "OR (direction > 0 AND trail_best < ?) OR (direction < 0 AND trail_best > ?))",
         (float(best), int(best_at), trade_id, float(best), float(best)))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def trail_crossed(conn: sqlite3.Connection, trade_id: int, when: int, price: float,
+                  stop: float) -> bool:
+    """Keep the first crossing of a trailing stop any reader saw.
+
+    A finished bar is held to the stop in force when it started, because its
+    high and low do not say which came first. So a crossing seen live, after
+    that day's own high had trailed the stop up, is not in the finished
+    bar's reading, and an older one drops out of a reader's bars in time.
+    Kept here, it stays a crossing for every reader. Only the first is kept.
+    Prices are in the trade's own shares. True when this call kept it.
+    """
+    cur = conn.execute(
+        "UPDATE trades SET trail_hit_ts=?, trail_hit_price=?, trail_hit_stop=? "
+        "WHERE id=? AND status='open' AND trail_hit_ts IS NULL "
+        "AND (trail_pct IS NOT NULL OR trail_dist IS NOT NULL)",
+        (int(when), float(price), float(stop), trade_id))
     conn.commit()
     return cur.rowcount == 1
 

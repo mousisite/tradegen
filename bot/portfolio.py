@@ -33,7 +33,9 @@ class Trail:
     volatility later cannot widen it and loosen the stop. since is when it was
     set: the trailed level counts on bars that started after that. best and
     best_at are the best price seen since opening as last stored, so a reader
-    whose bars start later than the trade still trails from it.
+    whose bars start later than the trade still trails from it. hit_at,
+    hit_price and hit_stop are the first crossing of the stop any reader saw,
+    as stored, so a crossing seen live still counts once that bar is done.
     """
     pct: Optional[float] = None
     distance: Optional[float] = None
@@ -41,6 +43,9 @@ class Trail:
     since: int = 0
     best: Optional[float] = None
     best_at: Optional[int] = None
+    hit_at: Optional[int] = None
+    hit_price: Optional[float] = None
+    hit_stop: Optional[float] = None
 
     def level(self, direction: int, best: float) -> float:
         """Where the trail puts the stop, given the best price so far."""
@@ -73,12 +78,18 @@ def trail_of(row) -> Optional[Trail]:
     if not pct and not distance:
         return None
     best = get("trail_best")
+    hit, hit_price, hit_stop = get("trail_hit_ts"), get("trail_hit_price"), get("trail_hit_stop")
+    if hit_price is None or hit_stop is None:
+        hit = None
     return Trail(pct=float(pct) if pct else None,
                  distance=None if pct else float(distance),
                  atr=float(get("trail_atr")) if get("trail_atr") else None,
                  since=int(get("trail_ts") or get("ts_opened") or 0),
                  best=float(best) if best is not None else None,
-                 best_at=int(get("trail_best_ts")) if get("trail_best_ts") is not None else None)
+                 best_at=int(get("trail_best_ts")) if get("trail_best_ts") is not None else None,
+                 hit_at=int(hit) if hit is not None else None,
+                 hit_price=float(hit_price) if hit is not None else None,
+                 hit_stop=float(hit_stop) if hit is not None else None)
 
 
 @dataclass
@@ -107,6 +118,18 @@ class StopRead:
     def moved(self) -> bool:
         """Whether the trail has tightened the stop from where it started."""
         return abs(self.stop - self.initial) > 1e-12 * max(1.0, abs(self.initial))
+
+    def crossing(self, now: float):
+        """The crossing this read saw, as (when, price, stop) to keep, or None.
+
+        The first bar that reached the stop, or else today's price past it,
+        at now. A reader of a trailing stop keeps it (database.trail_crossed).
+        """
+        if self.touched_at is not None:
+            return self.touched_at, self.touched, self.touched_stop
+        if self.past:
+            return int(now), self.price, self.stop
+        return None
 
 
 def _tighter(direction: int, a: float, b: float) -> float:
@@ -165,11 +188,16 @@ def read_stop(bars, direction: int, entry: float, stop: float, opened: int,
     opening: for a long, max(stop, best high - trail); for a short, the
     mirror. The best only ever improves, so the stop only ever tightens. A
     trail set after opening trails from the best since opening too, but a
-    bar from before it was set is held only to the logged stop.
+    bar from before it was set is held only to the logged stop. A crossing
+    of a trailing stop that a reader saw and kept (Trail.hit_at) counts as
+    one: seen live, it is not in that bar's own reading once the bar is done.
     """
     direction = 1 if direction > 0 else -1
     touched_at, touched, touched_stop, best, best_at = _walk(
         bars, direction, entry, stop, opened, split, trail)
+    if (trail is not None and trail.hit_at is not None
+            and (touched_at is None or trail.hit_at < touched_at)):
+        touched_at, touched, touched_stop = trail.hit_at, trail.hit_price, trail.hit_stop
     price = float(bars.last_price) * split
     if trail is not None and trail.best is not None and (trail.best - best) * direction > 0:
         best = trail.best

@@ -377,7 +377,7 @@ db.migrate(old)
 moved = db.connect(old)
 cols = {r[1] for r in moved.execute("PRAGMA table_info(trades)")}
 check("bringing it up to date adds the parts table and the trail columns, twice safely",
-      {"trail_pct", "trail_best", "trail_best_ts"} <= cols
+      {"trail_pct", "trail_best", "trail_best_ts", "trail_hit_ts"} <= cols
       and moved.execute("SELECT COUNT(*) FROM trade_exits").fetchone()[0] == 0)
 check("and its trades read as before", db.open_positions(moved)[0]["quantity"] == 5)
 moved.close()
@@ -537,6 +537,67 @@ try:
     told = [f for f in alerts.check_stops(conn)["fired"] if f.trade_id == th]
     check("so the notice, whose bars never saw that high, still trails from it",
           len(told) == 1 and "104.5" in told[0].message, [f.message for f in told])
+
+    # Seen live: today's own high trails the stop up to 114, then the price
+    # falls through it before the day is out. Once today's bar is finished,
+    # its high and low do not say which came first, so it is held to the
+    # stop from before it, 95, and shows no crossing. The one a reader saw
+    # is kept on the trade, so the stop stays hit for all four.
+    today = NOW - 6 * 3600                      # today's bar started six hours ago
+    days = bars_of([99, 99, 99, 99, 99, 101], [97, 97, 97, 97, 97, 99], live=120,
+                   start=today - 6 * DAY)
+    done = bars_of([99, 99, 99, 99, 99, 101, 120], [97, 97, 97, 97, 97, 99, 104],
+                   live=116, start=today - 6 * DAY)
+
+    def opened_yesterday(symbol):
+        tid = db.open_trade(conn, symbol, "1d", 1, 100.0, 90.0, quantity=60,
+                            trail_pct=0.05, user=alice.id)
+        conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                     (today - DAY + 3600, today - DAY + 3600, today - DAY + 3600, tid))
+        conn.commit()
+        return tid
+
+    tj = opened_yesterday("ZZJ")
+    BARS["ZZJ"] = days
+    mark, pos, said, told = four("ZZJ")
+    check("a new high, live, trails the stop up at once",
+          close(mark["stop"], 114.0) and mark["status"] == "open" and not pos.breached
+          and not told, (mark.get("stop"), mark.get("status"), said))
+    BARS["ZZJ"] = NS(**dict(vars(days), last_price=113.0))
+    mark, pos, said, told = four("ZZJ")
+    check("and a fall through it, live, is a hit for all four",
+          mark["status"] == "past stop" and pos.breached and "PAST STOP" in said
+          and len(told) == 1 and "is at 113, past the trailing stop of 114" in told[0].message,
+          (mark.get("status"), pos.breached, said, [f.message for f in told]))
+    BARS["ZZJ"] = done
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (tj,)).fetchone()
+    check("today's bar, finished, would not show that crossing on its own",
+          read_stop(done, 1, 100.0, 90.0, int(row["ts_opened"]),
+                    trail=Trail(pct=0.05, since=int(row["trail_ts"]), best=120.0,
+                                best_at=int(row["trail_best_ts"]))).touched_at is None)
+    mark, pos, said, told = four("ZZJ")
+    check("but the crossing seen is kept: all four still count the stop as hit",
+          mark["status"] == "past stop" and close(mark["touched"], 113.0)
+          and close(mark["touched_stop"], 114.0) and pos.breached
+          and close(pos.touched_stop, 114.0) and "STOP HIT" in said and not told,
+          (mark.get("status"), mark.get("touched"), pos.breached, said))
+    _trail, before, after = P.trail_from(row, done, 1.0, pct=0.04)
+    check("and no new trail is set on it",
+          "already past its stop" in (trail_problem("ZZJ", 1, before, after) or ""))
+
+    # The journal keeps a crossing it saw too: the notice, which had not
+    # looked at that moment, tells it once the day is done.
+    tj2 = opened_yesterday("ZZJ2")
+    for live in (120.0, 113.0):
+        BARS["ZZJ2"] = NS(**dict(vars(days), last_price=live))
+        row = conn.execute("SELECT * FROM trades WHERE id=?", (tj2,)).fetchone()
+        web._keep_trail_bests(conn, [row], {tj2: web._mark_one(row)})
+    BARS["ZZJ2"] = done
+    told = [f for f in alerts.check_stops(conn)["fired"] if f.trade_id == tj2]
+    check("a crossing the journal saw is told by the notice once the day is done",
+          len(told) == 1 and "traded at 113 on" in told[0].message
+          and "past the trailing stop of 114" in told[0].message
+          and "is at 116 now" in told[0].message, [f.message for f in told])
 
 
     # -----------------------------------------------------------------------
