@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{# viewport-fit=cover lets the page draw under a phone's notch and home bar;
+   style.css keeps the bars and the loading screen clear of them. #}
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
@@ -82,6 +84,17 @@
       href="{{ url_for('static', filename='icon-192.png') }}">
 <link rel="apple-touch-icon" sizes="180x180"
       href="{{ url_for('static', filename='icon-180.png') }}">
+{# Installing it as an app. The bar above the page takes the page's own
+   ground in each theme. On an iPhone the status bar keeps its default
+   style: black-translucent would set its white clock over the light
+   theme's cream bar, where it cannot be read. #}
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f3ee">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191817">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Orenth">
 {# Counts visits for Metricool. Their tag loads a script that sends the full
    address, query string and all, and /email/stop carries a token there. This
    sends their same counter request with the path only, so no third-party
@@ -532,6 +545,17 @@
     window.setTimeout(poll, 4000);
     window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
   })();
+
+  // The service worker: keeps the public files and the offline page, and
+  // shows notifications. Registered once the page has loaded, so it never
+  // competes with the page itself, and not inside the iPhone app, which shows
+  // notifications its own way and has no use for an offline page.
+  if ('serviceWorker' in navigator && !window.Capacitor) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('{{ url_for("service_worker") }}', { scope: '/' })
+        .catch(function () {});
+    });
+  }
 </script>
 </body>
 </html>

@@ -1,0 +1,38 @@
+<!doctype html>
+{# The page the service worker shows when a page cannot be fetched. It is
+   kept on the device, so it stands alone rather than extending base.html:
+   base.html carries the signed-in person's name, menu and alert bar, and
+   none of that may sit in a copy a shared phone keeps. The worker fetches
+   it without cookies too, so this is the same page for everybody. #}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="{{ light }}">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="{{ dark }}">
+<title>No connection · Orenth</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
+</head>
+<body>
+<div class="wrap">
+<main id="main" class="signin">
+  <div class="mark">{% with size=56 %}{% include "_mark.html" %}{% endwith %}</div>
+  <h1>No connection</h1>
+  <p class="lede">This device cannot reach Orenth just now, so that page could
+    not be loaded. Nothing you saved is lost: it is all kept on Orenth's
+    server, and will be here when the connection is back.</p>
+  <button class="btn" type="button" id="retry">Try again</button>
+</main>
+</div>
+<script>
+  // Again the address that failed, which is still the one in the address bar.
+  document.getElementById('retry').addEventListener('click', function () {
+    location.reload();
+  });
+  window.addEventListener('online', function () { location.reload(); });
+</script>
+</body>
+</html>

@@ -68,6 +68,7 @@ from bot import screener as screener_mod
 from bot import strategies as strategies_mod
 from bot import thesis as thesis_mod
 from bot import usage as usage_mod
+from bot import webapp as webapp_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
@@ -186,7 +187,7 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
                     "email_stop", "backtests", "backtest_page", "record",
-                    "record_csv"}
+                    "record_csv", "manifest", "service_worker", "offline"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -2449,6 +2450,62 @@ def favicon():
     return send_from_directory(
         os.path.join(app.root_path, "static"), "favicon.ico",
         mimetype="image/x-icon", max_age=60 * 60 * 24 * 7)
+
+
+# The installable app. A phone or a computer offers to install a site when it
+# finds a manifest, a service worker and https. The worker keeps public files
+# under a name that changes whenever one of them does, worked out once here at
+# start-up from the files themselves.
+ASSET_VERSION = webapp_mod.asset_version(app.root_path)
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    """What a browser needs to install Orenth as an app."""
+    body = webapp_mod.manifest(
+        lambda name: url_for("static", filename=name),
+        start=url_for("index", source="app"),
+        shortcuts=[("Analyse", url_for("index")), ("Monitor", url_for("monitor")),
+                   ("Journal", url_for("trades"))])
+    return Response(json.dumps(body, indent=1), mimetype="application/manifest+json",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.route("/sw.js")
+def service_worker():
+    """The service worker, from the site's root so it can cover every page.
+
+    no-cache, so a browser checks for a new one on every visit rather than
+    keeping an old one for a day. The same file for everybody: nothing in it
+    depends on who asked.
+    """
+    def static(name):
+        return url_for("static", filename=name)
+
+    body = app.jinja_env.get_template("sw.js").render(
+        version=ASSET_VERSION, offline=url_for("offline"),
+        precache=[static(name) for name in webapp_mod.PRECACHE],
+        static_prefix=app.static_url_path.rstrip("/") + "/",
+        icon=static("icon-192.png"), badge=static("badge-96.png"),
+        home=url_for("monitor"), config_url=url_for("push_config"),
+        subscribe_url=url_for("push_subscribe"))
+    return Response(body, mimetype="application/javascript",
+                    headers={"Cache-Control": "no-cache",
+                             "Service-Worker-Allowed": "/"})
+
+
+@app.route("/offline")
+def offline():
+    """The page the service worker shows when there is no connection.
+
+    Kept on the device, so it is the same for everyone and holds nothing
+    about whoever is signed in: it stands alone rather than extending
+    base.html, which carries the person's name and menu.
+    """
+    body = app.jinja_env.get_template("offline.html").render(
+        light=webapp_mod.LIGHT, dark=webapp_mod.DARK)
+    return Response(body, mimetype="text/html",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @app.route("/robots.txt")

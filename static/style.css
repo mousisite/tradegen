@@ -384,6 +384,9 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
    lifted for text, and a white label on it is only 3.14:1. This is 6.32. */
 .btn.danger { background: #a53e2a; border-color: #a53e2a; }
 .btn.danger:hover { background: #8e3423; border-color: #8e3423; }
+/* A button a script hides stays hidden: .btn's own display would otherwise
+   win over the browser's rule for [hidden], and the button would show. */
+.btn[hidden] { display: none; }
 
 /* Off screen until a keyboard reaches it, then over the top bar. */
 .skip {
@@ -687,6 +690,41 @@ ul.list.ok li::marker { color: var(--gain); }
   .pairs dd { text-align: left; padding-top: 2px; }
 }
 
+/* ---------- a phone's notch and home bar ---------- */
+
+/* viewport-fit=cover lets the page draw edge to edge, under a notch, a
+   rounded corner and the home bar, so whatever is pinned to an edge keeps
+   its own content clear of them. On a screen with none of those every
+   env() is zero and nothing moves. Only the bars and the loading screen are
+   handled here; the rest of the phone layout is its own piece of work. The
+   two bars pinned under the top one follow it, after their own rules below. */
+.topbar { padding-top: env(safe-area-inset-top, 0px); }
+.topbar .inner, .demobar .inner {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+}
+.wrap {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+  padding-bottom: calc(var(--s6) + env(safe-area-inset-bottom, 0px));
+}
+.overlay {
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+           env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+.skip:focus { top: calc(var(--s1) + env(safe-area-inset-top, 0px)); }
+@media (max-width: 760px) {
+  .topbar .inner, .demobar .inner {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+  }
+  .wrap {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+    padding-bottom: calc(var(--s5) + env(safe-area-inset-bottom, 0px));
+  }
+}
+
 /* ---------- a stop that has been crossed ---------- */
 
 .card.breach { border-color: var(--loss); background: var(--loss-wash); }
@@ -737,6 +775,22 @@ ul.list.ok li::marker { color: var(--gain); }
 @media (max-width: 760px) {
   .firebar { top: 56px; }
   .firebar .inner { padding: 10px var(--s2); }
+}
+
+/* Under a notch the top bar is taller by the notch, and the bars pinned
+   beneath it move down with it. Here, after their own rules, to win. */
+.firebar, .jump { top: calc(60px + env(safe-area-inset-top, 0px)); }
+.firebar .inner {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+}
+[id^="s-"] { scroll-margin-top: calc(120px + env(safe-area-inset-top, 0px)); }
+@media (max-width: 760px) {
+  .firebar, .jump { top: calc(56px + env(safe-area-inset-top, 0px)); }
+  .firebar .inner {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+  }
 }
 
 /* ---------- accounts ---------- */
