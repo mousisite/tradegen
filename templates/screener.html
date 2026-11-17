@@ -131,9 +131,11 @@
             {% endif %}
             <td class="r fig soft">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
             <td class="r">
-              <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d') }}">Analyse</a>
+              <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d',
+                                               exact=exact_arg(c.symbol)) }}">Analyse</a>
               ·
-              <a data-working href="{{ url_for('research', symbol=c.symbol, interval='1d') }}">Research</a>
+              <a data-working href="{{ url_for('research', symbol=c.symbol, interval='1d',
+                                               exact=exact_arg(c.symbol)) }}">Research</a>
             </td>
           </tr>
         {% endfor %}

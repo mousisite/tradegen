@@ -125,7 +125,8 @@
     {% if not current_user or demo %}
       <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
     {% endif %}
-    <a class="btn quiet" href="{{ url_for('analyse', symbol=symbol, interval='1d') }}">See the full workings</a>
+    <a class="btn quiet" href="{{ url_for('analyse', symbol=symbol, interval='1d',
+                                         exact=exact_arg(symbol)) }}">See the full workings</a>
   </div>
 </section>
 

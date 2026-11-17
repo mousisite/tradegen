@@ -98,7 +98,7 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             user: int = 1,
             progress: Optional[Callable[[str], None]] = None,
             source: str = "engine", resolve_symbol: bool = True,
-            with_calendar: bool = True) -> Analysis:
+            with_calendar: bool = True, exact: bool = False) -> Analysis:
     """Run the full pipeline for one instrument.
 
     `progress` is called with a short status string at each stage, so a caller
@@ -108,6 +108,10 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     `resolve_symbol` and `with_calendar` are for a caller that already holds
     an exact ticker and never reads the earnings calendar, such as the Find
     scan: each is one more request to the data source per instrument.
+
+    `exact` says the symbol is Yahoo's own, as picked from the suggestions:
+    LINK is then Interlink Electronics, not the Chainlink coin a bare LINK
+    means. Its name is still looked up, for the news search.
     """
     started = time.time()
 
@@ -120,7 +124,9 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     info: Dict = {}
     if resolve_symbol:
         step("Resolving %s" % symbol)
-        info = resolve(symbol)
+        # exact is passed only when set, so a stand-in for resolve() that
+        # takes the symbol alone, as the tests use, still works.
+        info = resolve(symbol, exact=True) if exact else resolve(symbol)
         resolved, name = info["symbol"], info.get("name") or info["symbol"]
     else:
         # Used exactly as given. The search behind resolve() falls back to a

@@ -58,11 +58,11 @@ _COINS = {
 # DOGE, ADA, AVAX, LINK and LTC stay coins: they are the coins on the public
 # pages (public.POPULAR), which show each by its bare ticker, so typing what
 # the site shows has to open what it showed. The funds listed as BTC, ETH and
-# XRP hold that same coin; the cost is that Interlink Electronics (LINK) and
-# LTC Properties (LTC) cannot be looked up here. Each coin below stays one
-# step away, in the forms that can only mean a coin (SUI-USD, SUIUSD, SUI/USD,
-# BINANCE:SUIUSDT), and a symbol picked from the suggestions is analysed as
-# picked (see search).
+# XRP, Interlink Electronics (LINK) and LTC Properties (LTC) are reached by
+# Yahoo's exact symbol instead: a pick from the suggestions is sent marked
+# exact (search), and so is every link the site makes to one (needs_exact).
+# Each coin below stays one step away, in the forms that can only mean a coin
+# (SUI-USD, SUIUSD, SUI/USD, BINANCE:SUIUSDT).
 _LISTED_FIRST = {"BCH", "TRX", "ATOM", "NEAR", "APT", "ARB", "SUI", "VET"}
 
 
@@ -277,17 +277,23 @@ def _get(url: str, params: dict, tries: int = _TRIES) -> dict:
         raise DataThrottled(str(exc), exc.seconds)
 
 
-def normalise_symbol(raw: str) -> str:
+def normalise_symbol(raw: str, exact: bool = False) -> str:
     """Turn loose user or screenshot text into a Yahoo-style ticker.
 
     Handles the shapes a chart screenshot actually shows: BTCUSD, BTC/USD,
     BINANCE:ETHUSDT, NASDAQ:AAPL, and a leading dollar-sign cashtag. A coin
     in any of the shapes that can only mean a coin becomes Yahoo's id for it;
     a bare ticker follows the rule above _LISTED_FIRST.
+
+    exact is for Yahoo's own symbol, as a pick from the suggestions sends it.
+    It is only tidied, never read as a coin, so LINK stays Interlink
+    Electronics and BTC the fund listed under that ticker.
     """
     s = (raw or "").strip().upper()
     if not s:
         raise DataError("empty symbol")
+    if exact:
+        return s.replace(" ", "")
     if ":" in s:                       # strip exchange prefix, e.g. NASDAQ:AAPL
         s = s.split(":", 1)[1]
     s = s.lstrip("$").replace(" ", "")
@@ -310,13 +316,32 @@ def normalise_symbol(raw: str) -> str:
     return s
 
 
-def resolve(query: str) -> dict:
+def needs_exact(symbol: str) -> bool:
+    """Whether Yahoo's symbol, typed bare, would be read as something else.
+
+    LINK is Interlink Electronics at Yahoo, but a bare LINK is the Chainlink
+    coin here. A link to the listing, or an alert or watchlist entry saved for
+    it, has to say that it means the symbol exactly. AAPL or BTC-USD reads the
+    same either way, and needs nothing.
+    """
+    try:
+        own = normalise_symbol(symbol, exact=True)
+        return normalise_symbol(own) != own
+    except DataError:
+        return False
+
+
+def resolve(query: str, exact: bool = False) -> dict:
     """Look up a ticker or company name and return the best matching instrument.
 
     Falls back to the normalised string itself when search returns nothing, so
     a valid-but-unindexed symbol still gets a chance at a data fetch.
+
+    With exact, the query is Yahoo's own symbol and the answer is that symbol
+    and no other. The search only supplies its name, which the news search
+    reads: "Interlink Electronics" finds the company's news, "LINK" the coin's.
     """
-    candidate = normalise_symbol(query)
+    candidate = normalise_symbol(query, exact=exact)
     # Search the *normalised* candidate, not the raw text. Querying "$TSLA"
     # verbatim ranks foreign depositary receipts above the real listing.
     # A refusal is passed on rather than guessed past. The guess sends one
@@ -335,7 +360,7 @@ def resolve(query: str) -> dict:
         search_down, quotes = exc, []
     except DataError:
         quotes = []
-    if not quotes and candidate != query.strip().upper():
+    if not quotes and not exact and candidate != query.strip().upper():
         try:
             data = _get(_SEARCH, {"q": query, "quotesCount": 8, "newsCount": 0})
             quotes = [q for q in data.get("quotes", []) if q.get("symbol")]
@@ -354,6 +379,10 @@ def resolve(query: str) -> dict:
     for q in quotes:                                   # exact match wins
         if q["symbol"].upper() == candidate:
             return pack(q)
+    if exact:
+        # Never another instrument. Nor is the symbol a guess, so one the
+        # source turns out not to have is said as such, search or no search.
+        return {"symbol": candidate, "name": candidate, "type": ""}
 
     preferred = ("cryptocurrency", "equity", "etf", "index", "future")
 
@@ -382,6 +411,13 @@ def search(query: str, limit: int = 6) -> list:
     when the lookup fails, because a missing suggestion must never stop
     someone typing the ticker themselves. Answers are cached by _get, so the
     same few letters typed twice ask Yahoo once.
+
+    What is picked here is analysed exactly as picked. An entry whose ticker
+    this app would read as something else, such as Interlink Electronics
+    under LINK beside the Chainlink coin, carries exact, and the box sends it
+    marked so. A coin says it is one: Yahoo calls it by its dollar price
+    ("Chainlink USD") and lists it on an exchange code of its own (CCC),
+    which tells a person choosing between a coin and a company nothing.
     """
     text = (query or "").strip()
     if not text:
@@ -395,17 +431,14 @@ def search(query: str, limit: int = 6) -> list:
         kind = (q.get("quoteType") or "").lower()
         if not q.get("symbol") or kind not in _SUGGEST_KINDS:
             continue
-        # What is picked here is analysed exactly as picked, so an entry whose
-        # ticker this app reads as something else is left out: the fund
-        # listed as XRP would otherwise open the XRP coin.
-        try:
-            if normalise_symbol(q["symbol"]) != q["symbol"].strip().upper():
-                continue
-        except DataError:
-            continue
-        out.append({"symbol": q["symbol"],
-                    "name": q.get("shortname") or q.get("longname") or q["symbol"],
-                    "where": q.get("exchDisp") or ""})
+        name = q.get("shortname") or q.get("longname") or q["symbol"]
+        where = q.get("exchDisp") or ""
+        if kind == "cryptocurrency":
+            if name.upper().endswith(" USD"):
+                name = name[:-4].rstrip() or name
+            where = "coin"
+        out.append({"symbol": q["symbol"], "name": name, "where": where,
+                    "exact": needs_exact(q["symbol"])})
     return out[:limit]
 
 

@@ -128,6 +128,11 @@ def _state(row) -> Optional[str]:
     return row["state"] if "state" in row.keys() else None
 
 
+def _exact(row) -> bool:
+    """Whether the alert was saved for Yahoo's own symbol, read as written."""
+    return bool(row["exact"]) if "exact" in row.keys() else False
+
+
 @dataclass
 class Fired:
     """One alert whose condition was met."""
@@ -478,10 +483,16 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
 
     calls: Dict = {}
     if call_of is not None:
-        for key in {(r["symbol"], _bars_for(r)) for r in rows
+        # The price is fetched as stored either way. The call is an analysis,
+        # which reads a bare LINK as the Chainlink coin, so an alert saved for
+        # Interlink Electronics asks for it exactly; only then, so a call_of
+        # taking a symbol and a bar size alone serves every other alert.
+        for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
                     if r["kind"] in CALL_KINDS}:
+            symbol, interval, exact = key
             try:
-                calls[key] = call_of(*key)
+                calls[key] = (call_of(symbol, interval, exact=True) if exact
+                              else call_of(symbol, interval))
             except Exception:
                 calls[key] = None
 
@@ -525,7 +536,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                            "error": "split history: %s" % str(exc)[:100]})
             continue
         is_call = row["kind"] in CALL_KINDS
-        call = calls.get(key) if is_call else None
+        call = calls.get(key + (_exact(row),)) if is_call else None
         if is_call and call is None:
             db.alert_failed(conn, int(row["id"]), "The call could not be worked out just now.")
             continue

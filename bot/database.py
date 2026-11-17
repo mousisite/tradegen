@@ -323,11 +323,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # price alert's level: the latest split it was moved for, or when its
         # level was last typed. So a split is applied once, and never to a
         # level typed after it.
+        # exact: 1 when the symbol is Yahoo's own and means exactly that,
+        # where a bare ticker would be read as something else: LINK saved
+        # for Interlink Electronics, which a bare LINK, the Chainlink coin,
+        # is not. An entry saved before is 0 and keeps the meaning it had.
         "alerts": [("state", "TEXT"), ("last_error", "TEXT"),
-                   ("last_error_ts", "INTEGER"), ("split_ts", "INTEGER")],
+                   ("last_error_ts", "INTEGER"), ("split_ts", "INTEGER"),
+                   ("exact", "INTEGER NOT NULL DEFAULT 0")],
         # When the background check last told the owner this position had
         # crossed its stop, so it is said once, not every five minutes.
         "trades": [("breach_noticed", "INTEGER")],
+        "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
     # Looking and adding happen inside one write transaction, so a second
     # process starting at the same moment waits here and then finds the
@@ -786,16 +792,38 @@ def _symbol(symbol: str) -> str:
     return sym
 
 
+def _exact(symbol: str, exact: bool) -> int:
+    """The exact column's value: 1 only where the bare ticker reads otherwise."""
+    from .market import needs_exact
+    return 1 if exact and needs_exact(symbol) else 0
+
+
 def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
-              note: str = "", user: int = 1) -> None:
+              note: str = "", user: int = 1, exact: bool = False) -> None:
+    """Watch an instrument, or change the bar size and note of one watched.
+
+    exact says the symbol is Yahoo's own, such as LINK for Interlink
+    Electronics, where a bare LINK is the Chainlink coin. A person has one
+    entry per symbol, so an entry saved before there was an exact column,
+    which still means the coin, moves to the coin's own id rather than be
+    replaced by the listing. If the coin is already watched under that id,
+    the older entry is the same coin twice and goes.
+    """
     sym, uid, now = _symbol(symbol), int(user), int(time.time())
     note = (note or "")[:MAX_NOTE]
+    exact = _exact(sym, exact)
+    if exact:
+        from .market import normalise_symbol
+        conn.execute("UPDATE OR IGNORE watchlist SET symbol=? WHERE user_id=? "
+                     "AND symbol=? AND exact=0", (normalise_symbol(sym), uid, sym))
+        conn.execute("DELETE FROM watchlist WHERE user_id=? AND symbol=? AND exact=0",
+                     (uid, sym))
     conn.execute(
         "INSERT OR REPLACE INTO watchlist "
-        "(symbol, interval, added_ts, note, last_run, user_id) VALUES "
+        "(symbol, interval, added_ts, note, last_run, user_id, exact) VALUES "
         "(?,?,COALESCE((SELECT added_ts FROM watchlist WHERE symbol=? AND user_id=?),?),"
-        "?,(SELECT last_run FROM watchlist WHERE symbol=? AND user_id=?),?)",
-        (sym, interval, sym, uid, now, note, sym, uid, uid))
+        "?,(SELECT last_run FROM watchlist WHERE symbol=? AND user_id=?),?,?)",
+        (sym, interval, sym, uid, now, note, sym, uid, uid, exact))
     conn.commit()
 
 
@@ -835,11 +863,12 @@ _CEILING = object()
 def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
               threshold: Optional[float] = None, interval: str = "1d",
               note: str = "", repeat: bool = False, user: int = 1,
-              cap=_CEILING) -> int:
+              cap=_CEILING, exact: bool = False) -> int:
     """Create an alert. Validation lives here so every caller gets it.
 
     A percent threshold is a fraction: 0.05 is 5%. cap is the most alerts the
-    account may hold: MAX_ALERTS unless given, None for no limit.
+    account may hold: MAX_ALERTS unless given, None for no limit. exact says
+    the symbol is Yahoo's own, as for watch_add.
     """
     if cap is _CEILING:
         cap = MAX_ALERTS
@@ -861,9 +890,9 @@ def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
 
     cur = conn.execute(
         "INSERT INTO alerts (symbol, kind, threshold, interval, note, active, "
-        "created_ts, repeat, user_id) VALUES (?,?,?,?,?,1,?,?,?)",
+        "created_ts, repeat, user_id, exact) VALUES (?,?,?,?,?,1,?,?,?,?)",
         (sym, kind, threshold, interval or "1d", (note or "")[:MAX_NOTE],
-         int(time.time()), 1 if repeat else 0, int(user)))
+         int(time.time()), 1 if repeat else 0, int(user), _exact(sym, exact)))
     conn.commit()
     return int(cur.lastrowid)
 

@@ -99,6 +99,7 @@
         data-working-note="Freezing this call with today's date and drawing its picture.">
     <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
     <input type="hidden" name="interval" value="{{ r.bars.interval }}">
+    {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
     <button class="btn quiet" type="submit">Share this call</button>
   </form>
 {% elif popular_url %}
@@ -562,6 +563,7 @@
             <td class="r">
               <form method="post" action="{{ url_for('add_alert') }}">
                 <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+                {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
                 <input type="hidden" name="kind" value="{{ sg.kind }}">
                 <input type="hidden" name="threshold" value="{{ sg.form_value }}">
                 <input type="hidden" name="interval" value="{{ r.bars.interval }}">
@@ -592,10 +594,12 @@
 
 <div style="display:flex;gap:var(--s1);margin-top:var(--s4);flex-wrap:wrap">
   <a class="btn" data-working
-     href="{{ url_for('research', symbol=r.bars.symbol, interval=r.bars.interval) }}">
+     href="{{ url_for('research', symbol=r.bars.symbol, interval=r.bars.interval,
+                      exact=exact_arg(r.bars.symbol)) }}">
     Research the business</a>
   <form method="post" action="{{ url_for('watch', action='add') }}">
     <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+    {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
     <input type="hidden" name="interval" value="{{ r.bars.interval }}">
     <input type="hidden" name="back" value="{{ request.full_path }}">
     <button class="btn quiet" type="submit">Add to watchlist</button>
@@ -605,7 +609,8 @@
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
   {# The JSON is for an account's own use: for a visitor looking around the
      example it answered only "Not signed in." #}
-  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
+  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
+                                       exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
   · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
 </p>

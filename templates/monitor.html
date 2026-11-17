@@ -67,7 +67,8 @@
               <td class="r">
                 {% if s.data.get('symbol') %}
                   <a data-working href="{{ url_for('analyse', symbol=s.data.symbol,
-                     interval=s.data.get('interval', '1d')) }}">Open</a>
+                     interval=s.data.get('interval', '1d'),
+                     exact=exact_arg(s.data.symbol, s.data.get('exact'))) }}">Open</a>
                 {% elif s.data.get('trade_id') %}
                   <a href="{{ url_for('trades') }}">Journal</a>
                 {% endif %}
@@ -315,7 +316,7 @@
             <td class="r">
               <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">
                 <a data-working href="{{ url_for('analyse', symbol=w['symbol'],
-                   interval=w['interval']) }}">Analyse</a>
+                   interval=w['interval'], exact=exact_arg(w['symbol'], w['exact'])) }}">Analyse</a>
                 <form method="post" action="{{ url_for('watch', action='remove') }}">
                   <input type="hidden" name="symbol" value="{{ w['symbol'] }}">
                   <button class="btn quiet sm" type="submit">Remove</button>
@@ -410,7 +411,8 @@
             </td>
             <td class="r">
               <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center;flex-wrap:wrap">
-                <a data-working href="{{ url_for('research', symbol=row['symbol']) }}">Review</a>
+                <a data-working href="{{ url_for('research', symbol=row['symbol'],
+                   exact=exact_arg(row['symbol'])) }}">Review</a>
                 {% if not row['outcome'] %}
                   <form method="post" action="{{ url_for('close_thesis') }}"
                         style="display:flex;gap:4px;align-items:center">
