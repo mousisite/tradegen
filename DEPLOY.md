@@ -328,6 +328,111 @@ push settings as well: `APNS_KEY_ID` is the same Key ID, and
 
 ---
 
+## 7. Optional: selling Pro in the iPhone app
+
+Inside the iPhone app, Apple allows Pro to be sold only through its own
+in-app purchase. Pro bought in the app works on the website too, and Pro
+bought on the website works in the app. Nothing changes on the site until
+`APPLE_APP_ID` is set. `mobile/APP_STORE.md` (Part 5, "Sell Pro in the app")
+has the App Store Connect half: the agreements, the two subscriptions and
+the review. This is the server's half. Pro needs the Stripe settings too,
+because they are what switch Free and Pro on.
+
+1. In App Store Connect, open Orenth, then **App Information** (under
+   General). Write down the number shown as **Apple ID**: about ten digits.
+2. On the same page, under **App Store Server Notifications**, set both the
+   **Production Server URL** and the **Sandbox Server URL** to
+   `https://orenth.app/apple/notifications`, and choose **Version 2** for
+   each. Save.
+3. In Render, open the service, then **Environment**, and add:
+
+   ```
+   APPLE_APP_ID = <the Apple ID number from step 1>
+   ```
+
+   Save. Render redeploys, and the start-up lines in its log say
+   `app purchases  on for app.orenth.ios.pro.monthly, app.orenth.ios.pro.yearly`.
+4. Do section 8 below, so Cloudflare never stops Apple's server.
+
+These are optional, and right as they are unless you change the products:
+
+```
+APPLE_PRODUCT_IDS   = app.orenth.ios.pro.monthly,app.orenth.ios.pro.yearly
+APPLE_BUNDLE_ID     = app.orenth.ios
+APPLE_SANDBOX_PRO   = all
+APPLE_SANDBOX_USERS =
+```
+
+**Test purchases.** Builds run from Xcode, TestFlight builds and App Review
+all buy in Apple's sandbox, where nothing is charged. App Review uses the
+real build with a sandbox account, and rejects an app whose purchase gives
+nothing, so by default (`APPLE_SANDBOX_PRO=all`) a test purchase gives Pro,
+and the pages call it a test purchase. Because of that, give TestFlight
+builds only to your own internal testers: anyone with one could give
+themselves Pro for free. `allowlist` gives test purchases Pro only to the
+accounts whose email addresses are in `APPLE_SANDBOX_USERS`, and `none` to
+nobody. Never use either while a build is in review, unless the review
+account is on the list. A change takes effect when Render restarts.
+
+**Before each App Review submission**, put the review account back on Free,
+in Render's **Shell** tab:
+
+```
+python tools/reset_test_purchases.py
+```
+
+**How it works.** Apple's server tells this one about every purchase,
+renewal, refund and cancellation at `/apple/notifications`. Each one is
+signed by Apple and checked against Apple's root certificate, which is built
+into the code. A notification is answered with 200 only once it is stored;
+anything else and Apple sends it again, for about a week. If one keeps being
+refused, the log (and Sentry) says "App Store notifications keep failing
+their check", which nearly always means `APPLE_APP_ID` or `APPLE_BUNDLE_ID`
+is wrong. The App Store Server API, and an In-App Purchase key for it, are
+not used.
+
+---
+
+## 8. Cloudflare: let Apple's and Stripe's servers through
+
+Cloudflare sits in front of orenth.app. Its bot protection can answer a
+request with a "checking your browser" page, which another company's server
+can never pass. Every message Apple or Stripe sends is then quietly lost:
+renewals stop being recorded, refunds stop taking Pro away, and an Apple
+Account deleted on Apple's side is never heard of. Three addresses must skip
+those checks. It is safe: each of them checks the sender's signature itself
+and refuses anything else.
+
+- `/apple/notifications` (purchases in the iPhone app)
+- `/auth/apple/notifications` (Sign in with Apple)
+- `/billing/webhook` (Stripe)
+
+1. Go to https://dash.cloudflare.com, click **orenth.app**, then
+   **Security**, then **WAF**, then the **Custom rules** tab. Click
+   **Create rule**.
+2. Rule name: `Let Apple and Stripe servers through`.
+3. Click **Edit expression**, and paste this:
+
+   ```
+   (http.request.method eq "POST" and http.request.uri.path in {"/apple/notifications" "/auth/apple/notifications" "/billing/webhook"})
+   ```
+
+4. Under **Then take action**, choose **Skip**. Tick every box it offers:
+   **All remaining custom rules**, **All rate limiting rules**, **All managed
+   rules**, and **All Super Bot Fight Mode Rules**. Under **More components
+   to skip**, tick **Browser Integrity Check**, **Security Level** and
+   **User Agent Blocking**.
+5. Under **Place at**, choose **First**. Click **Deploy**.
+6. Click **Security**, then **Bots**. If **Bot Fight Mode** is on (the free
+   plan's version), turn it off: a rule cannot make it skip these
+   addresses. **Super Bot Fight Mode** (paid plans) is skipped by the rule.
+7. To check it, make a test purchase in the app (`mobile/APP_STORE.md`,
+   Part 5), then open **Security**, then **Events**, and filter by the path
+   `/apple/notifications`. There should be no **Managed Challenge**,
+   **Challenge** or **Block** there.
+
+---
+
 ## The whole environment, in one place
 
 | Variable | Needed | What it does |
@@ -344,7 +449,10 @@ push settings as well: `APNS_KEY_ID` is the same Key ID, and
 | `GOOGLE_REDIRECT_URI` | no | Only if the callback differs from `PUBLIC_URL` + path |
 | `APPLE_TEAM_ID`, `APPLE_SIGNIN_KEY_ID`, `APPLE_SIGNIN_PRIVATE_KEY` | for Apple sign-in | All three turn on Sign in with Apple in the iPhone app. See section 6 |
 | `APPLE_SERVICES_ID` | for Apple on the website | With the three above, adds "Continue with Apple" to the website |
-| `APPLE_BUNDLE_ID` | no | The iPhone app's bundle id, default `app.orenth.ios` |
+| `APPLE_BUNDLE_ID` | no | The iPhone app's bundle id, default `app.orenth.ios`. Sign in with Apple and in-app purchase both use it |
+| `APPLE_APP_ID` | for selling Pro in the app | The app's number (Apple ID) from App Store Connect. Switches on in-app purchase, and Apple's production notifications must name it. See section 7 |
+| `APPLE_PRODUCT_IDS` | no | The subscriptions that are Pro, default `app.orenth.ios.pro.monthly,app.orenth.ios.pro.yearly` |
+| `APPLE_SANDBOX_PRO`, `APPLE_SANDBOX_USERS` | no | Whether test purchases give Pro: `all` (the default, which App Review needs), `allowlist` (only the email addresses in `APPLE_SANDBOX_USERS`) or `none` |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
 | `VAPID_PRIVATE_KEY` | recommended | The key browser notifications are signed with. Made and kept in `/data/vapid.pem` if unset; copy that file's text here so it outlives the disk. See "Notifications" below |
 | `VAPID_PUBLIC_KEY` | no | Only checked against the private key; the server works it out itself |

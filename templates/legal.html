@@ -64,9 +64,22 @@
       them.</li>
   </ul>
   <p class="prose">There are no passwords, so there are none to leak.</p>
-  <p class="prose">If you subscribe to Pro, Orenth stores the customer number
-    Stripe gives it and whether your plan is active. It never sees or stores
-    your card.</p>
+  <p class="prose">If you subscribe to Pro{% if iap_on %} on the website{% endif %},
+    Orenth stores the customer number Stripe gives it and whether your plan
+    is active. It never sees or stores your card.</p>
+  {% if iap_on %}
+  <p class="prose" id="apple-purchases">If you subscribe to Pro in the iPhone
+    app, Apple takes the payment, through your Apple Account, and Orenth never
+    sees your card or your Apple Account. Orenth keeps what Apple signs and
+    sends about the subscription: its transaction numbers, which plan it is,
+    when it was bought, renews or ends, whether it was refunded, and an
+    anonymous account token. That token is a random number Orenth made for
+    your account, which the app hands to Apple with each purchase so that
+    renewals and restored purchases reach the right account; it says nothing
+    about who you are. If a subscription is moved from one Orenth account to
+    another, Orenth keeps which account it left and when, and emails that
+    account to say so.</p>
+  {% endif %}
   <p class="prose">If you press Share on an analysis, Orenth makes a public
     page with that stock, the call, its counts and the date. It does not show
     your name or email. Deleting your account deletes these pages.</p>
@@ -147,9 +160,15 @@
         <tr><td>Metricool</td><td>The page address without anything after a ?, the
             window size and the page you came from, only while not signed in</td>
             <td>Counting visits. No cookie, and nothing that identifies you</td></tr>
-        <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe</td>
+        <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe{% if iap_on %} on the website{% endif %}</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
+        {% if iap_on %}
+        <tr><td>Apple</td><td>The anonymous account token, only if you
+            subscribe in the iPhone app</td>
+            <td>Taking payment for Pro bought in the app, and telling Orenth
+              about its renewals and refunds</td></tr>
+        {% endif %}
         <tr><td>Sentry</td><td>When something breaks: the error, the page
             address and the values the failing code was working with, which
             can include your email address. Cookies, form contents and
@@ -192,6 +211,10 @@
     strategy record stays, because it was never yours alone and contains
     nothing about you.{% if apple_native %} If you signed in with Apple, it
     also asks Apple to end Orenth's access to your Apple Account.{% endif %}
+    {% if iap_on %}It deletes Orenth's record of any Pro bought through Apple
+    too, but it cannot cancel that subscription: Apple keeps billing until you
+    cancel it in your iPhone's Settings &gt; Apple Account &gt;
+    Subscriptions, which the Account page says before you delete.{% endif %}
   </p>
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
@@ -279,13 +302,33 @@
   {% if billing_on %}
   <h2>Pro</h2>
   <p class="prose">
-    Pro is a monthly or yearly subscription, taken by Stripe, that renews
-    until you cancel. You can cancel at any time from your Account page; you
-    keep Pro until the end of the period you have paid for. Deleting your account
-    cancels it straight away. Pro gives you more of the
-    same analysis, not better odds: the measurements, warnings and calls are
-    identical on both plans, and none of it is financial advice.
+    Pro is a monthly or yearly subscription that renews automatically until
+    you cancel it. You keep Pro until the end of the period you have paid
+    for. The same Pro works on the website and in the iPhone app, wherever
+    you bought it. Pro gives you more of the same analysis, not better odds:
+    the measurements, warnings and calls are identical on both plans, and
+    none of it is financial advice.
   </p>
+  <p class="prose">
+    {% if in_app %}<b>Bought on the Orenth website:</b> cancel it at any
+    time from the Account page there. Deleting your account cancels it
+    straight away.{% else %}<b>Bought on this website:</b> Stripe takes the
+    payment. You can cancel at any time from your Account page, and deleting
+    your account cancels it straight away.{% endif %}
+  </p>
+  {% if iap_on %}
+  <p class="prose" id="apple">
+    <b>Bought in the iPhone app:</b> Apple takes the payment, and Apple's
+    <a href="https://www.apple.com/legal/internet-services/itunes/dev/stdeula/">Licensed
+    Application End User License Agreement</a> applies too. Payment is
+    charged to your Apple Account when you confirm the purchase. The
+    subscription renews automatically, at the same price and for the same
+    length, unless it is cancelled at least 24 hours before the end of the
+    current period. Manage or cancel it in your iPhone's Settings &gt; Apple
+    Account &gt; Subscriptions. Deleting your Orenth account does not cancel
+    it. Refunds are Apple's to give.
+  </p>
+  {% endif %}
   {% endif %}
 
   <h2>Liability</h2>

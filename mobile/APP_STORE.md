@@ -10,8 +10,9 @@ native parts change (this folder).
 
 **Part 1** says who signs up with Apple. **Part 2** is the Mac. **Part 3** is
 Apple's developer website and the Render settings. **Part 4** is the review
-account. **Part 5** is App Store Connect, with every answer ready to paste.
-**Part 6** is the list to check before you press Submit.
+account. **Part 5** is App Store Connect, with every answer ready to paste,
+and selling Pro in the app. **Part 6** is the list to check before you press
+Submit.
 
 ---
 
@@ -148,7 +149,8 @@ Go to https://developer.apple.com/account, then **Certificates, Identifiers
    choose **App IDs**, then **App**, type the description `Orenth` and the
    Bundle ID (Explicit) `app.orenth.ios`. Either way, make sure **Push
    Notifications** and **Sign In with Apple** are ticked. Leave Sign In with
-   Apple as **Enable as a primary App ID**. Save.
+   Apple as **Enable as a primary App ID**. Save. (**In-App Purchase** is on
+   for every App ID like this one; there is nothing to tick for it.)
 2. **Tell Apple where account changes go.** On that same App ID, click
    **Configure** (or **Edit**) next to Sign In with Apple. Server-to-Server
    Notification Endpoint: `https://orenth.app/auth/apple/notifications`.
@@ -202,6 +204,12 @@ whole thing (the BEGIN and END lines too) as the value.
 | `REVIEW_LOGIN_EMAIL` | the review account's email | Part 4 |
 | `REVIEW_LOGIN_CODE` | the review account's code | Part 4 |
 | `STOCKBOT_CONTACT` | an email address people can write to | you |
+| `APPLE_APP_ID` | the app's number (its Apple ID), digits only | Part 5, "Sell Pro in the app", step 14 |
+
+`APPLE_APP_ID` switches on selling Pro in the app, so add it when you get to
+that step in Part 5, not before. Three more settings for it are optional:
+`APPLE_PRODUCT_IDS`, `APPLE_SANDBOX_PRO` and `APPLE_SANDBOX_USERS` (see
+DEPLOY.md section 7). Leave them unset.
 
 Click **Save Changes**. Render restarts the site. Its log then lists the ways
 to sign in that are set up.
@@ -292,19 +300,24 @@ LOOK AROUND FIRST
 Explore a full example account without signing up. Create a free account to keep your own journal, watchlist and alerts.
 
 FREE AND PRO
-Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits.
+Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits: as many stocks and coins a day as you like, every result in every Find list, and as many alerts as you like.
+
+Orenth Pro is an auto-renewing subscription: Orenth Pro Monthly (1 month) or Orenth Pro Yearly (1 year). The price is shown in the app, in your currency, before you buy. Payment is charged to your Apple Account when you confirm the purchase. The subscription renews automatically unless it is cancelled at least 24 hours before the end of the current period. Manage or cancel it in Settings > Apple Account > Subscriptions.
 
 PRIVACY
 No ads and no tracking. Your journal, watchlist and alerts belong to your account. You can download them or delete your account at any time from the Account page.
 
 Orenth is analysis software, not financial advice. Every figure is measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
 
-Terms of use: https://orenth.app/terms
-Privacy: https://orenth.app/privacy
+Terms of Use (EULA): https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
+Orenth terms: https://orenth.app/terms
+Privacy policy: https://orenth.app/privacy
 ```
 
-When Pro goes on sale in the app, add one line before "Terms of use" with
-each plan's name, length and price, as App Store Connect shows them.
+The "Terms of Use (EULA)" line is Apple's standard licence. Apple asks for
+it in the description itself, not only in the app; apps are turned down
+when it is missing. If you add another language later, put the same lines
+in that language's description too.
 
 **Keywords** (100 characters at most; the words in the name and subtitle
 already count, so they are not repeated):
@@ -349,9 +362,9 @@ tracking: No**, **Purpose: App Functionality** (and nothing else).
 | Contact Info: **Phone Number** | Only if text-message sign-in is switched on (the Twilio settings). Skip it otherwise |
 | Financial Info: **Other Financial Info** | The account size, positions and prices people type into the journal and settings. No bank, card or brokerage details, ever |
 | User Content: **Other User Content** | Journal notes, saved theses, the watchlist and alerts |
-| Identifiers: **User ID** | The account number, and the Google or Apple account number |
+| Identifiers: **User ID** | The account number, the Google or Apple account number, and the random account token the app hands Apple with each purchase |
 | Identifiers: **Device ID** | The notification address of each iPhone that turns notifications on |
-| Purchases: **Purchase History** | Whether the account has Pro, and its subscription record |
+| Purchases: **Purchase History** | Whether the account has Pro, and its subscription record: for Pro bought in the app, the transaction numbers, plan and dates Apple sends |
 | Search History | The history of stocks and coins each person analysed, shown back to them |
 | Usage Data: **Product Interaction** | Which stocks each free account opened today (the daily allowance), and its alert history |
 | Other Data: **Other Data Types** | The network address of each sign-in code request (kept 30 days, to stop abuse), and the browser description saved with each sign-in |
@@ -416,13 +429,150 @@ prices, company filings and news headlines.
   can ask for proof that you may show the data (rule 5.2.2). Until then,
   answer the "rights" question honestly.
 
+### Sell Pro in the app (in-app purchase)
+
+Inside the app, Apple allows Pro to be sold only through Apple's in-app
+purchase (rule 3.1.1). It is the same Pro as on the website: bought in the
+app, it works on the website; bought on the website, it works in the app.
+The app's Pricing screen already does the selling. These steps set up the
+two things it sells. Do them once, in order.
+
+Before selling anything, read **Content rights** below: the prices Orenth
+shows need a licence that covers a paid app.
+
+**A. Money and agreements.** The **Account Holder** does these (the parent,
+if they signed up in Part 1).
+
+1. In App Store Connect, click **Business** (on some accounts it is called
+   **Agreements, Tax, and Banking**). Next to **Paid Apps**, click **View and
+   Agree to Terms**. Read it, and agree. This cannot be undone.
+2. Still in **Business**, add a **bank account** in the Account Holder's
+   name, and fill in the **tax forms** (in the United States, the W-9).
+3. Wait until **Paid Apps**, the **bank account** and the **tax forms** all
+   say **Active**. It can take a day or more. Until then the app shows no
+   plans at all, not even in testing.
+4. Join the **App Store Small Business Program**:
+   https://developer.apple.com/app-store/small-business-program/enroll/ . It
+   needs the Paid Apps Agreement first. Apple then keeps 15% instead of 30%.
+   The lower rate starts about two weeks after the end of the month you are
+   accepted, so do it before launch.
+
+**B. The two subscriptions.**
+
+5. Click **Apps**, then **Orenth**. In the left column, under
+   **Monetization**, click **Subscriptions**.
+6. Make a **subscription group**: click **+** (or **Create**) next to
+   Subscription Groups. Reference Name: `Orenth Pro`. Create.
+7. In the group, make the first subscription. Reference Name: `Pro Monthly`.
+   Product ID: `app.orenth.ios.pro.monthly`. Create. On its page:
+   - **Subscription Duration**: `1 Month`.
+   - **Subscription Prices**: click **Add Subscription Price**, choose
+     **United States**, pick **$9.99**, and let Apple work out the other
+     countries. Next, then Confirm.
+   - **Availability**: the same countries as the app (United States).
+8. Make the second one the same way. Reference Name: `Pro Yearly`. Product
+   ID: `app.orenth.ios.pro.yearly`. Duration `1 Year`. Price **$79.99**.
+
+   Type both product IDs exactly. They can never be changed or used again,
+   even after deleting, and a duration cannot change after it is submitted.
+9. Put both on the **same level**. In the group, each subscription shows a
+   level. Click **Edit Subscription Levels** (or drag them) until both say
+   **Level 1**. On one level, switching between monthly and yearly happens
+   at the next renewal, with no second charge.
+10. For **each** of the two subscriptions, fill in:
+    - **Localization**, English (U.S.). Display Name: `Orenth Pro Monthly`
+      (or `Orenth Pro Yearly`). Description: `All Pro tools, billed monthly`
+      (or `All Pro tools, billed yearly`). People see these when they manage
+      their subscriptions.
+    - **Review Information**. Screenshot: a picture of the app's subscribe
+      screen (in the app: Menu, Account, See Pro), taken on your iPhone with
+      the plans showing (step 20). Review Notes: `Pro removes the daily
+      limits. It is bought in the app under Go Pro, or Menu > Account > See
+      Pro.`
+    - **Family Sharing**: leave it **off**. Once on, it can never be turned
+      off.
+11. Give the group a name people see, too: click the group, then
+    **Localization** (or **App Store Localization**), English (U.S.).
+    Subscription Group Display Name: `Orenth Pro`.
+12. **Billing Grace Period**. On the Subscriptions page, find **Billing
+    Grace Period** and click **Set Up** (or **Turn On**). Duration:
+    **16 days**. Eligible subscribers: **All Renewals**. Server environment:
+    **Production and Sandbox**. Confirm. When a renewal payment fails,
+    people keep Pro for those 16 days while Apple tries their card again. It
+    can take up to a day to start.
+
+**C. Tell Apple where to send news about subscriptions.**
+
+13. Click **App Information** (left column, under General). Find **App Store
+    Server Notifications**. Set the **Production Server URL** to
+    `https://orenth.app/apple/notifications` and choose **Version 2**. Set
+    the **Sandbox Server URL** to the same address, also **Version 2**. Save.
+14. On the same page, under General Information, find **Apple ID**: a number
+    of about ten digits. That is `APPLE_APP_ID`.
+
+**D. Switch it on.**
+
+15. In Render (Part 3), add `APPLE_APP_ID` with that number. Save. When
+    Render has restarted, its log says `app purchases  on for
+    app.orenth.ios.pro.monthly, app.orenth.ios.pro.yearly`.
+16. In Cloudflare, add the rule in DEPLOY.md section 8, so Apple's messages
+    about subscriptions are never stopped by a "checking your browser" page.
+17. In Xcode, check that the **In-App Purchase** capability is there (Part 2,
+    step 18). If not, add it, and build the app again.
+
+**E. Try it on your iPhone, for free, with a sandbox account.**
+
+18. In App Store Connect, click **Users and Access**, then **Sandbox** (or
+    the **Sandbox** tab), then **Test Accounts**, then **+**. Use an email
+    address that is not an Apple Account yet. Adding `+test1` before the @ of
+    your own Gmail address works. Make a second one for later tests.
+19. On the iPhone (Developer Mode is on from Part 2): open **Settings >
+    Developer > Sandbox Apple Account** and sign in with the test account.
+    Stay signed in to your own Apple Account as usual.
+20. Run Orenth from Xcode (Part 2, step 22). Sign in with a free account.
+    Tap **Go Pro** (or Menu, Account, See Pro). Both plans show, with their
+    prices. Tap **Subscribe** on one. Apple's sheet says **[Sandbox]**:
+    confirm. The screen says you have Pro. Take the review screenshot
+    (step 10) on the screen before you buy.
+21. Open the **Account** page: it says Pro, through Apple, from a test
+    purchase. Tap **Manage subscription**: Apple's own sheet opens. In the
+    sandbox a month lasts a few minutes, and the subscription renews a few
+    times by itself and then stops.
+22. Delete the app, run it again from Xcode, sign in, and tap **Restore
+    Purchases**: Pro comes back.
+23. Open https://orenth.app in a browser, signed in to the same account: it
+    has Pro, and says it is through Apple.
+
+If no plans show at step 20: check step 3 (all **Active**), that both
+subscriptions say **Ready to Submit**, and the product IDs. A change in App
+Store Connect can take an hour to reach the sandbox.
+
+**F. Submit them with the app.**
+
+24. The first subscriptions can only be reviewed together with a new version
+    of the app. On the version page ("1.0 Prepare for Submission"), find
+    **In-App Purchases and Subscriptions**, click **+** (or **Select In-App
+    Purchases or Subscriptions**), tick both subscriptions, and click Done.
+25. The App Store description already has the **Terms of Use (EULA)** line
+    (Version page, above). The privacy policy URL is in **App Privacy**.
+26. Before **every** submission, put the review account back on Free, so the
+    reviewer can buy. In Render, open the **Shell** tab and type:
+
+    ```
+    python tools/reset_test_purchases.py
+    ```
+
+27. Leave `APPLE_SANDBOX_PRO` unset while a build is in review. App Review
+    buys in the sandbox; if that purchase gave no Pro, Apple would turn the
+    app down (rule 2.1).
+
 ### App Review Information
 
 - **Sign-in required**: tick it. User name: the `REVIEW_LOGIN_EMAIL`.
   Password: the `REVIEW_LOGIN_CODE`.
 - **Contact information**: the account holder's name, phone and email.
-- **Notes**: paste this, then fill in the four `[square brackets]`. It
-  must stay under 4,000 characters (it is about 2,400).
+- **Notes**: paste this, then fill in the three `[square brackets]`. It
+  must stay under 4,000 characters (it is about 2,900).
 
 ```
 ABOUT ORENTH
@@ -446,7 +596,9 @@ WHAT IS NATIVE
 - Pull any page down to reload it. Swipe in from the left edge to go back.
 - Offline screen: turn on Airplane Mode and pull a page down. Tap Try again once back online.
 - Links to other websites open in a sheet over the app with a Done button.
-- In-app purchase: [where Pro is bought in the app, for example Menu > Account > See Pro].
+
+IN-APP PURCHASE
+Signed in as the review account (free plan), tap Go Pro at the top, or Menu > Account > See Pro. Both subscriptions (Orenth Pro Monthly and Yearly, one group) show there with their prices from the App Store, Restore Purchases, and links to the Terms of Use (EULA), Terms and Privacy Policy. After buying, the Account page has Manage subscription, which opens Apple's sheet. Orenth is also a website (guideline 3.1.3(b)): Pro bought there also works in the app, and the app sells the same Pro only through in-app purchase, with no link to buying on the website.
 
 DELETING AN ACCOUNT
 Signed in: tap the round account picture at the top right > Account > "Leaving" at the bottom of the page > type delete > Delete my account. Everything is deleted straight away, not deactivated.
@@ -471,10 +623,13 @@ app, signed in as the review account:
 
 1. **Google sign-in works in the app** and leaves you signed in to the app,
    not to Safari. **Sign in with Apple** works too.
-2. **Pro can be bought in the app with Apple's in-app purchase**, and there
-   is a **Restore** button. Apple will not accept an app where Pro is bought
-   only on the website (rule 3.1.1). Inside the app, the site already hides
-   every Stripe button, web price and discount box.
+2. **Pro can be bought in the app with Apple's in-app purchase** (Part 5,
+   "Sell Pro in the app", steps 18 to 23, with a sandbox account): both plans
+   show with prices, **Restore Purchases** works, and **Manage subscription**
+   opens Apple's sheet. Apple will not accept an app where Pro is bought only
+   on the website (rule 3.1.1). Inside the app, the site already hides every
+   Stripe button, web price and discount box. Both subscriptions are added
+   to this version (step 24).
 3. **No page says "not set up"**, or shows an error about a missing key. If
    the chart-screenshot reader is on, the app must say that the picture is
    sent to Anthropic and ask before the first one (rule 5.1.2).
@@ -482,10 +637,15 @@ app, signed in as the review account:
    is no "add to Home Screen" box inside the app.
 5. **The site answers quickly.** If Render is asleep or slow, App Review sees
    a blank screen. Make sure Cloudflare is not showing a "checking your
-   browser" page to phones.
+   browser" page to phones, and that its rule for Apple's and Stripe's
+   servers is in place (DEPLOY.md section 8).
 6. **Account deletion** works from the Account page and confirms it is done.
 7. The **review sign-in** works (Part 4, step 4), and the review account is
-   on the **Free** plan.
+   on the **Free** plan: run `python tools/reset_test_purchases.py` in
+   Render's Shell after any test purchase with it.
+8. **Deleting an account that has an Apple subscription** says first that
+   Apple keeps billing until it is cancelled, with a **Manage subscription**
+   button, and still deletes straight away.
 
 ---
 
@@ -508,6 +668,12 @@ app, signed in as the review account:
 - `ios/App/App/MainViewController.swift`: the screen (swipe back, pull to
   refresh). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
   Google sign-in (JavaScript name `WebAuth`).
+- `ios/App/App/AppPurchasePlugin.swift`: Apple's in-app purchase, StoreKit 2
+  (JavaScript name `AppPurchase`). It hands every transaction to the page as
+  Apple's signed JWS and finishes one only when the page says the server has
+  it. On the website, `static/app-purchase.js` is the subscribe screen and
+  the go-between, `bot/appstore.py` checks Apple's signatures, and
+  `bot/apple_store.py` decides who has Pro.
 - `scripts/add-native-files.js`: lists new native files in the Xcode project
   and keeps the app iPhone-only. `scripts/check-project.js` checks it.
 - `scripts/make_assets.py`, then `npx @capacitor/assets generate --ios`:

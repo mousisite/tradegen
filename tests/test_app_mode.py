@@ -265,7 +265,8 @@ try:
                           ("an Apple Pro account", applesub)):
             client = web.app.test_client()
             sign_in(client, user)
-            for path in ("/", "/pricing", "/account", "/monitor", "/ideas"):
+            # The Terms too: the subscribe screen links to them.
+            for path in ("/", "/pricing", "/account", "/monitor", "/ideas", "/terms"):
                 response = client.get(path, headers=IN_APP)
                 page = text(response)
                 check("%s: %s inside the app sells only through Apple" % (who, path),

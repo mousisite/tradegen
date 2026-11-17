@@ -1681,6 +1681,15 @@ class Pages(WebBase):
         client = self.make_apple_pro(self.ann, env="Sandbox")
         self.assertIn("from a test purchase", self.text(client.get("/pricing", headers=IN_APP)))
 
+    def test_the_legal_pages_say_what_apple_purchases_keep(self):
+        privacy = self.text(CLIENT.get("/privacy"))
+        self.assertIn("anonymous account token", privacy)
+        self.assertIn("Apple takes the payment", privacy)
+        terms = self.text(CLIENT.get("/terms"))
+        self.assertIn("Bought in the iPhone app", terms)
+        self.assertNotIn("stripe", self.text(CLIENT.get("/terms", headers=IN_APP)).lower())
+
+
 class Script(unittest.TestCase):
     """static/app-purchase.js, read the way the app will run it."""
 
