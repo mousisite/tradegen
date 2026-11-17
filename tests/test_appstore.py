@@ -9,6 +9,8 @@ belongs to, and what the site does with it.
     refunds and their reversal, notifications out of order or twice, old
     copies sent again, one Apple ID shared by two accounts, test purchases,
     moving a subscription, and deleting an account.
+  - What the site does with it (web.py): Apple's notification address, and
+    the app's state, transactions and move addresses.
 
 Apple's tests cannot sign with Apple's key either: they swap in a test root
 (testCA.der) and sign with a key under it, and so do these.
@@ -21,6 +23,7 @@ import datetime
 import hashlib
 import json
 import os as _os
+import re
 import sqlite3
 import sys as _sys
 import tempfile
@@ -1125,6 +1128,390 @@ class Concurrency(unittest.TestCase):
                     _os.remove(path + suffix)
                 except OSError:
                     pass
+
+
+# --- what the site does with it ----------------------------------------------------
+
+import harness  # noqa: E402
+
+STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
+          "STRIPE_PRICE_ID_YEARLY": "price_y", "STRIPE_WEBHOOK_SECRET": "whsec_test"}
+for _key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL", "SMTP_HOST", "SMTP_USER",
+                            "SMTP_PASSWORD", "MAIL_FROM"]:
+    _os.environ.pop(_key, None)
+
+CLIENT, WEB_DB = harness.isolated_web("appstore")
+import web  # noqa: E402
+
+web.app.config["AUTH_MODE"] = None
+APP_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Mobile/15E148 OrenthApp/1")
+SAFARI_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1")
+IN_APP = {"User-Agent": APP_UA}
+# What WKWebView sends with a fetch from a page on this site.
+FROM_PAGE = {"User-Agent": APP_UA, "Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"}
+WEB_CHAIN = Chain(name="Web")
+PRICES = {"price_x": {"unit_amount": 999, "currency": "usd",
+                      "recurring": {"interval": "month", "interval_count": 1}},
+          "price_y": {"unit_amount": 7999, "currency": "usd",
+                      "recurring": {"interval": "year", "interval_count": 1}}}
+# Words that must never reach a page drawn inside the app (as test_app_mode).
+NEVER_IN_APP = ("stripe", "/billing/checkout", "/billing/portal", "/billing/code",
+                "discount code", "$9.99", "$79.99", "metricool")
+# A price written into a page: inside the app only StoreKit may show one.
+PRICE = re.compile(r"[$£€]\s?\d")
+
+
+class WebBase(unittest.TestCase):
+    def setUp(self):
+        self.sent_to_stripe = []
+        self.mails = []
+        saved = {k: _os.environ.get(k) for k in APPLE_SETTINGS + tuple(STRIPE)
+                 + ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")}
+
+        def put_back():
+            for key, value in saved.items():
+                if value is None:
+                    _os.environ.pop(key, None)
+                else:
+                    _os.environ[key] = value
+        self.addCleanup(put_back)
+        for key in APPLE_SETTINGS:
+            _os.environ.pop(key, None)
+        _os.environ.update(STRIPE)
+        _os.environ["APPLE_APP_ID"] = str(APP_ID)
+        _os.environ["GOOGLE_CLIENT_ID"] = "1.apps.googleusercontent.com"
+        _os.environ["GOOGLE_CLIENT_SECRET"] = "x"
+        web._RATE.clear()
+
+        real = (st.verifier, billing._stripe, web.codes_mod.email_ready, web.codes_mod.send_mail)
+
+        def restore():
+            st.verifier, billing._stripe = real[0], real[1]
+            web.codes_mod.email_ready, web.codes_mod.send_mail = real[2], real[3]
+        self.addCleanup(restore)
+        # Apple's test root swapped in, as Apple's own tests do.
+        st.verifier = lambda: av.Verifier(BUNDLE, APP_ID, roots=[WEB_CHAIN.root])
+        billing._stripe = self.fake_stripe
+        web.codes_mod.email_ready = lambda: True
+        web.codes_mod.send_mail = lambda to, subject, body, headers=None: self.mails.append(
+            (to, subject, body))
+
+        tag = uuid.uuid4().hex[:8]
+        # Each test's own subscription: the tests share one database, as the
+        # server does, and a subscription keeps the owner it first had.
+        self.otid = "9" + uuid.uuid4().hex[:11]
+        conn = db.connect(WEB_DB)
+        try:
+            self.ann = A.upsert_email_user(conn, "ann-%s@example.com" % tag)
+            self.ben = A.upsert_email_user(conn, "ben-%s@example.com" % tag)
+        finally:
+            conn.close()
+
+    def fake_stripe(self, method, path, data=None):
+        self.sent_to_stripe.append((method, path))
+        if path.startswith("prices/"):
+            return PRICES[path.split("/", 1)[1]]
+        if path == "checkout/sessions":
+            return {"url": "https://checkout.stripe.test/c/1", "id": "cs_test_1"}
+        if path.startswith("promotion_codes"):
+            return {"data": []}
+        return {"url": "https://billing.stripe.test/p/1"}
+
+    def client(self, user=None):
+        client = web.app.test_client()
+        if user is not None:
+            conn = db.connect(WEB_DB)
+            try:
+                token = A.start_session(conn, user.id, "test")
+            finally:
+                conn.close()
+            with client.session_transaction() as sess:
+                sess[web.SESSION_KEY] = token
+        return client
+
+    def state(self, client):
+        r = client.get("/api/apple/state", headers=FROM_PAGE)
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.get_json()
+
+    def tx(self, token, txid=None, otid=None, env="Production", product=YEARLY,
+           purchase=None, expires=None, signed=None, **extra):
+        otid = self.otid if otid is None else otid
+        txid = otid + "1" if txid is None else txid
+        purchase = now_ms() - DAY if purchase is None else purchase
+        payload = {"transactionId": txid, "originalTransactionId": otid, "productId": product,
+                   "bundleId": BUNDLE, "environment": env, "type": "Auto-Renewable Subscription",
+                   "purchaseDate": purchase,
+                   "expiresDate": purchase + 365 * DAY if expires is None else expires,
+                   "signedDate": now_ms() if signed is None else signed}
+        if token:
+            payload["appAccountToken"] = token
+        payload.update(extra)
+        return WEB_CHAIN.sign(payload)
+
+    def note(self, ntype, tx, uid=None, status=1, signed=None, env="Production", renewal=None):
+        data = {"bundleId": BUNDLE, "environment": env, "signedTransactionInfo": tx, "status": status}
+        if env == "Production":
+            data["appAppleId"] = APP_ID
+        if renewal is not None:
+            data["signedRenewalInfo"] = WEB_CHAIN.sign(dict({"environment": env,
+                                                            "signedDate": now_ms()}, **renewal))
+        return WEB_CHAIN.sign({"notificationType": ntype, "notificationUUID": uid or str(uuid.uuid4()),
+                               "signedDate": now_ms() if signed is None else signed, "version": "2.0",
+                               "data": data})
+
+    def post(self, client, path, body, headers=FROM_PAGE):
+        return client.post(path, json=body, headers=headers)
+
+    def apple_until(self, user):
+        conn = db.connect(WEB_DB)
+        try:
+            return A.get_user(conn, user.id).apple_until
+        finally:
+            conn.close()
+
+    def text(self, response):
+        return response.data.decode("utf-8", "replace")
+
+    def leaks(self, body):
+        low = body.lower()
+        return [w for w in NEVER_IN_APP if w in low]
+
+
+class Routes(WebBase):
+    def test_off_until_the_app_id_is_set(self):
+        _os.environ.pop("APPLE_APP_ID")
+        client = self.client(self.ann)
+        self.assertEqual(CLIENT.post("/apple/notifications", json={"signedPayload": "a.b.c"}).status_code, 404)
+        state = self.state(client)
+        self.assertEqual((state["enabled"], state["appAccountToken"], state["products"]), (False, "", []))
+        r = self.post(client, "/api/apple/transactions", {"jws": [self.tx(None)]})
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.post(client, "/api/apple/move", {"jws": "x"}).status_code, 404)
+
+    def test_needs_sign_in(self):
+        anon = self.client()
+        self.assertEqual(anon.get("/api/apple/state").status_code, 401)
+        self.assertEqual(self.post(anon, "/api/apple/transactions", {"jws": []}).status_code, 401)
+        self.assertEqual(self.post(anon, "/api/apple/move", {"jws": "x"}).status_code, 401)
+
+    def test_state_mints_one_token_and_is_never_cached(self):
+        client = self.client(self.ann)
+        r = client.get("/api/apple/state", headers=FROM_PAGE)
+        state = r.get_json()
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+        self.assertEqual((state["enabled"], state["pro"], state["source"]), (True, False, ""))
+        self.assertEqual(uuid.UUID(state["appAccountToken"]).version, 4)
+        self.assertEqual(state["products"], PRODUCTS)
+        self.assertEqual(self.state(client)["appAccountToken"], state["appAccountToken"])
+        self.assertNotEqual(self.state(self.client(self.ben))["appAccountToken"], state["appAccountToken"])
+        cross = client.get("/api/apple/state", headers={"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(cross.status_code, 403)
+
+    def test_purchase_from_the_app(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        r = self.post(client, "/api/apple/transactions", {"jws": [self.tx(token.upper())]})
+        out = r.get_json()
+        self.assertEqual(r.status_code, 200, out)
+        self.assertEqual((out["pro"], out["source"]), (True, "apple"))
+        self.assertEqual(out["results"], [{"outcome": "applied", "transactionId": self.otid + "1",
+                                           "environment": "Production"}])
+        self.assertGreater(out["appleUntil"], now_ms())
+        self.assertEqual(out["appAccountToken"], "")
+        self.assertGreater(self.apple_until(self.ann), time.time() + 300 * 86400)
+        # The same transaction again (a page load, a restore): confirmed, nothing new.
+        again = self.post(client, "/api/apple/transactions", {"jws": self.tx(token)}).get_json()
+        self.assertEqual(again["results"][0]["outcome"], "applied")
+
+    def test_what_the_app_sends_is_checked(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        forged = Chain(name="Forger").sign({"transactionId": "1", "originalTransactionId": "1",
+                                            "productId": YEARLY, "bundleId": BUNDLE,
+                                            "environment": "Production",
+                                            "type": "Auto-Renewable Subscription",
+                                            "purchaseDate": now_ms(), "expiresDate": now_ms() + 365 * DAY,
+                                            "signedDate": now_ms(), "appAccountToken": token})
+        out = self.post(client, "/api/apple/transactions", {"jws": [forged, "x.y.z"]}).get_json()
+        self.assertEqual([r["outcome"] for r in out["results"]], ["invalid", "invalid"])
+        self.assertFalse(out["pro"])
+        self.assertEqual(self.apple_until(self.ann), 0)
+        for bad in ({"jws": 5}, {"jws": [5]}, {"jws": ["x"] * 21}, {}):
+            self.assertEqual(self.post(client, "/api/apple/transactions", bad).status_code, 400, bad)
+        r = client.post("/api/apple/transactions", data="jws=x", headers=FROM_PAGE,
+                        content_type="application/x-www-form-urlencoded")
+        self.assertEqual(r.status_code, 400)
+        big = {"jws": ["a" * 300000]}
+        self.assertEqual(self.post(client, "/api/apple/transactions", big).status_code, 413)
+
+    def test_another_site_cannot_post(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        for headers in ({"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+                        {"Origin": "https://evil.example"},
+                        {"Sec-Fetch-Site": "cross-site"},
+                        {"Sec-Fetch-Site": "same-site", "Origin": "https://www.localhost"},
+                        {"Origin": "null"}):
+            r = self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]},
+                          headers=dict(headers, **{"User-Agent": APP_UA}))
+            self.assertEqual(r.status_code, 403, headers)
+            self.assertEqual(self.post(client, "/api/apple/move", {"jws": self.tx(token)},
+                                       headers=headers).status_code, 403, headers)
+        self.assertEqual(self.apple_until(self.ann), 0)
+
+    def test_web_pro_is_reported_so_the_app_sells_nothing(self):
+        conn = db.connect(WEB_DB)
+        billing.set_plan(conn, self.ben.id, "pro", "active", "cus_ben")
+        conn.close()
+        state = self.state(self.client(self.ben))
+        self.assertEqual((state["pro"], state["source"]), (True, "web"))
+
+    def test_one_apple_id_two_accounts(self):
+        ann, ben = self.client(self.ann), self.client(self.ben)
+        token = self.state(ann)["appAccountToken"]
+        self.post(ann, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        out = self.post(ben, "/api/apple/transactions", {"jws": [self.tx(token)]}).get_json()
+        self.assertEqual((out["pro"], out["results"][0]["outcome"]), (False, "other_account"))
+        moved = self.post(ben, "/api/apple/move", {"jws": self.tx(token)}).get_json()
+        self.assertEqual((moved["pro"], moved["source"], moved["outcome"]), (True, "apple", "moved"))
+        self.assertEqual(self.apple_until(self.ann), 0)
+        self.assertEqual(len(self.mails), 1)
+        to, subject, body = self.mails[0]
+        self.assertEqual(to, self.ann.email)
+        self.assertIn("moved to another", subject)
+        self.assertIn(self.ann.email, body)
+        self.assertNotIn(self.ben.email, body)
+        # Moving it straight back is refused for 30 days, and nobody is emailed.
+        back = self.post(ann, "/api/apple/move", {"jws": self.tx(token)}).get_json()
+        self.assertEqual((back["outcome"], back["pro"]), ("too_soon", False))
+        self.assertGreater(back["after"], time.time())
+        self.assertEqual(len(self.mails), 1)
+        forged = Chain(name="Forger").sign({"transactionId": "1"})
+        r = self.post(ann, "/api/apple/move", {"jws": forged})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.post(ann, "/api/apple/move", {"jws": ["x"]}).status_code, 400)
+
+    def test_moves_are_rate_limited(self):
+        client = self.client(self.ann)
+        codes = [self.post(client, "/api/apple/move", {"jws": "x.y.z"}).status_code
+                 for _ in range(web.APPSTORE_MOVES_PER_HOUR + 1)]
+        self.assertEqual(codes, [400] * web.APPSTORE_MOVES_PER_HOUR + [429])
+
+    def test_transactions_are_rate_limited(self):
+        client = self.client(self.ann)
+        limit = web.APPSTORE_POSTS_PER_HOUR
+        codes = [self.post(client, "/api/apple/transactions", {"jws": []}).status_code
+                 for _ in range(limit + 1)]
+        self.assertEqual(codes[:limit], [200] * limit)
+        self.assertEqual(codes[limit], 429)
+
+    def test_test_purchases_follow_the_setting(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        _os.environ["APPLE_SANDBOX_PRO"] = "none"
+        out = self.post(client, "/api/apple/transactions",
+                        {"jws": [self.tx(token, env="Sandbox")]}).get_json()
+        self.assertEqual((out["results"][0]["outcome"], out["pro"]), ("applied", False))
+        self.assertEqual(self.apple_until(self.ann), 0)
+        _os.environ["APPLE_SANDBOX_PRO"] = "all"
+        out = self.post(client, "/api/apple/transactions",
+                        {"jws": [self.tx(token, env="Sandbox")]}).get_json()
+        self.assertTrue(out["pro"])
+
+
+class Notifications(WebBase):
+    def send(self, payload, **kw):
+        return CLIENT.post("/apple/notifications", json={"signedPayload": payload}, **kw)
+
+    def test_signed_notifications_are_taken_once(self):
+        token = self.state(self.client(self.ann))["appAccountToken"]
+        payload = self.note("SUBSCRIBED", self.tx(token, otid="7000", txid="7001"), uid="n-%s" % token)
+        r = self.send(payload)
+        self.assertEqual((r.status_code, r.get_json()["outcome"]), (200, "applied"))
+        self.assertGreater(self.apple_until(self.ann), time.time())
+        r = self.send(payload)
+        self.assertEqual((r.status_code, r.get_json()["outcome"]), (200, "duplicate"))
+
+    def test_from_apple_with_no_cookie_and_any_headers(self):
+        # Sign-in is required on this server, and Apple sends no cookie, no
+        # Origin; even a browser's cross-site marker does not stop it.
+        self.assertTrue(web.auth_required())
+        payload = self.note("SUBSCRIBED", self.tx(None, otid="7100", txid="7101"))
+        r = self.send(payload, headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://apple.com"})
+        self.assertEqual((r.status_code, r.get_json()["outcome"]), (200, "unowned"))
+
+    def test_refused_unless_apple_signed_it(self):
+        forged = Chain(name="Forger")
+        tx = forged.sign({"transactionId": "1"})
+        payload = forged.sign({"notificationType": "SUBSCRIBED", "notificationUUID": "f-1",
+                               "signedDate": now_ms(),
+                               "data": {"bundleId": BUNDLE, "appAppleId": APP_ID,
+                                        "environment": "Production", "signedTransactionInfo": tx}})
+        self.assertEqual(self.send(payload).status_code, 400)
+        self.assertEqual(self.send("a.b.c").status_code, 400)
+        self.assertEqual(CLIENT.post("/apple/notifications", json={}).status_code, 400)
+        self.assertEqual(CLIENT.post("/apple/notifications", data="nope").status_code, 400)
+        self.assertEqual(CLIENT.post("/apple/notifications", json={"signedPayload": 7}).status_code, 400)
+        big = {"signedPayload": "a" * (200 * 1024)}
+        self.assertEqual(CLIENT.post("/apple/notifications", json=big).status_code, 413)
+        wrong_app = WEB_CHAIN.sign({"notificationType": "TEST", "notificationUUID": "w-1",
+                                    "signedDate": now_ms(),
+                                    "data": {"bundleId": BUNDLE, "appAppleId": APP_ID + 1,
+                                             "environment": "Production"}})
+        r = self.send(wrong_app)
+        self.assertEqual((r.status_code, r.get_json()["outcome"]), (400, "INVALID_APP_IDENTIFIER"))
+
+    def test_a_database_that_will_not_take_it_answers_500(self):
+        real = st.handle_notification
+
+        def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        web.apple_store_mod.handle_notification = locked
+        try:
+            r = self.send(self.note("TEST", None))
+        finally:
+            web.apple_store_mod.handle_notification = real
+        self.assertEqual(r.status_code, 500)
+        self.assertTrue(r.is_json)
+
+    def test_order_does_not_matter(self):
+        token = self.state(self.client(self.ann))["appAccountToken"]
+        t0 = now_ms() - 10 * DAY
+        bought = self.tx(token, otid="7200", txid="7201", purchase=t0, signed=t0)
+        self.send(self.note("SUBSCRIBED", bought, signed=t0))
+        refund_at = now_ms() - 60000
+        refunded = self.tx(token, otid="7200", txid="7201", purchase=t0, signed=refund_at,
+                           revocationDate=refund_at)
+        self.assertEqual(self.send(self.note("REFUND", refunded, status=5, signed=refund_at))
+                         .get_json()["outcome"], "applied")
+        self.assertEqual(self.apple_until(self.ann), 0)
+        # Apple retries the purchase's notification, and the app sends its old copy.
+        self.assertEqual(self.send(self.note("DID_CHANGE_RENEWAL_STATUS", bought, signed=t0 + 1))
+                         .get_json()["outcome"], "stale")
+        out = self.post(self.client(self.ann), "/api/apple/transactions", {"jws": [bought]}).get_json()
+        self.assertEqual((out["results"][0]["outcome"], out["pro"]), ("stale", False))
+        self.assertEqual(self.apple_until(self.ann), 0)
+        # Apple reverses the refund.
+        back = self.tx(token, otid="7200", txid="7201", purchase=t0, signed=now_ms())
+        self.send(self.note("REFUND_REVERSED", back))
+        self.assertGreater(self.apple_until(self.ann), time.time())
+
+    def test_repeated_failures_are_said_loudly(self):
+        notes = []
+        from bot import monitoring
+        real = monitoring.note
+        monitoring.note = lambda message, **context: notes.append((message, context))
+        web._APPSTORE_REFUSED.clear()
+        try:
+            for _ in range(4):
+                self.send("a.b.c")
+        finally:
+            monitoring.note = real
+        self.assertEqual(len(notes), 1)
+        self.assertIn("APPLE_APP_ID", notes[0][0])
 
 
 if __name__ == "__main__":
