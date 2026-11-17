@@ -136,6 +136,21 @@ CREATE TABLE IF NOT EXISTS watchlist (
     PRIMARY KEY (user_id, symbol)
 );
 
+-- Each watched instrument's daily call and price, one row per trading session
+-- (day: the exchange's own day number, as calls.price_day), so "since
+-- yesterday" has the session before to compare with. Written only by the
+-- background job, and shared by everyone watching the instrument: symbols,
+-- calls and prices, nobody's data. action is empty when only the price was read.
+CREATE TABLE IF NOT EXISTS watch_calls (
+    symbol      TEXT NOT NULL,
+    day         INTEGER NOT NULL,
+    action      TEXT,
+    price       REAL NOT NULL,
+    prev_close  REAL,
+    at          INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day)
+);
+
 -- Conditions to watch for. Checked on demand or by a scheduled run.
 CREATE TABLE IF NOT EXISTS alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -819,6 +834,50 @@ def watch_touch(conn: sqlite3.Connection, symbol: str,
                      [int(time.time()), symbol.upper()], user)
     conn.execute(sql, args)
     conn.commit()
+
+
+def watch_call_save(conn: sqlite3.Connection, symbol: str, day: int,
+                    action: Optional[str], price: float,
+                    prev_close: Optional[float], at: int) -> None:
+    """Keep the latest check of one watched instrument for its trading session.
+
+    A later check in the same session replaces the price, and the call when it
+    has one: a check that read only the price leaves the session's call alone.
+    The session before is never touched, which is what "since yesterday"
+    compares with.
+    """
+    conn.execute(
+        "INSERT INTO watch_calls (symbol, day, action, price, prev_close, at) "
+        "VALUES (?,?,?,?,?,?) ON CONFLICT(symbol, day) DO UPDATE SET "
+        "action=COALESCE(excluded.action, watch_calls.action), "
+        "price=excluded.price, prev_close=excluded.prev_close, at=excluded.at",
+        (symbol.upper(), int(day), action or None, float(price),
+         None if prev_close is None else float(prev_close), int(at)))
+    conn.commit()
+
+
+def watch_calls(conn: sqlite3.Connection, symbols,
+                sessions: int = 2) -> Dict[str, List[sqlite3.Row]]:
+    """The newest few sessions' rows of each instrument, newest first."""
+    out: Dict[str, List[sqlite3.Row]] = {}
+    symbols = sorted({s.upper() for s in symbols})
+    if not symbols:
+        return out
+    for row in conn.execute("SELECT * FROM watch_calls WHERE symbol IN (%s) "
+                            "ORDER BY symbol, day DESC" % ",".join("?" * len(symbols)),
+                            symbols):
+        kept = out.setdefault(row["symbol"], [])
+        if len(kept) < sessions:
+            kept.append(row)
+    return out
+
+
+def watch_calls_prune(conn: sqlite3.Connection, before: float) -> int:
+    """Forget checks made before a time. Kept only to compare one session
+    with the one before, so a fortnight is plenty."""
+    cur = conn.execute("DELETE FROM watch_calls WHERE at < ?", (int(before),))
+    conn.commit()
+    return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

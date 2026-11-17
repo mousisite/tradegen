@@ -941,23 +941,35 @@ def _attention_stored(conn, me: int) -> Dict:
     watched = db_mod.watchlist(conn, user=me)
     shown = watched[:WATCH_SHOWN]
     by_pair, by_symbol = _latest_runs(conn, me, [w["symbol"] for w in shown])
+    # The background job's daily check of anything else watched. The free
+    # plan is shown calls only on the popular stocks (digest.watched).
+    full = _pro()
+    checks = db_mod.watch_calls(conn, [w["symbol"] for w in shown], 1) if full else {}
     watch = []
     for w in shown:
         symbol, interval = w["symbol"], w["interval"] or "1d"
         # The public check is a daily one, so it answers only a daily watch.
         snap = popular.get(symbol) if interval == "1d" else None
+        daily = (checks.get(symbol) or [None])[0] if interval == "1d" else None
         own = by_pair.get((symbol, interval)) or by_symbol.get(symbol)
         item = {"symbol": symbol, "interval": interval}
         if snap and snap.get("action"):
             item.update(call=snap["action"], at=snap["at"], price=snap.get("price"),
                         public=True, quote_day=_quote_day(snap),
                         slug=public_mod.slug(symbol))
+        elif daily is not None and daily["action"]:
+            item.update(call=daily["action"], at=daily["at"], price=daily["price"],
+                        public=False, daily=True)
         elif own is not None and own["action"]:
             item.update(call=own["action"], at=own["ts"], price=own["price"],
                         public=False, run_interval=own["interval"],
                         closed=not own["market_open"])
         watch.append(item)
-    return {"fired": fired, "watch": watch,
+    # What changed since the session before, from the calls the background
+    # job wrote down.
+    since = digest_mod.since_yesterday(conn, me, full, now)
+    since["notes"] = digest_mod.notes(since)
+    return {"fired": fired, "watch": watch, "since": since, "full": full,
             "watch_more": max(0, len(watched) - len(shown)),
             "checked": bool(fresh),
             "buys": [dict(v, quote_day=_quote_day(v), slug=public_mod.slug(v["symbol"]),
@@ -1003,6 +1015,7 @@ def _attention(stored: Dict, open_trades) -> Dict:
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
             "watch": stored["watch"], "watch_more": stored["watch_more"],
+            "since": stored["since"], "full": stored["full"],
             "buys": buys[:ATTENTION_SHOWN],
             "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
             "checked": stored["checked"],
@@ -3412,13 +3425,66 @@ def _digest_look_up(symbol: str):
     return _public_snapshot(symbol)
 
 
+def _watch_check(symbol: str, with_call: bool) -> dict:
+    """A watched instrument's daily call and price, for "since yesterday".
+
+    A popular instrument's call is its public daily check, so nothing more is
+    analysed for it. Any other is analysed the way that check is, on daily
+    bars with the standard settings, recorded in nobody's history and costing
+    nobody's look, and only when with_call; otherwise only its price is read.
+    """
+    action, bars = None, None
+    if with_call and symbol in public_mod.NAMES:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            snap = public_mod.verdict(conn, symbol)
+        finally:
+            conn.close()
+        if snap and time.time() - snap["at"] < public_mod.MAX_AGE + 3600:
+            action = snap.get("action") or None
+    elif with_call:
+        cfg = config_mod.load(app.config.get("CFG_PATH"))
+        # No calendar: it adds warnings to a plan, never changes its call.
+        result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
+                                with_learning=True, record=False,
+                                db_path=app.config.get("DB_PATH"),
+                                with_calendar=False)
+        action, bars = result.plan.action, result.bars
+    if bars is None:
+        bars = market_mod.fetch_bars(symbol, "1d", lookback=alerts_mod.LOOKBACK["1d"])
+    return digest_mod.reading(bars, action)
+
+
+def _full_plan():
+    """full(person): whether the free plan's limits leave this account alone.
+
+    The pages' own test (_pro), for a background job with no page: Pro, an
+    invite week, the local account and the operator, or anyone while billing
+    is off.
+    """
+    admins = {e.strip().lower()
+              for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+              if e.strip()}
+    return lambda person: billing_mod.is_pro(person,
+                                             (person.email or "").lower() in admins)
+
+
 def _refresh_popular_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         # The bars were fetched moments ago for the check, so scoring the
         # earlier calls reads them from the cache rather than asking again.
-        return public_mod.refresh(conn, _public_snapshot,
+        done = public_mod.refresh(conn, _public_snapshot,
                                   bars=lambda s: market_mod.fetch_bars(s, "1d"))
+        # Then what people watch, after the popular checks it reuses. Its own
+        # failure must not undo the popular run's.
+        try:
+            watch = digest_mod.check_watched(conn, _watch_check, _full_plan())
+        except Exception as exc:
+            app.logger.exception("Could not check the watched instruments")
+            watch = {"checked": 0, "errors": ["watched instruments: %s" % exc]}
+        return {"checked": done["checked"] + watch["checked"],
+                "errors": list(done["errors"]) + list(watch["errors"])}
     finally:
         conn.close()
 
@@ -3427,7 +3493,7 @@ def _weekly_email_job():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         return digest_mod.run(conn, app.secret_key, _public_base_offline(),
-                              _digest_look_up)
+                              _digest_look_up, full=_full_plan())
     finally:
         conn.close()
 

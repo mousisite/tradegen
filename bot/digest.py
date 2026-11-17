@@ -5,6 +5,9 @@ every one carries a one-click way to stop. US law (CAN-SPAM) wants a postal
 address at the bottom of email like this, so nothing is sent until
 MAIL_POSTAL_ADDRESS is set. A PO box or a virtual mailbox works, and keeps a
 home address out of strangers' inboxes.
+
+Also here: what changed on a watchlist since the session before, which the
+front page shows every day and this email carries too.
 """
 from __future__ import annotations
 
@@ -16,8 +19,9 @@ import sqlite3
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-from . import accounts, codes, public
+from . import accounts, billing, codes, public
 from . import database as db
+from .market import DataThrottled
 
 # Monday, 13:00 UTC: morning across the US, before the market opens. Tuesday
 # counts too, so a server that was down on Monday still sends that week.
@@ -71,10 +75,213 @@ def strongest(verdicts: List[Dict], n: int = 3) -> List[Dict]:
     return sorted(buys, key=lambda v: v["worked"] / v["samples"], reverse=True)[:n]
 
 
+# --- what changed since yesterday --------------------------------------------
+#
+# For each instrument on a person's watchlist: whether its daily call changed
+# since the session before, how far its price moved since the previous close,
+# and the alerts and crossed stops of the last day. The daily calls are written
+# down by the hourly background job (check_watched), never by a page view, and
+# it never spends anyone's free looks: it is the server's own check, made the
+# way a popular stock's is.
+
+CHECK_EVERY = public.MAX_AGE      # as often as a popular stock is checked
+CHECK_PER_RUN = 20                # the rest wait for the next hourly run
+KEEP_DAYS = 14
+RECENT = 86400                    # an alert or a crossed stop of the last day
+MOVE_SHOWN = 0.02                 # a move this size is news on its own
+# The session before lies at most this many days back: a weekend and a holiday.
+# Compared with an older call, a week's change would read as a day's.
+GAP_DAYS = 4
+
+
+def reading(bars, action: Optional[str] = None) -> Dict:
+    """One check of a watched instrument, as check_watched stores it."""
+    day = public._price_day(bars)
+    if day is None:
+        raise ValueError("no trading day for %s" % getattr(bars, "symbol", "?"))
+    return {"action": (action or "").upper() or None, "day": int(day),
+            "price": float(bars.last_price), "prev_close": bars.prev_close}
+
+
+def _readers(conn: sqlite3.Connection, now: float) -> List:
+    """The accounts whose list someone will read: signed in within a
+    session's life, taking the weekly email, or the local account. Checking
+    the watchlists of accounts nobody opens would cost for nothing."""
+    rows = conn.execute(
+        "SELECT * FROM users WHERE provider <> 'demo' AND (is_local = 1 OR "
+        "weekly_email = 1 OR last_seen_ts >= ?) ORDER BY id",
+        (int(now) - accounts.SESSION_DAYS * 86400,)).fetchall()
+    return [accounts._row_to_user(r) for r in rows]
+
+
+def _first(conn: sqlite3.Connection, user_id: int) -> List[str]:
+    """The watchlist symbols this list covers, in the order both show them."""
+    return [w["symbol"] for w in db.watchlist(conn, user=user_id)][:MAX_SYMBOLS]
+
+
+def watched(conn: sqlite3.Connection, full: Callable,
+            now: Optional[float] = None) -> Dict[str, bool]:
+    """Each instrument to check, and whether its daily call is wanted.
+
+    The first MAX_SYMBOLS on each reader's watchlist, the ones the front page
+    and the email show. A popular instrument's call is its public daily check,
+    which costs nothing more. Any other is analysed only for an account the
+    free plan leaves alone (full(person) is true): a free account opens three
+    instruments a day, and a daily call on its whole watchlist from here would
+    be a way round that. Its price is read either way.
+    """
+    now = now or time.time()
+    out: Dict[str, bool] = {}
+    for person in _readers(conn, now):
+        symbols = _first(conn, person.id)
+        plan = None
+        for symbol in symbols:
+            if symbol in public.NAMES:
+                out[symbol] = True
+                continue
+            if plan is None:
+                plan = bool(full(person))
+            out[symbol] = out.get(symbol, False) or plan
+    return out
+
+
+def check_watched(conn: sqlite3.Connection, check: Callable[[str, bool], Dict],
+                  full: Callable, now: Optional[float] = None,
+                  limit: int = CHECK_PER_RUN, pause: float = public.PAUSE,
+                  sleep: Callable[[float], None] = time.sleep) -> Dict:
+    """Write today's row for each watched instrument that is due.
+
+    check(symbol, with_call) returns a reading(): the price, the previous
+    close, the trading day and, when with_call, the daily call. An instrument
+    is due when it has no row, when its newest is CHECK_EVERY old, or when its
+    call is wanted and the newest row has none. Never-checked first, then the
+    oldest; a source that says stop ends the run, and the rest wait an hour.
+    """
+    now = now or time.time()
+    wanted = watched(conn, full, now)
+    latest = {s: rows[0] for s, rows in db.watch_calls(conn, wanted, 1).items()}
+    due = [s for s, with_call in wanted.items()
+           if s not in latest or now - latest[s]["at"] >= CHECK_EVERY
+           or (with_call and not latest[s]["action"])]
+    due.sort(key=lambda s: (latest[s]["at"] if s in latest else 0, s))
+    checked, errors = 0, []
+    for n, symbol in enumerate(due[:limit]):
+        if n:
+            sleep(pause)
+        try:
+            got = check(symbol, wanted[symbol])
+            db.watch_call_save(conn, symbol, got["day"], got.get("action"),
+                               got["price"], got.get("prev_close"), int(now))
+            checked += 1
+        except DataThrottled as exc:
+            errors.append("%s: %s" % (symbol, exc))
+            break
+        except Exception as exc:          # one bad ticker must not stop the run
+            errors.append("%s: %s" % (symbol, exc))
+    db.watch_calls_prune(conn, now - KEEP_DAYS * 86400)
+    return {"checked": checked, "errors": errors}
+
+
+def since_yesterday(conn: sqlite3.Connection, user_id: int, full: bool,
+                    now: Optional[float] = None) -> Dict:
+    """What changed on one person's watchlist since the session before.
+
+    rows holds the instruments with something to say: the daily call changed,
+    the price moved at least MOVE_SHOWN since the previous close, or an alert
+    fired or a stop was crossed in the last day. quiet counts the others that
+    were checked, and kept those of them whose call was compared and is the
+    same; unchecked counts those with no check yet. A call is shown for a
+    popular instrument, and for any other only when full: the free plan's
+    calls are not checked here (watched()), and hidden says so.
+    """
+    now = now or time.time()
+    symbols = _first(conn, user_id)
+    out = {"rows": [], "quiet": 0, "kept": 0, "unchecked": 0,
+           "hidden": not full and any(s not in public.NAMES for s in symbols),
+           "watching": len(symbols)}
+    if not symbols:
+        return out
+    history = db.watch_calls(conn, symbols, 2)
+    recent = [e for e in db.event_list(conn, user_id, limit=200)
+              if e["ts"] >= now - RECENT]
+    for symbol in symbols:
+        sessions = history.get(symbol) or []
+        latest = sessions[0] if sessions else None
+        before = sessions[1] if len(sessions) > 1 else None
+        if before is not None and latest["day"] - before["day"] > GAP_DAYS:
+            before = None
+        shown = full or symbol in public.NAMES
+        mine = [e for e in recent if e["symbol"] == symbol]
+        row = {"symbol": symbol, "short": public.short(symbol),
+               "slug": public.slug(symbol) if symbol in public.NAMES else "",
+               "call": latest["action"] if latest and shown else None,
+               "was": before["action"] if before and shown else None,
+               "move": None, "price": latest["price"] if latest else None,
+               "at": latest["at"] if latest else None,
+               "alerts": [e["message"] for e in mine
+                          if e["kind"] not in ("stop_breach", "split")],
+               "stops": [e["message"] for e in mine if e["kind"] == "stop_breach"]}
+        row["changed"] = bool(row["call"] and row["was"] and row["call"] != row["was"])
+        if latest is not None and latest["prev_close"]:
+            row["move"] = latest["price"] / latest["prev_close"] - 1.0
+        if (row["changed"] or row["alerts"] or row["stops"]
+                or (row["move"] is not None and abs(row["move"]) >= MOVE_SHOWN)):
+            out["rows"].append(row)
+        elif row["move"] is None:
+            out["unchecked"] += 1
+        else:
+            out["quiet"] += 1
+            out["kept"] += 1 if row["call"] and row["was"] else 0
+    return out
+
+
+def change_line(row: Dict) -> str:
+    """One row of since_yesterday() as a sentence, for the email."""
+    parts = []
+    if row["changed"]:
+        parts.append("the daily call went from %s to %s" % (row["was"], row["call"]))
+    elif row["call"] and row["was"]:
+        parts.append("still %s" % row["call"])
+    elif row["call"]:
+        parts.append("daily call %s" % row["call"])
+    if row["move"] is not None:
+        pct = "%.2f" % (abs(row["move"]) * 100)
+        parts.append("level with the previous close" if pct == "0.00" else
+                     "%s %s%% since the previous close"
+                     % ("up" if row["move"] > 0 else "down", pct))
+    text = "; ".join(parts) or "no price to compare yet"
+    return text[:1].upper() + text[1:] + "."
+
+
+def notes(since: Dict) -> List[str]:
+    """What since_yesterday() left out of its rows, in sentences."""
+    out = []
+    n, limit = since["quiet"], int(MOVE_SHOWN * 100)
+    if n:
+        who = (("The other one" if n == 1 else "The other %d" % n) if since["rows"]
+               else ("The one checked" if n == 1 else "All %d checked" % n))
+        line = ("%s moved less than %d%% since the previous close, with no alert "
+                "or crossed stop." % (who, limit))
+        if since["kept"] == n:
+            line += (" Its daily call is" if n == 1 else " Their daily calls are")
+            line += " the same as the session before."
+        out.append(line)
+    if since["unchecked"]:
+        k = since["unchecked"]
+        out.append("%s no check from the session before to compare with yet."
+                   % ("One has" if k == 1 else "%d have" % k))
+    if since["hidden"]:
+        out.append("On a free account this list has the daily call of the "
+                   "popular stocks and coins only. Opening any other shows "
+                   "today's call.")
+    return out
+
+
 def compose(user, rows: List[Dict], picks: List[Dict], base: str,
-            stop_url: str) -> Tuple[str, str]:
+            stop_url: str, since: Optional[Dict] = None) -> Tuple[str, str]:
     """Subject and plain-text body. Plain text reads like a person wrote it,
-    which is also what keeps it out of spam folders."""
+    which is also what keeps it out of spam folders. since is the person's
+    since_yesterday(), said after their watchlist."""
     lines = ["Hi %s," % user.display, "", "Here is what Orenth says this week."]
     if rows:
         lines += ["", "YOUR WATCHLIST"]
@@ -89,6 +296,13 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
     else:
         lines += ["", "Your watchlist is empty. Add stocks from any analysis "
                       "page and they will show up here."]
+    if since and (since["rows"] or since["quiet"]):
+        lines += ["", "SINCE YESTERDAY"]
+        for r in since["rows"]:
+            lines.append("  %-6s %s" % (r["short"], change_line(r)))
+            lines += ["         Alert: %s" % m for m in r["alerts"]]
+            lines += ["         Stop: %s" % m for m in r["stops"]]
+        lines += ["  %s" % s for s in notes(since)]
     lines += ["", "STRONGEST SETUPS AMONG POPULAR STOCKS"]
     if picks:
         for p in picks:
@@ -113,9 +327,16 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
 
 def run(conn: sqlite3.Connection, secret, base: str,
         look_up: Callable[[str], Optional[Dict]],
-        send: Callable = codes.send_mail, now: Optional[float] = None) -> Dict:
-    """Send this week's email to everyone due one. Safe to call every hour."""
+        send: Callable = codes.send_mail, now: Optional[float] = None,
+        full: Optional[Callable] = None) -> Dict:
+    """Send this week's email to everyone due one. Safe to call every hour.
+
+    full(person) says whether the free plan leaves an account alone, for the
+    daily calls in "since yesterday"; without it, only the plan decides,
+    which leaves out the operator.
+    """
     now = now or time.time()
+    full = full or billing.is_pro
     if not ready() or not sending_window(now):
         return {"checked": 0}
     this_week = week(now)
@@ -149,7 +370,8 @@ def run(conn: sqlite3.Connection, secret, base: str,
             stop = "%s/email/stop?u=%d&t=%s" % (base, user.id,
                                                 token(secret, user.id))
             subject, body = compose(user, [check(s) for s in symbols[:MAX_SYMBOLS]],
-                                    picks, base, stop)
+                                    picks, base, stop,
+                                    since_yesterday(conn, user.id, full(user), now))
             send(user.email, subject, body,
                  {"List-Unsubscribe": "<%s>" % stop,
                   "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"})
