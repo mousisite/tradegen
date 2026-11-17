@@ -277,6 +277,52 @@ try:
     check("with it on, the second one and how long it lasts",
           "a second cookie of Orenth's lasts ten minutes" in page
           and web.APPLE_FLOW_SECONDS == 10 * 60, page[page.find("No tracking cookies"):][:900])
+
+    # -----------------------------------------------------------------------
+    head("EMAIL AND NOTIFICATIONS: EVERYTHING THAT GOES OUT, NOT ONLY CODES")
+    # -----------------------------------------------------------------------
+    # The weekly email and alert emails go through the same mail service as
+    # sign-in codes, and crossed stops go out with fired alerts, by email
+    # and to phones (web._check_and_tell hands both lists to each).
+    from bot import alerts as alerts_mod  # noqa: E402
+    from bot import push as push_mod  # noqa: E402
+    stop = alerts_mod.Fired(0, "AAPL", "stop_breach", 180.0, 175.0,
+                            "AAPL is at 175.00, past the stop of 180.00 on your long "
+                            "position.", "", ann.id, "11 Nov 21:00 UTC", 12)
+    mailed = []
+    conn = db.connect(DB)
+    try:
+        alerts_mod.deliver(conn, [stop], lambda to, subject, body: mailed.append(body),
+                           lambda user_id: "ann@example.com")
+    finally:
+        conn.close()
+    check("a crossed stop is emailed with the alerts",
+          mailed and "past the stop of 180.00 on your long position" in mailed[0])
+    check("and goes to phones in the same words",
+          "past the stop of 180.00 on your long position"
+          in push_mod.alert_note([stop]).body)
+    page = flat(text(visitor.get("/privacy")))
+    row = page[page.find("<td>The email delivery service</td>"):]
+    row = row[:row.find("</tr>")]
+    check("the mail service's row names the weekly email and alert emails too",
+          "Your email address and the code, if you sign in by email" in row
+          and "the weekly email or alert emails" in row
+          and "the alerts that fired and the stops your positions crossed" in row
+          and "Delivering sign-in codes and the emails you turned on" in row, row)
+    check("what is kept says alert emails go to the sign-in address",
+          "If you ask for alert emails on the Monitor page" in page)
+    notes = page[page.find('id="notifications"'):]
+    notes = notes[:notes.find("</p>")]
+    check("the notifications paragraph says crossed stops go too, and what of them",
+          "or a position in your journal crosses its stop" in notes
+          and "For a stop, the text names the stock" in notes, notes)
+    check("and what travels unencrypted beside the text",
+          "only a short label" in notes and "travels unencrypted" in notes, notes)
+    row = page[page.find("<td>Apple, Google, Mozilla or Microsoft</td>"):]
+    row = row[:row.find("</tr>")]
+    check("the push services' row says the same",
+          "A fired alert's or crossed stop's text" in row
+          and "Showing the alert or stop on your phone or computer" in row, row)
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):
