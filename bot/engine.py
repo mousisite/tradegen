@@ -10,6 +10,7 @@ else's job.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -23,6 +24,14 @@ from .levels import Level, build_levels
 from .market import Bars, DataError, SymbolNotFound, fetch_bars, resolve
 from .sentiment import Sentiment, analyse as analyse_sentiment
 from .strategies import Context, Regime, Signal, build_context, evaluate
+
+log = logging.getLogger(__name__)
+
+# What each piece of research is called where it is listed as left out.
+_PIECES = {"fundamentals": "Company figures", "sec_history": "Filed accounts",
+           "filings": "Recent filings", "risk": "Risk measures",
+           "options": "Options prices", "options analysis": "Options analysis",
+           "valuation": "Valuation"}
 
 
 @dataclass
@@ -46,7 +55,16 @@ class Research:
     thesis: Optional[object] = None
     reasoning: Optional[object] = None
     elapsed: float = 0.0
+    # The pieces that could not be had, by name. Why goes to `problems`, in
+    # the error's own words, for whoever runs this copy: those name hosts,
+    # addresses and library internals, which tell anyone else nothing.
     unavailable: List[str] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+
+    def left_out(self, piece: str, exc: Exception) -> None:
+        log.warning("Research on %s: %s failed: %s", self.symbol, piece, exc)
+        self.unavailable.append(_PIECES.get(piece, piece.capitalize()))
+        self.problems.append("%s: %s" % (piece, str(exc)[:160]))
 
 
 @dataclass
@@ -275,7 +293,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
                 results[name] = future.result()
             except Exception as exc:
                 results[name] = None
-                out.unavailable.append("%s: %s" % (name, str(exc)[:110]))
+                out.left_out(name, exc)
 
     out.fundamentals = results.get("fundamentals")
     out.sec_history = results.get("sec_history")
@@ -287,7 +305,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
         try:
             out.options = options_mod.analyse(chain)
         except Exception as exc:
-            out.unavailable.append("options analysis: %s" % str(exc)[:110])
+            out.left_out("options analysis", exc)
 
     if out.fundamentals is not None:
         step("Valuing the business")
@@ -303,15 +321,18 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
                 out.fundamentals.get("market_cap") if out.fundamentals else None,
                 getattr(out.fundamentals, "sector", "") if out.fundamentals else "")
         except Exception as exc:
+            log.warning("Research on %s: the scored models failed: %s", out.symbol, exc)
+            out.problems.append("scored models: %s" % str(exc)[:160])
             out.scores = {"available": False,
-                          "reason": "The scored models could not be run: %s" % exc}
+                          "reason": "The scored models could not be run on these "
+                                    "filings."}
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),
                       val_mod.multiples(out.fundamentals, price)]
             out.valuation = val_mod.combine(models, price)
         except Exception as exc:
-            out.unavailable.append("valuation: %s" % str(exc)[:110])
+            out.left_out("valuation", exc)
 
     technical = None
     if analysis is not None:
@@ -352,10 +373,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             options_stats=out.options, thesis=out.thesis)
         out.reasoning = reasoning_mod.analyse(payload)
     elif with_reasoning:
-        out.reasoning = reasoning_mod.Reasoning(
-            False, reason_unavailable=(
-                "No Anthropic API key is set, so the reasoning step is "
-                "unavailable. Every measured figure on this page is unaffected."))
+        out.reasoning = reasoning_mod.switched_off()
 
     out.elapsed = time.time() - started
     return out
