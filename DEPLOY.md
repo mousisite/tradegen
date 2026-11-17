@@ -202,6 +202,10 @@ written reasoning on the research page.
 | `GOOGLE_ALLOWED_DOMAINS` | no | Restrict who may sign in |
 | `GOOGLE_REDIRECT_URI` | no | Only if the callback differs from `PUBLIC_URL` + path |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
+| `VAPID_PRIVATE_KEY` | recommended | The key browser notifications are signed with. Made and kept in `/data/vapid.pem` if unset; copy that file's text here so it outlives the disk. See "Notifications" below |
+| `VAPID_PUBLIC_KEY` | no | Only checked against the private key; the server works it out itself |
+| `APPLE_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY` | for iPhone app notifications | All three turn on notifications to the Orenth iPhone app, through Apple. The key is the `.p8` file's text |
+| `APNS_BUNDLE_ID` | no | The iPhone app's bundle id, default `app.orenth.ios` |
 | `SENTRY_DSN` | recommended | Error reporting. Without it a 3am failure is invisible until someone emails you |
 | `STOCKBOT_ADMIN_EMAIL` | recommended | Who may see `/usage`. Without it, nobody can on a deployment |
 | `STOCKBOT_BACKUP_HOURS` | no | Hours between automatic backups, default 12. Set 0 to switch off |
@@ -246,6 +250,43 @@ four CSV exports, and pruning deletes them together. A deploy restarts the
 server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
 disk as the database: see "Back it up" below for the copy you keep elsewhere.
+
+---
+
+## Notifications to phones and browsers
+
+People can turn on "Notifications on this device" on the Monitor or Settings
+page, and every alert that fires for them then reaches that phone or computer,
+even with Orenth closed.
+
+**Browsers need nothing set.** The first time the server starts it makes a key
+pair and keeps it beside the database, at `/data/vapid.pem` on Render. Every
+browser that turns notifications on is tied to that key, so if the disk were
+lost they would all go quiet until each person turned them on again. To make
+the key outlive the disk, print it in Render's Shell tab with
+`cat /data/vapid.pem` and paste the text, all of it, into a
+`VAPID_PRIVATE_KEY` setting (on one line with `\n` where the line breaks were
+is fine). It is a secret: it goes in that setting and nowhere else. `STOCKBOT_CONTACT` is given to the push services as
+who to contact about this server. On an iPhone, browser notifications work
+once Orenth is added to the Home Screen; the Account page explains how.
+
+**The iPhone app needs an APNs key from Apple**, made once:
+
+1. developer.apple.com, Certificates, Identifiers & Profiles, Identifiers:
+   open `app.orenth.ios`, tick Push Notifications, and save.
+2. Keys, then +: name it "Orenth push", tick Apple Push Notifications service
+   (APNs), choose Sandbox & Production if asked, then Continue, Register and
+   Download. The `.p8` file can be downloaded only once, so keep it safe.
+   Note the Key ID shown on that page.
+3. The Team ID is under Membership details.
+4. In Render, Environment: set `APPLE_TEAM_ID`, `APNS_KEY_ID` and
+   `APNS_PRIVATE_KEY` (the whole `.p8` file's text, as it is or on one line
+   with `\n`). Saving redeploys.
+
+The start-up log then says `notifications  browsers on; iPhone app on`. A build
+run from Xcode gets sandbox device tokens and TestFlight and App Store builds
+get production ones; the server tries production first and remembers the
+sandbox for a token only it knows, so one key serves both.
 
 ---
 
