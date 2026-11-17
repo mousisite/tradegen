@@ -58,11 +58,11 @@ _COINS = {
 # DOGE, ADA, AVAX, LINK and LTC stay coins: they are the coins on the public
 # pages (public.POPULAR), which show each by its bare ticker, so typing what
 # the site shows has to open what it showed. The funds listed as BTC, ETH and
-# XRP hold that same coin; the cost is that Interlink Electronics (LINK) and
-# LTC Properties (LTC) cannot be looked up here. Each coin below stays one
-# step away, in the forms that can only mean a coin (SUI-USD, SUIUSD, SUI/USD,
-# BINANCE:SUIUSDT), and a symbol picked from the suggestions is analysed as
-# picked (see search).
+# XRP, Interlink Electronics (LINK) and LTC Properties (LTC) are reached by
+# Yahoo's exact symbol instead: a pick from the suggestions is sent marked
+# exact (search), and so is every link the site makes to one (needs_exact).
+# Each coin below stays one step away, in the forms that can only mean a coin
+# (SUI-USD, SUIUSD, SUI/USD, BINANCE:SUIUSDT).
 _LISTED_FIRST = {"BCH", "TRX", "ATOM", "NEAR", "APT", "ARB", "SUI", "VET"}
 
 
@@ -411,6 +411,13 @@ def search(query: str, limit: int = 6) -> list:
     when the lookup fails, because a missing suggestion must never stop
     someone typing the ticker themselves. Answers are cached by _get, so the
     same few letters typed twice ask Yahoo once.
+
+    What is picked here is analysed exactly as picked. An entry whose ticker
+    this app would read as something else, such as Interlink Electronics
+    under LINK beside the Chainlink coin, carries exact, and the box sends it
+    marked so. A coin says it is one: Yahoo calls it by its dollar price
+    ("Chainlink USD") and lists it on an exchange code of its own (CCC),
+    which tells a person choosing between a coin and a company nothing.
     """
     text = (query or "").strip()
     if not text:
@@ -424,17 +431,14 @@ def search(query: str, limit: int = 6) -> list:
         kind = (q.get("quoteType") or "").lower()
         if not q.get("symbol") or kind not in _SUGGEST_KINDS:
             continue
-        # What is picked here is analysed exactly as picked, so an entry whose
-        # ticker this app reads as something else is left out: the fund
-        # listed as XRP would otherwise open the XRP coin.
-        try:
-            if normalise_symbol(q["symbol"]) != q["symbol"].strip().upper():
-                continue
-        except DataError:
-            continue
-        out.append({"symbol": q["symbol"],
-                    "name": q.get("shortname") or q.get("longname") or q["symbol"],
-                    "where": q.get("exchDisp") or ""})
+        name = q.get("shortname") or q.get("longname") or q["symbol"]
+        where = q.get("exchDisp") or ""
+        if kind == "cryptocurrency":
+            if name.upper().endswith(" USD"):
+                name = name[:-4].rstrip() or name
+            where = "coin"
+        out.append({"symbol": q["symbol"], "name": name, "where": where,
+                    "exact": needs_exact(q["symbol"])})
     return out[:limit]
 
 

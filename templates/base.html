@@ -296,8 +296,27 @@
         if (i >= 0) { input.setAttribute('aria-activedescendant', list.id + '-' + i); }
         else { input.removeAttribute('aria-activedescendant'); }
       }
+      // A pick whose ticker the site would read as something else (the fund
+      // listed as BTC, Interlink Electronics as LINK) goes with exact=1, so it
+      // is analysed, watched or alerted as picked. Typing again drops it.
+      function markExact(on) {
+        var form = input.form;
+        if (!form) { return; }
+        var mark = form.querySelector('input[name="exact"][data-picked]');
+        if (on && !mark) {
+          mark = document.createElement('input');
+          mark.type = 'hidden';
+          mark.name = 'exact';
+          mark.value = '1';
+          mark.setAttribute('data-picked', '');
+          form.appendChild(mark);
+        } else if (!on && mark) {
+          form.removeChild(mark);
+        }
+      }
       function choose(i) {
         input.value = items[i].symbol;
+        markExact(items[i].exact);
         close();
         var form = input.form;
         if (input.getAttribute('data-suggest') === 'submit' && form) {
@@ -335,6 +354,7 @@
       }
       input.addEventListener('input', function () {
         clearTimeout(timer);
+        markExact(false);
         var q = input.value.trim();
         if (!q) { close(); return; }
         timer = setTimeout(function () {

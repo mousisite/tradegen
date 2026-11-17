@@ -687,23 +687,35 @@ try:
         check("an analysis of %r is of %s, %s" % (typed, meant, name),
               found["symbol"] == meant and found["name"] == name, found)
 
-    picks = [s["symbol"] for s in market.search("XRP")]
-    check("the fund listed as XRP is not offered, since picking it would open the coin",
-          picks == ["XRP-USD"], picks)
-    picks = [s["symbol"] for s in market.search("LTC")]
-    check("nor LTC Properties, for the same reason", picks == ["LTC-USD"], picks)
-    picks = [s["symbol"] for s in market.search("ARB-USD")]
-    check("nor a coin whose id this app reads as another coin", picks == ["ARB11841-USD"], picks)
-    picks = [s["symbol"] for s in market.search("SUI")]
+    # A pick whose ticker the app reads as something else used to be left
+    # out. It is offered now, marked exact, and the box sends it so.
+    picks = [(s["symbol"], s["exact"]) for s in market.search("XRP")]
+    check("the fund listed as XRP is offered beside the coin, marked to be read exactly",
+          picks == [("XRP", True), ("XRP-USD", False)], picks)
+    picks = [(s["symbol"], s["exact"]) for s in market.search("LTC")]
+    check("and LTC Properties beside Litecoin", picks == [("LTC", True), ("LTC-USD", False)],
+          picks)
+    picks = [(s["symbol"], s["exact"]) for s in market.search("ARB-USD")]
+    check("a coin whose id this app reads as another coin is marked the same way",
+          picks == [("ARB-USD", True), ("ARB11841-USD", False)], picks)
+    picks = [(s["symbol"], s["exact"]) for s in market.search("SUI")]
     check("Sun Communities is offered as SUI, and the Sui coin by its own id",
-          picks == ["SUI", "SUI20947-USD"], picks)
-    every = [s["symbol"] for typed in SEARCH for s in market.search(typed)]
-    check("every suggestion is analysed exactly as picked",
-          every and all(market.normalise_symbol(s) == s for s in every),
-          [s for s in every if market.normalise_symbol(s) != s])
+          picks == [("SUI", False), ("SUI20947-USD", False)], picks)
+    shown = {s["symbol"]: (s["name"], s["where"]) for s in market.search("LTC")}
+    check("a coin is called a coin, by its own name rather than its price's",
+          shown.get("LTC-USD") == ("Litecoin", "coin")
+          and shown.get("LTC") == ("LTC Properties, Inc.", "NYSE"), shown)
+    every = [s for typed in SEARCH for s in market.search(typed)]
+    check("every suggestion, sent the way the box sends it, is analysed exactly as picked",
+          every and all(market.normalise_symbol(s["symbol"], exact=s["exact"]) == s["symbol"]
+                        for s in every),
+          [s for s in every
+           if market.normalise_symbol(s["symbol"], exact=s["exact"]) != s["symbol"]])
     check("and the analysis of a pick finds that same instrument",
-          all(market.resolve(s)["symbol"] == s for s in every),
-          [(s, market.resolve(s)["symbol"]) for s in every])
+          all(market.resolve(s["symbol"], exact=s["exact"])["symbol"] == s["symbol"]
+              for s in every),
+          [(s["symbol"], market.resolve(s["symbol"], exact=s["exact"])["symbol"])
+           for s in every])
 
     REFUSE[0] = True
     del ASKED[:]
