@@ -489,6 +489,10 @@ try:
     check("and counts its dividends, as a buy is counted",
           abs(public.hold_index(ctx, spy, 1.5, 10, 3, 2.0)[2]
               - by_hand_hold(1.001 ** 10 * 1.0005 ** 10)) < 1e-3)
+    spy.dividend_factor[points[5]] = 0.0            # a hole in the source's data
+    check("a window starting on a hole in the dividends is left out, not an error",
+          public.hold_index(ctx, spy, 1.5, 10, 3, 2.0)[0] == len(points) - 1)
+    spy.dividend_factor = None
     gone = points[50] + 10                      # the end of one window, the start of none
     keep = np.arange(900) != gone
     spy_gap = Bars(symbol="SPY", name="SPY", asset_class="equity", currency="USD",
@@ -601,6 +605,14 @@ try:
     check("each beside the figures the version before reads, which are as they were",
           both["tests"] == snap["tests"] and both["baseline"] == snap["baseline"]
           and both["spread"] == snap["spread"])
+    web.app.logger.disabled = True              # the failure is logged, as it should be
+    try:
+        broken = web._public_snapshot("NVDA", {"SPY": SimpleNamespace()})
+    finally:
+        web.app.logger.disabled = False
+    check("index prices that cannot be read leave the comparison out, never the call",
+          broken["index"] is None and broken["action"] == snap["action"]
+          and broken["baseline_short"] == both["baseline_short"])
     asked = []
 
     def fetch_index(symbol, interval):

@@ -3423,17 +3423,23 @@ def _public_snapshot(symbol: str, indexes: Optional[dict] = None) -> dict:
     snap["baseline_short"] = public_mod.short_every_day(
         result.context, stop, target, horizon, stride, result.cost_bps)
     index = public_mod.index_symbol(symbol)
-    held = (public_mod.hold_index(result.context, indexes[index], stop, horizon,
-                                  stride, result.cost_bps)
-            if indexes and indexes.get(index) is not None else None)
+    held = None
+    if indexes and indexes.get(index) is not None:
+        try:
+            held = public_mod.hold_index(result.context, indexes[index], stop,
+                                         horizon, stride, result.cost_bps)
+        except Exception:        # a comparison only: never at the cost of the call
+            app.logger.warning("Could not set %s's strategy tests beside %s",
+                               symbol, index, exc_info=True)
     snap["index"] = {"symbol": index, "hold": held} if held else None
     return snap
 
 
 def _index_bars(symbol: str, fetched: dict) -> dict:
-    """fetched, holding the daily bars of the index symbol's tests are set
-    beside: fetched once per background run, and None for the rest of the
-    run when the source would not give them."""
+    """Make sure fetched holds the daily bars of the index this symbol's
+    strategy tests are set beside (public.index_symbol), and return it. Each
+    index is fetched once per background run; one the source would not give
+    is None for the rest of the run."""
     index = public_mod.index_symbol(symbol)
     if index not in fetched:
         try:

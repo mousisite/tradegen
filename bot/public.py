@@ -338,6 +338,7 @@ def short_every_day(ctx, stop_atr: float, target_atr: float, horizon: int,
 def _every_day(ctx, direction: int, stop_atr: float, target_atr: float,
                horizon: int, stride: int, cost_bps: float,
                max_samples: int) -> Optional[List]:
+    """The same pretend trade on every tested day, a buy (1) or a short (-1)."""
     from .calibrate import sample_points, simulate_trade
     from .learning import StrategyStat
     stat = StrategyStat(name="buy_every_day" if direction > 0 else "short_every_day",
@@ -363,7 +364,7 @@ def sides(report) -> Dict[str, int]:
     """
     if report is None:
         return {}
-    return {s.name: int(getattr(s, "longs", 0)) for s in report.overall.values()
+    return {s.name: int(s.longs) for s in report.overall.values()
             if hasattr(s, "longs")}
 
 
@@ -410,7 +411,10 @@ def hold_index(ctx, index_bars, stop_atr: float, horizon: int, stride: int = 3,
             continue
         start, end = float(closes[a]), float(closes[b])
         if factor is not None:
-            end *= float(factor[b]) / float(factor[a])
+            # A factor of nothing is a hole in the source's data: the window
+            # is left out like any other it has no price for.
+            base = float(factor[a])
+            end = end * float(factor[b]) / base if base > 0 else float("nan")
         if not all(math.isfinite(x) and x > 0 for x in (entry, atr, start, end)):
             continue
         r = (end / start - 1.0 - cost) * entry / (stop_atr * atr)
@@ -1051,7 +1055,7 @@ def _separate_tests(rows) -> int:
 # at least this many windows' worth of market days. Each window is about one
 # separate spell of the market, and with fewer the spread between spells
 # cannot be measured: the page then says it is too early for a range.
-MIN_STRETCHES = 3
+MIN_SPELLS = 3
 
 # The t distribution's 97.5th percentile for 1 to 30 degrees of freedom: what
 # a 95% range is wide by when its spread is measured from few separate
@@ -1120,7 +1124,7 @@ def _together(rows: List[Dict], values: List[float]) -> Optional[Tuple[float, in
         if start is None or day - start >= widest:
             held, start = held + 1, day
     spells = min((max(days) - min(days) + 1) / float(widest), float(held))
-    if spells < MIN_STRETCHES:
+    if spells < MIN_SPELLS:
         return None
     mean = sum(values) / n
     sums: Dict[Tuple[int, int], float] = {}
@@ -1156,7 +1160,7 @@ def _stats(rows, costs: Dict[str, float]) -> Dict:
     to 95% of the time. The range given is the wider of the two at each end.
 
     "together" says whether the second could be measured. Until the calls
-    cover MIN_STRETCHES windows of market days it cannot: "lo" and "hi" are
+    cover MIN_SPELLS windows of market days it cannot: "lo" and "hi" are
     then the first alone, kept for anything that reads them, and the page
     gives no range. "move_lo" and "move_hi" are the 95% range of the average
     move, by _together alone, None until then.
@@ -1264,7 +1268,7 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
             "scored": len(scored),
             "early": sum(1 for r in settled if r["at"] > cutoff),
             "mature_days": MATURE_DAYS,
-            "range_weeks": int(round(MIN_STRETCHES * stock_window / 7.0)),
+            "range_weeks": int(round(MIN_SPELLS * stock_window / 7.0)),
             "counts_from": first_at + MATURE_DAYS * 86400 if first_at else None,
             "classes": classes,
             "baseline": base,
@@ -1334,7 +1338,7 @@ def calls_csv(conn: sqlite3.Connection) -> str:
     return buf.getvalue()
 
 
-# --- the record's daily fingerprint --------------------------------------------
+# --- the record's daily fingerprint ------------------------------------------
 #
 # Once a UTC day is over, the calls written down that day get a fingerprint:
 # the SHA-256 of what each said when it was written, the columns of
