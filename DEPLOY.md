@@ -187,6 +187,71 @@ written reasoning on the research page.
 
 ---
 
+## 6. Optional: Sign in with Apple
+
+The iPhone app needs this before it goes to the App Store. Apple asks for
+"Sign in with Apple" wherever Google sign-in is offered, and asks that
+deleting an account also ends it. It also adds a "Continue with Apple" button
+to the website. You need a paid Apple Developer account. Nothing changes on
+the site until the settings below are in.
+
+On developer.apple.com, go to Account, then Certificates, Identifiers &
+Profiles:
+
+1. **Make the app's ID.** Identifiers, then **+**, then App IDs, then App.
+   Bundle ID: Explicit, `app.orenth.ios`. Tick **Sign In with Apple** (leave
+   it as a primary App ID) and **Push Notifications**. Continue, then
+   Register.
+2. **Tell Apple where to send changes.** Open that App ID, click
+   **Configure** next to Sign In with Apple, and type this as the
+   server-to-server notification endpoint:
+   `https://orenth.app/auth/apple/notifications`. Done, then Save.
+3. **Make the website's ID.** Identifiers, then **+**, then **Services IDs**.
+   Description "Orenth website", identifier `app.orenth.web` (any name you
+   like, as long as it is not the app's). Register. Open it, tick **Sign In
+   with Apple**, click **Configure**, and fill in: Primary App ID
+   `app.orenth.ios`; Domains and Subdomains `orenth.app`; Return URLs
+   `https://orenth.app/auth/apple/callback`. Done, Continue, then Save. There
+   is no file to put on the site: Apple stopped asking for one.
+4. **Make one key for both jobs.** Keys, then **+**. Name it "Orenth". Tick
+   **Sign in with Apple** (click Configure, choose `app.orenth.ios`, Save)
+   and **Apple Push Notifications service (APNs)**. Continue, Register, then
+   **Download**. Apple lets you download the .p8 file only once, so keep it
+   somewhere safe. Write down the **Key ID** shown on that page.
+5. **Find your Team ID.** It is at the top right of the developer site, and
+   under Membership details: ten letters and numbers.
+6. **Let email reach people who hide their address.** Services, then **Sign
+   in with Apple for Email Communication**, then Configure. Add the domain of
+   `MAIL_FROM` (or that exact address) under Email Sources. Apple checks
+   that mail with SPF, so the domain's SPF record must be in place; Resend's
+   domain setup adds it. Without this, Apple drops sign-in codes, alerts and
+   the weekly email sent to anyone who chose to hide their address.
+
+Then in Render, open the service, then Environment, and add:
+
+```
+APPLE_TEAM_ID            = <the Team ID, step 5>
+APPLE_SIGNIN_KEY_ID      = <the Key ID, step 4>
+APPLE_SIGNIN_PRIVATE_KEY = <the whole .p8 file, BEGIN and END lines included>
+APPLE_SERVICES_ID        = app.orenth.web
+```
+
+To copy the .p8 file, open it in Notepad, select all, copy, and paste it as
+the value. Pasting it on one line with `\n` where the line breaks were also
+works. `APPLE_BUNDLE_ID` is `app.orenth.ios` unless you set it.
+
+Save, and Render redeploys. The sign-in page then shows "Continue with
+Apple", and the app can use Apple's own sign-in sheet. With only the first
+three set, Apple sign-in works in the app only, and the website shows no
+Apple button. The start-up lines in Render's log say "Apple" among the ways
+in, or name the Apple setting that is missing.
+
+The same key also signs push notifications to the iPhone app. Give it to the
+push settings as well: `APNS_KEY_ID` is the same Key ID, and
+`APNS_PRIVATE_KEY` is the same .p8 text.
+
+---
+
 ## The whole environment, in one place
 
 | Variable | Needed | What it does |
@@ -201,6 +266,9 @@ written reasoning on the research page.
 | `GOOGLE_CLIENT_SECRET` | for sign-in | Never appears in a URL or a config file |
 | `GOOGLE_ALLOWED_DOMAINS` | no | Restrict who may sign in |
 | `GOOGLE_REDIRECT_URI` | no | Only if the callback differs from `PUBLIC_URL` + path |
+| `APPLE_TEAM_ID`, `APPLE_SIGNIN_KEY_ID`, `APPLE_SIGNIN_PRIVATE_KEY` | for Apple sign-in | All three turn on Sign in with Apple in the iPhone app. See section 6 |
+| `APPLE_SERVICES_ID` | for Apple on the website | With the three above, adds "Continue with Apple" to the website |
+| `APPLE_BUNDLE_ID` | no | The iPhone app's bundle id, default `app.orenth.ios` |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
 | `SENTRY_DSN` | recommended | Error reporting. Without it a 3am failure is invisible until someone emails you |
 | `STOCKBOT_ADMIN_EMAIL` | recommended | Who may see `/usage`. Without it, nobody can on a deployment |

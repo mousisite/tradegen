@@ -562,6 +562,15 @@ so trust comes from the connection to Google rather than from cryptography
 written here. Session tokens are opaque and stored, so signing out ends the
 session on the server rather than relying on a browser to discard its copy.
 
+Sign in with Apple is the exception, because Apple has no userinfo endpoint
+and inside the iPhone app its token comes from the phone. So `bot/apple.py`
+checks the token by hand, as narrowly as it can: RS256 only, Apple's
+published keys only, and the issuer, audience, expiry and the nonce this
+server handed out. Inside the app, Google and Apple's web sign-in run in the
+system browser sheet, which hands the result back to the app as a one-time
+code that only works with a secret the app kept (`static/signin-app.js`).
+Deleting an account asks Apple to end its sign-in. DEPLOY.md has the setup.
+
 Credentials are read from the environment and never from `config.json`, because
 `config.json` is a file people edit, copy, and paste into support requests.
 
