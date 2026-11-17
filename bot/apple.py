@@ -224,9 +224,11 @@ def _unb64(part: str) -> bytes:
 
 
 def _json_part(part: str) -> Dict:
+    # Read before any signature is checked, so anyone's: JSON nested past
+    # Python's recursion limit is refused like any other junk.
     try:
         value = json.loads(_unb64(part).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         raise AppleError("That sign-in token is not one Apple made.") from exc
     if not isinstance(value, dict):
         raise AppleError("That sign-in token is not one Apple made.")
@@ -358,7 +360,7 @@ def name_from_post(raw_user: str) -> str:
         return ""
     try:
         data = json.loads(raw_user)
-    except ValueError:
+    except (ValueError, RecursionError):
         return ""
     name = data.get("name") if isinstance(data, dict) else None
     if not isinstance(name, dict):

@@ -2590,7 +2590,12 @@ def apple_native():
                                               "itself."}), 403
     request.max_content_length = APPLE_JSON_LIMIT
     # Named so that an error report strips it: it holds the identity token.
-    token_post = request.get_json(silent=True)
+    try:
+        token_post = request.get_json(silent=True)
+    except RecursionError:
+        # silent= covers only what is not JSON; this is JSON nested too
+        # deep for Python to read, which anyone can send.
+        token_post = None
     if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
@@ -2675,7 +2680,10 @@ def apple_notifications():
     if not apple_mod.native_ready():
         abort(404)
     request.max_content_length = APPLE_JSON_LIMIT
-    body = request.get_json(silent=True, force=True)
+    try:
+        body = request.get_json(silent=True, force=True)
+    except RecursionError:
+        body = None              # nested too deep to read, as in apple_native
     try:
         event = apple_mod.read_notification(
             body.get("payload") if isinstance(body, dict) else None)

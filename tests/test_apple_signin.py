@@ -522,6 +522,12 @@ try:
           "\n" not in noisy and len(noisy) <= 130, noisy)
     check("a name that is not JSON is ignored",
           apple_mod.name_from_post("{not json") == "")
+    try:
+        nested = apple_mod.name_from_post("[" * 999 + "]" * 999)
+    except RecursionError:
+        nested = None
+    check("a name nested deeper than Python reads is ignored, not a crash",
+          nested == "", nested)
 
     section("WHICH ACCOUNT AN APPLE ID REACHES")
 
@@ -923,6 +929,29 @@ try:
         json={"payload": sign(claims_for("005.late.1", BUNDLE, apple_mod.new_nonce()))})
     check("an identity token posted as a notification is refused",
           other_kind.status_code == 400)
+
+    def status_of(path, **kwargs):
+        """A post's status, counting an error that escapes as the 500 it is
+        on the site."""
+        try:
+            return web.app.test_client().post(path, **kwargs).status_code
+        except RecursionError:
+            return 500
+
+    # Nested past what Python reads, and unsigned: anyone can send these.
+    deep = "[" * 2500 + "]" * 2500
+    nested_token = "%s.%s.%s" % (b64(deep.encode("ascii")), b64(b"{}"), b64(b"x"))
+    check("a token whose header is nested thousands deep is refused, not a 500",
+          status_of("/auth/apple/notifications",
+                    json={"payload": nested_token}) == 400)
+    deep_body = "[" * 20000 + "]" * 20000
+    check("so is a notification body nested thousands deep",
+          status_of("/auth/apple/notifications", data=deep_body,
+                    content_type="application/json") == 400)
+    check("and the same body posted to the app's Apple sign-in",
+          status_of("/auth/apple/native", data=deep_body,
+                    content_type="application/json",
+                    headers={"Origin": "http://localhost"}) == 400)
 
 finally:
     apple_mod.requests = _real_requests
