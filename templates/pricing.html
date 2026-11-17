@@ -38,6 +38,11 @@
       <li>As many alerts as you like</li>
       <li>Everything in Free</li>
     </ul>
+    {# The hourly safety limits every account keeps, Pro included, from the
+       numbers the server enforces. #}
+    <p class="fine">Fair use: up to {% if fair.images %}{{ fair.images }}
+      screenshot reads and {% endif %}{{ fair.theses }} saved theses an hour,
+      and Find scans wait their turn when the server is busy.</p>
     {% if is_pro and current_user and not demo %}
       <p class="prose"><b>You have Pro.</b></p>
       {% if has_customer %}
@@ -103,6 +108,12 @@
   });
 })();
 </script>
+
+{# How every figure on both plans is measured, one tap from the page that
+   asks for money, as it is from the front page. #}
+<p class="fine" style="text-align:center;margin-top:var(--s3)">
+  See <a href="{{ url_for('backtests') }}#how-we-tested">how the strategies are tested</a>
+  and <a href="{{ url_for('record') }}">how past calls turned out</a>.</p>
 
 <p class="legal">
   <b>Pro gives you more of the same analysis, not better odds.</b> The

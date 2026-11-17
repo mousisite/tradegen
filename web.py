@@ -347,7 +347,18 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
                            offer=billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
-                           has_customer=bool(customer)), status
+                           has_customer=bool(customer), fair=_fair_use()), status
+
+
+def _fair_use() -> Dict[str, int]:
+    """The hourly limits Pro keeps, read from the limits themselves.
+
+    Screenshot reads are left out where no key is set: the page would be
+    putting a limit on something this site does not offer.
+    """
+    return {"images": (IMAGE_READS_PER_HOUR
+                       if os.environ.get("ANTHROPIC_API_KEY") else 0),
+            "theses": THESES_PER_HOUR}
 
 
 def _upgrade(reason: str):
