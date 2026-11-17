@@ -526,6 +526,17 @@ try:
     finally:
         _os.environ.update(public_env)
 
+    head("A NUMBER THAT IS NOT ONE")
+    # A NaN or an infinity reaching a page read "nan%", "+nan" or "inf".
+    odd = [float("nan"), float("inf"), -float("inf"), None, "n/a"]
+    check("every figure filter shows a dash for it",
+          all(f(v) == "-" for f in (web._price, web._money, web._pct, web._signed)
+              for v in odd),
+          [(f.__name__, f(v)) for f in (web._price, web._money, web._pct, web._signed)
+           for v in odd if f(v) != "-"])
+    check("and real figures as before", (web._pct(0.25), web._signed(-0.004),
+                                         web._money(1234.5)) == ("25%", "0.00", "1,234.50"))
+
     head("OFFLINE")
     check("no page reached for the network", not reached, reached[:5])
 

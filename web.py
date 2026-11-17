@@ -20,6 +20,7 @@ from datetime import timedelta
 import hmac
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -744,35 +745,46 @@ def _record_cached_run(result: engine.Analysis, user: int) -> Optional[int]:
 # Template helpers
 # ---------------------------------------------------------------------------
 
+def _number(value) -> Optional[float]:
+    """A value as a finite number, or None when it is not one.
+
+    A NaN or an infinity printed as it comes reads "nan%", "+nan" or "inf"
+    on the page, which looks broken. The filters below show "-" for it, as
+    they do for a missing value.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 @app.template_filter("price")
 def _price(value):
-    return format_price(value) if value is not None else "-"
+    number = _number(value)
+    return format_price(number) if number is not None else "-"
 
 
 @app.template_filter("money")
 def _money(value):
-    try:
-        return "{:,.2f}".format(float(value))
-    except (TypeError, ValueError):
-        return "-"
+    number = _number(value)
+    return "{:,.2f}".format(number) if number is not None else "-"
 
 
 @app.template_filter("pct")
 def _pct(value, digits=0):
-    try:
-        return "%.*f%%" % (digits, float(value) * 100)
-    except (TypeError, ValueError):
-        return "-"
+    number = _number(value)
+    return "%.*f%%" % (digits, number * 100) if number is not None else "-"
 
 
 @app.template_filter("signed")
 def _signed(value, digits=2):
-    try:
-        value = round(float(value), digits)
-        # -0.004 rounds to zero, and "-0.00" reads as a loss that is not there.
-        return "%.*f" % (digits, 0.0) if value == 0 else "%+.*f" % (digits, value)
-    except (TypeError, ValueError):
+    number = _number(value)
+    if number is None:
         return "-"
+    number = round(number, digits)
+    # -0.004 rounds to zero, and "-0.00" reads as a loss that is not there.
+    return "%.*f" % (digits, 0.0) if number == 0 else "%+.*f" % (digits, number)
 
 
 @app.template_filter("strategy")
