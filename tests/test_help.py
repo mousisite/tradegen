@@ -13,6 +13,7 @@ import os as _os
 import re
 import sys as _sys
 from html.parser import HTMLParser
+from types import SimpleNamespace as NS
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -28,6 +29,7 @@ import web  # noqa: E402
 from bot import accounts as A  # noqa: E402
 from bot import calibrate, catalysts, config, engine, indicators, learning, plain  # noqa: E402
 from bot import database as db  # noqa: E402
+from bot import reasoning as reasoning_mod  # noqa: E402
 from bot import sentiment as sentiment_mod  # noqa: E402
 from bot import strategies  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -307,6 +309,25 @@ try:
     engine.fetch_bars = broken
     web._CACHE.clear()
     web.app.logger.disabled = True
+    # The research page's reasoning, which needs a Claude key, without one.
+    real_cached, real_research = web.cached_analysis, web.engine.research
+    stand_in = NS(symbol="ZZRES", name="Res Corp", last_price=101.0, interval="1d",
+                  close=[101.0] * 3, timestamp=[1_700_000_000 + k * DAY for k in range(3)],
+                  splits=[], meta={}, market_open=True, last_bar_time="",
+                  asset_class="equity", currency="USD")
+    no_key = reasoning_mod.Reasoning(False, reason_unavailable=(
+        "No Anthropic API key is set, so the reasoning step is unavailable."))
+
+    def research_page():
+        web.cached_analysis = lambda *a, **k: NS(bars=stand_in)
+        web.engine.research = lambda symbol, price, cfg, **k: web.engine.Research(
+            symbol=symbol, price=price, reasoning=no_key)
+        web._RESEARCH_CACHE.clear()
+        try:
+            return c.get("/research?symbol=ZZRES&interval=1d").data.decode("utf-8", "replace")
+        finally:
+            web.cached_analysis, web.engine.research = real_cached, real_research
+
     try:
         r = c.get("/analyse?symbol=ZZFAIL&interval=1d&news=0")
         page = r.data.decode("utf-8", "replace")
@@ -315,6 +336,9 @@ try:
               and "boom" in page, page[-1500:])
         check("with no advice about tickers that do not exist",
               "the ticker does not exist" not in page)
+        page = research_page()
+        check("on their own machine, the research page says why there is no reasoning",
+              "What the evidence supports" in page and "No Anthropic API key" in page)
         _os.environ["GOOGLE_CLIENT_ID"] = "1.apps.googleusercontent.com"
         _os.environ["GOOGLE_CLIENT_SECRET"] = "x"
         conn = db.connect(DB)
@@ -328,6 +352,10 @@ try:
         check("anyone else gets the sentence, never the exception's text",
               r.status_code == 500 and "Something broke while analysing ZZFAIL" in page
               and "boom" not in page and "engine.py" not in page, page[-1500:])
+        page = research_page()
+        check("and the research page shows them no section about a missing key",
+              "ZZRES" in page and "What the evidence supports" not in page
+              and "Anthropic" not in page and "API key" not in page)
     finally:
         web.app.logger.disabled = False
         for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):

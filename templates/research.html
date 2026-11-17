@@ -68,7 +68,11 @@
    top bar; it is filled in below from the headings that actually rendered. #}
 <nav class="jump" id="jump" aria-label="Sections" hidden></nav>
 
-{% if r.reasoning %}
+{# Shown when the reasoning came back. When it did not, the reason is for
+   whoever runs the server on their own machine: no key set, or a failed
+   request's own text. Anyone else gets every measured figure below, and no
+   section saying something here is not set up. #}
+{% if r.reasoning and (r.reasoning.available or (current_user and current_user.is_local)) %}
 <section style="margin-top:0">
   <div class="sechead">
     <h2>What the evidence supports</h2>
