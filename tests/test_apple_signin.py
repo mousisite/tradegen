@@ -31,6 +31,7 @@ from bot import accounts as A
 from bot import apple as apple_mod
 from bot import database as db
 from bot import demo as demo_mod
+from bot import push as push_mod
 
 c, DB = harness.isolated_web("apple")
 
@@ -928,6 +929,15 @@ try:
         A.upsert_apple_user(conn, {"sub": "a-dana", "email": "dana@example.com",
                                    "email_verified": True})
         dana_session = A.start_session(conn, dana.id)
+        # Notifications that sign-in switched on, on a shared iPad, and
+        # someone else's phone, which none of this may touch.
+        push_mod.register(conn, dana.id, "web",
+                          "https://fcm.googleapis.com/fcm/send/dana-ipad", "p", "a",
+                          label="iPad", session_ref=web._session_ref(dana_session))
+        robin_id = people()["robin@example.com"].id
+        push_mod.register(conn, robin_id, "web",
+                          "https://fcm.googleapis.com/fcm/send/robin", "p", "a",
+                          label="Robin's", session_ref=web._session_ref("robin-1"))
     finally:
         conn.close()
     out = notify("consent-revoked", "a-dana")
@@ -940,6 +950,11 @@ try:
               A.user_for_session(conn, dana_session) is None)
         check("but the account stays, Google still opens it",
               A.get_user(conn, dana.id) is not None)
+        left = [d["label"] for d in push_mod.devices(conn, dana.id)]
+        check("and, as signing out does, the devices those sign-ins switched "
+              "on stop getting its alerts", left == [], left)
+        check("while nobody else's devices are touched",
+              len(push_mod.devices(conn, robin_id)) == 1)
     finally:
         conn.close()
 
@@ -992,9 +1007,26 @@ try:
           and "q9@privaterelay.appleid.com" not in people(), out.status_code)
     web_sign_in("005.real.2", "real2@example.com")
     notify("consent-revoked", "005.real.2")
+    # Back in with a code since, with notifications on for that sign-in.
+    conn = db.connect(DB)
+    try:
+        real2 = A.upsert_email_user(conn, "real2@example.com")
+        since = A.start_session(conn, real2.id)
+        push_mod.register(conn, real2.id, "web",
+                          "https://fcm.googleapis.com/fcm/send/real2", "p", "a",
+                          session_ref=web._session_ref(since))
+    finally:
+        conn.close()
     notify("account-delete", "005.real.2")
     check("while one with a real address is kept that way too",
           "real2@example.com" in people())
+    conn = db.connect(DB)
+    try:
+        check("and a sign-in made since, with its devices, is left alone",
+              A.user_for_session(conn, since) is not None
+              and len(push_mod.devices(conn, real2.id)) == 1)
+    finally:
+        conn.close()
 
     web_sign_in("005.late.1", "late@example.com")
     out = notify("consent-revoked", "005.late.1", at=int(time.time()) - 3600)

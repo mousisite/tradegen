@@ -28,7 +28,7 @@ import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Tables that belong to one person. Everything else is shared or derived.
 # In the order they can be deleted: a trade opened from an analysis points at
@@ -600,19 +600,25 @@ def can_still_sign_in(conn: sqlite3.Connection, user_id: int, provider: str,
                 and (link["email"] or "").lower() == email)
 
 
-def unlink_identity(conn: sqlite3.Connection, provider: str,
-                    subject: str) -> Optional[int]:
+def unlink_identity(conn: sqlite3.Connection, provider: str, subject: str,
+                    ending: Optional[Callable[[str], None]] = None) -> Optional[int]:
     """Take a sign-in method off its account, and sign that account out.
 
     Its stored token goes with it. Which account it was tied to is kept, so
     that the address cannot later bring another id from that provider in.
     Every session ends, because the method being withdrawn is to be treated
     as the person signing out, and nothing records which method opened which
-    session. Returns the account's id.
+    session. ending, when given, is called with each of those sessions'
+    tokens first, for what that sign-in switched on elsewhere. Returns the
+    account's id.
     """
     row = identity_owner(conn, provider, subject)
     if row is None:
         return None
+    if ending is not None:
+        for (token,) in conn.execute("SELECT token FROM sessions WHERE user_id=?",
+                                     (row["user_id"],)).fetchall():
+            ending(token)
     conn.execute("INSERT OR REPLACE INTO former_identities (user_id, provider, "
                  "subject, ended_ts) VALUES (?,?,?,?)",
                  (row["user_id"], provider, subject, int(time.time())))

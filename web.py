@@ -2706,7 +2706,13 @@ def apple_notifications():
         user_id = int(owner["user_id"])
         if not deleted or accounts_mod.can_still_sign_in(conn, user_id, "apple",
                                                          event["sub"]):
-            accounts_mod.unlink_identity(conn, "apple", event["sub"])
+            # Unlinking signs the account out everywhere. As /signout does
+            # for one sign-in, the devices those sign-ins switched on stop
+            # being sent its alerts, so a shared iPad stops showing them.
+            accounts_mod.unlink_identity(
+                conn, "apple", event["sub"],
+                ending=lambda token: push_mod.forget_session(conn,
+                                                             _session_ref(token)))
             return jsonify({"received": True})
         # Their Apple Account is gone and nothing else opens this one. The
         # subscription stops first, as when they delete it themselves.
