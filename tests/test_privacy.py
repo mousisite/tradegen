@@ -241,6 +241,42 @@ try:
     page = flat(text(visitor.get("/privacy")))
     check("which is what the privacy page says",
           "Every page with anything of yours on it is sent marked not to be stored" in page)
+
+    # -----------------------------------------------------------------------
+    head("COOKIES: EVERY ONE, AND WHAT IS IN IT")
+    # -----------------------------------------------------------------------
+    # The page said the one cookie held an opaque token "and nothing else".
+    # Flask's cookie is signed, not encrypted, and holds what a step under
+    # way needs; Apple's sign-in on the website sets a second.
+    from bot import invites  # noqa: E402
+    conn = db.connect(DB)
+    invite = invites.code_for(conn, ann.id)
+    conn.close()
+    arrived = web.app.test_client()
+    arrived.get("/join/%s" % invite)
+    with arrived.session_transaction() as sess:
+        check("a visitor who came by an invite carries it in the cookie",
+              sess.get("ref") == invite, dict(sess))
+    page = flat(text(visitor.get("/privacy")))
+    check("the page no longer says the cookie holds a token and nothing else",
+          "nothing else" not in page and "No tracking cookies." in page)
+    check("it says what else the cookie holds while something is under way",
+          "the invite you arrived with, the email address or phone number a "
+          "sign-in code was sent to" in page
+          and "a note of an exit the journal just recorded" in page)
+    check("and that it is signed, not encrypted",
+          "signed so that it cannot be changed, but it is not encrypted" in page)
+    check("with Apple off the website, no second cookie is spoken of",
+          "second cookie" not in page)
+    real_web_ready = web.apple_mod.web_ready
+    web.apple_mod.web_ready = lambda: True
+    try:
+        page = flat(text(visitor.get("/privacy")))
+    finally:
+        web.apple_mod.web_ready = real_web_ready
+    check("with it on, the second one and how long it lasts",
+          "a second cookie of Orenth's lasts ten minutes" in page
+          and web.APPLE_FLOW_SECONDS == 10 * 60, page[page.find("No tracking cookies"):][:900])
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):
