@@ -1,9 +1,10 @@
-"""When a market's price can move.
+"""When a market's price can move, and a call worked out before a close.
 
 The NYSE calendar worked out by rule: weekends, holidays and the days they are
 taken, Good Friday, the 13:00 closes and summer time. Then the hour after a
 close, listings elsewhere read from their own data, coins and anything unknown
-always checked, and a data clock that disagrees. No network."""
+always checked, a data clock that disagrees, and a call worked out before a
+close not used after it. No network: the analysis is stubbed."""
 import calendar
 import os as _os
 import sys as _sys
@@ -11,6 +12,8 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness
 
 fails = []
 
@@ -29,8 +32,10 @@ def head(title):
     print("=" * 72)
 
 
+import web  # noqa: E402
 from bot import sessions  # noqa: E402
 
+harness.isolated_web("sessions")
 HOUR = 3600
 
 
@@ -305,6 +310,46 @@ check("Seoul is still checked more than an hour after Yahoo's regular end",
 check("and left alone from an hour after its after-market until midnight there",
       not may("005930.KS", at(2026, 11, 17, 10, 5), at(2026, 11, 17, 14, 55))
       and may("005930.KS", at(2026, 11, 17, 10, 5), at(2026, 11, 17, 15, 5)))
+
+head("A CALL IS NOT CARRIED ACROSS A CLOSE")
+sessions._SEEN.clear()
+us_day("AAPL", date(2026, 11, 13))
+seen("BTC-USD", {"instrumentType": "CRYPTOCURRENCY"}, at(2026, 11, 13, 22))
+ANALYSED = []
+
+
+def analyse(symbol, cfg, **_kw):
+    ANALYSED.append(symbol)
+    return SimpleNamespace(plan=SimpleNamespace(action="BUY"))
+
+
+real = (web.engine.analyse, web.public_mod.verdict)
+web.engine.analyse = analyse
+# The public check for AAPL was written mid-session, from a day not over.
+web.public_mod.verdict = lambda conn, symbol: (
+    {"symbol": symbol, "at": at(2026, 11, 13, 18, 0), "action": "WAIT"}
+    if symbol == "AAPL" else None)
+try:
+    web._CALLS.clear()
+    before_close = web._call_now("AAPL", "1d", now=at(2026, 11, 13, 21, 50))
+    check("while the close settles, the day's public call is used as before",
+          before_close == "WAIT" and not ANALYSED, (before_close, ANALYSED))
+    # Fifteen minutes on: inside the half hour a call is kept, but the
+    # close has settled in between.
+    after = web._call_now("AAPL", "1d", now=at(2026, 11, 13, 22, 5))
+    check("once it has settled, neither that nor the call kept from before is used",
+          after == "BUY" and ANALYSED == ["AAPL"], (after, ANALYSED))
+    again = web._call_now("AAPL", "1d", now=at(2026, 11, 13, 22, 10))
+    check("and the call worked out after the close is kept as usual",
+          again == "BUY" and ANALYSED == ["AAPL"], ANALYSED)
+    del ANALYSED[:]
+    web._call_now("BTC-USD", "1d", now=at(2026, 11, 14, 3, 0))
+    web._call_now("BTC-USD", "1d", now=at(2026, 11, 14, 3, 10))
+    check("a coin's call is kept for its half hour, as before",
+          ANALYSED == ["BTC-USD"], ANALYSED)
+finally:
+    web.engine.analyse, web.public_mod.verdict = real
+    web._CALLS.clear()
 
 print()
 print("%d failure(s)" % len(fails))

@@ -64,6 +64,7 @@ from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
+from bot import sessions as sessions_mod
 from bot import strategies as strategies_mod
 from bot import thesis as thesis_mod
 from bot import usage as usage_mod
@@ -3502,16 +3503,26 @@ _CALLS: Dict = {}
 _CALLS_LOCK = threading.Lock()
 
 
-def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
+def _call_now(symbol: str, interval: str = "1d",
+              now: Optional[float] = None) -> Optional[str]:
     """BUY, WAIT, AVOID or SHORT for an instrument, with the standard settings.
 
     A popular symbol's daily call is read from its public check when that is
-    recent; anything else is analysed once and kept for CALL_TTL.
+    recent; anything else is analysed once and kept for CALL_TTL. Neither is
+    used once the market's last close has settled since it was worked out:
+    it read a day that was not over, and the loop's first check after a close
+    is the one a change of call must be read on, since the loop then waits
+    for the open. `now` is the present unless given.
     """
+    now = time.time() if now is None else now
     key = (symbol.upper(), interval)
+
+    def fresh(at: float, age: float) -> bool:
+        return now - at < age and not sessions_mod.settled_between(symbol, at, now)
+
     with _CALLS_LOCK:
         hit = _CALLS.get(key)
-        if hit and time.time() - hit[0] < CALL_TTL:
+        if hit and fresh(hit[0], CALL_TTL):
             return hit[1]
     action = None
     if interval == "1d" and public_mod.from_slug(symbol.lower()):
@@ -3520,7 +3531,7 @@ def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
             snap = public_mod.verdict(conn, symbol.upper())
         finally:
             conn.close()
-        if snap and time.time() - snap["at"] < public_mod.MAX_AGE + 3600:
+        if snap and fresh(snap["at"], public_mod.MAX_AGE + 3600):
             action = snap.get("action") or None
     if action is None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
@@ -3529,8 +3540,8 @@ def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
                                 db_path=app.config.get("DB_PATH"))
         action = (result.plan.action or "").upper() or None
     with _CALLS_LOCK:
-        _CALLS[key] = (time.time(), action)
-        for old in [k for k, v in _CALLS.items() if time.time() - v[0] > CALL_TTL]:
+        _CALLS[key] = (now, action)
+        for old in [k for k, v in _CALLS.items() if now - v[0] > CALL_TTL]:
             _CALLS.pop(old, None)
     return action
 
