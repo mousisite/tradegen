@@ -216,7 +216,8 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     step("Marking positions to market")
-    rows = db.list_trades(conn, status="open", user=user)
+    # What is held: a position closed in part counts only what is left.
+    rows = db.open_positions(conn, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return

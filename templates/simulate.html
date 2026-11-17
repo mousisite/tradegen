@@ -87,11 +87,34 @@
   A price that opens past it fills worse than the stop, so the loss can be
   bigger than the money at risk above.</p>
 
+{% if not logged %}
+  {# Part of the Confirm form below, through the form attribute, so it works
+     without any script. Empty keeps the stop where the plan put it. #}
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">A trailing stop, if you want one</span>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <label class="sr" for="t-trail">How far behind the best price the stop trails</label>
+      <input form="take" class="field fig" id="t-trail" name="trail" type="number"
+             step="any" min="0" placeholder="5" style="max-width:110px">
+      <label class="sr" for="t-trail-kind">Trail measured as</label>
+      <select form="take" class="field" id="t-trail-kind" name="trail_kind">
+        <option value="pct">% of price</option>
+        <option value="atr">times ATR</option>
+      </select>
+    </div>
+    <p class="prose" style="margin-top:var(--s2)">Leave it empty to keep the stop
+      at {{ size.stop|price }}. With a trail, the stop follows the
+      {{ 'high' if long else 'low' }} since the trade opened, this far behind
+      it, and only ever tightens from {{ size.stop|price }}. The ATR is
+      measured on {{ words }} bars when you confirm.</p>
+  </div>
+{% endif %}
+
 <div style="display:flex;gap:var(--s1);flex-wrap:wrap;margin-top:var(--s3)">
   {% if logged %}
     <a class="btn" href="{{ url_for('trades') }}">Open the journal</a>
   {% else %}
-    <form method="post" action="{{ url_for('take_trade') }}">
+    <form id="take" method="post" action="{{ url_for('take_trade') }}">
       <input type="hidden" name="run_id" value="{{ run['id'] }}">
       <button class="btn" type="submit">Confirm paper trade</button>
     </form>
