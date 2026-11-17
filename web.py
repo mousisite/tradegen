@@ -1997,8 +1997,9 @@ APPLE_FLOW_SECONDS = 10 * 60
 # they are limited per network (_rate_limited allows a network three times
 # this an hour).
 APPLE_SIGNINS_PER_HOUR = 20
-# How long a nonce handed to the app stays good.
-APPLE_NONCE_SECONDS = 10 * 60
+# Apple's JSON is a few kilobytes. The site's own limit is set for screenshot
+# uploads, and these two answer anyone, signed in or not.
+APPLE_JSON_LIMIT = 64 * 1024
 
 
 def _flow_key() -> bytes:
@@ -2044,6 +2045,8 @@ def apple_start():
     response.set_cookie(APPLE_FLOW, apple_mod.seal_flow(flow, _flow_key()),
                         max_age=APPLE_FLOW_SECONDS, path=url_for("apple_start"),
                         secure=True, httponly=True, samesite="None")
+    # One visitor's state: nothing between here and them may keep a copy.
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -2133,8 +2136,10 @@ def apple_native():
     if not _from_this_site():
         return jsonify({"ok": False, "error": "Start signing in from Orenth "
                                               "itself."}), 403
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
+    request.max_content_length = APPLE_JSON_LIMIT
+    # Named so that an error report strips it: it holds the identity token.
+    token_post = request.get_json(silent=True)
+    if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
         return jsonify({"ok": False,
@@ -2144,33 +2149,36 @@ def apple_native():
     issued = session.pop("apple_nonce", None)
     issued = issued if isinstance(issued, dict) else {}
     issued_hash = issued.get("hash") or ""
-    if not issued_hash or time.time() - issued.get("at", 0) > APPLE_NONCE_SECONDS:
+    if not issued_hash or \
+            time.time() - issued.get("at", 0) > apple_mod.NONCE_SECONDS:
         return jsonify({"ok": False, "error": "That sign-in took too long. "
                                               "Try again."}), 400
     client_id = apple_mod.bundle_id()
     try:
-        identity = apple_mod.verify_identity(data.get("identityToken"), client_id,
-                                             issued_hash)
+        identity = apple_mod.verify_identity(token_post.get("identityToken"),
+                                             client_id, issued_hash)
     except apple_mod.AppleError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     # The session cookie holding the nonce could be sent again; this cannot.
     if not apple_mod.spend_nonce(issued_hash):
         return jsonify({"ok": False, "error": "That sign-in was already used. "
                                               "Try again."}), 400
-    refresh_token = _apple_refresh_token(data.get("authorizationCode"),
+    refresh_token = _apple_refresh_token(token_post.get("authorizationCode"),
                                          identity["sub"], client_id)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         user = events_mod.new_account(
             conn, accounts_mod.upsert_apple_user, identity,
-            apple_mod.name_from(data.get("givenName"), data.get("familyName")),
+            apple_mod.name_from(token_post.get("givenName"),
+                                token_post.get("familyName")),
             refresh_token, client_id)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     finally:
         conn.close()
     _open_session(user)
-    next_url = data.get("next") if isinstance(data.get("next"), str) else ""
+    next_url = token_post.get("next")
+    next_url = next_url if isinstance(next_url, str) else ""
     return jsonify({"ok": True, "next": _safe_back(next_url, url_for("index"))})
 
 
@@ -2214,6 +2222,7 @@ def apple_notifications():
     """
     if not apple_mod.native_ready():
         abort(404)
+    request.max_content_length = APPLE_JSON_LIMIT
     body = request.get_json(silent=True, force=True)
     try:
         event = apple_mod.read_notification(
@@ -2318,16 +2327,14 @@ def _from_this_site() -> bool:
     The rest of the site leans on the session cookie being SameSite=Lax. A
     sign-in cannot, being what starts the session: a form on another site
     could otherwise sign its visitor in to an account of its choosing.
-    Browsers set both headers themselves. One that sends neither is let
-    through, since then there is nothing to go on.
+    Browsers set these headers themselves: Sec-Fetch-Site, then Origin, then,
+    for an older browser sending neither, the Referer. One that sends none of
+    them is let through, since then there is nothing to go on.
     """
     from urllib.parse import urlparse
     fetched = request.headers.get("Sec-Fetch-Site", "")
     if fetched and fetched != "same-origin":
         return False
-    origin = request.headers.get("Origin", "")
-    if not origin:
-        return True
 
     def origin_of(url: str) -> str:
         parts = urlparse(url)
@@ -2337,7 +2344,13 @@ def _from_this_site() -> bool:
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
     if public:
         allowed.add(origin_of(public))
-    return origin.strip().lower() in allowed
+    origin = request.headers.get("Origin", "")
+    if origin:
+        return origin.strip().lower() in allowed
+    referrer = request.headers.get("Referer", "")
+    if referrer:
+        return origin_of(referrer) in allowed
+    return True
 
 
 @app.route("/auth/app/finish", methods=["POST"])

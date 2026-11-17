@@ -212,9 +212,17 @@ try:
     check("an Origin from another site alone is enough", out.status_code == 403)
     out, _ = finish(code, verifier, headers={"Origin": "null"})
     check("so is an Origin of null", out.status_code == 403)
+    out, _ = finish(code, verifier,
+                    headers={"Referer": "https://evil.example/page"})
+    check("with neither, a Referer from another site is refused",
+          out.status_code == 403)
     out, quiet = finish(code, verifier, headers={})
-    check("a browser that sends neither header is let through",
+    check("a browser that sends none of them is let through",
           out.status_code == 302 and quiet.get("/account").status_code == 200)
+    verifier, challenge = new_secret()
+    code = code_of(sheet_sign_in(person(3), challenge)[0])
+    out, _ = finish(code, verifier, headers={"Referer": "http://localhost/signin"})
+    check("as is one whose Referer is this site", out.status_code == 302)
 
     section("WHEN THE SHEET'S SIGN-IN DOES NOT FINISH")
 

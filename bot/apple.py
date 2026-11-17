@@ -312,19 +312,21 @@ def open_flow(value, key: bytes, max_age: int) -> Dict:
     return flow
 
 
-# Nonces already used to sign in, by hash, until their tokens would have
-# expired anyway. The session that holds a nonce lives in a cookie, which can
-# be sent twice; this is what makes each nonce good for one sign-in.
+# How long a nonce handed to the app stays good.
+NONCE_SECONDS = 10 * 60
+# Nonces already used to sign in, by hash, for as long as they could still be
+# good. The session holding a nonce lives in a cookie, which can be sent
+# twice; this is what makes each nonce good for one sign-in.
 _SPENT: Dict[str, float] = {}
 _SPENT_LOCK = threading.Lock()
-SPENT_KEEP = TOKEN_MAX_AGE
+SPENT_KEEP = NONCE_SECONDS + SKEW
 
 
 def spend_nonce(issued_hash: str) -> bool:
     """Mark a nonce used. False if it already was."""
     now = time.time()
     with _SPENT_LOCK:
-        if len(_SPENT) > 5000:
+        if len(_SPENT) > 1000:
             for key in [k for k, at in _SPENT.items() if now - at > SPENT_KEEP]:
                 del _SPENT[key]
         if issued_hash in _SPENT:
@@ -382,10 +384,12 @@ def client_secret(client_id: str) -> str:
     now = int(time.time())
     held_key = (team_id(), key_id(), client_id,
                 hashlib.sha256(_key_text().encode("utf-8")).hexdigest())
+    # Locals that hold a secret are named so, because error reports strip
+    # values by name (bot/monitoring.py).
     with _SECRETS_LOCK:
-        held = _SECRETS.get(held_key)
-        if held and held[1] - 300 > now:
-            return held[0]
+        held_secret = _SECRETS.get(held_key)
+        if held_secret and held_secret[1] - 300 > now:
+            return held_secret[0]
     header = {"alg": "ES256", "kid": key_id()}
     claims = {"iss": team_id(), "iat": now, "exp": now + SECRET_LIFETIME,
               "aud": ISSUER, "sub": client_id}
@@ -396,10 +400,11 @@ def client_secret(client_id: str) -> str:
     # A JWT carries the two numbers side by side, 32 bytes each, not the DER
     # structure the library returns.
     r, s = decode_dss_signature(der)
-    signed = signing_input + "." + _b64(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+    secret_jwt = "%s.%s" % (signing_input,
+                            _b64(r.to_bytes(32, "big") + s.to_bytes(32, "big")))
     with _SECRETS_LOCK:
-        _SECRETS[held_key] = (signed, now + SECRET_LIFETIME)
-    return signed
+        _SECRETS[held_key] = (secret_jwt, now + SECRET_LIFETIME)
+    return secret_jwt
 
 
 # --- Apple's public keys ------------------------------------------------------
@@ -481,10 +486,10 @@ def _verified_claims(token, audiences: Iterable[str], max_age: int,
     """
     if not isinstance(token, str) or not token or len(token) > MAX_TOKEN:
         raise AppleError(NOT_APPLES)
-    parts = token.split(".")
-    if len(parts) != 3 or not all(_B64URL.match(part) for part in parts):
+    token_parts = token.split(".")
+    if len(token_parts) != 3 or not all(_B64URL.match(p) for p in token_parts):
         raise AppleError(NOT_APPLES)
-    header = _json_part(parts[0])
+    header = _json_part(token_parts[0])
     # Only RS256 and only Apple's keys. "none", and HS256 keyed with Apple's
     # public key, are the classic forgeries; both stop here.
     if header.get("alg") != "RS256" or "crit" in header:
@@ -496,11 +501,12 @@ def _verified_claims(token, audiences: Iterable[str], max_age: int,
     if public is None:
         raise AppleError(NOT_APPLES)
     try:
-        public.verify(_unb64(parts[2]), ("%s.%s" % (parts[0], parts[1])).encode("ascii"),
+        public.verify(_unb64(token_parts[2]),
+                      ("%s.%s" % (token_parts[0], token_parts[1])).encode("ascii"),
                       padding.PKCS1v15(), hashes.SHA256())
     except InvalidSignature as exc:
         raise AppleError(NOT_APPLES) from exc
-    claims = _json_part(parts[1])
+    claims = _json_part(token_parts[1])
     if claims.get("iss") != ISSUER:
         raise AppleError(NOT_APPLES)
     allowed = {a for a in audiences if a}
@@ -602,12 +608,12 @@ def redeem(code, client_id: str, redirect_uri: str = "") -> Dict:
     """
     if not isinstance(code, str) or not code or len(code) > 1024:
         raise AppleError("Apple returned no sign-in code.")
-    data = {"client_id": client_id, "client_secret": client_secret(client_id),
-            "code": code, "grant_type": "authorization_code"}
+    secret_form = {"client_id": client_id, "client_secret": client_secret(client_id),
+                   "code": code, "grant_type": "authorization_code"}
     if redirect_uri:
-        data["redirect_uri"] = redirect_uri
+        secret_form["redirect_uri"] = redirect_uri
     try:
-        response = requests.post(TOKEN_URL, data=data, timeout=TIMEOUT,
+        response = requests.post(TOKEN_URL, data=secret_form, timeout=TIMEOUT,
                                  headers={"Accept": "application/json"})
     except RequestException as exc:
         raise AppleError("Could not reach Apple to finish signing in. Try again "
@@ -626,12 +632,12 @@ def redeem(code, client_id: str, redirect_uri: str = "") -> Dict:
                     response.status_code, error or "no reason given")
         raise AppleError("Apple did not finish the sign-in. Try again.")
     try:
-        body = response.json()
+        token_body = response.json()
     except ValueError as exc:
         raise AppleError("Apple did not finish the sign-in. Try again.") from exc
-    if not isinstance(body, dict):
+    if not isinstance(token_body, dict):
         raise AppleError("Apple did not finish the sign-in. Try again.")
-    return body
+    return token_body
 
 
 def revoke(refresh_token: str, client_id: str) -> bool:
@@ -641,16 +647,19 @@ def revoke(refresh_token: str, client_id: str) -> bool:
     whatever Apple says. What went wrong is logged, without the token.
     """
     try:
-        data = {"client_id": client_id, "client_secret": client_secret(client_id),
-                "token": refresh_token, "token_type_hint": "refresh_token"}
+        secret_form = {"client_id": client_id,
+                       "client_secret": client_secret(client_id),
+                       "token": refresh_token, "token_type_hint": "refresh_token"}
     except AppleError:
         log.warning("Could not ask Apple to end a sign-in: Sign in with Apple "
                     "is not set up any more.")
         return False
     try:
-        response = requests.post(REVOKE_URL, data=data, timeout=REVOKE_TIMEOUT,
+        response = requests.post(REVOKE_URL, data=secret_form,
+                                 timeout=REVOKE_TIMEOUT,
                                  headers={"Accept": "application/json"})
-    except RequestException as exc:
+    except Exception as exc:
+        # Anything at all: the deletion waiting on this must go ahead.
         log.warning("Could not reach Apple to end a sign-in: %s",
                     type(exc).__name__)
         return False

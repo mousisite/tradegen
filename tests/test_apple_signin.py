@@ -424,6 +424,8 @@ try:
     print("      %s" % "; ".join(p.strip() for p in cookie.split(";")[1:]))
     for part in ("Secure", "HttpOnly", "SameSite=None", "Path=/auth/apple"):
         check("the flow cookie is %s" % part, part in cookie, cookie)
+    check("and the redirect is never cached",
+          start.headers.get("Cache-Control") == "no-store")
     check("the state is not left in the session cookie",
           not any(h.startswith("session=") for h in start.headers.getlist("Set-Cookie")))
 
@@ -687,6 +689,20 @@ try:
     out = native(lambda n: sign(claims_for("002.native.2", BUNDLE, n)), ask=False)
     check("a session that was never given a nonce is refused",
           out.status_code == 400)
+    slow = web.app.test_client()
+    slow_nonce = slow.get("/auth/apple/nonce").get_json()["nonce"]
+    with slow.session_transaction() as sess:
+        sess["apple_nonce"] = dict(sess["apple_nonce"],
+                                   at=int(time.time()) - apple_mod.NONCE_SECONDS - 5)
+    out = slow.post("/auth/apple/native", headers={"Origin": "http://localhost"},
+                    json={"identityToken": sign(claims_for("002.native.3", BUNDLE,
+                                                           slow_nonce))})
+    check("a nonce older than ten minutes is refused", out.status_code == 400)
+    huge = web.app.test_client().post(
+        "/auth/apple/native", headers={"Origin": "http://localhost"},
+        json={"identityToken": "x" * 100000})
+    check("a body far bigger than any sign-in is turned away",
+          huge.status_code == 413, huge.status_code)
     check("the app with no code still signs in, with nothing to revoke later",
           identity_row("002.native.2") is not None
           and identity_row("002.native.2")["refresh_token"] == "")
@@ -898,6 +914,15 @@ try:
     check("one for another app is refused", out.status_code == 400)
     junk = web.app.test_client().post("/auth/apple/notifications", data="not json")
     check("a body that is not JSON is refused", junk.status_code == 400)
+    huge = web.app.test_client().post("/auth/apple/notifications",
+                                      json={"payload": "x" * 100000})
+    check("and one far bigger than any notice is turned away",
+          huge.status_code == 413, huge.status_code)
+    other_kind = web.app.test_client().post(
+        "/auth/apple/notifications",
+        json={"payload": sign(claims_for("005.late.1", BUNDLE, apple_mod.new_nonce()))})
+    check("an identity token posted as a notification is refused",
+          other_kind.status_code == 400)
 
 finally:
     apple_mod.requests = _real_requests

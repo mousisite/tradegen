@@ -28,6 +28,9 @@
   var FINISH = 'app.orenth.ios://auth/finish';
   var KEY = 'orenth-app-signin';
   var said = document.querySelector('[data-app-said]');
+  // Set while a sign-in is being started, so a second tap before the sheet
+  // appears cannot start another and replace the first one's secret.
+  var starting = false;
   var WORDS = {
     cancelled: 'Signing in was cancelled.',
     expired: 'That sign-in took too long. Try again.',
@@ -84,6 +87,7 @@
     }
     var verifier = random(32);
     var start = new URL(link.getAttribute('href'), location.href);
+    starting = true;
     window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
       .then(function (hash) {
         start.searchParams.set('app', '1');
@@ -91,7 +95,8 @@
         keep({ verifier: verifier, next: start.searchParams.get('next') || '' });
         return Browser.open({ url: start.href, presentationStyle: 'popover' });
       })
-      .catch(function () { forget(); say(WORDS.failed); });
+      .then(function () { starting = false; })
+      .catch(function () { starting = false; forget(); say(WORDS.failed); });
   }
 
   // What the sheet hands back: FINISH?code=... or FINISH?error=<a word>.
@@ -137,6 +142,7 @@
   function withApple(link) {
     var plugin = plugins.SignInWithApple;
     var next = nextOf(link);
+    starting = true;
     fetch(box.getAttribute('data-apple-nonce'), {
       credentials: 'same-origin', headers: { 'Accept': 'application/json' }
     }).then(function (answer) {
@@ -168,9 +174,11 @@
         return answer.json().catch(function () { return {}; });
       });
     }).then(function (body) {
+      starting = false;
       if (body && body.ok) { location.assign(body.next || '/'); return; }
       say((body && body.error) || WORDS.failed);
     }).catch(function (err) {
+      starting = false;
       // Closing Apple's sheet is error 1001, "canceled", on iOS.
       var what = String((err && (err.code || err.message)) || '');
       say(/1001|cancel/i.test(what) ? WORDS.cancelled : WORDS.failed);
@@ -181,6 +189,7 @@
     var link = e.target && e.target.closest ? e.target.closest('a[data-app-via]') : null;
     if (!link || !box.contains(link)) { return; }
     e.preventDefault();
+    if (starting) { return; }
     if (said) { said.hidden = true; }
     var apple = link.getAttribute('data-app-via') === 'apple';
     if (apple && plugins.SignInWithApple && link.getAttribute('data-native') === '1'
