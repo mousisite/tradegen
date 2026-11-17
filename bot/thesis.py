@@ -83,6 +83,11 @@ def _money(v):
     return "%.2f" % v
 
 
+def _items(n: int, word: str) -> str:
+    """"1 post", "2 posts": a count the way a person writes it."""
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
 def build(symbol: str, price: float, fundamentals=None, quality=None,
           valuation=None, risk_profile=None, technical=None, sentiment=None,
           filings=None, options_stats=None, sec_history=None) -> Thesis:
@@ -153,8 +158,9 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
     if sentiment is not None and (sentiment.n_news or sentiment.n_social):
         _sentiment_points(sentiment, bull, bear, stamp)
         sources.append({"name": "News and social sentiment",
-                        "url": "", "detail": "%d headlines, %d posts, scored by %s"
-                        % (sentiment.n_news, sentiment.n_social, sentiment.method)})
+                        "url": "", "detail": "%s, %s, scored by %s"
+                        % (_items(sentiment.n_news, "headline"),
+                           _items(sentiment.n_social, "post"), sentiment.method)})
 
     if filings:
         _filing_points(filings, bull, bear, stamp)
@@ -483,15 +489,15 @@ def _sentiment_points(s, bull: Case, bear: Case, stamp: str) -> None:
     if s.score > 0.30:
         bull.points.append(Point(
             "Coverage is positive",
-            "Sentiment of %+.2f across %d headlines and %d posts." % (
-                s.score, s.n_news, s.n_social),
+            "Sentiment of %+.2f across %s and %s." % (
+                s.score, _items(s.n_news, "headline"), _items(s.n_social, "post")),
             [Evidence("News and social sentiment", "%+.2f" % s.score,
                       s.method, "", stamp, "weak")], 0.5))
     elif s.score < -0.30:
         bear.points.append(Point(
             "Coverage is negative",
-            "Sentiment of %+.2f across %d headlines and %d posts." % (
-                s.score, s.n_news, s.n_social),
+            "Sentiment of %+.2f across %s and %s." % (
+                s.score, _items(s.n_news, "headline"), _items(s.n_social, "post")),
             [Evidence("News and social sentiment", "%+.2f" % s.score,
                       s.method, "", stamp, "weak")], 0.5))
     if getattr(s, "fresh_catalyst", False):
@@ -585,10 +591,14 @@ def _summarise(case: Case, phrase: str) -> str:
     if not case.points:
         return "Nothing in the available evidence %s." % phrase
     strong = [p for p in case.points if any(e.strength == "strong" for e in p.evidence)]
-    lead = case.points[0].headline.lower()
-    return "%d point%s %s, %d of them on strong evidence. The clearest is that it %s." % (
+    # Headlines are phrases of every shape ("Highly profitable", "A catalyst
+    # just landed"), so the lead follows a colon rather than being fitted
+    # into a sentence: "the clearest is that it coverage is positive" was on
+    # the page.
+    lead = case.points[0].headline
+    return "%d point%s %s, %d of them on strong evidence. The clearest: %s." % (
         len(case.points), "" if len(case.points) == 1 else "s", phrase,
-        len(strong), lead)
+        len(strong), lead[:1].lower() + lead[1:])
 
 
 def _verdict(balance: float, bull: Case, bear: Case, evidence_count: int) -> str:

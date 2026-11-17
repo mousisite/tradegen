@@ -218,10 +218,19 @@ def _trim(value) -> str:
 def explain_company(research) -> Dict:
     """What the filings say, without the accounting words."""
     points: List[str] = []
-    history = getattr(research, "sec_history", None) or {}
+    asked = getattr(research, "sec_history", None)
+    history = asked or {}
     facts = getattr(research, "fundamentals", None)
     scores = getattr(research, "scores", None) or {}
 
+    if asked is None:
+        # The filings were asked for and did not come back. A company that
+        # files may simply not have answered this time, and saying it does
+        # not file at all would be false about NVIDIA.
+        return {"available": False,
+                "why": ("Its filed accounts could not be read just now, so there "
+                        "are no company numbers to put into plain words here. "
+                        "The price side of the app still works.")}
     if not history.get("available"):
         return {"available": False,
                 "why": ("This is not a company that files accounts with the US "
