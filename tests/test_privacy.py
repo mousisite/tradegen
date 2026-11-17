@@ -21,7 +21,7 @@ CLEAR = ("SENTRY_DSN", "SENTRY_TRACES_RATE", "SENTRY_ENVIRONMENT", "SMTP_HOST",
          "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM", "STOCKBOT_PUBLIC_URL",
          "STOCKBOT_BEHIND_PROXY", "STOCKBOT_ADMIN_EMAIL", "STRIPE_SECRET_KEY",
          "STRIPE_PRICE_ID", "STRIPE_PRICE_ID_YEARLY", "STRIPE_WEBHOOK_SECRET",
-         "RENDER", "FLY_APP_NAME")
+         "RENDER", "RENDER_SERVICE_ID", "FLY_APP_NAME")
 for _k in CLEAR:
     _os.environ.pop(_k, None)
 
@@ -360,7 +360,8 @@ try:
     check("a request that came through Cloudflare names it, and what it sees",
           "Everything your browser and Orenth send each other" in row
           and "Carrying traffic to the server" in row, row or page[-1500:])
-    for name, env in (("Render", {"RENDER": "true"}), ("Fly.io", {"FLY_APP_NAME": "orenth"})):
+    for name, env in (("Render", {"RENDER": "true"}), ("Render", {"RENDER_SERVICE_ID": "srv-1"}),
+                      ("Fly.io", {"FLY_APP_NAME": "orenth"})):
         _os.environ.update(env)
         try:
             page = flat(text(visitor.get("/privacy")))
