@@ -208,6 +208,39 @@ try:
     check("and the page it came from is named without its query",
           came_from["request"]["headers"]["Referer"] == "https://orenth.app/email/stop",
           came_from["request"]["headers"])
+
+    # -----------------------------------------------------------------------
+    head("A PAGE WITH ANYTHING OF YOURS ON IT IS SENT MARKED NOT TO BE KEPT")
+    # -----------------------------------------------------------------------
+    # Without it a browser keeps signed-in pages in its cache and for Back, so
+    # on a shared computer the next person pressed Back after Sign out and
+    # read the journal; the iPhone app's web view kept them on disk.
+    for path in ("/trades", "/account", "/settings", "/monitor",
+                 "/api/alerts/status", "/export/trades.csv"):
+        r = member.get(path)
+        said = r.headers.get("Cache-Control", "")
+        check("signed in, %s is not to be stored anywhere" % path,
+              r.status_code == 200 and "no-store" in said and "private" in said,
+              (r.status_code, said))
+    r = member.post("/signout")
+    check("nor is the answer to signing out", "no-store" in r.headers.get("Cache-Control", ""),
+          r.headers.get("Cache-Control"))
+    for path in ("/privacy", "/terms", "/signin"):
+        r = visitor.get(path)
+        check("to a visitor, %s, the same for everybody, may be kept" % path,
+              r.status_code == 200 and "no-store" not in r.headers.get("Cache-Control", ""),
+              (r.status_code, r.headers.get("Cache-Control")))
+    member = signed_in(ann)
+    for path, said in (("/static/style.css", None), ("/sw.js", "no-cache")):
+        r = member.get(path)
+        check("%s keeps its own caching, signed in or not" % path,
+              "no-store" not in (r.headers.get("Cache-Control") or "")
+              and (said is None or r.headers.get("Cache-Control") == said),
+              r.headers.get("Cache-Control"))
+        r.close()
+    page = flat(text(visitor.get("/privacy")))
+    check("which is what the privacy page says",
+          "Every page with anything of yours on it is sent marked not to be stored" in page)
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):

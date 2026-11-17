@@ -134,6 +134,14 @@ def _harden(response):
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if app.config.get("SESSION_COOKIE_SECURE"):
         h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    # Anything sent to someone signed in may hold their journal, so no copy
+    # is kept: not in the browser's cache, nor the app's, nor for Back after
+    # signing out on a shared computer. What is the same for everybody, and
+    # a route that sets its own, keeps its caching.
+    if (getattr(g, "user", None) is not None and not getattr(g, "demo", False)
+            and request.endpoint != "static"
+            and response.mimetype in ("text/html", "application/json", "text/csv")):
+        h.setdefault("Cache-Control", "private, no-store")
     return response
 
 
