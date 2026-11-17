@@ -11,9 +11,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Dependencies first, so a code change does not reinstall them.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencies first, so a code change does not reinstall them. Installed from
+# the lock file: every package pinned with the hashes of its files, so a build
+# installs exactly what was tested and refuses anything else. --no-deps because
+# the lock already lists every package; nothing unlisted may come in.
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 
 COPY . .
 
