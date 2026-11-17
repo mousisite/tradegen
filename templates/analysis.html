@@ -465,7 +465,8 @@
         <div class="blank">No news retrieved for this instrument.</div>
       {% endif %}
       <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-        Scored by {{ r.sentiment.method }}.
+        {% if r.sentiment.method == 'skipped' %}The news was not read for this
+        analysis.{% else %}Scored by {{ r.sentiment.method }}.{% endif %}
       </p>
     </div>
 

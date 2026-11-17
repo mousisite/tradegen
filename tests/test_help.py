@@ -277,6 +277,23 @@ try:
     nest.feed(page)
     check("never inside a paragraph or a phrase, where browsers break it",
           not nest.bad, nest.bad[:3])
+    check("a news-less analysis says so in words, not 'Scored by skipped'",
+          "The news was not read for this analysis." in flat(page)
+          and "Scored by skipped" not in page)
+
+    head("WHAT THE PAGE SAYS ABOUT THE NEWS WITHOUT A CLAUDE KEY")
+    sentiment_mod.gather_news = lambda symbol, name="": [sentiment_mod.Item(
+        text="Test Corp beats estimates", kind="news", source="Test", age_hours=30.0)]
+    sentiment_mod.gather_social = lambda symbol: []
+    web._CACHE.clear()
+    page = c.get("/analyse?symbol=TEST&interval=1d").data.decode("utf-8", "replace")
+    worth = page[page.find("Worth knowing"):page.find("Worth knowing") + 2000]
+    check("it says the reading is rough, in plain words",
+          "Headlines were scored with a list of finance words" in flat(worth), worth[:600])
+    check("never the name of a setting or a key",
+          not re.search(r"ANTHROPIC|API key|\.env|restart", page), re.findall(
+              r".{40}(?:ANTHROPIC|API key|\.env|restart).{40}", page)[:2])
+    check("and says how the news was scored", "Scored by a list of finance words." in page)
 finally:
     engine.resolve, engine.fetch_bars = real["resolve"], real["bars"]
     catalysts.fetch = real["calendar"]

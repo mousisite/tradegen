@@ -357,7 +357,7 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     social = gather_social(symbol)
     notes: List[str] = []
 
-    scored_by = "finance lexicon"
+    scored_by = "a list of finance words"
     all_items = news + social
     if use_llm and _score_with_claude(all_items, symbol):
         scored_by = "Claude (%s)" % os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
@@ -365,9 +365,12 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         for it in all_items:
             it.score = lexicon_score(it.text)
         if use_llm and not os.environ.get("ANTHROPIC_API_KEY"):
-            notes.append("No ANTHROPIC_API_KEY set, so headlines were scored by "
-                         "keyword lexicon. LLM scoring is materially better on "
-                         "financial phrasing.")
+            # Shown to everyone on the analysis page, so it says what this
+            # means for the reading, not which setting is missing: only whoever
+            # runs the server can add a key, and Settings tells them how.
+            notes.append("Headlines were scored with a list of finance words, "
+                         "which can misread financial phrasing, so treat the "
+                         "news reading as rough.")
 
     # StockTwits self-tags are a direct statement of intent. Trust them over
     # inferred text sentiment, but do not let them fully override it.
