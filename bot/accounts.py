@@ -381,7 +381,9 @@ def upsert_phone_user(conn: sqlite3.Connection, phone: str) -> User:
 
 # Apple's Hide My Email addresses: real, and forwarded to the person's own
 # inbox, but made for this site alone, so never a reason to join two accounts.
-APPLE_RELAY = "@privaterelay.appleid.com"
+# Apple also hands out relay addresses at icloud.com, which only the token's
+# is_private_email marks as such.
+APPLE_RELAY = ("@privaterelay.appleid.com", "@private.icloud.com")
 
 
 def upsert_apple_user(conn: sqlite3.Connection, identity: Dict, name: str = "",
@@ -550,7 +552,13 @@ def can_still_sign_in(conn: sqlite3.Connection, user_id: int, provider: str,
     if other is not None:
         return True
     email = (row["email"] or "").lower()
-    return not (email.endswith(".invalid") or email.endswith(APPLE_RELAY))
+    if email.endswith(".invalid") or email.endswith(APPLE_RELAY):
+        return False
+    # A relay address at icloud.com looks like a real one; Apple said which.
+    link = conn.execute("SELECT email, is_private_email FROM identities WHERE "
+                        "provider=? AND subject=?", (provider, subject)).fetchone()
+    return not (link is not None and link["is_private_email"]
+                and (link["email"] or "").lower() == email)
 
 
 def unlink_identity(conn: sqlite3.Connection, provider: str,

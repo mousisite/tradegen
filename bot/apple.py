@@ -60,8 +60,9 @@ KEYS_URL = ISSUER + "/auth/keys"
 DEFAULT_BUNDLE_ID = "app.orenth.ios"
 # Hide My Email addresses. Real addresses that forward to the person's own
 # inbox, so mail sent to one arrives; they are never joined to an account by
-# address alone.
-RELAY_DOMAIN = "privaterelay.appleid.com"
+# address alone. Apple also gives out relay addresses at icloud.com, where
+# real ones live too: only the token's is_private_email tells those apart.
+RELAY_DOMAINS = ("privaterelay.appleid.com", "private.icloud.com")
 
 TIMEOUT = 15
 # Deleting an account waits on this, so it is shorter.
@@ -243,8 +244,9 @@ def _truthy(value) -> bool:
 
 
 def is_relay(email: str) -> bool:
-    """Whether an address is one of Apple's Hide My Email addresses."""
-    return (email or "").strip().lower().endswith("@" + RELAY_DOMAIN)
+    """Whether an address is plainly one of Apple's Hide My Email addresses."""
+    address = (email or "").strip().lower()
+    return any(address.endswith("@" + domain) for domain in RELAY_DOMAINS)
 
 
 def new_state() -> str:

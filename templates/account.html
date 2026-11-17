@@ -29,7 +29,7 @@
         {% else %}
           Signed in with {{ current_user.provider|capitalize }}.
         {% endif %}
-        {% if current_user.email.endswith('@privaterelay.appleid.com') %}
+        {% if current_user.email.endswith(('@privaterelay.appleid.com', '@private.icloud.com')) %}
           This is a private address from Apple: email sent to it reaches your
           own inbox.
         {% endif %}

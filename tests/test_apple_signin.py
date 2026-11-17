@@ -556,6 +556,23 @@ try:
         check("and the new account does not take that address",
               unverified.email.endswith("@users.invalid"), unverified.email)
 
+        icloud = A.upsert_email_user(conn, "hidden.one@icloud.com")
+        marked = A.upsert_apple_user(conn, {"sub": "a-icloud",
+                                            "email": "hidden.one@icloud.com",
+                                            "email_verified": True,
+                                            "is_private_email": True})
+        check("an icloud.com address Apple marks private joins nothing",
+              marked.id != icloud.id)
+        coded = A.upsert_email_user(conn, "x1@private.icloud.com")
+        unmarked = A.upsert_apple_user(conn, {"sub": "a-pic",
+                                              "email": "x1@private.icloud.com",
+                                              "email_verified": True})
+        check("nor does an address at private.icloud.com, marked or not",
+              unmarked.id != coded.id)
+        check("the token reads a private.icloud.com address as hidden",
+              apple_mod.is_relay("X1@Private.iCloud.com")
+              and not apple_mod.is_relay("someone@icloud.com"))
+
         A.upsert_email_user(conn, "zz9@privaterelay.appleid.com")
         hidden = A.upsert_apple_user(conn, {"sub": "a-zz9",
                                             "email": "zz9@privaterelay.appleid.com",
@@ -854,6 +871,12 @@ try:
     check("Apple's own spelling, account-deleted, is accepted", out.status_code == 200)
     check("an account only that Apple Account could open is deleted with it",
           "q7@privaterelay.appleid.com" not in people())
+
+    # A hidden address at icloud.com looks like a real one; the token said.
+    web_sign_in("005.icloud.1", "q8@icloud.com", relay=True)
+    notify("account-delete", "005.icloud.1")
+    check("so is one whose icloud.com address Apple said was hidden",
+          "q8@icloud.com" not in people())
 
     back, kept_client, _ = web_sign_in("005.real.1", "real@example.com")
     notify("account-delete", "005.real.1")
