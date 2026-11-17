@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS plan_events (
     user_id  INTEGER PRIMARY KEY,
     last_ts  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plan_checks (
+    user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    checked_ts  INTEGER NOT NULL
+);
 """
 
 
@@ -481,13 +485,24 @@ RECHECK_PER_RUN = 25
 
 def lapsing(conn: sqlite3.Connection, now: Optional[float] = None,
             limit: int = RECHECK_PER_RUN) -> list:
-    """Pro plans whose recorded period has ended, or ends within a day."""
+    """Pro plans whose recorded period has ended, or ends within a day.
+
+    Plans still inside their grace period come first, since they can still
+    be kept, then the ones read longest ago (plan_checks). Picked by end date
+    alone, the same plans came first every hour for ever when Stripe could not
+    answer for them, such as test-mode customers left after switching to live
+    keys, and a run's worth of those meant nobody else was ever read.
+    """
+    ensure_schema(conn)
     now = now or time.time()
     return conn.execute(
-        "SELECT id, stripe_customer, plan_until FROM users WHERE plan='pro' "
-        "AND plan_status IN ('active', 'trialing', 'past_due') AND plan_until>0 "
-        "AND plan_until<? AND stripe_customer<>'' ORDER BY plan_until LIMIT ?",
-        (int(now + RECHECK_BEFORE), int(limit))).fetchall()
+        "SELECT u.id AS id, u.stripe_customer AS stripe_customer, "
+        "u.plan_until AS plan_until FROM users u "
+        "LEFT JOIN plan_checks c ON c.user_id=u.id WHERE u.plan='pro' "
+        "AND u.plan_status IN ('active', 'trialing', 'past_due') AND u.plan_until>0 "
+        "AND u.plan_until<? AND u.stripe_customer<>'' "
+        "ORDER BY u.plan_until+?<?, COALESCE(c.checked_ts, 0), u.plan_until LIMIT ?",
+        (int(now + RECHECK_BEFORE), GRACE, int(now), int(limit))).fetchall()
 
 
 def _current(subscriptions: List[Dict]) -> Optional[Dict]:
@@ -508,7 +523,8 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
     Whatever Stripe says now is recorded: a renewal moves the end forward,
     a cancellation ends Pro, and an account Stripe knows nothing about is left
     for the grace period to decide. Nothing here charges or changes anything
-    at Stripe; it only reads.
+    at Stripe; it only reads. Every plan asked about, answered or not, goes to
+    the back of the queue.
     """
     if not ready():
         return {"checked": 0, "errors": []}
@@ -529,6 +545,11 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
             checked += 1
         except Exception as exc:          # one customer must not stop the rest
             errors.append("user %d: %s" % (int(row["id"]), exc))
+        finally:
+            conn.execute("INSERT INTO plan_checks (user_id, checked_ts) VALUES (?, ?) "
+                         "ON CONFLICT(user_id) DO UPDATE SET "
+                         "checked_ts=excluded.checked_ts", (int(row["id"]), int(now)))
+            conn.commit()
     return {"checked": checked, "errors": errors}
 
 
