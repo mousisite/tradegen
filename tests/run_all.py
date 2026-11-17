@@ -53,6 +53,7 @@ SUITES = [
     ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
     ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
     ("test_since.py",        False, "what changed on a watchlist since yesterday, page and email"),
+    ("test_help.py",         False, "the help beside each figure on the analysis page"),
 ]
 
 TIMEOUT = 900

@@ -761,6 +761,11 @@ def _strategy(name):
 # Whether a coin's newest finished day is one the source left blank.
 app.jinja_env.globals["blank_day"] = public_mod.blank_day
 
+# The words behind each "?" beside a figure (templates/_help.html), with the
+# house settings in them. The analysis page passes its own, with the
+# person's settings and bar interval in them instead.
+app.jinja_env.globals["help_text"] = plain_mod.help_for(config_mod.DEFAULTS)
+
 
 @app.template_filter("day")
 def _day(ts):
@@ -1130,6 +1135,7 @@ def analyse():
                            overlap=overlap, chart=_trade_chart(result),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
+                           help_text=plain_mod.help_for(cfg, result.bars.interval),
                            # A visitor cannot make a share, but every example
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(

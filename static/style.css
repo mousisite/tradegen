@@ -467,6 +467,53 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 .pairs dd { text-align: right; }
 .pairs dt:last-of-type, .pairs dd:last-of-type { border-bottom: 0; }
 
+/* ---------- help beside a figure ---------- */
+
+/* A small "?" at the end of a label or value that opens a sentence or two
+   about it, in the words of plain.HELP. A details element, so it opens and
+   closes with no script and its summary is a real button with a name.
+   Inline, so the words open on the line below what they explain. */
+.help { display: inline; }
+.help > summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: middle; margin-left: 5px; cursor: pointer; list-style: none;
+  border-radius: 999px;
+}
+.help > summary::-webkit-details-marker { display: none; }
+.help .q {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; background: var(--surface);
+  border: 1px solid var(--line-strong); color: var(--ink-2);
+  font: 600 11px/1 var(--sans); letter-spacing: 0; text-transform: none;
+}
+.help > summary:hover .q, .help[open] > summary .q {
+  border-color: var(--accent-text); color: var(--accent-text);
+}
+.help .lbl { margin-left: 7px; font: 500 var(--t-xs)/1.4 var(--sans);
+             color: var(--accent-text); letter-spacing: normal; text-transform: none; }
+.help > .say {
+  display: block; max-width: 46ch; margin: 8px 0 10px; padding: 10px 12px;
+  border-radius: var(--r-sm); background: var(--sunken); color: var(--ink-2);
+  font: 400 var(--t-xs)/1.6 var(--sans); letter-spacing: normal;
+  text-transform: none; text-align: left; white-space: normal;
+}
+.help.list > .say { display: grid; grid-template-columns: auto 1fr;
+                    gap: 6px var(--s2); max-width: 76ch; }
+.help.list dt { color: var(--ink); font-weight: 600; }
+.help.list dd { margin: 0; }
+.helpfoot { padding: 0 var(--s3) var(--s3); }
+/* A finger needs 44 pixels. The ring stays small; the space round it is the
+   target, and negative margins keep that space from pushing lines apart. */
+@media (pointer: coarse) {
+  .help > summary { min-width: 44px; min-height: 44px;
+                    margin: -13px -12px -13px -7px; }
+  .help.list > summary { margin: 0; justify-content: flex-start; }
+}
+@media (max-width: 420px) {
+  .help.list > .say { grid-template-columns: 1fr; gap: 2px; }
+  .help.list dd + dt { margin-top: 6px; }
+}
+
 /* ---------- tables ---------- */
 
 /* position:relative makes this box the containing block for anything
