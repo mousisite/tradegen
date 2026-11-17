@@ -426,17 +426,22 @@ def _move_coin_alerts(conn: sqlite3.Connection) -> List[tuple]:
     another coin's price, so its owner checks it and resumes it. Nothing else
     about it changes, every move is logged, and once moved there is nothing
     left for a second run to find. Returns (id, old, new) for each move.
+
+    Only alerts saved by ticker (exact=0) are moved. One saved exactly, such
+    as ARB-USD picked from the suggestions as Yahoo's ARbit, means that very
+    coin; this runs at every start, and moved it, paused it and told its
+    owner something false each time.
     """
     moved = []
     marks = ",".join("?" * len(COIN_IDS_MOVED))
-    for row in conn.execute("SELECT id, symbol FROM alerts WHERE symbol IN (%s)"
-                            % marks, list(COIN_IDS_MOVED)).fetchall():
+    for row in conn.execute("SELECT id, symbol FROM alerts WHERE exact=0 AND "
+                            "symbol IN (%s)" % marks, list(COIN_IDS_MOVED)).fetchall():
         old, new = row[1], COIN_IDS_MOVED[row[1]]
         why = ("Moved from %s, which at Yahoo is another coin or no coin, to %s, "
                "Yahoo's id for the coin you named. Paused so you can check its "
                "level, then resume it." % (old, new))
         conn.execute("UPDATE alerts SET symbol=?, active=0, state=NULL, "
-                     "last_error=?, last_error_ts=? WHERE id=? AND symbol=?",
+                     "last_error=?, last_error_ts=? WHERE id=? AND symbol=? AND exact=0",
                      (new, why, int(time.time()), row[0], old))
         logging.getLogger(__name__).warning(
             "alert %d moved from %s to %s and paused", row[0], old, new)
