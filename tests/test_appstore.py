@@ -1057,6 +1057,31 @@ class Sandbox(StoreBase):
         _os.environ["APPLE_SANDBOX_PRO"] = "nobody"
         self.assertEqual(st.sandbox_policy(), "all")
 
+    def test_the_review_account_goes_back_to_free(self):
+        # A reviewer bought Pro in the sandbox; the next one must find it Free.
+        self.app(self.ann, self.tx(env="Sandbox"))
+        self.assertTrue(self.pro(self.ann))
+        import importlib
+        tool = importlib.import_module("tools.reset_test_purchases")
+        self.assertEqual(tool.reset(self.conn, " ANN@example.com "), 1)
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.user(self.ann).apple_until, 0)
+        # It has a new token, so the sandbox renewal does not come back to it.
+        self.assertNotEqual(st.account_token(self.conn, self.ann), self.ann_token)
+        renew_at = self.t0 + DAY
+        self.assertEqual(self.send(self.note("DID_RENEW", self.tx(env="Sandbox", txid="2001",
+                                                                 purchase=renew_at),
+                                             env="Sandbox"))[1], st.UNOWNED)
+        self.assertFalse(self.pro(self.ann))
+        # Real purchases are never touched, and keep their token.
+        self.app(self.ben, self.tx(env="Production", otid="4000", txid="4001", token="ben"))
+        self.app(self.ben, self.tx(env="Sandbox", otid="4100", txid="4101", token="ben"))
+        self.assertEqual(st.forget_test_purchases(self.conn, self.ben), 1)
+        self.assertTrue(self.pro(self.ben))
+        self.assertEqual(st.account_token(self.conn, self.ben), self.ben_token)
+        with self.assertRaises(ValueError):
+            tool.reset(self.conn, "nobody@example.com")
+
 
 class Settings(unittest.TestCase):
     def setUp(self):

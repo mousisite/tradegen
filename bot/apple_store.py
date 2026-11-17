@@ -614,6 +614,29 @@ def forget_user(conn: sqlite3.Connection, user_id: int) -> None:
     conn.execute("UPDATE apple_subs SET moved_from=NULL WHERE moved_from=?", (user_id,))
 
 
+def forget_test_purchases(conn: sqlite3.Connection, user_id: int) -> int:
+    """Put one account back where it was before its test purchases.
+
+    For the App Review account, which a reviewer leaves with Pro bought in
+    Apple's sandbox: the next reviewer must find something to buy. Only its
+    Sandbox subscriptions go. Unless it has real ones, it also gets a new
+    appAccountToken, so a test subscription still renewing in the sandbox
+    cannot find its way back. Returns how many were forgotten.
+    """
+    ensure_schema(conn)
+
+    def work(c: sqlite3.Connection) -> int:
+        cur = c.execute("DELETE FROM apple_subs WHERE user_id=? AND environment=?",
+                        (user_id, SANDBOX))
+        if c.execute("SELECT 1 FROM apple_subs WHERE user_id=? LIMIT 1",
+                     (user_id,)).fetchone() is None:
+            c.execute("DELETE FROM apple_tokens WHERE user_id=?", (user_id,))
+        _refresh_locked(c, user_id)
+        return cur.rowcount
+
+    return _write(conn, work)
+
+
 def prune_notifications(conn: sqlite3.Connection,
                         days: int = KEEP_NOTIFICATIONS_DAYS) -> int:
     """Forget notifications Apple can no longer be retrying."""
