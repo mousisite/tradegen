@@ -159,6 +159,9 @@
         <div class="f"><div class="k">Alert checks</div>
           <div class="v fig">{{ scheduler.runs }}</div>
           <div class="n">{{ scheduler.failures }} failed</div></div>
+        <div class="f"><div class="k">Skipped, market closed</div>
+          <div class="v fig">{{ "{:,}".format(counts.total.get('closed_skips', 0)) }}</div>
+          <div class="n">alert and stop checks, {{ days }} days</div></div>
         <div class="f"><div class="k">Last looked</div>
           <div class="v fig">{{ scheduler.last_run|ago if scheduler.last_run else 'not yet' }}</div></div>
       {% endif %}

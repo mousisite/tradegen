@@ -147,6 +147,9 @@ class Scheduler:
                     "ok": True,
                     "seconds": self.last_run - started,
                     "checked": result.get("checked", 0),
+                    # Left because their market was closed, so a run that
+                    # checked nothing on a Sunday reads as what it is.
+                    "skipped": result.get("skipped", 0),
                     "fired": len(fired),
                     "errors": len(result.get("errors") or []),
                     "triggered": triggered,

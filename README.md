@@ -497,6 +497,16 @@ Background checking runs inside the server process on the interval set in
 settings, so an alert is evaluated whether or not you are looking at the page,
 and anything that fires appears on whatever page you are on.
 
+It does not ask for a price that cannot have changed. A stock's alerts and
+open positions' stops wait while its market is closed, from an hour after the
+close, when the day's last prices are in, until the next open: nights,
+weekends and NYSE holidays for a US listing, worked out by rule
+(`bot/sessions.py`), and the hours its own market data gives for a listing
+elsewhere. Coins, mutual funds, indices and anything whose hours are not known
+are checked every time, and so is an alert that is new, edited, re-armed or
+whose last check failed. "Check them all now" and the routines check
+everything. The usage page counts the checks skipped.
+
 **Nothing runs when the window is closed.** The interface says so in those
 words rather than letting you believe a level is being watched overnight.
 Making that true means hosting the app somewhere that stays up, which this
@@ -734,6 +744,7 @@ bot/
   yahoo.py          authenticated Yahoo session: cookie, crumb, retry
   catalysts.py      earnings and dividend dates, and whether they fall in range
   scheduler.py      the background loop that actually checks alerts
+  sessions.py       market hours, so the loop leaves a closed market alone
   export.py         your journal and measurements as CSV or JSON
   sec.py            EDGAR filings, XBRL company facts, full text search
   fundamentals.py   ratios from Yahoo, reconciled against what was filed

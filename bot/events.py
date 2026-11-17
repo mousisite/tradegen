@@ -6,7 +6,9 @@ a paper trade or pays. Each of those is a number for a day and nothing more:
 the table holds the day, the name of what happened and how many times. No
 account, address, ticker or network address is stored with a count, so none of
 it can be traced back to a person, and deleting an account leaves a day's total
-as it was, because the total never said whose it was.
+as it was, because the total never said whose it was. One count is of the
+server's own work instead, kept the same way: the alert checks it left while a
+market was closed, so the requests that saves can be seen.
 
 Every function here swallows its own failures. A count is worth far less than
 the thing being counted, and a locked table or a full disk must never cost
@@ -35,7 +37,13 @@ NAMES = (
     ("paper_trade", "Paper trades"),
     ("turned_pro", "Turned Pro"),
 )
-_KNOWN = dict(NAMES)
+# What the server itself does, counted the same way and shown with the
+# machinery rather than in the table above: the alert and stop checks the
+# background loop left because their market was closed (web._check_alerts_job).
+MACHINERY = (
+    ("closed_skips", "Checks skipped, market closed"),
+)
+_KNOWN = dict(NAMES + MACHINERY)
 
 _TABLE = ("CREATE TABLE IF NOT EXISTS usage_counts ("
           "day TEXT NOT NULL, name TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, "
@@ -218,7 +226,8 @@ def counting_upgrades(conn: sqlite3.Connection) -> Iterator[None]:
 def read(conn: sqlite3.Connection, days: int = 30) -> Dict:
     """The last `days` days of counts, newest day first, with totals.
 
-    Only days on which something was counted are listed.
+    Only days on which something people do was counted are listed; the
+    server's own counts are in the totals alone.
     """
     since = time.strftime("%Y-%m-%d",
                           time.gmtime(time.time() - (max(1, days) - 1) * 86400))
@@ -227,13 +236,15 @@ def read(conn: sqlite3.Connection, days: int = 30) -> Dict:
                             "ORDER BY day DESC", (since,)).fetchall()
     except sqlite3.OperationalError:
         rows = []                       # nothing counted yet, so no table
+    people = dict(NAMES)
     by_day: Dict[str, Dict[str, int]] = {}
-    total = {key: 0 for key, _label in NAMES}
+    total = {key: 0 for key in _KNOWN}
     for row in rows:
         day, name, n = row[0], row[1], int(row[2])
         if name not in _KNOWN:
             continue
-        by_day.setdefault(day, {})[name] = n
+        if name in people:
+            by_day.setdefault(day, {})[name] = n
         total[name] += n
     return {"names": NAMES, "since": since, "total": total,
             "days": [{"day": day, "counts": counts} for day, counts in by_day.items()]}

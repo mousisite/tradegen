@@ -10,7 +10,9 @@
     {% if loop and loop.running %}The server checks your alerts every
     {{ (loop.interval // 60)|int }} minutes, and your open positions' stops,
     even when this page is closed{% if loop.last_run %}; it last looked
-    {{ loop.last_run|ago }}{% endif %}.
+    {{ loop.last_run|ago }}{% endif %}. A stock waits while its market is
+    closed, from an hour after the close until it opens again, because its
+    price cannot move then. Coins are checked every time.
     {% else %}Background checking is off, so alerts are only checked when you
     press the button below, and each one says when it last looked.{% endif %}</p>
 </div>

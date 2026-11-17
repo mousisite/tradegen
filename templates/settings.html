@@ -193,7 +193,9 @@
                type="number" step="1" min="0" max="240"
                value="{{ cfg.alert_check_minutes }}">
         <div class="hint">Minutes. 0 switches it off. Below 1 minute is refused,
-          because the data sources are free and rate limited.</div>
+          because the data sources are free and rate limited. A stock waits
+          while its market is closed, from an hour after the close until it
+          opens again; coins are checked every time.</div>
       </div>
     </div>
     {% if scheduler %}
