@@ -52,6 +52,7 @@ SUITES = [
     ("test_record.py",       False, "the public track record, splits, and the strategy tests' margins"),
     ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
     ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
+    ("test_wording.py",      False, "what visitors read on a public site: no setup text, plain errors"),
 ]
 
 TIMEOUT = 900
