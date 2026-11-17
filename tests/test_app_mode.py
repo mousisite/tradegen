@@ -517,6 +517,24 @@ check("Xcode project: deployment target stays at iOS 15.0",
 check("Xcode project: the bundle id is app.orenth.ios",
       set(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);", pbx)) == {"app.orenth.ios"})
 
+from PIL import Image  # noqa: E402
+
+CATALOG = _os.path.join(IOS_APP, "Assets.xcassets")
+for folder in ("AppIcon.appiconset", "Splash.imageset"):
+    listed = json.loads(read("ios", "App", "App", "Assets.xcassets", folder, "Contents.json"))
+    names = [i["filename"] for i in listed["images"] if i.get("filename")]
+    on_disk = sorted(n for n in _os.listdir(_os.path.join(CATALOG, folder)) if n.endswith(".png"))
+    check("%s lists exactly the pictures it holds" % folder, sorted(names) == on_disk,
+          (sorted(names), on_disk))
+with Image.open(_os.path.join(CATALOG, "AppIcon.appiconset", "AppIcon-512@2x.png")) as icon:
+    check("the App Store icon is 1024 x 1024 with no alpha channel at all",
+          icon.size == (1024, 1024) and icon.mode == "RGB"
+          and "transparency" not in icon.info, (icon.size, icon.mode))
+splashes = json.loads(read("ios", "App", "App", "Assets.xcassets", "Splash.imageset",
+                           "Contents.json"))["images"]
+check("the launch screen has a dark version",
+      any(a.get("value") == "dark" for i in splashes for a in i.get("appearances", [])))
+
 print()
 if fails:
     print("FAILED: %d" % len(fails))
