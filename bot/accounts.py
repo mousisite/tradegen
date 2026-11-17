@@ -559,6 +559,16 @@ def identity_owner(conn: sqlite3.Connection, provider: str,
                         "provider=? AND subject=?", (provider, subject)).fetchone()
 
 
+def made_by(conn: sqlite3.Connection, provider: str,
+            subject: str) -> Optional[sqlite3.Row]:
+    """The account a sign-in method made, in identity_owner's shape, for a
+    method no longer linked to it. When the account was last signed in to
+    stands in for when the method was last used."""
+    return conn.execute("SELECT id AS user_id, last_seen_ts AS last_used_ts "
+                        "FROM users WHERE provider=? AND provider_id=?",
+                        (provider, subject)).fetchone()
+
+
 def can_still_sign_in(conn: sqlite3.Connection, user_id: int, provider: str,
                       subject: str) -> bool:
     """Whether an account keeps a way in once this one sign-in method is gone.

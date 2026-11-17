@@ -979,6 +979,23 @@ try:
     check("one with a real address it can still be reached at is kept",
           "real@example.com" in people() and identity_row("005.real.1") is None)
 
+    # Consent taken back first, which unlinks Apple; the Apple Account itself
+    # deleted later. The account Apple made still names it.
+    web_sign_in("005.hidden.2", "q9@privaterelay.appleid.com", relay=True)
+    notify("consent-revoked", "005.hidden.2")
+    check("someone who hid their address stops using Apple here, and the "
+          "account stays for now", "q9@privaterelay.appleid.com" in people()
+          and identity_row("005.hidden.2") is None)
+    out = notify("account-delete", "005.hidden.2")
+    check("when their Apple Account is deleted later, the account only it "
+          "could open goes with it", out.status_code == 200
+          and "q9@privaterelay.appleid.com" not in people(), out.status_code)
+    web_sign_in("005.real.2", "real2@example.com")
+    notify("consent-revoked", "005.real.2")
+    notify("account-delete", "005.real.2")
+    check("while one with a real address is kept that way too",
+          "real2@example.com" in people())
+
     web_sign_in("005.late.1", "late@example.com")
     out = notify("consent-revoked", "005.late.1", at=int(time.time()) - 3600)
     check("a notice older than the latest sign-in changes nothing",

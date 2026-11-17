@@ -2696,6 +2696,10 @@ def apple_notifications():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         owner = accounts_mod.identity_owner(conn, "apple", event["sub"])
+        if owner is None and deleted:
+            # Unlinked already, when its consent was taken back. The account
+            # it made still names it, and goes too if nothing else opens it.
+            owner = accounts_mod.made_by(conn, "apple", event["sub"])
         # Unknown here, or signed in again since it happened: nothing to undo.
         if owner is None or owner["last_used_ts"] > event["at"]:
             return jsonify({"received": True})
