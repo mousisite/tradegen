@@ -394,6 +394,38 @@ try:
           "The server also copies the database each time a new version of Orenth "
           "starts, and keeps the last few of those copies" in page
           and "can stay until newer versions replace it, however long that takes" in page)
+
+    # -----------------------------------------------------------------------
+    head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")
+    # -----------------------------------------------------------------------
+    from bot import billing  # noqa: E402
+    IN_APP = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                            "OrenthApp/1"}
+    STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
+              "STRIPE_WEBHOOK_SECRET": "whsec_x"}
+    _os.environ.update(STRIPE)
+    try:
+        conn = db.connect(DB)
+        billing.set_plan(conn, ann.id, "pro", "active", "cus_ann")
+        conn.close()
+        member = signed_in(ann)
+        account = text(member.get("/account", headers=IN_APP))
+        check("inside the app the Account page has no way to cancel",
+              "Manage subscription" not in account
+              and member.post("/billing/portal", headers=IN_APP).status_code == 404)
+        terms = flat(text(visitor.get("/terms", headers=IN_APP)))
+        check("so the terms there do not send people to it",
+              "cancel at any time from your Account page" not in terms
+              and "A subscription taken on the website is cancelled from the Account "
+                  "page there; you keep Pro until the end of the period" in terms,
+              terms[terms.find("<h2>Pro</h2>"):][:600])
+        terms = flat(text(visitor.get("/terms")))
+        check("while in a browser they still do",
+              "You can cancel at any time from your Account page; you keep Pro" in terms)
+    finally:
+        for _k in STRIPE:
+            _os.environ.pop(_k, None)
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):

@@ -323,7 +323,9 @@
   <h2>Pro</h2>
   <p class="prose">
     Pro is a monthly or yearly subscription, taken by Stripe, that renews
-    until you cancel. You can cancel at any time from your Account page; you
+    until you cancel. {% if in_app %}A subscription taken on the website is
+    cancelled from the Account page there;{% else %}You can cancel at any
+    time from your Account page;{% endif %} you
     keep Pro until the end of the period you have paid for. Deleting your account
     cancels it straight away. Pro gives you more of the
     same analysis, not better odds: the measurements, warnings and calls are
