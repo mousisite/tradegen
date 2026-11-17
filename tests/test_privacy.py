@@ -1,9 +1,15 @@
 """What the privacy page and the terms promise, held to what the code does.
 
 Error reports: page loads are sampled for Sentry only when the owner asks for
-it, and a sample never carries what was typed into a form, a cookie or
-anything after a ?. This is checked with Sentry's own client and a transport
-that only records, so nothing is sent anywhere.
+it, and a sample never carries what was typed into a form, a cookie, a header
+or anything after a ?. This is checked with Sentry's own client and a
+transport that only records, so nothing is sent anywhere. A page with anything
+of a signed-in person's on it is sent marked not to be stored.
+
+Then the page's own words, each beside the code it describes: what the
+sign-in cookie holds, what goes out by email and to phones, what each sign-in
+keeps, who carries and runs the site, the copies taken before each new
+version, what can be downloaded, and what the terms say inside the iPhone app.
 
 No network: Sentry's transport is a list, and nothing else is reached.
 """
