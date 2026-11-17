@@ -207,13 +207,13 @@
                   <input type="hidden" name="alert_id" value="{{ row['id'] }}">
                   {% if kinds.get(row['kind'], {}).get('needs_threshold') %}
                     <label class="sr" for="e-th-{{ row['id'] }}">Value</label>
-                    <input class="field fig" id="e-th-{{ row['id'] }}" name="threshold" type="number"
-                           step="any" style="max-width:110px;min-height:34px"
+                    <input class="field fig sm" id="e-th-{{ row['id'] }}" name="threshold" type="number"
+                           step="any" style="max-width:110px"
                            value="{{ (row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
                   {% endif %}
                   <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
-                  <input class="field" id="e-note-{{ row['id'] }}" name="note" type="text"
-                         style="max-width:180px;min-height:34px" value="{{ row['note'] or '' }}"
+                  <input class="field sm" id="e-note-{{ row['id'] }}" name="note" type="text"
+                         style="max-width:180px" value="{{ row['note'] or '' }}"
                          placeholder="note">
                   <button class="btn quiet sm" type="submit">Save</button>
                 </form>
@@ -411,8 +411,7 @@
                     <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
                     <input type="hidden" name="back" value="{{ url_for('monitor') }}">
                     <label class="sr" for="out-{{ row['id'] }}">Outcome for {{ row['symbol'] }}</label>
-                    <select class="field" id="out-{{ row['id'] }}" name="outcome"
-                            style="min-height:36px;font-size:var(--t-xs);padding:0 26px 0 9px">
+                    <select class="field sm" id="out-{{ row['id'] }}" name="outcome">
                       {% for key, meaning in outcomes.items() %}
                         <option value="{{ key }}"
                           {{ 'selected' if key == t.proposed }}>{{ key }}</option>

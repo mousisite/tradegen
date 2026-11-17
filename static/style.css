@@ -58,6 +58,9 @@
   --hold-wash:   #f6ecdd;
 
   --focus:       #aa4f30;
+  /* What a phone flashes behind a tapped link or button: the accent, faint,
+     instead of the browser's own grey-blue. */
+  --tap:         rgba(201, 100, 66, .14);
 
   /* Type: serif display, humanist sans body, mono for every figure. */
   --serif: 'Source Serif 4', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
@@ -110,12 +113,17 @@
     --loss-wash:   #2f201d;
     --hold-wash:   #2d2519;
     --focus:       #e89268;
+    --tap:         rgba(232, 146, 104, .2);
   }
 }
 
 * { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: var(--tap); }
+
+/* Two quick taps on a control are two taps, not a double-tap zoom, and no
+   tap waits to find out which it was. Pinch zoom is untouched. */
+a, button, input, select, textarea, summary, label { touch-action: manipulation; }
 
 body {
   margin: 0;
@@ -634,10 +642,13 @@ ul.list.ok li::marker { color: var(--gain); }
 /* ---------- forms in tables ---------- */
 
 .inline-form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
-.inline-form .field { min-height: 36px; font-size: var(--t-xs); padding: 0 10px; }
+/* .field.sm is the same small field anywhere else: a stop to trail, an
+   alert to edit, a thesis to close out. */
+.inline-form .field, .field.sm { min-height: 36px; font-size: var(--t-xs); padding: 0 10px; }
 .inline-form input.field { flex: 0 0 92px; }
 /* Room for the arrow, which the padding above otherwise lets sit on the text. */
-.inline-form select.field { padding-right: 28px; background-position: right 9px center; }
+.inline-form select.field, select.field.sm { padding-right: 28px;
+                                             background-position: right 9px center; }
 
 .sr {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -697,11 +708,35 @@ ul.list.ok li::marker { color: var(--gain); }
 
 /* ---------- touch ---------- */
 
+/* A finger needs 44 by 44 pixels: every button, field, menu and tab here is
+   at least that on a touch screen. */
 @media (pointer: coarse) {
   .btn.sm { min-height: 44px; padding: 0 16px; }
   .pills a { min-height: 44px; display: inline-flex; align-items: center; }
-  .inline-form .field { min-height: 44px; }
+  .inline-form .field, .field.sm { min-height: 44px; }
   tbody td { padding-top: 14px; padding-bottom: 14px; }
+  /* An iPhone zooms the whole page in on a field whose text is under 16
+     pixels as soon as it is tapped, and leaves it zoomed. Selects were 15,
+     and the small fields in tables 13. */
+  select.field, .inline-form .field, .field.sm { font-size: 16px; }
+  .wordmark, .me, .menu > summary { min-height: 44px; }
+  .me { min-width: 44px; justify-content: center; }
+  .jump a { min-height: 44px; display: inline-flex; align-items: center; }
+  .firebar button { min-height: 44px; }
+  /* The "Edit" and "Trail the stop" openers were 21 pixels tall. */
+  details:not(.help):not(.menu) > summary { padding-block: 12px; }
+  /* A link standing on its own, as a table's action or a line of its own:
+     the words stay where they are, and the padding round them is what the
+     finger hits. Inline, so the padding moves nothing. */
+  td a:not(.btn), .tail a, .firebar a, ul.list li > a:only-child,
+  .prose > a:only-child, .fine > a:only-child { padding: 14px 9px; margin: 0 -9px; }
+  a.tail { padding-block: 14px; margin-block: -14px; }
+}
+
+/* Only where there is a pointer to hover with. A tap counts as a hover on
+   a phone, and the row stayed lit after its button was tapped. */
+@media (hover: none) {
+  tbody tr:hover { background: transparent; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -860,6 +895,10 @@ ul.list.ok li::marker { color: var(--gain); }
   padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
 }
 [id^="s-"] { scroll-margin-top: calc(120px + env(safe-area-inset-top, 0px)); }
+/* The section bar is taller on a touch screen, by its 44 pixel links. */
+@media (pointer: coarse) {
+  [id^="s-"] { scroll-margin-top: calc(136px + env(safe-area-inset-top, 0px)); }
+}
 @media (max-width: 760px) {
   .firebar, .jump { top: calc(56px + env(safe-area-inset-top, 0px)); }
   .firebar .inner {

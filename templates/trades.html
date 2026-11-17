@@ -243,10 +243,10 @@
                       style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
                   <input type="hidden" name="trade_id" value="{{ t['id'] }}">
                   <label class="sr" for="tr{{ t['id'] }}">How far behind the {{ 'high' if long else 'low' }} the stop of {{ t['symbol'] }} trails</label>
-                  <input class="field fig" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
-                         min="0" required placeholder="5" style="max-width:80px;min-height:34px">
+                  <input class="field fig sm" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
+                         min="0" required placeholder="5" style="max-width:80px">
                   <label class="sr" for="tk{{ t['id'] }}">Trail measured as</label>
-                  <select class="field" id="tk{{ t['id'] }}" name="trail_kind" style="min-height:34px">
+                  <select class="field sm" id="tk{{ t['id'] }}" name="trail_kind">
                     <option value="pct">% of price</option>
                     <option value="atr">times ATR</option>
                   </select>
