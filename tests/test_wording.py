@@ -387,6 +387,11 @@ try:
     check("nor does the pricing page", "555-0100" not in said)
     said = text(get(visitor, "visitor", "/auth/google/callback?error=Call+555-0100"))
     check("nor Google's error code", "555-0100" not in said)
+    said = flat(text(get(visitor, "visitor", "/monitor?checked=Call+555-0100&fired=x")))
+    check("nor the Monitor page's count of checked alerts", "555-0100" not in said
+          and "Checked Call" not in said)
+    said = flat(text(get(visitor, "visitor", "/monitor?checked=2&fired=1")))
+    check("which still says a real count", "Checked 2 alerts. 1 triggered." in said)
 
     # Sign-in keys that went missing on a public site.
     keys = {k: _os.environ.pop(k) for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")}

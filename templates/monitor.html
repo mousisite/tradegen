@@ -15,10 +15,13 @@
     press the button below, and each one says when it last looked.{% endif %}</p>
 </div>
 
-{% if request.args.get('checked') %}
+{# Only numbers are read from the address. Any other text there would be the
+   link's own words, said in the site's notice. #}
+{% set checked = request.args.get('checked', '')|int(-1) %}
+{% if checked >= 0 %}
   <div class="saved">
-    Checked {{ request.args.get('checked') }} alert{{ '' if request.args.get('checked') == '1' else 's' }}.
-    {{ request.args.get('fired') }} triggered.
+    Checked {{ checked }} alert{{ '' if checked == 1 else 's' }}.
+    {{ request.args.get('fired', '')|int(0) }} triggered.
   </div>
 {% endif %}
 
