@@ -129,6 +129,7 @@ class User:
     plan_status: str = ""
     plan_until: int = 0           # when the paid period ends, 0 if not known
     bonus_until: int = 0          # free Pro from invites, until this time
+    apple_until: int = 0          # Pro bought through Apple, until this time
     weekly_email: bool = False
     alert_email: bool = False
     created_ts: int = 0
@@ -155,6 +156,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
                 plan_until=row["plan_until"] if "plan_until" in keys else 0,
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
+                apple_until=row["apple_until"] if "apple_until" in keys else 0,
                 alert_email=bool(row["alert_email"]) if "alert_email" in keys
                 else False,
                 weekly_email=bool(row["weekly_email"]) if "weekly_email" in keys
@@ -184,7 +186,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                         ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),
                         ("weekly_email", "INTEGER NOT NULL DEFAULT 0"),
                         ("alert_email", "INTEGER NOT NULL DEFAULT 0"),
-                        ("digest_week", "TEXT NOT NULL DEFAULT ''")):
+                        ("digest_week", "TEXT NOT NULL DEFAULT ''"),
+                        # Pro bought in the iPhone app, worked out by
+                        # bot/apple_store.py from Apple's signed data.
+                        ("apple_until", "INTEGER NOT NULL DEFAULT 0")):
         if column not in have:
             conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite ON "
@@ -784,6 +789,11 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     push.ensure_schema(conn)
     cur = conn.execute("DELETE FROM push_devices WHERE user_id=?", (user_id,))
     removed["push_devices"] = cur.rowcount
+    # Pro bought through Apple: the account's token and its subscriptions.
+    # Apple keeps billing until the person cancels with Apple, which the
+    # Account page says before this runs; renewals then arrive unowned.
+    from . import apple_store
+    apple_store.forget_user(conn, user_id)
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()

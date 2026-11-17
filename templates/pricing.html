@@ -46,23 +46,94 @@
     <p class="fine">Fair use: up to {% if fair.images %}{{ fair.images }}
       screenshot reads and {% endif %}{{ fair.theses }} saved theses an hour,
       and Find scans wait their turn when the server is busy.</p>
-    {% if is_pro and current_user and not demo %}
+    {% if in_app %}
+      {# ===================== app_purchase =====================
+         Inside the iPhone app, Pro may only be sold through Apple (App Store
+         rule 3.1.1), and it is the same Pro as on the website (3.1.3(b)).
+         Everything the App Store must see is here: each plan's name, length
+         and price exactly as StoreKit gives them (static/app-purchase.js
+         fills them in; the billed price is the largest thing on the card),
+         the renewal and cancelling terms, Apple's Terms of Use (EULA) and
+         our Terms and Privacy Policy, Restore Purchases, and Manage
+         subscription. Nothing is offered to an account that already has
+         Pro, whichever way it got it. Never put a Stripe form, a Stripe
+         link, a web price or the discount box in here. #}
+      {% block app_purchase %}
+      <div class="iap" data-app-purchase>
+        {% if not apple.on %}
+          <p class="prose">Upgrading is not available in the app yet.</p>
+        {% elif not current_user or demo %}
+          <p class="prose">Pro belongs to your Orenth account, so it works
+            here and on the website alike. Create a free account first, then
+            subscribe here.</p>
+          <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create free account</a>
+          <p class="fine">Already subscribed? Sign in, then tap Restore
+            Purchases here.</p>
+        {% elif apple.pro %}
+          <p class="prose"><b>You have Pro through Apple</b>{% if apple.pro.test %},
+            from a test purchase{% endif %}.
+            {% if apple.pro.renews %}It renews on {{ apple.pro.until|day }}.{% else %}It
+            ends on {{ apple.pro.until|day }} and will not renew.{% endif %}</p>
+          {% if apple.twice %}
+            <p class="notice">You are paying for Pro twice: through Apple, and
+              on the Orenth website. Cancel one of them.</p>
+          {% endif %}
+          <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage>Manage subscription</a>
+          <p class="fine">Or in your iPhone's Settings &gt; Apple Account &gt;
+            Subscriptions.</p>
+        {% elif is_pro %}
+          <p class="prose"><b>Your account already has Pro</b>{% if apple.via == 'web' %},
+            paid for on the Orenth website{% elif apple.via == 'invite' %},
+            free from invites until {{ apple.invite_until|day }}{% endif %},
+            so there is nothing to buy here.</p>
+        {% else %}
+          <div class="iapshop" data-iap-shop data-products="{{ apple.products|join(',') }}">
+            <div class="iapgrid" data-iap-products aria-live="polite">
+              <p class="soft">Asking the App Store for the plans…</p>
+            </div>
+            <div class="notice" data-iap-elsewhere hidden>
+              <p class="prose"><b>The Pro on this iPhone's Apple Account belongs
+                to another Orenth account.</b> Move it here, and that account
+                loses it and is told by email. A subscription can move once
+                every 30 days.</p>
+              <button class="btn quiet" type="button" data-iap-move>Move Pro to this account</button>
+            </div>
+            <p class="fine">Payment is charged to your Apple Account when you
+              confirm the purchase. The subscription renews automatically, at
+              the same price and for the same length (a month or a year, as
+              you choose), unless it is cancelled at least 24 hours before the
+              end of the current period; the renewal is charged within the 24
+              hours before that end. Manage or cancel it at any time in your
+              iPhone's Settings &gt; Apple Account &gt; Subscriptions.</p>
+          </div>
+        {% endif %}
+        {% if apple.on and current_user and not demo %}
+          <p class="iapsaid" data-iap-said role="status" aria-live="polite"></p>
+          <button class="btn quiet" type="button" data-iap-restore>Restore Purchases</button>
+        {% endif %}
+        {% if apple.on %}
+          <p class="fine iaplinks">
+            <a href="https://www.apple.com/legal/internet-services/itunes/dev/stdeula/">Terms of Use (EULA)</a>
+            · <a href="{{ url_for('terms') }}">Terms</a>
+            · <a href="{{ url_for('privacy') }}">Privacy Policy</a></p>
+        {% endif %}
+      </div>
+      {% endblock %}
+    {% elif is_pro and current_user and not demo %}
       <p class="prose"><b>You have Pro.</b></p>
-      {% if has_customer and not in_app %}
+      {% if apple.pro %}
+        <p class="prose">{{ apple_pro_said }}</p>
+      {% endif %}
+      {% if apple.twice %}
+        <p class="notice">You are paying for Pro twice: through Apple, and here
+          on the website. Cancel one of them: this one below, Apple's in your
+          iPhone's Settings.</p>
+      {% endif %}
+      {% if has_customer %}
         <form method="post" action="{{ url_for('billing_portal') }}">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
       {% endif %}
-    {% elif in_app %}
-      {# ===================== app_purchase =====================
-         Inside the iPhone app, Pro may only be sold through Apple (App Store
-         rule 3.1.1). Apple's purchase buttons replace what is inside this
-         block. Never put a Stripe form, a Stripe link, a web price or the
-         discount box in here. #}
-      {% block app_purchase %}
-        <p class="prose" data-app-purchase>Upgrading is not available in the
-          app yet.</p>
-      {% endblock %}
     {% elif current_user and not demo %}
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the

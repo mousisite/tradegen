@@ -284,6 +284,26 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .codesaid.ok { color: var(--gain); background: var(--gain-wash); }
 .codesaid.bad { color: var(--loss); background: var(--loss-wash); }
 
+/* Pro in the iPhone app, sold through Apple (static/app-purchase.js fills in
+   each plan as the App Store describes it). The price a plan bills is its
+   largest text, as Apple asks. */
+.iap { display: flex; flex-direction: column; gap: var(--s2); }
+.iap .prose { margin: 0; }
+.iapgrid { display: grid; gap: var(--s2); }
+.iapitem { display: flex; flex-direction: column; gap: 4px; padding: var(--s2);
+           border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+           background: var(--surface); }
+.iapname { font-weight: 600; }
+.iaplength { font-size: var(--t-xs); color: var(--ink-2); }
+.iapprice { margin: 2px 0 var(--s1); }
+.iapamount { font-family: var(--serif); font-size: var(--t-xl); color: var(--ink); }
+.iapper { font-size: var(--t-sm); color: var(--ink-2); }
+.iap .btn { width: 100%; }
+.iap .notice .btn { margin-top: var(--s1); }
+.iapsaid { margin: 0; font-size: var(--t-sm); color: var(--ink); }
+.iapsaid:empty { display: none; }
+.iaplinks a { white-space: nowrap; }
+
 /* The phone menu. Hidden on wide screens, where the row of links fits. */
 .menu { display: none; position: relative; }
 .menu > summary {

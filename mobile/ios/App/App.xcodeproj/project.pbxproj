@@ -19,6 +19,7 @@
 		290D552E41BB4A10B19FBE14 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7CF1417E994AD39E1D1788 /* MainViewController.swift */; };
 		F797B6E7033F415689DF47CD /* WebAuthPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 682183DD32D1439AA071C854 /* WebAuthPlugin.swift */; };
 		6A3785AC1F4C48B08624FDFF /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */; };
+		FDA9EE7FC99A473BA4B9E4E5 /* AppPurchasePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 		AE7CF1417E994AD39E1D1788 /* MainViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
 		682183DD32D1439AA071C854 /* WebAuthPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebAuthPlugin.swift; sourceTree = "<group>"; };
 		639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPurchasePlugin.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -82,6 +84,7 @@
 				AE7CF1417E994AD39E1D1788 /* MainViewController.swift */,
 				682183DD32D1439AA071C854 /* WebAuthPlugin.swift */,
 				639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */,
+				1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -172,6 +175,7 @@
 				9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */,
 				290D552E41BB4A10B19FBE14 /* MainViewController.swift in Sources */,
 				F797B6E7033F415689DF47CD /* WebAuthPlugin.swift in Sources */,
+				FDA9EE7FC99A473BA4B9E4E5 /* AppPurchasePlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

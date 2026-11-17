@@ -2,7 +2,8 @@
 /*
  * Reads project.pbxproj back and checks that Xcode will find what Orenth
  * added: the project parses, every reference in it points at something that
- * exists, the two Swift files are compiled by the App target, the privacy
+ * exists, Orenth's own Swift files (the screen, the sign-in sheet and the
+ * in-app purchase plugin) are compiled by the App target, the privacy
  * manifest is copied into the app, and the app is iPhone-only.
  *
  *   cd mobile && node scripts/check-project.js
@@ -20,7 +21,8 @@ const PBXPROJ = path.join(MOBILE, 'ios', 'App', 'App.xcodeproj', 'project.pbxpro
 const APP_DIR = path.join(MOBILE, 'ios', 'App', 'App');
 
 const SOURCES = ['AppDelegate.swift', 'SceneDelegate.swift',
-                 'MainViewController.swift', 'WebAuthPlugin.swift'];
+                 'MainViewController.swift', 'WebAuthPlugin.swift',
+                 'AppPurchasePlugin.swift'];
 const RESOURCES = ['PrivacyInfo.xcprivacy'];
 // Made by "npx cap sync ios" and kept out of git, so a fresh copy lacks them.
 const GENERATED = new Set(['public', 'capacitor.config.json', 'config.xml']);

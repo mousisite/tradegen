@@ -22,6 +22,7 @@ import io
 import json
 import math
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -46,6 +47,8 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
 from bot import apple as apple_mod
+from bot import apple_store as apple_store_mod
+from bot import appstore as appstore_mod
 from bot import auth as auth_mod
 from bot import billing as billing_mod
 from bot import catalysts as catalysts_mod
@@ -186,6 +189,9 @@ def healthcheck():
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "apple_start", "apple_callback", "apple_nonce",
                     "apple_native", "apple_notifications", "app_finish",
+                    # Apple's server, about in-app purchases: signed, so it
+                    # needs no sign-in and has no Origin to check.
+                    "appstore_notifications",
                     "static", "healthcheck", "privacy", "terms",
                     "robots", "sitemap", "index", "favicon",
                     "manifest", "service_worker", "offline",
@@ -358,7 +364,44 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
                            offer={} if _in_app() else billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
-                           has_customer=bool(customer), fair=_fair_use()), status
+                           has_customer=bool(customer), fair=_fair_use(),
+                           apple=_apple_plan()), status
+
+
+def _apple_plan() -> Dict:
+    """Pro through Apple, for the pricing and account pages.
+
+    on: whether the app sells Pro. pro: the Apple subscription that gives
+    this person Pro now, or None. billing: one Apple could still charge for
+    (running, or retrying a failed renewal), test purchases included, for the
+    warning before an account is deleted. via: how Pro was got otherwise,
+    so the app can say why it sells nothing: "web" (paid on the website),
+    "invite" or "other".
+    """
+    out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
+           "products": apple_store_mod.product_ids(), "via": "", "twice": False,
+           "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
+    user = getattr(g, "user", None)
+    if user is None or getattr(g, "demo", False):
+        return out
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        out["pro"] = apple_store_mod.subscription(conn, user.id)
+        out["billing"] = apple_store_mod.subscription(conn, user.id, counted_only=False)
+    finally:
+        conn.close()
+    plain = dataclasses.replace(user, apple_until=0)
+    if billing_mod.ready() and billing_mod.is_pro(plain, _is_operator()):
+        if plain.plan == "pro" and plain.plan_status in billing_mod.ACTIVE:
+            out["via"] = "web"
+        elif plain.bonus_until > time.time():
+            out["via"], out["invite_until"] = "invite", plain.bonus_until
+        else:
+            out["via"] = "other"
+    # Paying Apple and Stripe for the same Pro, which checkout and the app
+    # both try to prevent: said plainly wherever the plan is shown.
+    out["twice"] = bool(out["pro"]) and out["via"] == "web"
+    return out
 
 
 def _fair_use() -> Dict[str, int]:
@@ -596,9 +639,15 @@ def _expose_user():
             "auth_on": auth_required(),
             "email_ready": codes_mod.email_ready(),
             "billing_on": billing_mod.ready(),
-            # The upgrade button, for signed-in free accounts only.
+            # The upgrade button, for signed-in free accounts only, and in
+            # the iPhone app only while Pro can be bought there, through Apple.
             "go_pro": (billing_mod.ready() and getattr(g, "user", None) is not None
-                       and not getattr(g, "demo", False) and not _pro()),
+                       and not getattr(g, "demo", False) and not _pro()
+                       and (not _in_app() or apple_store_mod.enabled())),
+            # Pro sold in the iPhone app through Apple: the app's pages load
+            # static/app-purchase.js while it is on.
+            "iap_on": apple_store_mod.enabled(),
+            "apple_pro_said": APPLE_PRO_SAID,
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured(),
             # Apple on the website, and Apple anywhere (the app needs less).
@@ -3080,6 +3129,9 @@ def billing_checkout():
     """Send someone to Stripe's own page to pay."""
     if not billing_mod.ready() or g.demo or _in_app():
         abort(404)
+    if g.user.apple_until > time.time():
+        # Already paying Apple for the same Pro: never a second bill.
+        return _pricing_page(APPLE_PRO_SAID, 409)
     if _pro():
         return redirect(url_for("account"))
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -3163,6 +3215,264 @@ def billing_webhook():
     return jsonify({"received": True, "outcome": outcome})
 
 
+# --- Pro bought in the iPhone app, through Apple -------------------------------
+#
+# Inside the App Store app, Pro may only be sold through Apple (rule 3.1.1),
+# and Pro bought on either side works on both (3.1.3(b)). The app's pages send
+# what StoreKit gave them, and Apple's server sends notifications; either way
+# bot/apple_store.py checks Apple's signature and decides who has Pro. All of
+# it is off, and these addresses are not found, until APPLE_APP_ID is set.
+
+APPLE_PRO_SAID = ("You have Pro through Apple; manage it in your iPhone's "
+                  "Settings > Apple Account > Subscriptions.")
+APPLE_SUBSCRIPTIONS = "https://apps.apple.com/account/subscriptions"
+# Apple's notifications are a few kilobytes.
+APPSTORE_NOTICE_LIMIT = 128 * 1024
+# What the app sends: up to twenty transactions of a few kilobytes each.
+APPSTORE_POST_LIMIT = 256 * 1024
+APPSTORE_JWS_PER_POST = 20
+# Per account an hour (_rate_limited allows a network three times this). A
+# page load sends nothing unless StoreKit has something unfinished.
+APPSTORE_STATE_PER_HOUR = 240
+APPSTORE_POSTS_PER_HOUR = 60
+APPSTORE_MOVES_PER_HOUR = 5
+# Notifications refused by kind of failure, so one that keeps happening (a
+# wrong APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once an hour.
+_APPSTORE_REFUSED: Dict[str, list] = {}
+_APPSTORE_REFUSED_LOCK = threading.Lock()
+
+
+def _appstore_refused(status: str) -> None:
+    app.logger.warning("An App Store notification was refused: %s", status)
+    now = time.time()
+    with _APPSTORE_REFUSED_LOCK:
+        seen = [t for t in _APPSTORE_REFUSED.get(status, []) if now - t < 3600]
+        seen.append(now)
+        _APPSTORE_REFUSED[status] = seen
+        loud = len(seen) == 3
+    if loud:
+        from bot import monitoring
+        monitoring.note("App Store notifications keep failing their check; "
+                        "APPLE_APP_ID or APPLE_BUNDLE_ID may be wrong",
+                        status=status)
+
+
+@app.route("/apple/notifications", methods=["POST"])
+def appstore_notifications():
+    """Apple's server saying what happened to a subscription bought in the app:
+    App Store Server Notifications, version 2.
+
+    Server to server, with no cookie and no Origin; Apple's signature, checked
+    to Apple's root, is what makes it believable. 200 only once it is stored.
+    Anything else makes Apple send it again later (for about a week, in
+    production): 400 for one that does not check out, 500 for a database that
+    would not take it.
+    """
+    if not apple_store_mod.enabled():
+        abort(404)
+    if (request.content_length or 0) > APPSTORE_NOTICE_LIMIT:
+        return jsonify({"error": "That is far larger than a notification."}), 413
+    # The same cap for a body sent in chunks, which states no length up front.
+    request.max_content_length = APPSTORE_NOTICE_LIMIT
+    body = request.get_json(silent=True, force=True)
+    signed = body.get("signedPayload") if isinstance(body, dict) else None
+    if not isinstance(signed, str) or not signed:
+        return jsonify({"error": "No signedPayload."}), 400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        status, outcome = apple_store_mod.handle_notification(
+            conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
+    except sqlite3.Error:
+        app.logger.exception("Could not store an App Store notification; Apple "
+                             "will send it again")
+        return jsonify({"error": "Try again later."}), 500
+    finally:
+        conn.close()
+    if status != 200:
+        _appstore_refused(outcome)
+    return jsonify({"outcome": outcome}), status
+
+
+def _apple_state(conn, mint: bool) -> Dict:
+    """What the app's subscribe screen needs to know about this person.
+
+    pro is Pro by any means; source says which: "apple", or "web" for
+    anything else (Stripe, an invite week), so the app sells nothing to
+    someone who already has it. The appAccountToken goes with every
+    purchase and is made the first time it is asked for.
+    """
+    user = g.user
+    on = apple_store_mod.enabled()
+    until = apple_store_mod.pro_until_ms(conn, user.id)
+    apple = until > time.time() * 1000
+    # Read without the Apple column, which may be older than the change just
+    # made: whether Pro comes from anywhere else.
+    elsewhere = billing_mod.is_pro(dataclasses.replace(user, apple_until=0),
+                                   _is_operator())
+    return {"enabled": on, "pro": apple or elsewhere,
+            "source": "apple" if apple else ("web" if elsewhere else ""),
+            "appleUntil": until,
+            "appAccountToken": (apple_store_mod.account_token(conn, user.id)
+                                if on and mint else ""),
+            "products": apple_store_mod.product_ids() if on else []}
+
+
+def _no_store(payload: Dict, status: int = 200):
+    response = jsonify(payload)
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/apple/state")
+def apple_state():
+    """The app's subscribe screen: whether it may sell, who has Pro, the
+    products, and this account's appAccountToken."""
+    if getattr(g, "user", None) is None or g.demo:
+        return _no_store({"error": "Not signed in."}, 401)
+    if _from_another_site():
+        return _no_store({"error": "That request came from another site."}, 403)
+    if _rate_limited("apple_state", APPSTORE_STATE_PER_HOUR):
+        return _no_store({"error": "Asked a lot in the last hour. Wait a while, "
+                                   "then try again."}, 429)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return _no_store(_apple_state(conn, mint=True))
+    finally:
+        conn.close()
+
+
+def _appstore_post_refused():
+    """Why a post from the app's subscribe screen is refused, or None.
+
+    These decide who has Pro, so beyond the session cookie (SameSite=Lax,
+    which another site's form never carries), the browser's own account of
+    where the request came from must be this site, and the body must be
+    JSON, which a page elsewhere could only send after a check this server
+    never answers.
+    """
+    if not apple_store_mod.enabled():
+        return _no_store({"error": "Pro is not sold in the app just now."}, 404)
+    if getattr(g, "user", None) is None or g.demo:
+        return _no_store({"error": "Not signed in."}, 401)
+    origin = request.headers.get("Origin")
+    ours = {_origin_of(_public_base()), _origin_of(request.host_url)}
+    if (origin is not None and _origin_of(origin) not in ours - {""}) \
+            or request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+        return _no_store({"error": "That request came from another site."}, 403)
+    if (request.content_length or 0) > APPSTORE_POST_LIMIT:
+        return _no_store({"error": "That is far more than a purchase."}, 413)
+    request.max_content_length = APPSTORE_POST_LIMIT
+    if not isinstance(request.get_json(silent=True), dict):
+        return _no_store({"error": "Send it as JSON."}, 400)
+    return None
+
+
+@app.route("/api/apple/transactions", methods=["POST"])
+def apple_transactions():
+    """Transactions StoreKit gave the app: after a purchase, a restore, or a
+    page load that found some unfinished. JSON {"jws": [...]}, up to twenty.
+
+    Each is checked and applied for the signed-in person, and comes back with
+    its outcome. The app finishes a transaction once it has an answer here
+    other than "invalid".
+    """
+    refused = _appstore_post_refused()
+    if refused is not None:
+        return refused
+    if _rate_limited("apple_post", APPSTORE_POSTS_PER_HOUR):
+        return _no_store({"error": "Sent a lot in the last hour. Wait a while, "
+                                   "then try again."}, 429)
+    signed = request.get_json(silent=True).get("jws")
+    if isinstance(signed, str):
+        signed = [signed]
+    if not isinstance(signed, list) or len(signed) > APPSTORE_JWS_PER_POST \
+            or not all(isinstance(item, str) for item in signed):
+        return _no_store({"error": "jws must be a list of up to %d signed "
+                                   "transactions." % APPSTORE_JWS_PER_POST}, 400)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        results = apple_store_mod.handle_app_transactions(
+            conn, apple_store_mod.verifier(), g.user.id, signed,
+            apple_store_mod.product_ids())
+        out = _apple_state(conn, mint=False)
+    finally:
+        conn.close()
+    out["results"] = results
+    return _no_store(out)
+
+
+@app.route("/api/apple/move", methods=["POST"])
+def apple_move():
+    """Move this Apple Account's Pro here from another Orenth account.
+
+    JSON {"jws": one transaction the phone read just now from its current
+    entitlements}. Only the subscription's running transaction moves it, at
+    most once in 30 days, and the account it leaves is told by email when it
+    has an address that can be written to; who it was is kept either way.
+    """
+    refused = _appstore_post_refused()
+    if refused is not None:
+        return refused
+    if _rate_limited("apple_move", APPSTORE_MOVES_PER_HOUR):
+        return _no_store({"error": "Tried a lot in the last hour. Wait a while, "
+                                   "then try again."}, 429)
+    signed = request.get_json(silent=True).get("jws")
+    if not isinstance(signed, str) or not signed:
+        return _no_store({"error": "jws must be one signed transaction."}, 400)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        try:
+            result = apple_store_mod.move_to(conn, apple_store_mod.verifier(), g.user.id,
+                                             signed, apple_store_mod.product_ids())
+        except appstore_mod.VerificationError as exc:
+            return _no_store({"error": "That subscription could not be confirmed "
+                                       "with Apple.", "reason": exc.status}, 400)
+        left = (accounts_mod.get_user(conn, result["previous"])
+                if result.get("previous") else None)
+        out = _apple_state(conn, mint=False)
+    finally:
+        conn.close()
+    if left is not None:
+        _tell_pro_moved(left)
+    out["outcome"] = result["outcome"]
+    if result.get("after"):
+        out["after"] = result["after"]
+    return _no_store(out)
+
+
+def _tell_pro_moved(person) -> None:
+    """Tell an account its Apple subscription was moved to another account.
+
+    By email, when email is set up and the account has an address that can
+    be written to. A failure is logged and changes nothing: the move is
+    already made, and apple_subs keeps who it moved from.
+    """
+    address = (person.email or "").strip()
+    if person.is_local or not address or address.endswith(".invalid") \
+            or not codes_mod.email_ready():
+        app.logger.info("Moved an Apple subscription away from account %d; no "
+                        "email could say so", person.id)
+        return
+    when = time.strftime("%d %B %Y at %H:%M UTC", time.gmtime()).lstrip("0")
+    body = (
+        "The Orenth Pro subscription bought through Apple for your account "
+        "(%s) was moved to another Orenth account on %s. Someone signed in to "
+        "Orenth on an iPhone that uses the Apple Account the subscription was "
+        "bought with asked for it.\n\n"
+        "Your account no longer has Pro from that subscription. Nothing else in "
+        "your account changed, and Apple's billing did not change.\n\n"
+        "If that was you, there is nothing to do. If it was not, check who can "
+        "use that Apple Account. To bring Pro back, open Orenth on that iPhone "
+        "signed in to this account, go to Pricing and tap Move Pro to this "
+        "account. A subscription can move once every 30 days.\n" % (address, when))
+    try:
+        codes_mod.send_mail(address, "Your Orenth Pro moved to another account", body)
+    except codes_mod.CodeError:
+        app.logger.warning("Could not email account %d that its Apple "
+                           "subscription moved", person.id)
+
+
 @app.route("/signout", methods=["POST"])
 def signout():
     """End this session everywhere, not just in this browser.
@@ -3216,7 +3526,8 @@ def account():
                            methods=methods,
                            datasets=export_mod.DATASETS, plan=plan,
                            invite=invite, weekly=weekly,
-                           invite_days=invites_mod.BONUS_DAYS)
+                           invite_days=invites_mod.BONUS_DAYS,
+                           apple=_apple_plan())
 
 
 @app.route("/account/delete", methods=["POST"])
@@ -4899,10 +5210,18 @@ def start_background_jobs():
 
 
 def _recheck_plans_job():
-    """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost."""
+    """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost.
+
+    And forget App Store notifications too old for Apple to be retrying.
+    """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        return billing_mod.recheck(conn)
+        result = billing_mod.recheck(conn)
+        try:
+            apple_store_mod.prune_notifications(conn)
+        except sqlite3.Error as exc:
+            result.setdefault("errors", []).append("app store notifications: %s" % exc)
+        return result
     finally:
         conn.close()
 

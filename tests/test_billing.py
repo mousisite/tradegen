@@ -138,6 +138,16 @@ try:
     check("a cancelled one is not", not billing.is_pro(A.get_user(conn, paid.id)))
     check("and the customer number survives the change",
           billing.customer_of(conn, paid.id) == "cus_paid")
+    # Pro bought in the iPhone app is kept on the user row by apple_store.
+    conn.execute("UPDATE users SET apple_until=? WHERE id=?",
+                 (int(time.time()) + 3600, free.id))
+    check("Pro bought through Apple is Pro until it ends",
+          billing.is_pro(A.get_user(conn, free.id)))
+    conn.execute("UPDATE users SET apple_until=? WHERE id=?",
+                 (int(time.time()) - 1, free.id))
+    check("and not a moment after", not billing.is_pro(A.get_user(conn, free.id)))
+    conn.execute("UPDATE users SET apple_until=0 WHERE id=?", (free.id,))
+    conn.commit()
     conn.close()
 
     print()

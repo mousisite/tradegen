@@ -4,6 +4,8 @@
 # Everything personal: the journal, the accumulated strategy record, and the
 # key that signs session cookies all live here.
 data/
+# Except the tests' own files, which are nobody's: Apple's signed test data.
+!tests/data/
 *.db
 *.db-wal
 *.db-shm

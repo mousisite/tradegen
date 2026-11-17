@@ -238,6 +238,9 @@ def is_pro(user, operator: bool = False) -> bool:
         return True
     if getattr(user, "bonus_until", 0) > time.time():     # invite reward
         return True
+    # Bought in the iPhone app through Apple (bot/apple_store.py keeps it).
+    if getattr(user, "apple_until", 0) > time.time():
+        return True
     if getattr(user, "plan", "free") != "pro" or \
             getattr(user, "plan_status", "") not in ACTIVE:
         return False

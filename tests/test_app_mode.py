@@ -4,7 +4,10 @@ The app is the live site in a native shell, and it adds "OrenthApp/1" to its
 User-Agent. Inside it there must be no third-party visit counting, no Stripe
 form, link, price or discount box (the App Store allows selling Pro there only
 through Apple), nothing about Android or installing an app, and the small
-script that reaches the phone. Outside it, nothing changes.
+script that reaches the phone. Once Pro is sold in the app, it is sold
+through Apple alone: a "Manage subscription" there is Apple's, every way to
+Pro leads to the app's own screen, and no page names a price StoreKit did not
+give. Outside it, nothing changes.
 
 Apple's reviewers cannot receive an email or a text, so one named account can
 be signed in to with a fixed code. That door must not exist until it is set
@@ -12,7 +15,9 @@ up, must open only that one account, must never make it Pro, and must not
 let anyone guess at the code.
 """
 import os as _os
+import re
 import sys as _sys
+import time
 from urllib.parse import urlparse
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -32,7 +37,8 @@ def check(name, ok, detail=""):
 STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_PRICE_ID_YEARLY": "price_y", "STRIPE_WEBHOOK_SECRET": "whsec_test"}
 REVIEW = ("REVIEW_LOGIN_EMAIL", "REVIEW_LOGIN_CODE")
-for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
+APPLE = ("APPLE_APP_ID", "APPLE_PRODUCT_IDS", "APPLE_SANDBOX_PRO", "APPLE_SANDBOX_USERS")
+for key in list(STRIPE) + list(REVIEW) + list(APPLE) + ["STOCKBOT_ADMIN_EMAIL"]:
     _os.environ.pop(key, None)
 
 import web  # noqa: E402
@@ -54,12 +60,19 @@ SAFARI_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
 IN_APP = {"User-Agent": APP_UA}
 IN_SAFARI = {"User-Agent": SAFARI_UA}
 
-# Words that must never reach a page drawn inside the app.
+# Words that must never reach a page drawn inside the app. "Manage
+# subscription" may, but only as Apple's (see apple_only below).
 NEVER_IN_APP = ("stripe", "metricool", "android", "google play", "play store",
                 "install the app", "install app", "install orenth",
                 "add to home screen", "to your home screen", "/billing/checkout",
                 "/billing/portal", "/billing/code", "discount code",
-                "$9.99", "$79.99", "manage subscription")
+                "$9.99", "$79.99", "buy on the website", "subscribe on the website")
+# A price written into a page. Inside the app only StoreKit may show one.
+PRICE = re.compile(r"[$£€]\s?\d")
+# A link to tap out of the app, to a site's pricing or billing pages. The
+# page's own <link rel="canonical"> names its address, and is not one.
+WEB_BUYING = re.compile(r"""<a\b[^>]*href=["']https?://[^"']*/(pricing|billing)""", re.I)
+MANAGE = re.compile(r"<(a|button)\b([^>]*)>\s*Manage subscription", re.I)
 
 conn = db.connect(DB)
 free = A.upsert_email_user(conn, "free@example.com")
@@ -83,7 +96,14 @@ def text(response):
 
 def leaks(body):
     low = body.lower()
-    return [w for w in NEVER_IN_APP if w in low]
+    found = [w for w in NEVER_IN_APP if w in low]
+    if PRICE.search(body):
+        found.append("a price: " + PRICE.search(body).group(0))
+    if WEB_BUYING.search(body):
+        found.append("a link to buy on the web: " + WEB_BUYING.search(body).group(0))
+    found += ["a Manage subscription that is not Apple's"
+              for _tag, attrs in MANAGE.findall(body) if "data-iap-manage" not in attrs]
+    return found
 
 
 # A stand-in for Stripe, so nothing reaches the network, counting every call.
@@ -213,6 +233,80 @@ try:
           response.status_code == 303
           and "checkout.stripe.test" in response.headers.get("Location", ""),
           (response.status_code, response.headers.get("Location")))
+
+    print()
+    print("=" * 72)
+    print("PRO SOLD IN THE APP: THROUGH APPLE, AND NOTHING ELSE")
+    print("=" * 72)
+    from bot import apple_store  # noqa: E402
+    page = text(client.get("/pricing", headers=IN_APP))
+    check("while it is off, the app's screen says so and offers nothing",
+          "Upgrading is not available in the app yet" in page
+          and "Restore Purchases" not in page and not leaks(page), leaks(page))
+    check("and the app's bar has no Go Pro it cannot sell",
+          ">Go Pro<" not in text(client.get("/monitor", headers=IN_APP)))
+
+    _os.environ["APPLE_APP_ID"] = "6740000001"
+    conn = db.connect(DB)
+    applesub = A.upsert_email_user(conn, "apple-sub@example.com")
+    apple_store.ensure_schema(conn)
+    now_ms = int(time.time() * 1000)
+    conn.execute("INSERT INTO apple_subs (environment, original_tx_id, user_id, product_id, "
+                 "transaction_id, purchase_ms, expires_ms, tx_signed_ms, updated) "
+                 "VALUES ('Production', 'app-mode-1', ?, 'app.orenth.ios.pro.yearly', "
+                 "'app-mode-1', ?, ?, ?, ?)",
+                 (applesub.id, now_ms - 86400000, now_ms + 300 * 86400000, now_ms,
+                  int(time.time())))
+    conn.commit()
+    apple_store.prepare(conn)
+    conn.close()
+    try:
+        for who, user in (("a free account", free), ("a Stripe Pro account", paid),
+                          ("an Apple Pro account", applesub)):
+            client = web.app.test_client()
+            sign_in(client, user)
+            # The Terms too: the subscribe screen links to them.
+            for path in ("/", "/pricing", "/account", "/monitor", "/ideas", "/terms"):
+                response = client.get(path, headers=IN_APP)
+                page = text(response)
+                check("%s: %s inside the app sells only through Apple" % (who, path),
+                      response.status_code in (200, 402) and not leaks(page),
+                      (response.status_code, leaks(page)))
+                check("%s: %s inside the app carries the purchase script" % (who, path),
+                      "/static/app-purchase.js" in page)
+            pricing = text(client.get("/pricing", headers=IN_APP))
+            if user is free:
+                check("a free account gets Apple's subscribe screen",
+                      "data-iap-shop" in pricing and "Restore Purchases" in pricing
+                      and "stdeula" in pricing and 'href="/privacy"' in pricing
+                      and 'href="/terms"' in pricing)
+                for page_path in ("/monitor", "/account"):
+                    found = text(client.get(page_path, headers=IN_APP))
+                    links = re.findall(r'href="([^"]*)"[^>]*>\s*(?:Go Pro|See Pro)\s*<', found)
+                    check("its way to Pro on %s is the app's own screen" % page_path,
+                          links and set(links) == {"/pricing"}, links)
+                browser = text(client.get("/pricing", headers=IN_SAFARI))
+                check("while a browser still gets the website's checkout, and no app script",
+                      "/billing/checkout" in browser and "app-purchase.js" not in browser)
+            elif user is paid:
+                check("a Stripe Pro account is sold nothing in the app",
+                      "data-iap-shop" not in pricing and "already has Pro" in pricing)
+            else:
+                check("an Apple Pro account is told it has Pro through Apple",
+                      "You have Pro through Apple" in pricing
+                      and "data-iap-manage" in pricing and "data-iap-shop" not in pricing)
+                account = text(client.get("/account", headers=IN_APP))
+                check("and its account page manages it with Apple, before deleting",
+                      0 <= account.find("keeps billing through Apple")
+                      < account.find("data-iap-manage", account.find("keeps billing"))
+                      < account.find('action="/account/delete"'))
+        visitor = web.app.test_client()
+        page = text(visitor.get("/pricing", headers=IN_APP))
+        check("signed out, the app asks for an account first and sells nothing",
+              "Create free account" in page and "data-iap-shop" not in page
+              and "app-purchase.js" not in page and not leaks(page), leaks(page))
+    finally:
+        _os.environ.pop("APPLE_APP_ID", None)
 
     print()
     print("=" * 72)
@@ -503,11 +597,45 @@ check("WebAuthPlugin is the WebAuth plugin with a start method",
       and 'CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise)' in plugin
       and '"CANCELLED"' in plugin and "ASWebAuthenticationPresentationContextProviding" in plugin)
 
+purchase = read("ios", "App", "App", "AppPurchasePlugin.swift")
+check("MainViewController registers the App Store plugin at launch, beside the sign-in sheet",
+      controller.find("registerPluginInstance(WebAuthPlugin())")
+      < controller.find("registerPluginInstance(AppPurchasePlugin())")
+      < controller.find("guard let webView"))
+methods = re.findall(r'CAPPluginMethod\(name: "(\w+)", returnType: CAPPluginReturnPromise\)', purchase)
+check("AppPurchasePlugin is the AppPurchase plugin, with its eight methods",
+      'jsName: String = "AppPurchase"' in purchase and "import StoreKit" in purchase
+      and sorted(methods) == sorted(["products", "purchase", "entitlements", "restore",
+                                     "unfinished", "finish", "manageSubscriptions",
+                                     "storefront"]), methods)
+page_script = open(_os.path.join(harness.ROOT, "static", "app-purchase.js"), encoding="utf-8").read()
+called = set(re.findall(r"\bap\('(\w+)'", page_script))
+check("every method the page calls is one the plugin has", called and called <= set(methods),
+      called - set(methods))
+check("it listens to StoreKit from launch and keeps events until a page listens",
+      "Transaction.updates" in purchase and "retainUntilConsumed: true" in purchase
+      and "override public func load()" in purchase)
+check("every purchase carries the account's token, and none goes without one",
+      "[.appAccountToken(token)]" in purchase and "UUID(uuidString: tokenText)" in purchase
+      and '"appAccountToken must be a UUID", "BAD_INPUT"' in purchase)
+check("the sheet shows over the app's window on iOS 17, and iOS 15 still buys",
+      "#available(iOS 17.0, *)" in purchase and "purchase(confirmIn: scene, options: options)" in purchase
+      and "product.purchase(options: options)" in purchase)
+check("a transaction is finished only when the page asks, after the server",
+      purchase.count(".finish()") == 1
+      and purchase.index(".finish()") > purchase.index("@objc func finish("))
+check("the server gets Apple's signed copy of each transaction",
+      purchase.count('"jws": result.jwsRepresentation') == 1)
+check("restore and manage are Apple's own (AppStore.sync, showManageSubscriptions)",
+      "try await AppStore.sync()" in purchase
+      and "AppStore.showManageSubscriptions(in: scene)" in purchase)
+
 pbx = read("ios", "App", "App.xcodeproj", "project.pbxproj")
 check("Xcode project: iPhone only",
       pbx.count("TARGETED_DEVICE_FAMILY = 1;") == 2 and '"1,2"' not in pbx)
 for name, phase in (("MainViewController.swift", "Sources"),
                     ("WebAuthPlugin.swift", "Sources"),
+                    ("AppPurchasePlugin.swift", "Sources"),
                     ("PrivacyInfo.xcprivacy", "Resources")):
     check("Xcode project: %s is built into the app" % name,
           pbx.count("/* %s in %s */" % (name, phase)) == 2

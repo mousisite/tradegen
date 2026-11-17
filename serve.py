@@ -161,6 +161,8 @@ def main(argv=None) -> int:
     # Only when some of Apple's settings are there: then the missing ones.
     if web.apple_mod.why_not():
         print("    apple          %s" % web.apple_mod.why_not())
+    # Pro sold in the iPhone app, through Apple.
+    print("    app purchases  %s" % web.apple_store_mod.describe())
     print("    alert checks   %s"
           % ("every %g minutes" % cfg.get("alert_check_minutes", 5)
              if loop else "off"))
