@@ -3558,10 +3558,16 @@ def privacy():
     # bucket or its address.
     offsite = {"provider": offsite_mod.provider(), "days": offsite_mod.KEEP_DAYS,
                "months": offsite_mod.KEEP_MONTHS}
+    # Who carries and runs this copy, named where it can be told: Cloudflare
+    # adds CF-Connecting-IP to every request it carries (_client_ip reads
+    # it), and Render and Fly set RENDER and FLY_APP_NAME on their machines.
+    hosting = {"proxy": "Cloudflare" if request.headers.get("CF-Connecting-IP") else "",
+               "server": ("Render" if os.environ.get("RENDER")
+                          else "Fly.io" if os.environ.get("FLY_APP_NAME") else "")}
     return render_template("legal.html", page="privacy",
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
-                           contact=_contact(), offsite=offsite,
+                           contact=_contact(), offsite=offsite, hosting=hosting,
                            sampled=_sampled_words(monitoring.status()["sampled"]))
 
 

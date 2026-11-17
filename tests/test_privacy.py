@@ -268,6 +268,8 @@ try:
           "signed so that it cannot be changed, but it is not encrypted" in page)
     check("with Apple off the website, no second cookie is spoken of",
           "second cookie" not in page)
+    check("and with Apple not set up at all, no Apple sign-in either",
+          "for a sign-in with Google," in page and "Google or Apple" not in page)
     real_web_ready = web.apple_mod.web_ready
     web.apple_mod.web_ready = lambda: True
     try:
@@ -323,6 +325,53 @@ try:
     check("the push services' row says the same",
           "A fired alert's or crossed stop's text" in row
           and "Showing the alert or stop on your phone or computer" in row, row)
+
+    # -----------------------------------------------------------------------
+    head("WHAT EACH SIGN-IN KEEPS, AND WHO CARRIES AND RUNS THE SITE")
+    # -----------------------------------------------------------------------
+    conn = db.connect(DB)
+    try:
+        token = A.start_session(conn, ann.id, "Mozilla/5.0 (iPhone) OrenthApp/1")
+        kept = conn.execute("SELECT user_agent, expires_ts - created_ts AS lasts "
+                            "FROM sessions WHERE token=?", (token,)).fetchone()
+    finally:
+        conn.close()
+    check("each sign-in keeps the browser's description of itself, for its life",
+          kept["user_agent"] == "Mozilla/5.0 (iPhone) OrenthApp/1"
+          and kept["lasts"] == A.SESSION_DAYS * 86400, dict(kept))
+    page = flat(text(visitor.get("/privacy")))
+    check("which the page says, whichever way you sign in",
+          "each sign-in is kept with the description your browser or the app "
+          "gives of itself (its User-Agent)" in page
+          and "runs out after %d days" % A.SESSION_DAYS in page)
+    check("so Google's list no longer ends 'That is the whole of it'",
+          "That is the whole of it" not in page
+          and "That is all Orenth gets from Google." in page)
+    row = page[page.find("<td>Metricool</td>"):]
+    row = row[:row.find("</tr>")]
+    check("Metricool's row says it sees the network address, as any request does",
+          "nothing that identifies you" not in row
+          and "your network address and the description your browser gives" in row, row)
+    check("a site reached directly names no proxy and no host",
+          "Carrying traffic" not in page and "Running the server" not in page)
+    page = flat(text(visitor.get("/privacy", headers={"CF-Connecting-IP": "203.0.113.5"})))
+    row = page[page.find("<td>Cloudflare</td>"):]
+    row = row[:row.find("</tr>")]
+    check("a request that came through Cloudflare names it, and what it sees",
+          "Everything your browser and Orenth send each other" in row
+          and "Carrying traffic to the server" in row, row or page[-1500:])
+    for name, env in (("Render", {"RENDER": "true"}), ("Fly.io", {"FLY_APP_NAME": "orenth"})):
+        _os.environ.update(env)
+        try:
+            page = flat(text(visitor.get("/privacy")))
+        finally:
+            for key in env:
+                _os.environ.pop(key, None)
+        row = page[page.find("<td>%s</td>" % name):]
+        row = row[:row.find("</tr>")]
+        check("on %s, the host is named, with the disk it holds" % name,
+              "the disk that holds the database and its backups" in row
+              and "Running the server" in row, row or page[-1500:])
 finally:
     sentry_sdk.init = REAL_INIT
     for _k in ("SENTRY_DSN", "SENTRY_TRACES_RATE"):
