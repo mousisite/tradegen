@@ -369,7 +369,8 @@ try:
 
     page = SEEN[("visitor", "/backtest/opening-range-break")][1]
     check("a strategy that never fires on daily prices is not 'being tested'",
-          "Not in the daily test" in page and "Being tested" not in page)
+          "Not in the daily test" in page and "Being tested" not in page
+          and "Tested on every popular stock" not in page)
 
     status, page = SEEN[("visitor", "/screener?preset=quality_value")]
     check("a screen that failed says so plainly", status == 500
