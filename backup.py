@@ -306,28 +306,32 @@ def restore(path: str) -> bool:
 
     print("  Restoring %s" % path)
     print("  into      %s" % live)
-    os.makedirs(os.path.dirname(live), exist_ok=True)
 
     def waited(status, _remaining, _total):
         if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
             raise _Busy()
 
-    source = sqlite3.connect(path)
-    target = sqlite3.connect(live, timeout=RESTORE_WAIT)
     try:
-        source.backup(target, progress=waited)
+        os.makedirs(os.path.dirname(live), exist_ok=True)
+        source = sqlite3.connect(path)
+        try:
+            target = sqlite3.connect(live, timeout=RESTORE_WAIT)
+            try:
+                source.backup(target, progress=waited)
+            finally:
+                target.close()
+        finally:
+            source.close()
     except _Busy:
         _said_busy()
         return False
-    except sqlite3.DatabaseError as exc:
-        print("  SQLite refused: %s. Nothing was changed." % exc)
+    except (OSError, sqlite3.DatabaseError) as exc:
+        # A failed backup step is rolled back by SQLite.
+        print("  That did not work: %s. Nothing was changed." % exc)
         print("  If the database file itself is broken, stop the app, move %s and"
               % os.path.basename(live))
         print("  any -wal and -shm files beside it out of the way, and run this again.")
         return False
-    finally:
-        target.close()
-        source.close()
     print()
     print("  Checking the restored database")
     if not verify(live):

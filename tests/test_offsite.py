@@ -948,6 +948,17 @@ try:
           and rows(live) == (350, 300), said[-300:])
     code, said = run("--restore", live)
     check("so is the database itself", code == 1 and rows(live) == (350, 300), said[-300:])
+
+    blocked = _os.path.join(home, "a-file")
+    with open(blocked, "w") as fh:
+        fh.write("not a folder")
+    _os.environ["STOCKBOT_DB"] = _os.path.join(blocked, "data", "stockbot.db")
+    try:
+        code, said = run("--restore", saved)
+    finally:
+        _os.environ["STOCKBOT_DB"] = live
+    check("a database folder that cannot be made is said in words, not a traceback",
+          code == 1 and "Nothing was changed" in said, said[-300:])
 finally:
     for key, value in was.items():
         if value is None:
