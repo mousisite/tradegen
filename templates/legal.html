@@ -31,6 +31,25 @@
     <span class="fig">profile</span> scopes. It cannot read your Gmail, Drive,
     contacts or calendar, and it never sees your Google password.
   </p>
+  {% if apple_native %}
+  <p class="prose">If you sign in with Apple, Orenth receives and stores:</p>
+  <ul class="list">
+    <li>An Apple account identifier, which is how Apple tells Orenth it is you
+      again. It is made for Orenth alone.</li>
+    <li>An email address, used as the identity of your account. If you choose
+      to hide yours, it is a private address from Apple, usually at
+      privaterelay.appleid.com, that Apple forwards to your own inbox, and
+      Orenth never sees the real one.</li>
+    <li>Your name, which Apple shares only the first time you sign in here,
+      and only if you let it.</li>
+    <li>A token from Apple, kept only so that deleting your account can ask
+      Apple to end Orenth's access to your Apple Account.</li>
+  </ul>
+  <p class="prose">
+    Orenth asks Apple only for your name and email address, and it never sees
+    your Apple Account password.
+  </p>
+  {% endif %}
   <p class="prose">If you sign in with a code instead:</p>
   <ul class="list">
     <li><b>By email:</b> your email address, used as the identity of your
@@ -171,7 +190,8 @@
     history, shared pages, sign-in records and the devices you turned
     notifications on for straight away; the shared
     strategy record stays, because it was never yours alone and contains
-    nothing about you.
+    nothing about you.{% if apple_native %} If you signed in with Apple, it
+    also asks Apple to end Orenth's access to your Apple Account.{% endif %}
   </p>
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
@@ -191,7 +211,9 @@
   <h2>Security</h2>
   <p class="prose">
     Google sign-in uses the authorization code flow with PKCE, exchanged
-    between servers. Code sign-in limits how many codes one address and one
+    between servers.{% if apple_native %} Apple sign-in checks Apple's
+    signature on every token against Apple's published keys, and ties each
+    token to the sign-in that asked for it.{% endif %} Code sign-in limits how many codes one address and one
     network can ask for, locks a code after five wrong tries, stops taking
     codes for an address after twenty wrong tries in a day, and caps how many
     texts can be sent in an hour in total. Session tokens are random, opaque and stored, so they can be

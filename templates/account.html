@@ -24,8 +24,14 @@
         {% if current_user.is_local %}
           Signed in as the local account, because this installation has no
           sign-in configured.
+        {% elif methods and methods|length > 1 %}
+          You can sign in with {{ methods[:-1]|join(', ') }} or {{ methods[-1] }}.
         {% else %}
           Signed in with {{ current_user.provider|capitalize }}.
+        {% endif %}
+        {% if current_user.email.endswith(('@privaterelay.appleid.com', '@private.icloud.com')) %}
+          This is a private address from Apple: email sent to it reaches your
+          own inbox.
         {% endif %}
       </div>
     </div>

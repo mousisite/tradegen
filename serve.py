@@ -129,6 +129,10 @@ def main(argv=None) -> int:
     # sign in even when none is, and saying "Google" then sent the operator
     # looking for a fault in Google sign-in rather than for the missing keys.
     ways = [name for name, ready in (("Google", web.auth_mod.configured()),
+                                     ("Apple", web.apple_mod.web_ready()),
+                                     ("Apple in the app only",
+                                      web.apple_mod.native_ready()
+                                      and not web.apple_mod.web_ready()),
                                      ("email code", web.codes_mod.email_ready()),
                                      ("text code", web.codes_mod.phone_ready()))
             if ready]
@@ -136,6 +140,9 @@ def main(argv=None) -> int:
           % ("off, single local account" if not web.auth_required() else
              ", ".join(ways) if ways else
              "required, but no way to sign in is set up"))
+    # Only when some of Apple's settings are there: then the missing ones.
+    if web.apple_mod.why_not():
+        print("    apple          %s" % web.apple_mod.why_not())
     print("    alert checks   %s"
           % ("every %g minutes" % cfg.get("alert_check_minutes", 5)
              if loop else "off"))

@@ -45,6 +45,7 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
+from bot import apple as apple_mod
 from bot import auth as auth_mod
 from bot import billing as billing_mod
 from bot import catalysts as catalysts_mod
@@ -183,6 +184,8 @@ def healthcheck():
 # Pages reachable without being signed in. Everything else needs an account
 # once Google sign-in is configured.
 PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
+                    "apple_start", "apple_callback", "apple_nonce",
+                    "apple_native", "apple_notifications", "app_finish",
                     "static", "healthcheck", "privacy", "terms",
                     "robots", "sitemap", "index", "favicon",
                     "manifest", "service_worker", "offline",
@@ -231,7 +234,8 @@ def auth_required() -> bool:
         return True
     # Any configured way in means this is a shared installation.
     return (auth_mod.configured() or codes_mod.email_ready()
-            or codes_mod.phone_ready() or _served_publicly())
+            or codes_mod.phone_ready() or apple_mod.native_ready()
+            or _served_publicly())
 
 
 # Addresses this app used to answer on. A link somebody saved still works, and
@@ -595,7 +599,25 @@ def _expose_user():
             "go_pro": (billing_mod.ready() and getattr(g, "user", None) is not None
                        and not getattr(g, "demo", False) and not _pro()),
             "phone_ready": codes_mod.phone_ready(),
-            "google_ready": auth_mod.configured()}
+            "google_ready": auth_mod.configured(),
+            # Apple on the website, and Apple anywhere (the app needs less).
+            "apple_ready": apple_mod.web_ready(),
+            "apple_native": apple_mod.native_ready(),
+            "apple_client": apple_mod.bundle_id(),
+            # The button shows wherever it can work: on the website once the
+            # website is set up, and in the app as soon as the app's half is.
+            "apple_button": apple_mod.web_ready()
+                            or (apple_mod.native_ready() and _in_app())}
+
+
+def _in_app() -> bool:
+    """Whether this page is drawn inside the Orenth iPhone app.
+
+    The app's web view adds OrenthApp/<version> to its User-Agent. It only
+    ever chooses what to show, never what is allowed: anyone can send any
+    User-Agent.
+    """
+    return "OrenthApp/" in request.headers.get("User-Agent", "")
 
 
 def uid() -> int:
@@ -2313,6 +2335,10 @@ def google_start():
         return render_template("signin.html", reason=why, setup=setup,
                                why_not=why, next_url=""), 503
 
+    challenge, refused = _app_challenge()
+    if refused:
+        return _to_app(error="failed")
+
     state = auth_mod.new_state()
     verifier = auth_mod.new_verifier()
     # Held in the signed cookie, so the callback can prove it belongs to the
@@ -2320,6 +2346,11 @@ def google_start():
     session["oauth_state"] = state
     session["oauth_verifier"] = verifier
     session["oauth_next"] = _safe_back(request.args.get("next"), "")
+    # The app's check, when the iPhone app started this in its browser sheet.
+    if challenge:
+        session["oauth_app"] = challenge
+    else:
+        session.pop("oauth_app", None)
 
     try:
         url = auth_mod.authorization_url(_redirect_uri(), state, verifier)
@@ -2335,49 +2366,453 @@ def google_callback():
     expected = session.pop("oauth_state", "")
     verifier = session.pop("oauth_verifier", "")
     next_url = session.pop("oauth_next", "")
+    # Set when the iPhone app started this: then the result goes to the app.
+    challenge = session.pop("oauth_app", "")
 
     if request.args.get("error"):
         # Google's own code, such as access_denied, is not repeated: it means
         # nothing to the person, and the address can carry any text at all.
-        return render_template(
-            "signin.html", why_not="", next_url="",
-            reason=("You cancelled the sign-in at Google."
-                    if request.args.get("error") == "access_denied" else
-                    "Google did not complete the sign-in. Start again from "
-                    "this page.")), 400
+        return _sign_in_failed(
+            challenge,
+            ("You cancelled the sign-in at Google."
+             if request.args.get("error") == "access_denied" else
+             "Google did not complete the sign-in. Start again from "
+             "this page."),
+            "cancelled" if request.args.get("error") == "access_denied"
+            else "failed")
 
     state = request.args.get("state", "")
     # Constant time, because this is a secret being compared.
     if not expected or not hmac.compare_digest(str(expected), str(state)):
-        return render_template(
-            "signin.html", why_not="", next_url="",
-            reason="That sign-in link did not match this browser session. "
-                   "Start again from this page."), 400
+        return _sign_in_failed(
+            challenge, "That sign-in link did not match this browser session. "
+                       "Start again from this page.", "expired")
 
     code = request.args.get("code", "")
     if not code:
-        return render_template("signin.html", why_not="", next_url="",
-                               reason="Google returned no sign-in code."), 400
+        return _sign_in_failed(challenge, "Google returned no sign-in code.")
 
     try:
         profile = auth_mod.sign_in(code, _redirect_uri(), verifier)
     except auth_mod.AuthError as exc:
-        return render_template("signin.html", reason=_sign_in_trouble(exc),
-                               why_not="", next_url=""), 400
+        return _sign_in_failed(challenge, _sign_in_trouble(exc))
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
-        return render_template("signin.html", reason=str(exc), why_not="",
-                               next_url=""), 400
+        return _sign_in_failed(challenge, str(exc), "refused")
     finally:
         conn.close()
+    if challenge:
+        return _hand_to_app(user, challenge, next_url)
     return _finish_sign_in(user, next_url)
+
+
+# The Apple sign-in's own state, kept apart from the session. Apple posts the
+# browser back from appleid.apple.com, a cross-site POST that the session
+# cookie (SameSite=Lax) does not travel with, so the state, the nonce and
+# where to go next ride in a cookie of their own: signed, ten minutes long,
+# sent only to /auth/apple and only over https.
+APPLE_FLOW = "apple_flow"
+APPLE_FLOW_SECONDS = 10 * 60
+# Every one of these is a call to Apple, and anyone can start a sign-in, so
+# they are limited per network (_rate_limited allows a network three times
+# this an hour).
+APPLE_SIGNINS_PER_HOUR = 20
+# Apple's JSON is a few kilobytes. The site's own limit is set for screenshot
+# uploads, and these two answer anyone, signed in or not.
+APPLE_JSON_LIMIT = 64 * 1024
+
+
+def _flow_key() -> bytes:
+    key = app.secret_key
+    return key if isinstance(key, bytes) else str(key).encode("utf-8")
+
+
+def _apple_flow() -> Dict:
+    """This browser's Apple sign-in in progress: {} when there is none, when
+    it has run out, or when the cookie is not one this server sealed."""
+    return apple_mod.open_flow(request.cookies.get(APPLE_FLOW, ""), _flow_key(),
+                               APPLE_FLOW_SECONDS)
+
+
+def _apple_done(response):
+    """A finished Apple sign-in, either way: its cookie is spent."""
+    response.delete_cookie(APPLE_FLOW, path=url_for("apple_start"), secure=True,
+                           httponly=True, samesite="None")
+    return response
+
+
+def _apple_redirect_uri() -> str:
+    """Where Apple posts back. Registered with Apple, so it must match exactly."""
+    return _public_base() + url_for("apple_callback")
+
+
+@app.route("/auth/apple")
+def apple_start():
+    """Begin signing in with Apple, on the website or in the app's browser sheet."""
+    if not apple_mod.web_ready():
+        abort(404)
+    challenge, refused = _app_challenge()
+    if refused:
+        return _to_app(error="failed")
+    state, nonce = apple_mod.new_state(), apple_mod.new_nonce()
+    flow = {"state": state, "nonce": apple_mod.nonce_hash(nonce),
+            "next": _safe_back(request.args.get("next"), ""), "app": challenge,
+            # A friend's invite this visitor arrived with: it lives in the
+            # session cookie, which Apple's post back will not carry.
+            "ref": session.get("ref", "")}
+    response = redirect(apple_mod.authorization_url(_apple_redirect_uri(), state,
+                                                    nonce))
+    response.set_cookie(APPLE_FLOW, apple_mod.seal_flow(flow, _flow_key()),
+                        max_age=APPLE_FLOW_SECONDS, path=url_for("apple_start"),
+                        secure=True, httponly=True, samesite="None")
+    # One visitor's state: nothing between here and them may keep a copy.
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/auth/apple/callback", methods=["POST"])
+def apple_callback():
+    """Where Apple posts the browser back, from its own site."""
+    if not apple_mod.web_ready():
+        abort(404)
+    flow = _apple_flow()
+    challenge = flow.get("app", "")
+    state = request.form.get("state", "")
+    # Constant time, because this is a secret being compared.
+    if not flow or not hmac.compare_digest(
+            str(flow.get("state", "")).encode("utf-8"), state.encode("utf-8")):
+        return _apple_done(_sign_in_failed(
+            challenge, "That sign-in did not match this browser. Start again "
+                       "from this page.", "expired"))
+    error = request.form.get("error", "")
+    if error:
+        cancelled = error == "user_cancelled_authorize"
+        return _apple_done(_sign_in_failed(
+            challenge, "Signing in with Apple was cancelled." if cancelled
+            else "Apple did not complete the sign-in.",
+            "cancelled" if cancelled else "failed"))
+    if _rate_limited("apple_signin", APPLE_SIGNINS_PER_HOUR):
+        return _apple_done(_sign_in_failed(
+            challenge, "Too many sign-ins were tried from this connection in "
+                       "the last hour. Wait a while, then try again.",
+            "failed", 429))
+
+    client_id = apple_mod.services_id()
+    try:
+        tokens = apple_mod.redeem(request.form.get("code", ""), client_id,
+                                  _apple_redirect_uri())
+        # Checked by hand although it came straight from Apple over TLS: the
+        # nonce in it is what ties it to the sign-in this browser started.
+        identity = apple_mod.verify_identity(tokens.get("id_token"), client_id,
+                                             flow.get("nonce", ""))
+    except apple_mod.AppleError as exc:
+        return _apple_done(_sign_in_failed(challenge, str(exc)))
+    refresh_token = tokens.get("refresh_token")
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        user = events_mod.new_account(
+            conn, accounts_mod.upsert_apple_user, identity,
+            apple_mod.name_from_post(request.form.get("user", "")),
+            refresh_token if isinstance(refresh_token, str) else "", client_id)
+    except ValueError as exc:
+        return _apple_done(_sign_in_failed(challenge, str(exc), "refused"))
+    finally:
+        conn.close()
+    if challenge:
+        return _apple_done(_hand_to_app(user, challenge, flow.get("next", "")))
+    if flow.get("ref"):
+        session["ref"] = flow["ref"]
+    return _apple_done(_finish_sign_in(user, flow.get("next", "")))
+
+
+@app.route("/auth/apple/nonce")
+def apple_nonce():
+    """A fresh nonce for the app's own Apple sheet, remembered in this session.
+
+    Apple signs it into the identity token, so a token is good only for the
+    session that asked for it, and only once.
+    """
+    if not apple_mod.native_ready():
+        abort(404)
+    nonce = apple_mod.new_nonce()
+    session["apple_nonce"] = {"hash": apple_mod.nonce_hash(nonce),
+                              "at": int(time.time())}
+    response = jsonify({"nonce": nonce})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/auth/apple/native", methods=["POST"])
+def apple_native():
+    """Sign in with what the app's own Apple sheet returned.
+
+    JSON, from a page on this site only. It cannot ask for a signed-in
+    session the way other JSON posts do, being what starts one; it asks
+    instead for the nonce this session was given, which Apple has signed into
+    the token.
+    """
+    if not apple_mod.native_ready():
+        abort(404)
+    if not _from_this_site():
+        return jsonify({"ok": False, "error": "Start signing in from Orenth "
+                                              "itself."}), 403
+    request.max_content_length = APPLE_JSON_LIMIT
+    # Named so that an error report strips it: it holds the identity token.
+    token_post = request.get_json(silent=True)
+    if not isinstance(token_post, dict):
+        return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
+    if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
+        return jsonify({"ok": False,
+                        "error": "Too many sign-ins were tried from this "
+                                 "connection in the last hour. Wait a while, "
+                                 "then try again."}), 429
+    issued = session.pop("apple_nonce", None)
+    issued = issued if isinstance(issued, dict) else {}
+    issued_hash = issued.get("hash") or ""
+    if not issued_hash or \
+            time.time() - issued.get("at", 0) > apple_mod.NONCE_SECONDS:
+        return jsonify({"ok": False, "error": "That sign-in took too long. "
+                                              "Try again."}), 400
+    client_id = apple_mod.bundle_id()
+    try:
+        identity = apple_mod.verify_identity(token_post.get("identityToken"),
+                                             client_id, issued_hash)
+    except apple_mod.AppleError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    # The session cookie holding the nonce could be sent again; this cannot.
+    if not apple_mod.spend_nonce(issued_hash):
+        return jsonify({"ok": False, "error": "That sign-in was already used. "
+                                              "Try again."}), 400
+    refresh_token = _apple_refresh_token(token_post.get("authorizationCode"),
+                                         identity["sub"], client_id)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        user = events_mod.new_account(
+            conn, accounts_mod.upsert_apple_user, identity,
+            apple_mod.name_from(token_post.get("givenName"),
+                                token_post.get("familyName")),
+            refresh_token, client_id)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    finally:
+        conn.close()
+    _open_session(user)
+    next_url = token_post.get("next")
+    next_url = next_url if isinstance(next_url, str) else ""
+    return jsonify({"ok": True, "next": _safe_back(next_url, url_for("index"))})
+
+
+def _apple_refresh_token(code, sub: str, client_id: str) -> str:
+    """The refresh token for a sign-in in the app, kept so deleting the
+    account can end its Apple side.
+
+    Trading the app's one-time code is the only way to get one. A failure
+    does not stop a sign-in already proved by the identity token: the next
+    sign-in tries again, and the log says what is missing until then.
+    """
+    if not code:
+        return ""
+    try:
+        tokens = apple_mod.redeem(code, client_id)
+        again = apple_mod.verify_identity(tokens.get("id_token"), client_id,
+                                          check_nonce=False)
+    except apple_mod.AppleError:
+        app.logger.warning("An Apple sign-in in the app gave no refresh token, so "
+                           "until the next one, deleting that account cannot "
+                           "end its Apple sign-in")
+        return ""
+    refresh_token = tokens.get("refresh_token")
+    # Only the same person's: a token kept against the wrong account would
+    # end somebody else's sign-in when this one is deleted.
+    if again["sub"] != sub or not isinstance(refresh_token, str):
+        return ""
+    return refresh_token
+
+
+@app.route("/auth/apple/notifications", methods=["POST"])
+def apple_notifications():
+    """Apple saying someone stopped using Sign in with Apple here, or deleted
+    their Apple Account.
+
+    Server to server: no cookie and no Origin to check. What makes it
+    believable is Apple's signature, checked as a sign-in's is. Taking consent
+    back unlinks Apple and signs the account out. A deleted Apple Account
+    unlinks it too, and deletes the whole account only when nothing else can
+    ever open it again: never one that Google or a code can still reach.
+    """
+    if not apple_mod.native_ready():
+        abort(404)
+    request.max_content_length = APPLE_JSON_LIMIT
+    body = request.get_json(silent=True, force=True)
+    try:
+        event = apple_mod.read_notification(
+            body.get("payload") if isinstance(body, dict) else None)
+    except apple_mod.AppleError:
+        return jsonify({"error": "not a notification signed by Apple"}), 400
+    deleted = event["type"] in ("account-delete", "account-deleted")
+    if event["type"] != "consent-revoked" and not deleted:
+        # Email forwarding switched on or off: nothing kept here depends on it.
+        return jsonify({"received": True})
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        owner = accounts_mod.identity_owner(conn, "apple", event["sub"])
+        # Unknown here, or signed in again since it happened: nothing to undo.
+        if owner is None or owner["last_used_ts"] > event["at"]:
+            return jsonify({"received": True})
+        user_id = int(owner["user_id"])
+        if not deleted or accounts_mod.can_still_sign_in(conn, user_id, "apple",
+                                                         event["sub"]):
+            accounts_mod.unlink_identity(conn, "apple", event["sub"])
+            return jsonify({"received": True})
+        # Their Apple Account is gone and nothing else opens this one. The
+        # subscription stops first, as when they delete it themselves.
+        customer = billing_mod.customer_of(conn, user_id)
+        if customer and billing_mod.ready():
+            billing_mod.close_customer(customer)
+        accounts_mod.delete_user(conn, user_id)
+        app.logger.info("Deleted account %d: its Apple Account was deleted and "
+                        "nothing else could open it", user_id)
+    except billing_mod.BillingError:
+        # Kept whole, so Apple's next try finds it as it was.
+        app.logger.error("Could not cancel the subscription of an account whose "
+                         "Apple Account was deleted, so it was kept for now")
+        return jsonify({"error": "try again later"}), 503
+    finally:
+        conn.close()
+    return jsonify({"received": True})
+
+
+# The app's own address, where the browser sheet hands a sign-in back.
+APP_FINISH = "app.orenth.ios://auth/finish"
+# Thirty an hour from one network (_rate_limited allows a network three times
+# this): a household signing in, never someone guessing.
+APP_FINISHES_PER_HOUR = 10
+HANDOFF_FAILED = "That sign-in took too long or was already used. Try again."
+
+
+def _app_challenge() -> Tuple[str, bool]:
+    """The app's check when the iPhone app started this sign-in, and whether
+    the request has to be refused.
+
+    The app opens the start address in the system browser sheet with app=1
+    and the SHA-256 of a secret it keeps, base64url, 43 characters. A link on
+    another site cannot start one: the browser marks it cross-site, and it
+    becomes an ordinary sign-in in that browser, which hands nothing to
+    anyone.
+    """
+    if request.args.get("app") != "1":
+        return "", False
+    if request.headers.get("Sec-Fetch-Site", "") in ("cross-site", "same-site"):
+        return "", False
+    challenge = request.args.get("challenge", "")
+    if not accounts_mod.valid_challenge(challenge):
+        return "", True
+    return challenge, False
+
+
+def _to_app(**params):
+    """Send the browser sheet back to the app, with a code or a short reason."""
+    from urllib.parse import urlencode
+    response = redirect(APP_FINISH + "?" + urlencode(params))
+    # The address carries a one-time code: nothing should keep a copy.
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _hand_to_app(user, challenge: str, next_url: str):
+    """Give a finished sign-in to the app, not to this browser."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        handoff_token = accounts_mod.new_handoff(conn, user.id, challenge,
+                                                 _safe_back(next_url, ""))
+    finally:
+        conn.close()
+    return _to_app(code=handoff_token)
+
+
+def _sign_in_failed(challenge: str, message: str, reason: str = "failed",
+                    status: int = 400):
+    """A sign-in that did not finish. Said on the sign-in page or, when the
+    app started it, to the app in a word, so nobody is left on an error page
+    inside the browser sheet."""
+    if challenge:
+        return _to_app(error=reason)
+    return app.make_response((render_template(
+        "signin.html", reason=message, why_not="", next_url=""), status))
+
+
+def _from_this_site() -> bool:
+    """Whether the browser says this POST came from a page on this site.
+
+    The rest of the site leans on the session cookie being SameSite=Lax. A
+    sign-in cannot, being what starts the session: a form on another site
+    could otherwise sign its visitor in to an account of its choosing.
+    Browsers set these headers themselves: Sec-Fetch-Site, then Origin, then,
+    for an older browser sending neither, the Referer. One that sends none of
+    them is let through, since then there is nothing to go on.
+    """
+    from urllib.parse import urlparse
+    fetched = request.headers.get("Sec-Fetch-Site", "")
+    if fetched and fetched != "same-origin":
+        return False
+
+    def origin_of(url: str) -> str:
+        parts = urlparse(url)
+        return ("%s://%s" % (parts.scheme, parts.netloc)).lower()
+
+    allowed = {origin_of(request.host_url)}
+    public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
+    if public:
+        allowed.add(origin_of(public))
+    origin = request.headers.get("Origin", "")
+    if origin:
+        return origin.strip().lower() in allowed
+    referrer = request.headers.get("Referer", "")
+    if referrer:
+        return origin_of(referrer) in allowed
+    return True
+
+
+@app.route("/auth/app/finish", methods=["POST"])
+def app_finish():
+    """The app's web view collecting a sign-in finished in the browser sheet.
+
+    It posts the one-time code the sheet was handed and the verifier only it
+    kept. Every failure says the same plain thing.
+    """
+    if not (auth_mod.configured() or apple_mod.web_ready()):
+        abort(404)
+    if not _from_this_site():
+        return _sign_in_failed("", HANDOFF_FAILED, status=403)
+    if _rate_limited("app_finish", APP_FINISHES_PER_HOUR):
+        return _sign_in_failed("", "Too many sign-ins were tried from this "
+                                   "connection in the last hour. Wait a while, "
+                                   "then try again.", status=429)
+    # Named so that an error report strips them, as it does any token.
+    handoff_token = request.form.get("code", "")
+    verifier_secret = request.form.get("verifier", "")
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        found = accounts_mod.redeem_handoff(conn, handoff_token, verifier_secret)
+        user = accounts_mod.get_user(conn, found[0]) if found else None
+    finally:
+        conn.close()
+    if user is None:
+        return _sign_in_failed("", HANDOFF_FAILED)
+    return _finish_sign_in(user, found[1] or request.form.get("next", ""))
 
 
 def _finish_sign_in(user, next_url: str):
     """Start a session for someone who just proved who they are."""
+    _open_session(user)
+    return redirect(_safe_back(next_url, url_for("index")))
+
+
+def _open_session(user) -> None:
+    """The session itself, for a sign-in that answers with JSON, not a page."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         accounts_mod.purge_expired(conn)
@@ -2392,7 +2827,6 @@ def _finish_sign_in(user, next_url: str):
         conn.close()
     session.permanent = True
     session[SESSION_KEY] = token
-    return redirect(_safe_back(next_url, url_for("index")))
 
 
 def _client_ip() -> str:
@@ -2639,6 +3073,7 @@ def account():
     try:
         counts = accounts_mod.owned_counts(conn, uid())
         everyone = accounts_mod.list_users(conn) if g.user.is_local else []
+        methods = accounts_mod.sign_in_methods(conn, g.user)
     finally:
         conn.close()
     plan = {"on": billing_mod.ready(), "pro": _pro(), "customer": ""}
@@ -2660,6 +3095,7 @@ def account():
     weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
               "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,
+                           methods=methods,
                            datasets=export_mod.DATASETS, plan=plan,
                            invite=invite, weekly=weekly,
                            invite_days=invites_mod.BONUS_DAYS)
@@ -2678,6 +3114,7 @@ def delete_account():
         customer = billing_mod.customer_of(conn, uid())
         if customer and billing_mod.ready():
             billing_mod.close_customer(customer)
+        _end_apple_sign_in(conn, uid())
         accounts_mod.delete_user(conn, uid())
     except billing_mod.BillingError:
         return render_template(
@@ -2690,6 +3127,23 @@ def delete_account():
         conn.close()
     session.clear()
     return redirect(url_for("signin", said="deleted"))
+
+
+def _end_apple_sign_in(conn, user_id: int) -> None:
+    """Ask Apple to end Sign in with Apple for an account about to go.
+
+    The App Store asks for this. Unlike Stripe's, a failure does not stop the
+    deletion: nothing keeps charging, and the person can still end it in their
+    Apple Account settings, so it is logged and the deletion goes ahead. There
+    is no queue to try again later, which would mean keeping a deleted
+    person's token after their account is gone.
+    """
+    for identity_id, refresh_token, client_id in accounts_mod.apple_tokens(
+            conn, user_id):
+        if not apple_mod.revoke(refresh_token, client_id):
+            app.logger.warning("Apple did not confirm ending sign-in %d of an "
+                               "account being deleted; it is deleted anyway",
+                               identity_id)
 
 
 def _redirect_uri() -> str:

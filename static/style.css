@@ -899,6 +899,21 @@ ul.list.ok li::marker { color: var(--gain); }
 }
 .gbtn:hover { background: #f7f7f7; text-decoration: none; border-color: var(--ink-3); }
 .gbtn svg { flex: none; }
+/* Apple's button, as its guidelines have it: black on a light page and white
+   on a dark one, in the system font, the same size as Google's. */
+.abtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  width: 100%; min-height: 48px; padding: 0 var(--s3);
+  background: #000; color: #fff; border: 1px solid #000; border-radius: var(--r-sm);
+  font: 500 var(--t-sm) -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  cursor: pointer;
+}
+.abtn:hover { background: #262626; color: #fff; text-decoration: none; }
+.abtn svg { flex: none; margin-top: -2px; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .abtn { background: #fff; color: #000; border-color: #fff; }
+  :root:not([data-theme="light"]) .abtn:hover { background: #ececec; color: #000; }
+}
 
 /* ---------- legal pages ---------- */
 
