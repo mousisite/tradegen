@@ -185,7 +185,7 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
                     "email_stop", "backtests", "backtest_page", "record",
-                    "record_csv"}
+                    "record_csv", "record_fingerprints"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -3224,6 +3224,7 @@ def record():
     try:
         rec = public_mod.record(conn, costs={"equity": method["equity"] / 100.0,
                                              "crypto": method["crypto"] / 100.0})
+        prints = public_mod.fingerprints(conn, limit=7)
     finally:
         conn.close()
     # Calls made before a stock split are scored on split-adjusted prices only
@@ -3233,7 +3234,8 @@ def record():
     return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
                            short=public_mod.short, slug=public_mod.slug,
-                           how_words=public_mod.HOW_WORDS, splits=splits)
+                           how_words=public_mod.HOW_WORDS, splits=splits,
+                           prints=prints)
 
 
 @app.route("/record.csv")
@@ -3246,6 +3248,19 @@ def record_csv():
         conn.close()
     return Response(body, mimetype="text/csv", headers={
         "Content-Disposition": 'attachment; filename="orenth-record.csv"',
+        "Cache-Control": "public, max-age=900"})
+
+
+@app.route("/record/fingerprints.csv")
+def record_fingerprints():
+    """Every day's fingerprint of the record, for anyone to keep a copy of."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        body = public_mod.fingerprints_csv(conn)
+    finally:
+        conn.close()
+    return Response(body, mimetype="text/csv", headers={
+        "Content-Disposition": 'attachment; filename="orenth-record-fingerprints.csv"',
         "Cache-Control": "public, max-age=900"})
 
 

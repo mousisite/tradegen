@@ -292,8 +292,9 @@ try:
           (len(rows), total))
     check("saying why a call is left out", any("no market session" in x[-1] for x in rows)
           and any("split on 2 Mar 2026" in x[-1] for x in rows))
+    named = [dict(zip(rows[0], x)) for x in rows[1:]]
     check("and dating each by its session",
-          any(x[1] == "SPY" and x[2] == "2026-11-24" for x in rows))
+          any(x["symbol"] == "SPY" and x["session"] == "2026-11-24" for x in named))
     check("with nothing about any person in it", "@" not in body and "user" not in body)
     page = text("/record")
     check("the record page links to it", 'href="/record.csv"' in page)
@@ -935,6 +936,151 @@ page = on_page("/record", young_path)
 check("a record too young for that range gives none, and says why",
       "(too early for a 95% range)" in page and "95% range " not in page.split("How it is scored")[0]
       and "Not yet distinguishable from chance: these calls cover too few weeks" in page)
+
+# ---------------------------------------------------------------------------
+head("A FINGERPRINT OF EACH DAY'S CALLS")
+# ---------------------------------------------------------------------------
+# A record that can be edited is a story. Each finished day's calls get a
+# SHA-256 of the parts that never change, kept for good and published, so
+# anyone who saves one can check later that no call was edited.
+import hashlib  # noqa: E402
+import re  # noqa: E402
+
+prints_path = _os.path.join(tempfile.mkdtemp(prefix="stockbot-test-prints-"), "data", "p.db")
+fp = db.connect(prints_path)
+try:
+    mon, tue = utc(2026, 3, 9), utc(2026, 3, 10)
+    public.record_call(fp, call("BTC-USD", "AVOID", 69000.5, 1500.0, mon + 1800,
+                                price_day=mon // DAY, market_open=True))
+    public.record_call(fp, call("NVDA", "BUY", 201.25, 4.5, mon + 21 * 3600 + 2400,
+                                price_day=mon // DAY))
+    public.record_call(fp, call("KO", "WAIT", 70.1, 0.9, mon + 21 * 3600 + 2460))
+    public.record_call(fp, call("BTC-USD", "WAIT", 70100.0, 1450.0, tue + 1800,
+                                price_day=tue // DAY, market_open=True))
+    check("a day is not fingerprinted before it is over",
+          public.fingerprint_days(fp, now=mon + 23 * 3600) == 0)
+    check("nor in the hour after, while its last calls may still be written",
+          public.fingerprint_days(fp, now=tue + 1800) == 0)
+    check("but is then, once", public.fingerprint_days(fp, now=tue + 3600) == 1
+          and public.fingerprint_days(fp, now=tue + 7200) == 0)
+    stored = public.fingerprints(fp)
+    monday = fp.execute("SELECT * FROM calls WHERE at >= ? AND at < ? ORDER BY at, symbol",
+                        (mon, mon + DAY)).fetchall()
+    text_mon = public.fingerprint_text(monday)
+    check("its fingerprint is the SHA-256 of the day's calls, one line each",
+          len(stored) == 1 and stored[0]["day"] == "2026-03-09" and stored[0]["count"] == 3
+          and stored[0]["sha256"] == hashlib.sha256(text_mon.encode()).hexdigest()
+          and text_mon.count("\n") == 3
+          and text_mon.splitlines()[0] == "BTC-USD,2026-03-09 00:30:00,AVOID,69000.5,"
+                                           "66750.5,72375.5,10", text_mon)
+    check("the same calls always give the same fingerprint",
+          public.fingerprint_text([dict(r) for r in monday]) == text_mon)
+    changed = []
+    for field, value in (("symbol", "KO.L"), ("at", monday[2]["at"] + 1),
+                         ("action", "AVOID"), ("price", 70.1 + 1e-9),
+                         ("stop", monday[2]["stop"] - 0.01), ("target", 71.0),
+                         ("horizon", 11)):
+        edited = [dict(r) for r in monday]
+        edited[2][field] = value
+        changed.append(public.fingerprint_text(edited) != text_mon)
+    check("changing any part written down, by any amount, changes it", all(changed), changed)
+    check("and so does adding or removing a call",
+          public.fingerprint_text(monday[:2]) != text_mon
+          and public.fingerprint_text(list(monday) + [monday[0]]) != text_mon)
+    # Scoring, marking and dating a call later touch other columns only.
+    after = SimpleNamespace(timestamp=[tue + 14 * 3600 + k * DAY for k in range(12)],
+                            close=[202.0] * 12, high=[220.0] * 12, low=[199.0] * 12,
+                            gmt_offset=-18000)
+    public.settle_calls(fp, "NVDA", after)
+    fp.execute("UPDATE calls SET excluded='a reason' WHERE symbol='KO'")
+    fp.execute("UPDATE calls SET price_day=20521 WHERE symbol='KO'")
+    fp.commit()
+    rescored = fp.execute("SELECT * FROM calls WHERE at >= ? AND at < ? ORDER BY at, symbol",
+                          (mon, mon + DAY)).fetchall()
+    check("scoring a call, leaving it out, or dating it later does not change it",
+          rescored[1]["outcome"] == "right" and rescored[2]["excluded"] == "a reason"
+          and public.fingerprint_text(rescored) == text_mon)
+    try:
+        fp.execute("UPDATE record_fingerprints SET sha256='0' WHERE day='2026-03-09'")
+        edited = True
+    except sqlite3.DatabaseError:
+        edited = False
+    try:
+        fp.execute("DELETE FROM record_fingerprints")
+        removed = True
+    except sqlite3.DatabaseError:
+        removed = False
+    fp.execute("INSERT OR REPLACE INTO record_fingerprints (day, count, sha256, created_ts) "
+               "VALUES ('2026-03-09', 9, 'x', 1)")
+    fp.commit()
+    check("the database refuses to change or remove a fingerprint, or to replace one",
+          not edited and not removed
+          and public.fingerprints(fp)[0]["sha256"] == stored[0]["sha256"]
+          and public.fingerprints(fp)[0]["count"] == 3)
+    # Tuesday's is taken three days late: it says so.
+    public.fingerprint_days(fp, now=tue + 4 * DAY)
+    prints = public.fingerprints(fp)
+    check("one taken more than a day late is marked as after the fact",
+          [p["day"] for p in prints] == ["2026-03-10", "2026-03-09"]
+          and prints[0]["late"] and not prints[1]["late"], prints)
+    # A day written before fingerprints existed gets one on the first run.
+    public.record_call(fp, call("KO", "AVOID", 69.0, 0.9, mon - 6 * DAY + 21 * 3600))
+    real_due = public.due
+    public.due = lambda conn, now=None: []
+    try:
+        public.refresh(fp, lambda sym: {}, pause=0)
+    finally:
+        public.due = real_due
+    late = [p for p in public.fingerprints(fp) if p["day"] == "2026-03-03"]
+    check("a background run fingerprints the days it has not, dated then",
+          late and late[0]["count"] == 1 and late[0]["late"]
+          and late[0]["created_ts"] >= int(time.time()) - 60, late)
+finally:
+    fp.close()
+
+body = None
+was = web.app.config["DB_PATH"]
+web.app.config["DB_PATH"] = prints_path
+try:
+    r = c.get("/record.csv")
+    body = r.data.decode("utf-8")
+    prints_file = c.get("/record/fingerprints.csv")
+finally:
+    web.app.config["DB_PATH"] = was
+rows_ = list(csv.reader(io.StringIO(body)))
+check("the record file starts with the columns that never change",
+      tuple(rows_[0][:7]) == public.FINGERPRINTED
+      and tuple(rows_[0]) == public.CSV_COLUMNS)
+mine = [x for x in rows_[1:] if x[1].startswith("2026-03-09")]
+again = hashlib.sha256("".join(",".join(x[:7]) + "\n" for x in mine).encode()).hexdigest()
+check("and anyone can work out a day's fingerprint from it", again == stored[0]["sha256"])
+# What the page tells people to run: grep '^[^,]*,DAY ' | cut -d, -f1-7 | shasum -a 256
+lines = [ln for ln in body.split("\n") if re.match(r"^[^,]*,2026-03-09 ", ln)]
+recipe = hashlib.sha256("".join(",".join(ln.split(",")[:7]) + "\n" for ln in lines)
+                        .encode()).hexdigest()
+check("and the shell recipe the page gives works out the same", recipe == stored[0]["sha256"])
+got = prints_file.data.decode("utf-8")
+check("every day's fingerprint is a file anyone can download",
+      prints_file.status_code == 200 and prints_file.mimetype == "text/csv"
+      and "attachment" in prints_file.headers.get("Content-Disposition", "")
+      and got.splitlines()[0] == ",".join(public.FINGERPRINT_COLUMNS)
+      and ("2026-03-09,3,%s," % stored[0]["sha256"]) in got
+      and got.splitlines()[-1].endswith(",yes"), got[:300])
+page = on_page("/record", prints_path)
+check("the record page shows each day's fingerprint",
+      stored[0]["sha256"] in page and "A fingerprint of each day's calls" in page
+      and 'href="/record/fingerprints.csv"' in page)
+check("says which were taken after the fact, and when",
+      "fingerprinted on %s, after the fact" % time.strftime(
+          "%d %b %Y", time.gmtime(time.time())).lstrip("0") in page
+      and "fingerprinted on 14 Mar 2026, after the fact" in page
+      and page.count("after the fact</span>") == 2
+      and "its fingerprint vouches for its calls only from the day it was taken"
+      in page)
+check("and how to check one, with the newest day's command",
+      "How to check one yourself" in page
+      and "grep '^[^,]*,2026-03-10 ' orenth-record.csv | cut -d, -f1-7 | shasum -a 256"
+      in page)
 
 print()
 print("%d failure(s)" % len(fails))

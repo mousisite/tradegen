@@ -133,6 +133,47 @@
   </section>
 {% endif %}
 
+{% if prints %}
+  <section id="fingerprints" style="margin-top:var(--s4)">
+    <div class="sechead"><h2>A fingerprint of each day's calls</h2>
+      <a class="tail" href="{{ url_for('record_fingerprints') }}">every day's, as a file &rarr;</a></div>
+    <p class="prose">Once a day is over, the calls written down that day get a
+      fingerprint: a SHA-256 hash of each call's stock, what it said, its
+      price, stop and target, how many days it runs and when it was written.
+      Change any of those by any amount, or add or remove a call, and the
+      fingerprint changes. Save a copy, and you can check later that none of
+      that day's calls was edited.{% if prints|selectattr('late')|list %}
+      A day fingerprinted more than a day after it ended, as the days before
+      fingerprints began were, says so: its fingerprint vouches for its calls
+      only from the day it was taken.{% endif %}</p>
+    <div class="card" style="margin-top:var(--s2)">
+      <ul style="list-style:none;margin:0;padding:0">
+      {% for f in prints %}
+        <li style="padding:var(--s1) 0{% if not loop.first %};border-top:1px solid var(--rule){% endif %}">
+          <span style="font-size:var(--t-sm)"><b>{{ f.start|day }}</b></span>
+          <span class="soft" style="font-size:var(--t-sm)">· {{ f.count }} call{{ '' if f.count == 1 else 's' }} written</span>{% if f.late %}
+          <span class="faint" style="font-size:var(--t-xs)">· fingerprinted on {{ f.created_ts|day }}, after the fact</span>{% endif %}
+          <div class="fig soft" style="font-size:var(--t-xs);overflow-wrap:anywhere">{{ f.sha256 }}</div>
+        </li>
+      {% endfor %}
+      </ul>
+    </div>
+    <details class="card" style="margin-top:var(--s2)">
+      <summary><b>How to check one yourself</b></summary>
+      <p class="prose" style="margin-top:var(--s2)">Download
+        <a href="{{ url_for('record_csv') }}">every call</a>. Take that day's
+        rows, the ones whose <b>written_utc</b> starts with its date, in the
+        order the file lists them. Keep each row's first seven columns,
+        <b>symbol</b> to <b>horizon_days</b>, exactly as the file has them,
+        joined by commas, with a line break after each row. The SHA-256 of
+        that text is the day's fingerprint. A call's score, and any reason it
+        is left out, come in the columns after those, so scoring a call never
+        changes its day's fingerprint. On a Mac or Linux, for {{ prints[0].start|day }}:</p>
+      <p class="fig" style="font-size:var(--t-xs);overflow-wrap:anywhere;margin:var(--s1) 0 0">grep '^[^,]*,{{ prints[0].day }} ' orenth-record.csv | cut -d, -f1-7 | shasum -a 256</p>
+    </details>
+  </section>
+{% endif %}
+
 <div class="card" style="margin-top:var(--s3)">
   <span class="eyebrow">How it is scored</span>
   <ul class="list">
@@ -188,7 +229,9 @@
       it.</li>{% endif %}
     <li>Calls are never edited or removed. One left out of the scores stays
       listed below, with the reason. Every call, left-out ones included, is in
-      <a href="{{ url_for('record_csv') }}">one file</a> anyone can check.</li>
+      <a href="{{ url_for('record_csv') }}">one file</a> anyone can
+      check{% if prints %}, and each day's calls have a
+      <a href="#fingerprints">fingerprint</a> that an edit would change{% endif %}.</li>
   </ul>
   <p class="prose faint" style="font-size:var(--t-xs)">This is a forward test
     of software calls, not a record of real trades or money. Past results do

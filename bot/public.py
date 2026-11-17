@@ -17,7 +17,9 @@ the date, never who shared it.
 from __future__ import annotations
 
 import bisect
+import calendar
 import csv
+import hashlib
 import io
 import json
 import math
@@ -116,6 +118,26 @@ CREATE TABLE IF NOT EXISTS calls (
     excluded    TEXT,
     UNIQUE (symbol, day)
 );
+-- A fingerprint of each UTC day's calls, taken once the day is over: the
+-- SHA-256 of the parts of them that never change (fingerprint_text). Written
+-- once and never changed or removed, which the triggers hold to: a second
+-- row for a day is dropped, and an edit or a delete is refused.
+CREATE TABLE IF NOT EXISTS record_fingerprints (
+    day         TEXT PRIMARY KEY,
+    count       INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    created_ts  INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS record_fingerprints_once
+BEFORE INSERT ON record_fingerprints
+WHEN EXISTS (SELECT 1 FROM record_fingerprints WHERE day = NEW.day)
+BEGIN SELECT RAISE(IGNORE); END;
+CREATE TRIGGER IF NOT EXISTS record_fingerprints_never_edited
+BEFORE UPDATE ON record_fingerprints
+BEGIN SELECT RAISE(ABORT, 'a day''s fingerprint is never changed'); END;
+CREATE TRIGGER IF NOT EXISTS record_fingerprints_never_removed
+BEFORE DELETE ON record_fingerprints
+BEGIN SELECT RAISE(ABORT, 'a day''s fingerprint is never removed'); END;
 """
 
 # Columns added after the table first shipped. Existing databases get them by
@@ -605,6 +627,10 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
     are estimates, and the call would read them. The next check writes it,
     six hours on. Whether a call is skipped depends only on the data, never
     on the price, so it cannot pick the calls that flatter the record.
+
+    Every run ends by fingerprinting the days of calls that are over
+    (fingerprint_days), by the clock, not by now, which only says what is
+    due.
     """
     checked, errors = 0, []
     for n, symbol in enumerate(due(conn, now)):
@@ -622,6 +648,10 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
                 settle_calls(conn, symbol, daily)
         except Exception as exc:           # a delisted ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
+    try:
+        fingerprint_days(conn)
+    except sqlite3.Error as exc:           # the next run takes it
+        errors.append("fingerprints: %s" % exc)
     return {"checked": checked, "errors": errors}
 
 
@@ -1253,9 +1283,30 @@ def _dated(row) -> Dict:
     return out
 
 
-CSV_COLUMNS = ("id", "symbol", "session", "written_utc", "action", "price", "stop",
-               "target", "horizon_days", "outcome", "price_did", "exit_price",
-               "scored_utc", "left_out_because")
+# The record as a file. The first seven columns are what a call says when it
+# is written down, and never change (FINGERPRINTED); the rest are filled in
+# later: the session, once known, and the score and any reason it is left out.
+FINGERPRINTED = ("symbol", "written_utc", "action", "price", "stop", "target",
+                 "horizon_days")
+CSV_COLUMNS = FINGERPRINTED + ("session", "outcome", "price_did", "exit_price",
+                               "scored_utc", "left_out_because")
+
+
+def _utc(ts) -> str:
+    """A time as record.csv writes it, to the second, in UTC."""
+    return "" if ts is None else time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(ts)))
+
+
+def _exact(x) -> str:
+    """A price as record.csv writes it: the shortest text that reads back as
+    exactly the number stored, so a change of any size shows."""
+    return repr(float(x))
+
+
+def _written(r) -> List[str]:
+    """A call's FINGERPRINTED columns, as record.csv writes them."""
+    return [r["symbol"], _utc(r["at"]), r["action"], _exact(r["price"]),
+            _exact(r["stop"]), _exact(r["target"]), str(int(r["horizon"]))]
 
 
 def calls_csv(conn: sqlite3.Connection) -> str:
@@ -1263,12 +1314,10 @@ def calls_csv(conn: sqlite3.Connection) -> str:
 
     The table holds nobody's data, only symbols, calls, prices and times, so
     all of it can be published as it is. Prices are the call's own, before
-    any later stock split.
+    any later stock split. Ordered by when each was written, then symbol,
+    the order fingerprint_text takes them in.
     """
     ensure_schema(conn)
-
-    def when(ts) -> str:
-        return time.strftime("%Y-%m-%d %H:%M", time.gmtime(int(ts))) if ts else ""
 
     def num(x) -> str:
         return "" if x is None else "%.10g" % float(x)
@@ -1276,15 +1325,106 @@ def calls_csv(conn: sqlite3.Connection) -> str:
     buf = io.StringIO()
     out = csv.writer(buf, lineterminator="\n")
     out.writerow(CSV_COLUMNS)
-    for r in conn.execute("SELECT * FROM calls ORDER BY at, id"):
-        out.writerow([
-            r["id"], r["symbol"],
+    for r in conn.execute("SELECT * FROM calls ORDER BY at, symbol"):
+        out.writerow(_written(r) + [
             time.strftime("%Y-%m-%d", time.gmtime(r["price_day"] * 86400))
             if r["price_day"] is not None else "",
-            when(r["at"]), r["action"], num(r["price"]), num(r["stop"]),
-            num(r["target"]), r["horizon"], r["outcome"] or "open",
-            HOW_WORDS.get(r["how"] or "", ""), num(r["exit_price"]),
-            when(r["settled"]), r["excluded"] or ""])
+            r["outcome"] or "open", HOW_WORDS.get(r["how"] or "", ""),
+            num(r["exit_price"]), _utc(r["settled"]), r["excluded"] or ""])
+    return buf.getvalue()
+
+
+# --- the record's daily fingerprint --------------------------------------------
+#
+# Once a UTC day is over, the calls written down that day get a fingerprint:
+# the SHA-256 of what each said when it was written, the columns of
+# record.csv that never change. Changing any of them by any amount, or adding
+# or removing a call, changes the day's fingerprint, so anyone who keeps a
+# copy can check later that the record was not edited. A fingerprint is kept
+# for good once made (record_fingerprints); one taken more than a day after
+# its day ended says so, since it can only vouch for the calls from then on.
+
+# How long after a UTC day ends its fingerprint waits: a check that began
+# before midnight can still be writing the day's last calls just after it.
+FINGERPRINT_WAIT = 3600
+# A fingerprint taken later than this after its day ended is labelled as
+# taken after the fact, with its date.
+FINGERPRINT_LATE = 86400
+
+
+def fingerprint_text(rows) -> str:
+    """The text a day's fingerprint is the SHA-256 of, as UTF-8.
+
+    One line per call, in the order record.csv lists them (written time,
+    then symbol): its first seven columns exactly as the file writes them,
+    joined by commas, each line ending in a line feed.
+    """
+    return "".join(",".join(_written(r)) + "\n" for r in rows)
+
+
+def _day_start(day: str) -> int:
+    return calendar.timegm(time.strptime(day, "%Y-%m-%d"))
+
+
+def fingerprint_days(conn: sqlite3.Connection, now: Optional[float] = None) -> int:
+    """Fingerprint each finished UTC day of calls that has none yet.
+
+    Returns how many were taken. Days written before fingerprints existed
+    get theirs on the first run, dated then, and the page says they were
+    taken after the fact. Never changes one already taken.
+    """
+    ensure_schema(conn)
+    now = int(time.time() if now is None else now)
+    # Calls before the start of the day that held (now - FINGERPRINT_WAIT)
+    # belong to days that are over and past the wait.
+    before = (now - FINGERPRINT_WAIT) // 86400 * 86400
+    have = {r[0] for r in conn.execute("SELECT day FROM record_fingerprints")}
+    days = [r[0] for r in conn.execute(
+        "SELECT DISTINCT strftime('%Y-%m-%d', at, 'unixepoch') FROM calls "
+        "WHERE at < ? ORDER BY 1", (before,))]
+    made = 0
+    for day in days:
+        if day in have:
+            continue
+        start = _day_start(day)
+        rows = conn.execute("SELECT symbol, at, action, price, stop, target, horizon "
+                            "FROM calls WHERE at >= ? AND at < ? ORDER BY at, symbol",
+                            (start, start + 86400)).fetchall()
+        digest = hashlib.sha256(fingerprint_text(rows).encode("utf-8")).hexdigest()
+        cur = conn.execute("INSERT OR IGNORE INTO record_fingerprints "
+                           "(day, count, sha256, created_ts) VALUES (?, ?, ?, ?)",
+                           (day, len(rows), digest, now))
+        made += 1 if cur.rowcount == 1 else 0
+    conn.commit()
+    return made
+
+
+def fingerprints(conn: sqlite3.Connection, limit: Optional[int] = None) -> List[Dict]:
+    """The days' fingerprints, newest first. "late" marks one taken after the
+    fact; "start" is the day's first second, for dating it on a page."""
+    ensure_schema(conn)
+    sql = "SELECT * FROM record_fingerprints ORDER BY day DESC"
+    rows = conn.execute(sql + (" LIMIT %d" % int(limit) if limit else "")).fetchall()
+    out = []
+    for r in rows:
+        start = _day_start(r["day"])
+        out.append({"day": r["day"], "count": r["count"], "sha256": r["sha256"],
+                    "created_ts": r["created_ts"], "start": start,
+                    "late": r["created_ts"] - (start + 86400) > FINGERPRINT_LATE})
+    return out
+
+
+FINGERPRINT_COLUMNS = ("day", "calls", "sha256", "fingerprinted_utc", "after_the_fact")
+
+
+def fingerprints_csv(conn: sqlite3.Connection) -> str:
+    """Every day's fingerprint as CSV text, oldest first."""
+    buf = io.StringIO()
+    out = csv.writer(buf, lineterminator="\n")
+    out.writerow(FINGERPRINT_COLUMNS)
+    for f in reversed(fingerprints(conn)):
+        out.writerow([f["day"], f["count"], f["sha256"], _utc(f["created_ts"]),
+                      "yes" if f["late"] else "no"])
     return buf.getvalue()
 
 
