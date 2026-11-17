@@ -530,10 +530,21 @@ shared_before = conn.execute("SELECT COUNT(*) FROM strategy_stats").fetchone()[0
 counts = A.owned_counts(conn, bob.id)
 print("   Bob owns %s" % counts)
 check("Bob owns something to delete", counts["trades"] >= 1)
+# Pro he bought in the iPhone app: his App Store token and his subscription.
+from bot import apple_store  # noqa: E402
+apple_store.account_token(conn, bob.id)
+conn.execute("INSERT INTO apple_subs (environment, original_tx_id, user_id, product_id, "
+             "transaction_id, purchase_ms, expires_ms, tx_signed_ms, updated) VALUES "
+             "('Production', 'bob-1', ?, 'app.orenth.ios.pro.monthly', 'bob-1', 1, 2, 1, 1)",
+             (bob.id,))
+conn.commit()
 
 removed = A.delete_user(conn, bob.id)
 print("   removed %s" % removed)
 check("his trades are gone", A.owned_counts(conn, bob.id)["trades"] == 0)
+check("and his App Store token and subscription",
+      conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?", (bob.id,)).fetchone()[0] == 0
+      and conn.execute("SELECT COUNT(*) FROM apple_subs WHERE user_id=?", (bob.id,)).fetchone()[0] == 0)
 check("and so are his settings", A.settings_for(conn, bob.id) == {})
 check("his account is gone", A.get_user(conn, bob.id) is None)
 check("Alice is untouched", len(db.list_trades(conn, user=alice.id)) == 1)
@@ -904,8 +915,12 @@ _COMES_WITH = {"httpx2": "anthropic"}
 # definition. A hand-kept list meant every new script read as a missing
 # third-party package until somebody remembered to add it here: the helper
 # scripts in tools/ importing each other was the case that exposed it.
+# Folders are judged by their path inside this checkout, not the whole path
+# on disk: a checkout that is itself a worktree under .claude would otherwise
+# skip every folder, find no imports at all, and check nothing.
 for _folder, _dirs, _files in _os.walk(ROOT):
-    if any(skip in _folder for skip in (".runtime", "__pycache__", ".git")):
+    if any(skip in _os.path.relpath(_folder, ROOT)
+           for skip in (".runtime", "__pycache__", ".git")):
         continue
     _LOCAL.update(f[:-3] for f in _files if f.endswith(".py"))
     if "__init__.py" in _files:
@@ -915,8 +930,9 @@ imported = {}
 for folder, _dirs, files in _os.walk(ROOT):
     # .claude holds editor settings and, while parallel work is going on,
     # other branches' worktrees, whose imports are not this checkout's.
-    if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests",
-                                       ".claude", "node_modules", "mobile")):
+    if any(skip in _os.path.relpath(folder, ROOT)
+           for skip in (".runtime", "__pycache__", ".git", "tests",
+                        ".claude", "node_modules", "mobile")):
         continue
     # The iPhone app's build tools (mobile/scripts: screenshots, icons) run on
     # a developer's machine, never in the server's container.
