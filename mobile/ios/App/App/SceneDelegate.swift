@@ -8,7 +8,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        window?.rootViewController = CAPBridgeViewController()
+        // Orenth's own screen: Capacitor's, plus the sign-in sheet, swipe
+        // back and pull to refresh. Since Capacitor 8.5 the window is built
+        // here, so this line, not Main.storyboard, decides the screen.
+        window?.rootViewController = MainViewController()
         window?.makeKeyAndVisible()
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)

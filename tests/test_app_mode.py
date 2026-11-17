@@ -372,6 +372,151 @@ finally:
     for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
         _os.environ.pop(key, None)
 
+
+# ---------------------------------------------------------------------------
+# The iPhone project in mobile/. Xcode cannot run here, so these read the
+# committed files the way Xcode and Capacitor will, and hold them to what was
+# decided: a decision undone by a later edit fails here, not at App Review.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import plistlib  # noqa: E402
+import re  # noqa: E402
+import xml.etree.ElementTree as ET  # noqa: E402
+
+MOBILE = _os.path.join(harness.ROOT, "mobile")
+IOS_APP = _os.path.join(MOBILE, "ios", "App", "App")
+
+
+def read(*parts):
+    with open(_os.path.join(MOBILE, *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+print()
+print("=" * 72)
+print("THE IPHONE PROJECT IS SET UP AS DECIDED")
+print("=" * 72)
+config = json.loads(read("capacitor.config.json"))
+paper = re.search(r"--paper:\s*(#[0-9a-fA-F]{6})",
+                  open(_os.path.join(harness.ROOT, "static", "style.css"),
+                       encoding="utf-8").read()).group(1).lower()
+check("bundle id and name", config.get("appId") == "app.orenth.ios"
+      and config.get("appName") == "Orenth", config)
+check("the app shows the live site", config.get("server", {}).get("url")
+      == "https://orenth.app", config.get("server"))
+check("and never another one", not config.get("server", {}).get("allowNavigation"))
+check("a failed load shows the offline page",
+      config["server"].get("errorPath") == "offline.html"
+      and _os.path.exists(_os.path.join(MOBILE, "www", "offline.html")))
+agent = config.get("ios", {}).get("appendUserAgent", "")
+check("the app's User-Agent is the one the site looks for",
+      agent == "OrenthApp/1" and web.APP_AGENT in agent + " ", agent)
+check("content runs edge to edge", config["ios"].get("contentInset") == "never")
+check("the launch colour is the site's paper",
+      config.get("backgroundColor", "").lower() == paper
+      and config["plugins"]["SplashScreen"].get("backgroundColor", "").lower() == paper,
+      (config.get("backgroundColor"), paper))
+splash = config["plugins"]["SplashScreen"]
+check("the launch screen hides itself quickly, with no spinner",
+      splash.get("launchAutoHide") is True and splash.get("launchShowDuration") == 800
+      and splash.get("showSpinner") is False, splash)
+bar = config["plugins"]["StatusBar"]
+check("the status bar sits above the page and follows the phone",
+      bar.get("overlaysWebView") is False and bar.get("style") == "DEFAULT", bar)
+check("notifications show while the app is open",
+      config["plugins"]["PushNotifications"].get("presentationOptions")
+      == ["badge", "sound", "banner", "list"])
+
+offline = read("www", "offline.html")
+check("the offline page fetches nothing",
+      not re.search(r"""(src|href)\s*=\s*["']?https?:""", offline, re.I)
+      and "@import" not in offline and "<link" not in offline.lower())
+check("and says what is wrong in plain words",
+      "No connection" in offline and "needs the internet" in offline
+      and "Try again" in offline)
+check("and tries the site again", "https://orenth.app/" in offline)
+check("and has a dark version", "prefers-color-scheme: dark" in offline)
+check("and takes the launch screen away", "'SplashScreen', 'hide'" in offline)
+
+package = json.loads(read("package.json"))
+pins = dict(package.get("dependencies", {}), **package.get("devDependencies", {}))
+WANT = {"@capacitor/core": "8.6.2", "@capacitor/cli": "8.6.2", "@capacitor/ios": "8.6.2",
+        "@capacitor/app": "8.1.2", "@capacitor/browser": "8.0.5",
+        "@capacitor/push-notifications": "8.1.3", "@capacitor/splash-screen": "8.0.2",
+        "@capacitor/status-bar": "8.0.4", "@capacitor/share": "8.0.3",
+        "@capacitor/haptics": "8.0.2", "@capawesome/capacitor-apple-sign-in": "0.1.5",
+        "@capacitor/assets": "4.0.0"}
+check("every package is pinned to the decided version",
+      all(pins.get(name) == version for name, version in WANT.items()),
+      {n: pins.get(n) for n in WANT if pins.get(n) != WANT[n]})
+check("and nothing floats", not [v for v in pins.values() if not re.match(r"^\d+\.\d+\.\d+$", v)],
+      pins)
+lock = json.loads(read("package-lock.json"))
+check("the lock file matches",
+      all(lock["packages"].get("node_modules/" + name, {}).get("version") == version
+          for name, version in WANT.items()))
+
+with open(_os.path.join(IOS_APP, "Info.plist"), "rb") as fh:
+    info = plistlib.load(fh)
+check("Info.plist: 64-bit devices, not armv7",
+      info.get("UIRequiredDeviceCapabilities") == ["arm64"],
+      info.get("UIRequiredDeviceCapabilities"))
+check("Info.plist: only standard encryption (HTTPS)",
+      info.get("ITSAppUsesNonExemptEncryption") is False)
+schemes = [s for t in info.get("CFBundleURLTypes", []) for s in t.get("CFBundleURLSchemes", [])]
+check("Info.plist: app.orenth.ios links open the app", schemes == ["app.orenth.ios"], schemes)
+check("Info.plist: the home screen says Orenth", info.get("CFBundleDisplayName") == "Orenth")
+check("Info.plist: says why it may use the camera and save photos",
+      len(info.get("NSCameraUsageDescription", "")) > 20
+      and len(info.get("NSPhotoLibraryAddUsageDescription", "")) > 20)
+check("Info.plist: one window, made by SceneDelegate",
+      info["UIApplicationSceneManifest"]["UIApplicationSupportsMultipleScenes"] is False)
+
+with open(_os.path.join(IOS_APP, "PrivacyInfo.xcprivacy"), "rb") as fh:
+    privacy = plistlib.load(fh)
+check("privacy manifest: no tracking, no tracking domains, no reasoned APIs",
+      privacy == {"NSPrivacyTracking": False, "NSPrivacyTrackingDomains": [],
+                  "NSPrivacyAccessedAPITypes": []}, privacy)
+
+board = ET.parse(_os.path.join(IOS_APP, "Base.lproj", "Main.storyboard")).getroot()
+screens = [(v.get("customClass"), v.get("customModule"), v.get("customModuleProvider"))
+           for v in board.iter("viewController")]
+check("Main.storyboard names MainViewController in the App module",
+      screens == [("MainViewController", "App", "target")], screens)
+scene = read("ios", "App", "App", "SceneDelegate.swift")
+check("SceneDelegate builds the window around MainViewController",
+      "rootViewController = MainViewController()" in scene
+      and "CAPBridgeViewController()" not in scene)
+delegate = read("ios", "App", "App", "AppDelegate.swift")
+check("AppDelegate passes the push token and its failure to Capacitor",
+      ".capacitorDidRegisterForRemoteNotifications, object: deviceToken" in delegate
+      and ".capacitorDidFailToRegisterForRemoteNotifications, object: error" in delegate)
+controller = read("ios", "App", "App", "MainViewController.swift")
+check("MainViewController registers the sign-in sheet, swipe back and pull to refresh",
+      "registerPluginInstance(WebAuthPlugin())" in controller
+      and "allowsBackForwardNavigationGestures = true" in controller
+      and "refreshControl" in controller and "observe(\\.isLoading" in controller)
+plugin = read("ios", "App", "App", "WebAuthPlugin.swift")
+check("WebAuthPlugin is the WebAuth plugin with a start method",
+      'jsName: String = "WebAuth"' in plugin
+      and 'CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise)' in plugin
+      and '"CANCELLED"' in plugin and "ASWebAuthenticationPresentationContextProviding" in plugin)
+
+pbx = read("ios", "App", "App.xcodeproj", "project.pbxproj")
+check("Xcode project: iPhone only",
+      pbx.count("TARGETED_DEVICE_FAMILY = 1;") == 2 and '"1,2"' not in pbx)
+for name, phase in (("MainViewController.swift", "Sources"),
+                    ("WebAuthPlugin.swift", "Sources"),
+                    ("PrivacyInfo.xcprivacy", "Resources")):
+    check("Xcode project: %s is built into the app" % name,
+          pbx.count("/* %s in %s */" % (name, phase)) == 2
+          and pbx.count("path = %s;" % name) == 1, name)
+check("Xcode project: no value left as undefined", "= undefined;" not in pbx)
+check("Xcode project: deployment target stays at iOS 15.0",
+      set(re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([\d.]+);", pbx)) == {"15.0"})
+check("Xcode project: the bundle id is app.orenth.ios",
+      set(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);", pbx)) == {"app.orenth.ios"})
+
 print()
 if fails:
     print("FAILED: %d" % len(fails))
