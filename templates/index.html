@@ -28,12 +28,16 @@
           {% set t, m = p.trade, p.mark %}
           <li><b>{{ t['symbol'] }}</b> {{ 'long' if t['direction'] > 0 else 'short' }}:
             {% if m.status == 'past stop' %}
-              {% set beyond = (m.price <= t['stop']) if t['direction'] > 0 else (m.price >= t['stop']) %}
+              {# The stop in force, which a trail may have moved from the one
+                 the trade was opened with. #}
+              {% set stop = m.stop if m.stop is defined else t['stop'] %}
+              {% set beyond = (m.price <= stop) if t['direction'] > 0 else (m.price >= stop) %}
               {% if m.touched_at and not beyond %}
-                traded through its stop of {{ t['stop']|price }} at {{ m.touched|price }}
+                traded through its {{ 'trailing ' if m.trail }}stop of
+                {{ (m.touched_stop or stop)|price }} at {{ m.touched|price }}
                 on {{ m.touched_at|day }}, and is at {{ m.price|price }} now.
               {% else %}
-                at {{ m.price|price }}, past its stop of {{ t['stop']|price }}.
+                at {{ m.price|price }}, past its {{ 'trailing ' if m.trail }}stop of {{ stop|price }}.
               {% endif %}
               The journal does not close it for you.
             {% else %}

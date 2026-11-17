@@ -623,33 +623,45 @@ def check_stops(conn, user=None) -> Dict:
                            "error": "split history: %s" % str(exc)[:100]})
             continue
         quote = float(bars.last_price)
-        price, stop, side = quote * split, float(row["stop"]), int(row["direction"])
+        side = int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:
-        # the journal marks both as stopped (portfolio.stop_touched), so the
-        # owner is told of both.
-        from .portfolio import stop_touched
-        touched_at, touched = stop_touched(bars, opened, stop / split, side)
-        past_now = (price - stop) * side <= 0
-        if not past_now and touched_at is None:
+        # the journal marks both as stopped, by the one rule they all read a
+        # position through (portfolio.read_stop), trail and split included.
+        from .portfolio import read_trade_stop
+        read = read_trade_stop(row, bars, split)
+        if read.trail is not None:
+            # The highs this round saw hold the trail up for every reader.
+            db.trail_seen(conn, int(row["id"]), read.best, read.best_at)
+        if not read.hit:
             continue
+        price, stop = read.price, read.stop
         said = format_price(price)
         if split != 1.0:
             said = ("%s (%s in the shares you opened with, after a %s split)"
                     % (format_price(quote), format_price(price), split_words(split)))
         side_word = "long" if side > 0 else "short"
-        if past_now:
-            message = ("%s is at %s, past the stop of %s on your %s position. "
+        kind = "the stop"
+        if read.trail is not None:
+            kind = "the trailing stop"
+        if read.past:
+            moved = ""
+            if read.moved:
+                moved = (" It had trailed %s behind the best price, %s from %s."
+                         % (read.trail.words(), "up" if side > 0 else "down",
+                            format_price(read.initial)))
+            message = ("%s is at %s, past %s of %s on your %s position.%s "
                        "The journal does not close it for you: close it, or set a "
-                       "new stop on purpose." % (row["symbol"], said,
-                                                 format_price(stop), side_word))
+                       "new stop on purpose." % (row["symbol"], said, kind,
+                                                 format_price(stop), side_word, moved))
         else:
-            when = time.strftime("%d %b", time.gmtime(touched_at)).lstrip("0")
-            message = ("%s traded at %s on %s, past the stop of %s on your %s "
+            when = time.strftime("%d %b", time.gmtime(read.touched_at)).lstrip("0")
+            message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it, or set a "
                        "new stop on purpose." % (row["symbol"],
-                                                 format_price(touched * split), when,
-                                                 format_price(stop), side_word, said))
+                                                 format_price(read.touched), when, kind,
+                                                 format_price(read.touched_stop),
+                                                 side_word, said))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
         # Two checks at once (the loop and "Check them all now") both read the

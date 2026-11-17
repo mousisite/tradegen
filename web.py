@@ -1195,40 +1195,54 @@ def trades():
                            closed=closed, summary=summary, live=live)
 
 
+def _trade_bars(trade):
+    """A journal trade's own bars, and its shares today per share the day it opened.
+
+    The bars the journal marks it with. The split is over the trade's whole
+    life: an intraday chart reaches back sixty days, and a split older than
+    that is not in its bars. Raises DataError when either cannot be had.
+    """
+    bars = market_mod.fetch_bars(trade["symbol"], trade["interval"] or "1d")
+    return bars, market_mod.split_factor_since(trade["symbol"],
+                                               int(trade["ts_opened"]), bars)
+
+
 def _mark_one(trade):
-    """Current price, open R and state for a single position.
+    """Current price, open R, the stop in force and the state of one position.
 
     In the shares of the day it opened, as its entry, stop and target are.
     After a split Yahoo quotes today's shares, so the quote is turned back,
-    and what it is today is said beside it.
+    and what it is today is said beside it. The stop is read by the rule the
+    portfolio, paper.py and the background notice read it by
+    (portfolio.read_stop), so a trail moves it the same way everywhere.
     """
-    from bot.market import fetch_bars, split_factor_since, split_words
-    bars = fetch_bars(trade["symbol"], trade["interval"] or "1d")
-    # Over the trade's whole life: an intraday chart reaches back sixty days,
-    # and a split older than that is not in its bars.
-    split = split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
-    price = bars.last_price * split
+    bars, split = _trade_bars(trade)
     direction = int(trade["direction"])
     entry, stop = float(trade["entry"]), float(trade["stop"])
+    read = portfolio_mod.read_trade_stop(trade, bars, split)
+    price = read.price
+    # R is measured from the stop the trade opened with, wherever it is now.
     risk = abs(entry - stop)
     r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
 
     target = trade["target1"]
     status = "open"
     # A stop that traded and recovered was still hit: the plan said get out.
-    touched_at, touched = portfolio_mod.stop_touched(bars, int(trade["ts_opened"]),
-                                                     stop / split, direction)
-    if ((price <= stop) if direction > 0 else (price >= stop)) or touched_at:
+    if read.hit:
         status = "past stop"
     elif target and ((price >= float(target)) if direction > 0
                      else (price <= float(target))):
         status = "past target"
     return {"price": price, "r": r_now, "status": status,
             "as_of": alerts_mod.as_of(bars), "quoted": bars.last_price,
-            "split_words": split_words(split) if split != 1.0 else "",
+            "split": split,
+            "split_words": market_mod.split_words(split) if split != 1.0 else "",
+            # The stop in force now, and how a trail has moved it.
+            "stop": read.stop, "moved": read.moved, "trail": read.trail,
+            "best": read.best, "best_at": read.best_at,
             # Where and when the stop was traded through, in the same shares.
-            "touched": touched * split if touched_at else None,
-            "touched_at": touched_at}
+            "touched": read.touched, "touched_at": read.touched_at,
+            "touched_stop": read.touched_stop}
 
 
 def _mark_to_market(open_trades):

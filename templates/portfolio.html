@@ -24,8 +24,13 @@
     <span class="eyebrow">Stop breached · action required</span>
     <ul class="list">
       {% for p in view.breached %}
-        <li><b>{{ p.symbol }}</b> is at {{ p.price|price }}, past its stop of
-          {{ p.stop|price }}: {{ p.open_pnl|money }}{% if p.open_r is not none %}
+        <li><b>{{ p.symbol }}</b>
+          {% if (p.price - p.stop) * p.direction > 0 and p.touched is not none -%}
+          traded through its {{ 'trailing ' if p.trail }}stop of
+          {{ (p.touched_stop or p.stop)|price }} and is at {{ p.price|price }}
+          {%- else -%}
+          is at {{ p.price|price }}, past its {{ 'trailing ' if p.trail }}stop
+          of {{ p.stop|price }}{%- endif %}: {{ p.open_pnl|money }}{% if p.open_r is not none %}
           ({{ p.open_r|signed }}R){% endif %}.</li>
       {% endfor %}
     </ul>

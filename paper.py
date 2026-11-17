@@ -36,7 +36,7 @@ from rich.table import Table
 from bot import config as config_mod
 from bot import database as db
 from bot.market import DataError, fetch_bars, format_price, split_factor_since
-from bot.portfolio import stop_touched
+from bot.portfolio import read_trade_stop
 
 console = Console()
 
@@ -215,8 +215,9 @@ def cmd_check(args, conn) -> int:
     table = Table(box=None, padding=(0, 1))
     for col, width, just in (("#", 3, "right"), ("symbol", 8, "left"),
                              ("side", 5, "left"), ("entry", 10, "right"),
-                             ("now", 10, "right"), ("R", 6, "right"),
-                             ("age", 4, "right"), ("status", 13, "left")):
+                             ("stop", 10, "right"), ("now", 10, "right"),
+                             ("R", 6, "right"), ("age", 4, "right"),
+                             ("status", 13, "left")):
         table.add_column(col, width=width, justify=just, no_wrap=True)
 
     # Fetch every instrument at once. One at a time, twenty positions is five
@@ -238,8 +239,8 @@ def cmd_check(args, conn) -> int:
         bars = fetched.get(t["id"])
         if bars is None:
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), "-", "-", _age(t["ts_opened"]),
-                          "[yellow]no data[/]")
+                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          _age(t["ts_opened"]), "[yellow]no data[/]")
             continue
 
         # In the shares the trade was opened with, as its entry and stop
@@ -250,10 +251,9 @@ def cmd_check(args, conn) -> int:
         except DataError:
             # A split cannot be ruled out just now.
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), "-", "-", _age(t["ts_opened"]),
-                          "[yellow]no split data[/]")
+                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          _age(t["ts_opened"]), "[yellow]no split data[/]")
             continue
-        price = bars.last_price * split
         if split != 1.0:
             from bot.market import split_words
             notes.append("#%d %s split %s since it was opened: its prices here are "
@@ -263,31 +263,41 @@ def cmd_check(args, conn) -> int:
         direction = int(t["direction"])
         entry, stop = float(t["entry"]), float(t["stop"])
         risk = abs(entry - stop)
-        r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
 
-        # Scan the bars since the trade opened for a stop or target touch, by
-        # the rule the journal pages use (portfolio.stop_touched): only bars
-        # that started after the trade did. The bar it opened in is left out,
-        # because part of that bar's range may have traded before the entry,
-        # and a low from before you bought is not your stop being hit.
+        # The stop by the rule the journal pages and the background notice
+        # use (portfolio.read_stop): only bars that started after the trade
+        # did, because part of the bar it opened in may have traded before
+        # the entry, and a low from before you bought is not your stop being
+        # hit; a trail, if it has one, behind the best price since opening;
+        # and the live price, which catches a gap through the stop before any
+        # bar covers it, and a market that is closed.
+        read = read_trade_stop(t, bars, split)
+        price = read.price
+        r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
+        if read.trail is not None:
+            db.trail_seen(conn, int(t["id"]), read.best, read.best_at)
+            where = "where it started"
+            if read.moved:
+                where = "%s from %s" % ("up" if direction > 0 else "down",
+                                        format_price(stop))
+            notes.append("#%d %s: the stop trails %s behind the best price since "
+                         "opening, %s, and is at %s, %s." % (
+                             t["id"], t["symbol"], read.trail.words(),
+                             format_price(read.best), format_price(read.stop), where))
         after = bars.timestamp > opened
         status = "open"
         target = t["target1"]
-        if stop_touched(bars, opened, stop / split, direction)[0] is not None:
+        if read.touched_at is not None:
             status = "[red]STOP HIT[/]"
         elif target and after.any():
             if (float(bars.high[after].max()) * split >= float(target) if direction > 0
                     else float(bars.low[after].min()) * split <= float(target)):
                 status = "[green]TARGET HIT[/]"
 
-        # Fall back to the live price. No bars print while a market is closed,
-        # and a gap can carry price through the stop before any bar covers it,
-        # so the bar scan alone would report a blown stop as still protected.
         if status == "open":
-            beyond_stop = (price <= stop) if direction > 0 else (price >= stop)
             hit_target = target and (
                 (price >= float(target)) if direction > 0 else (price <= float(target)))
-            if beyond_stop:
+            if read.past:
                 status = "[red]PAST STOP[/]"
             elif hit_target:
                 status = "[green]PAST TARGET[/]"
@@ -297,7 +307,7 @@ def cmd_check(args, conn) -> int:
 
         colour = "green" if r_now > 0 else "red"
         table.add_row(str(t["id"]), t["symbol"], _side(direction),
-                      format_price(entry), format_price(price),
+                      format_price(entry), format_price(read.stop), format_price(price),
                       "[%s]%+.2f[/]" % (colour, r_now), _age(t["ts_opened"]), status)
 
     console.print(Panel(table, title="Open positions marked to market",
