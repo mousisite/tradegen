@@ -10,6 +10,7 @@ import csv
 import html
 import io
 import os as _os
+import re
 import sqlite3
 import sys as _sys
 import time
@@ -877,6 +878,35 @@ try:
     check("the front page names a crossed trailing stop at the level it was crossed",
           "<b>ZZF</b> long: traded through its trailing stop of 104.5 at 104.4" in body,
           body[body.find("ZZF") - 100:][:400])
+
+    # Its table of open positions shows the stop in force, which a trail
+    # moves, and what that stop risks from the entry on what is still held.
+    def front_row(symbol):
+        """The cells of a position's row in the front page's Open positions table."""
+        page = flat(text(c.get("/")))
+        at = page.rindex("<b>%s</b>" % symbol)
+        row = page[page.rindex("<tr", 0, at):page.index("</tr>", at)]
+        return [re.sub("<[^>]+>", "", cell).strip()
+                for cell in re.findall(r"<td[^>]*>(.*?)</td>", row)]
+
+    def trailed_then_part_closed(symbol, stop, risk, highs, lows, live):
+        tid = db.open_trade(conn, symbol, "1d", 1, 100.0, stop, quantity=60,
+                            risk_amount=risk, trail_pct=0.05, user=alice.id)
+        conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                     (start - DAY + 3600, start - DAY + 3600, start - DAY + 3600, tid))
+        conn.commit()
+        BARS[symbol] = bars_of(highs, lows, live=live, start=start)
+        db.exit_trade(conn, tid, live, 40, user=alice.id)
+
+    trailed_then_part_closed("ZZM", 90.0, 600.0, [102, 104], [100, 101], live=103)
+    cells = front_row("ZZM")
+    check("the front page's open positions show the trailed stop, and the risk on what is left",
+          cells[:4] == ["ZZM", "Long", "100", "98.8"] and cells[5] == "24.00", cells)
+    trailed_then_part_closed("ZZM2", 95.0, 300.0, [110, 120, 130, 129], [104, 114, 124, 126],
+                             live=128)
+    cells = front_row("ZZM2")
+    check("and nothing at risk once the trail has carried the stop past the entry",
+          cells[3] == "123.5" and cells[5] == "0.00", cells)
     page = text(c.get("/portfolio"))
     check("and so does the portfolio", "traded through its trailing stop of" in flat(page)
           and "ZZF" in page)

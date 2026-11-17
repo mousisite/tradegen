@@ -1003,16 +1003,17 @@ def index():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)
-        open_trades = db_mod.list_trades(conn, status="open", limit=20,
-                                         user=uid())
+        # As held now: a position closed in part counts only what is left.
+        open_trades = db_mod.open_positions(conn, limit=20, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
         stored = _attention_stored(conn, uid())
     finally:
         conn.close()
-    return render_template("index.html", runs=runs, open_trades=open_trades,
-                           summary=summary, counts=counts,
-                           attention=_attention(stored, open_trades),
+    attention = _attention(stored, open_trades)
+    return render_template("index.html", runs=runs,
+                           open_trades=_held(open_trades, attention["marks"]),
+                           summary=summary, counts=counts, attention=attention,
                            has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
 
 
@@ -1157,7 +1158,7 @@ def _attention(stored: Dict, open_trades) -> Dict:
                     if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
     return {"positions": positions, "late": late, "crossed": len(crossed),
-            "unchecked": unchecked,
+            "unchecked": unchecked, "marks": marks,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
             "watch": stored["watch"], "watch_more": stored["watch_more"],
@@ -1166,6 +1167,26 @@ def _attention(stored: Dict, open_trades) -> Dict:
             "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
             "checked": stored["checked"],
             "any": bool(positions or fired or unchecked or stored["watch"] or buys)}
+
+
+def _held(open_trades, marks) -> list:
+    """The front page's open positions, at the stop in force and the size still held.
+
+    A trail moves the stop and closing part of a position shrinks it, so
+    stop_now is the stop the journal reads (the position's mark), and
+    at_risk what that stop would lose from the entry on what is left:
+    nothing once a trail has carried it past the entry. A position whose
+    price did not come back in time shows the stop it was opened with.
+    """
+    out = []
+    for t in open_trades:
+        stop = (marks.get(t["id"]) or {}).get("stop", t["stop"])
+        left = t["quantity"]
+        at_risk = (None if left is None else
+                   max(0.0, (float(t["entry"]) - float(stop)) * int(t["direction"]))
+                   * float(left))
+        out.append(dict(t, stop_now=stop, at_risk=at_risk))
+    return out
 
 
 def _safe_back(raw, fallback):
