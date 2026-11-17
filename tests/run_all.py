@@ -52,7 +52,7 @@ SUITES = [
     ("test_record.py",       False, "the public track record, splits, and the strategy tests' margins"),
     ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
     ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
-    ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it"),
+    ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it, the review sign-in"),
 ]
 
 TIMEOUT = 900

@@ -2086,6 +2086,94 @@ def code_verify(channel):
                            to=pending["to"], error=error)
 
 
+# Apple's reviewers must be able to sign in to the iPhone app, and they cannot
+# receive an email or a text, so a code sign-in alone fails review. Two
+# settings let one named account in with a fixed code instead:
+# REVIEW_LOGIN_EMAIL and REVIEW_LOGIN_CODE. With either missing, or a code
+# shorter than REVIEW_CODE_MIN, this door does not exist. Nothing links to it;
+# the address and the code go only in App Store Connect's review notes.
+REVIEW_CODE_MIN = 16
+# Tries an hour, counted per network at three times this (see _rate_limited).
+REVIEW_TRIES_PER_HOUR = 5
+REVIEW_ERROR = "That email and code do not match. Check both, then try again."
+REVIEW_TOO_OFTEN = "Too many tries from this network. Wait an hour, then try again."
+
+
+def _review_login() -> Optional[Tuple[str, str]]:
+    """The review account's address and code, or None when switched off."""
+    email = (os.environ.get("REVIEW_LOGIN_EMAIL") or "").strip().lower()
+    code = (os.environ.get("REVIEW_LOGIN_CODE") or "").strip()
+    if not email or len(code) < REVIEW_CODE_MIN:
+        return None
+    return email, code
+
+
+def _review_account(conn, email: str):
+    """The review account, made on first use with the email provider.
+
+    Never the local account, the example account, an operator, or an account
+    someone signs in to another way: a fixed code must open nothing but the
+    one account kept for App Review.
+    """
+    operators = {e.strip().lower()
+                 for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+                 if e.strip()}
+    if email in operators:
+        return None
+    row = conn.execute("SELECT provider, is_local FROM users WHERE email=?",
+                       (email,)).fetchone()
+    if row is not None and (row["is_local"] or row["provider"] != "email"):
+        return None
+    try:
+        return accounts_mod.upsert_email_user(conn, email)
+    except ValueError:
+        return None
+
+
+@app.route("/signin/review", methods=["GET", "POST"])
+def review_signin():
+    """The App Review account's way in: one address, one fixed code."""
+    login = _review_login()
+    if login is None:
+        abort(404)
+    if getattr(g, "user", None) is not None:
+        return redirect(url_for("index"))
+    error = ""
+    email = ""
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip()[:200]
+        if _rate_limited("review_signin", REVIEW_TRIES_PER_HOUR):
+            return render_template("review_signin.html", error=REVIEW_TOO_OFTEN,
+                                   email=email), 429
+        want_email, want_code = login
+        code = (request.form.get("code") or "").strip()[:200]
+        # Both compared every time, in constant time, so neither the answer
+        # nor how long it took says which of the two was wrong.
+        email_ok = hmac.compare_digest(email.lower().encode("utf-8"),
+                                       want_email.encode("utf-8"))
+        code_ok = hmac.compare_digest(code.encode("utf-8"),
+                                      want_code.encode("utf-8"))
+        user = None
+        if email_ok and code_ok:
+            conn = db_mod.connect(app.config.get("DB_PATH"))
+            try:
+                user = _review_account(conn, want_email)
+            finally:
+                conn.close()
+        if user is not None:
+            # An invite link opened earlier in this browser would hand the
+            # account free Pro, and the reviewer must see the account as Free.
+            session.pop("ref", None)
+            return _finish_sign_in(user, "")
+        error = REVIEW_ERROR
+    return render_template("review_signin.html", error=error,
+                           email=email), (400 if error else 200)
+
+
+# Reachable signed out, like the other ways in.
+PUBLIC_ENDPOINTS.add("review_signin")
+
+
 @app.route("/pricing")
 def pricing():
     """Free and Pro, side by side. Only exists once billing is set up."""

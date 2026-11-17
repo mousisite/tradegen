@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% set active = 'signin' %}
+{% block title %}Review sign-in · Orenth{% endblock %}
+{# Only for Apple's App Review, which cannot receive a code by email or text.
+   Linked from nowhere, and kept out of search results. #}
+{% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+
+<div class="signin">
+  <div class="mark" aria-hidden="true">
+    {% with size=48 %}{% include "_mark.html" %}{% endwith %}
+  </div>
+  <h1>Review sign-in</h1>
+  <p class="lede">For App Review. Type the email and the code from the review
+    notes.</p>
+
+  {% if error %}<div class="notice" role="alert">{{ error }}</div>{% endif %}
+
+  <form class="codeform" method="post" action="{{ url_for('review_signin') }}">
+    <label class="sr" for="email">Email</label>
+    <input class="field" id="email" name="email" type="email" required autofocus
+           autocomplete="username" inputmode="email" placeholder="Email"
+           value="{{ email }}">
+    <label class="sr" for="code">Code</label>
+    <input class="field" id="code" name="code" type="password" required
+           autocomplete="current-password" placeholder="Code" maxlength="200"
+           style="margin-top:var(--s1)">
+    <button class="btn" type="submit">Sign in</button>
+  </form>
+</div>
+
+{% endblock %}

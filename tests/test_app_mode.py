@@ -1,13 +1,19 @@
-"""The iPhone app: what the site draws inside it.
+"""The iPhone app: what the site draws inside it, and the App Review sign-in.
 
 The app is the live site in a native shell, and it adds "OrenthApp/1" to its
 User-Agent. Inside it there must be no third-party visit counting, no Stripe
 form, link, price or discount box (the App Store allows selling Pro there only
 through Apple), nothing about Android or installing an app, and the small
 script that reaches the phone. Outside it, nothing changes.
+
+Apple's reviewers cannot receive an email or a text, so one named account can
+be signed in to with a fixed code. That door must not exist until it is set
+up, must open only that one account, must never make it Pro, and must not
+let anyone guess at the code.
 """
 import os as _os
 import sys as _sys
+from urllib.parse import urlparse
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -25,13 +31,15 @@ def check(name, ok, detail=""):
 
 STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_PRICE_ID_YEARLY": "price_y", "STRIPE_WEBHOOK_SECRET": "whsec_test"}
-for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL"]:
+REVIEW = ("REVIEW_LOGIN_EMAIL", "REVIEW_LOGIN_CODE")
+for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
     _os.environ.pop(key, None)
 
 import web  # noqa: E402
 from bot import accounts as A  # noqa: E402
 from bot import billing  # noqa: E402
 from bot import database as db  # noqa: E402
+from bot import invites  # noqa: E402
 
 c, DB = harness.isolated_web("app-mode")
 web.app.config["AUTH_MODE"] = None
@@ -205,9 +213,163 @@ try:
           and "checkout.stripe.test" in response.headers.get("Location", ""),
           (response.status_code, response.headers.get("Location")))
 
+    print()
+    print("=" * 72)
+    print("THE REVIEW SIGN-IN DOES NOT EXIST UNTIL IT IS SET UP")
+    print("=" * 72)
+    visitor = web.app.test_client()
+    check("no settings: the page is not found",
+          visitor.get("/signin/review").status_code == 404)
+    check("nor can anything be posted to it",
+          visitor.post("/signin/review", data={"email": "x@example.com",
+                                               "code": "x" * 20}).status_code == 404)
+    _os.environ["REVIEW_LOGIN_EMAIL"] = "appreview@example.com"
+    _os.environ["REVIEW_LOGIN_CODE"] = "short-code"
+    check("a code shorter than %d characters keeps it off" % web.REVIEW_CODE_MIN,
+          visitor.get("/signin/review").status_code == 404)
+
+    CODE = "Kq3-x8Rw-2mZ7-pL5v-T9"
+    _os.environ["REVIEW_LOGIN_CODE"] = CODE
+    web._RATE.clear()
+    page = visitor.get("/signin/review", headers=IN_APP)
+    body = text(page)
+    check("set up, it shows a small form", page.status_code == 200
+          and 'name="email"' in body and 'name="code"' in body, page.status_code)
+    check("which asks search engines to leave it out", 'content="noindex"' in body)
+    for path in ("/", "/signin", "/sitemap.xml", "/robots.txt", "/privacy"):
+        check("and no page links to it (%s)" % path,
+              "/signin/review" not in text(visitor.get(path)))
+
+    print()
+    print("=" * 72)
+    print("WRONG ANSWERS ALL GET THE SAME REPLY")
+    print("=" * 72)
+    wrong_code = visitor.post("/signin/review", data={
+        "email": "appreview@example.com", "code": CODE + "x"})
+    wrong_email = visitor.post("/signin/review", data={
+        "email": "someone@example.com", "code": CODE})
+    empty = visitor.post("/signin/review", data={})
+    check("a wrong code is refused", wrong_code.status_code == 400,
+          wrong_code.status_code)
+    check("a wrong address is refused", wrong_email.status_code == 400,
+          wrong_email.status_code)
+    check("an empty form is refused", empty.status_code == 400, empty.status_code)
+    check("with the same words for all three",
+          web.REVIEW_ERROR in text(wrong_code) and web.REVIEW_ERROR in text(wrong_email)
+          and web.REVIEW_ERROR in text(empty))
+    with visitor.session_transaction() as sess:
+        check("and nobody is signed in", web.SESSION_KEY not in sess)
+
+    print()
+    print("=" * 72)
+    print("THE RIGHT ANSWER OPENS THE ONE REVIEW ACCOUNT, AS FREE")
+    print("=" * 72)
+    web._RATE.clear()
+    # An invite link opened earlier in the same browser would otherwise give
+    # the new account a free week of Pro.
+    conn = db.connect(DB)
+    ref = invites.code_for(conn, free.id)
+    conn.close()
+    with visitor.session_transaction() as sess:
+        sess["ref"] = ref
+    right = visitor.post("/signin/review", data={
+        "email": "  AppReview@Example.com ", "code": CODE}, headers=IN_APP)
+    check("the address in any case, with the code, signs in",
+          right.status_code == 302, right.status_code)
+    check("and lands on the front page",
+          urlparse(right.headers.get("Location", "")).path == "/",
+          right.headers.get("Location"))
+    conn = db.connect(DB)
+    row = conn.execute("SELECT * FROM users WHERE email=?",
+                       ("appreview@example.com",)).fetchone()
+    reviewer = A.get_user(conn, row["id"]) if row else None
+    conn.close()
+    check("the account was made on first use", reviewer is not None)
+    check("with the email provider, not local and not the example",
+          reviewer is not None and reviewer.provider == "email"
+          and not reviewer.is_local)
+    check("and it is not Pro", reviewer is not None and reviewer.plan == "free"
+          and not billing.is_pro(reviewer))
+    check("not even from the invite link in the browser",
+          reviewer is not None and reviewer.bonus_until == 0)
+    account = visitor.get("/account", headers=IN_APP)
+    check("the session works: the account page opens",
+          account.status_code == 200 and "appreview@example.com" in text(account),
+          account.status_code)
+    check("and a signed-in visitor is sent on from the review page",
+          visitor.get("/signin/review").status_code == 302)
+
+    again = web.app.test_client()
+    web._RATE.clear()
+    second = again.post("/signin/review", data={
+        "email": "appreview@example.com", "code": CODE})
+    conn = db.connect(DB)
+    count = conn.execute("SELECT COUNT(*) FROM users WHERE email=?",
+                         ("appreview@example.com",)).fetchone()[0]
+    conn.close()
+    check("signing in again reaches the same account",
+          second.status_code == 302 and count == 1, (second.status_code, count))
+
+    print()
+    print("=" * 72)
+    print("A FIXED CODE NEVER OPENS ANYONE ELSE'S ACCOUNT")
+    print("=" * 72)
+    for label, email, prepare in (
+            ("the local account", A.LOCAL_EMAIL, None),
+            ("the example account", "example@orenth.invalid", "demo"),
+            ("an operator", "boss@example.com", "operator"),
+            ("an account made with Google", "googler@example.com", "google")):
+        web._RATE.clear()
+        conn = db.connect(DB)
+        if prepare == "demo":
+            from bot import demo
+            demo.user(conn)
+        elif prepare == "operator":
+            A.upsert_email_user(conn, "boss@example.com")
+            _os.environ["STOCKBOT_ADMIN_EMAIL"] = "boss@example.com"
+        elif prepare == "google":
+            A.upsert_google_user(conn, {"sub": "g-1", "email": "googler@example.com",
+                                        "email_verified": True, "name": "G"})
+        conn.close()
+        _os.environ["REVIEW_LOGIN_EMAIL"] = email
+        stranger = web.app.test_client()
+        tried = stranger.post("/signin/review", data={"email": email, "code": CODE})
+        with stranger.session_transaction() as sess:
+            signed = web.SESSION_KEY in sess
+        check("%s cannot be opened with it" % label,
+              tried.status_code == 400 and not signed
+              and web.REVIEW_ERROR in text(tried), (tried.status_code, signed))
+        _os.environ.pop("STOCKBOT_ADMIN_EMAIL", None)
+    _os.environ["REVIEW_LOGIN_EMAIL"] = "appreview@example.com"
+
+    print()
+    print("=" * 72)
+    print("GUESSING IS LIMITED PER NETWORK")
+    print("=" * 72)
+    web._RATE.clear()
+    guesser = web.app.test_client()
+    budget = web.REVIEW_TRIES_PER_HOUR * 3
+    answers = [guesser.post("/signin/review", data={
+        "email": "appreview@example.com", "code": "guess-%02d-xxxxxxxxxx" % n},
+        environ_base={"REMOTE_ADDR": "203.0.113.9"}).status_code
+        for n in range(budget + 2)]
+    check("the first %d wrong tries are each just refused" % budget,
+          answers[:budget] == [400] * budget, answers)
+    check("after that the network is told to wait", answers[budget:] == [429, 429],
+          answers[budget:])
+    late = guesser.post("/signin/review", data={
+        "email": "appreview@example.com", "code": CODE},
+        environ_base={"REMOTE_ADDR": "203.0.113.9"})
+    check("even the right code waits once the limit is reached",
+          late.status_code == 429, late.status_code)
+    elsewhere = web.app.test_client().post("/signin/review", data={
+        "email": "appreview@example.com", "code": CODE},
+        environ_base={"REMOTE_ADDR": "198.51.100.7"})
+    check("while another network can still sign in",
+          elsewhere.status_code == 302, elsewhere.status_code)
 finally:
     billing._stripe = real_stripe
-    for key in list(STRIPE) + ["STOCKBOT_ADMIN_EMAIL"]:
+    for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
         _os.environ.pop(key, None)
 
 print()
