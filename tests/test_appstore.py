@@ -11,8 +11,9 @@ belongs to, and what the site does with it.
     moving a subscription, and deleting an account.
   - What the site does with it (web.py): Apple's notification address, the
     app's state, transactions and move addresses, Stripe checkout refused to
-    someone already paying Apple, and the subscribe screen inside the app and
-    what the website says instead.
+    someone already paying Apple, the subscribe screen inside the app and
+    what the website says instead, and the warning before deleting an
+    account that Apple still bills.
 
 Apple's tests cannot sign with Apple's key either: they swap in a test root
 (testCA.der) and sign with a key under it, and so do these.
@@ -1612,6 +1613,44 @@ class Pages(WebBase):
         r = self.client(self.ben).post("/billing/checkout", data={"plan": "monthly"},
                                        headers={"User-Agent": SAFARI_UA})
         self.assertEqual(r.status_code, 303)
+
+    def test_deleting_an_account_apple_still_bills(self):
+        client = self.make_apple_pro(self.ann)
+        page = self.text(client.get("/account", headers=IN_APP))
+        notice = page.index("keeps billing through Apple")
+        manage = page.index("data-iap-manage", notice)
+        delete = page.index('action="/account/delete"')
+        self.assertLess(notice, manage)
+        self.assertLess(manage, delete)
+        self.assertIn("Deleting your Orenth account does not", page)
+        self.assertFalse(self.leaks(page), self.leaks(page))
+        web_page = self.text(client.get("/account", headers={"User-Agent": SAFARI_UA}))
+        self.assertIn('href="https://apps.apple.com/account/subscriptions" data-iap-manage', web_page)
+        # And deleting still happens at once.
+        r = client.post("/account/delete", data={"confirm": "delete"}, headers=IN_APP)
+        self.assertEqual(r.status_code, 302)
+        conn = db.connect(WEB_DB)
+        try:
+            self.assertIsNone(A.get_user(conn, self.ann.id))
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?",
+                                          (self.ann.id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM apple_subs WHERE user_id=?",
+                                          (self.ann.id,)).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_no_warning_without_an_apple_subscription(self):
+        page = self.text(self.client(self.ben).get("/account", headers=IN_APP))
+        self.assertNotIn("data-apple-billing", page)
+        self.assertNotIn("data-iap-manage", page)
+
+    def test_a_cancelled_apple_subscription_says_so(self):
+        client = self.make_apple_pro(self.ann, renews=False)
+        page = self.text(client.get("/account", headers=IN_APP))
+        self.assertIn("set not to renew", page)
+        self.assertNotIn("keeps billing through Apple", page)
+        pricing = self.text(client.get("/pricing", headers=IN_APP))
+        self.assertIn("will not renew", pricing)
 
     def test_a_test_purchase_is_labelled(self):
         client = self.make_apple_pro(self.ann, env="Sandbox")

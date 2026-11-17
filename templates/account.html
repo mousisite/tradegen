@@ -195,6 +195,26 @@
   <div class="sechead"><h2>Leaving</h2></div>
   <div class="card" style="border-color:var(--loss)">
     <span class="eyebrow" style="color:var(--loss)">This cannot be undone</span>
+    {# Apple asks that someone with a subscription billed through Apple hears
+       it before deleting (5.1.1(v)): deleting here cannot stop Apple's
+       billing, so the way to cancel comes first. Deleting stays one step
+       away, straight after it. #}
+    {% if apple.billing %}
+      <div class="notice" data-apple-billing style="margin-top:var(--s2)">
+        {% if apple.billing.renews %}
+          <p class="prose"><b>Your Apple subscription keeps billing through Apple
+            until you cancel it.</b> Deleting your Orenth account does not
+            cancel it. Cancel it first in your iPhone's Settings &gt; Apple
+            Account &gt; Subscriptions, or with the button below.</p>
+        {% else %}
+          <p class="prose"><b>Your Apple subscription is set not to renew,</b>
+            so Apple will not charge you for it again. Deleting your Orenth
+            account does not change that.</p>
+        {% endif %}
+        <a class="btn" href="{{ apple.subscriptions_url }}" data-iap-manage
+           style="margin-top:var(--s2)">Manage subscription</a>
+      </div>
+    {% endif %}
     <p class="prose" style="margin-top:var(--s1)">
       Deleting your account removes your trades, watchlist, alerts, saved theses
       and analysis history immediately and permanently. Download anything you

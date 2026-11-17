@@ -294,6 +294,11 @@ try:
                 check("an Apple Pro account is told it has Pro through Apple",
                       "You have Pro through Apple" in pricing
                       and "data-iap-manage" in pricing and "data-iap-shop" not in pricing)
+                account = text(client.get("/account", headers=IN_APP))
+                check("and its account page manages it with Apple, before deleting",
+                      0 <= account.find("keeps billing through Apple")
+                      < account.find("data-iap-manage", account.find("keeps billing"))
+                      < account.find('action="/account/delete"'))
         visitor = web.app.test_client()
         page = text(visitor.get("/pricing", headers=IN_APP))
         check("signed out, the app asks for an account first and sells nothing",
