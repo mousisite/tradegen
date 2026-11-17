@@ -268,8 +268,8 @@ def notes(since: Dict) -> List[str]:
         out.append(line)
     if since["unchecked"]:
         k = since["unchecked"]
-        out.append("%s no check from the session before to compare with yet."
-                   % ("One has" if k == 1 else "%d have" % k))
+        out.append("%s no price to compare with yet."
+                   % ("One instrument has" if k == 1 else "%d instruments have" % k))
     if since["hidden"]:
         out.append("On a free account this list has the daily call of the "
                    "popular stocks and coins only. Opening any other shows "

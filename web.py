@@ -3448,10 +3448,13 @@ def _watch_check(symbol: str, with_call: bool) -> dict:
     nobody's look, and only when with_call; otherwise only its price is read.
     """
     action, bars = None, None
-    if with_call and symbol in public_mod.NAMES:
+    # The ticker an analysis would use: an entry kept from before tickers
+    # were tidied up may still read BTC rather than BTC-USD.
+    ticker = market_mod.normalise_symbol(symbol)
+    if with_call and ticker in public_mod.NAMES:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            snap = public_mod.verdict(conn, symbol)
+            snap = public_mod.verdict(conn, ticker)
         finally:
             conn.close()
         if snap and time.time() - snap["at"] < public_mod.MAX_AGE + 3600:
@@ -3459,13 +3462,13 @@ def _watch_check(symbol: str, with_call: bool) -> dict:
     elif with_call:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
         # No calendar: it adds warnings to a plan, never changes its call.
-        result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
+        result = engine.analyse(ticker, cfg, interval="1d", with_news=False,
                                 with_learning=True, record=False,
                                 db_path=app.config.get("DB_PATH"),
                                 with_calendar=False)
         action, bars = result.plan.action, result.bars
     if bars is None:
-        bars = market_mod.fetch_bars(symbol, "1d", lookback=alerts_mod.LOOKBACK["1d"])
+        bars = market_mod.fetch_bars(ticker, "1d", lookback=alerts_mod.LOOKBACK["1d"])
     return digest_mod.reading(bars, action)
 
 

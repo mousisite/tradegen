@@ -6,6 +6,8 @@ analyse for a page view, or hand the free plan calls it does not check).
 No network: prices, analyses and the popular checks are stand-ins.
 """
 import os as _os
+import re
+import sqlite3
 import sys as _sys
 import time
 from types import SimpleNamespace as NS
@@ -135,6 +137,14 @@ try:
     db.migrate(DB)
     db.migrate(DB)
     check("making it again changes nothing", rows_of("ZZX") == [])
+    raw = sqlite3.connect(DB)
+    raw.execute("DROP TABLE watch_calls")
+    raw.commit()
+    raw.close()
+    db.migrate(DB)
+    check("a database from before it gets it at start-up, nothing else touched",
+          rows_of("ZZX") == [] and "watch_calls" in {r[0] for r in sqlite3.connect(DB).execute(
+              "SELECT name FROM sqlite_master WHERE type='table'")})
     conn = db.connect(DB)
     db.watch_call_save(conn, "zzx", TODAY, "WAIT", 10.0, 9.5, NOW - 3600)
     db.watch_call_save(conn, "ZZX", TODAY, None, 10.4, 9.5, NOW)
@@ -313,9 +323,16 @@ try:
         conn = db.connect(DB)
         public_mod.save_verdict(conn, {"symbol": "TSLA", "name": "Tesla", "action": "WAIT",
                                        "price": 300.0, "at": NOW - 2 * DAY})
+        public_mod.save_verdict(conn, {"symbol": "BTC-USD", "name": "Bitcoin",
+                                       "action": "AVOID", "price": 90000.0, "at": NOW - 600})
         conn.close()
         check("a popular check two days old is not passed off as today's call",
               web._watch_check("TSLA", True)["action"] is None)
+        del fetched[:]
+        got = web._watch_check("btc", True)
+        check("an entry kept from before tickers were tidied is checked as what it means",
+              got["action"] == "AVOID" and fetched and fetched[0][0] == "BTC-USD"
+              and not analysed, (got, fetched))
         conn = db.connect(DB)
         runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
         conn.close()
@@ -413,8 +430,8 @@ try:
     lines = digest.notes(said)
     check("the rest is said in plain sentences",
           lines[0] == "The other 3 moved less than 2% since the previous close, with "
-          "no alert or crossed stop." and lines[1] == "One has no check from the session "
-          "before to compare with yet.", lines)
+          "no alert or crossed stop." and lines[1] == "One instrument has no price to "
+          "compare with yet.", lines)
     check("an email line reads like one", digest.change_line(rows["NVDA"])
           == "The daily call went from WAIT to BUY; up 2.81% since the previous close.",
           digest.change_line(rows["NVDA"]))
@@ -448,9 +465,10 @@ try:
     check("a changed call says from what to what, in words",
           '<b class="fig">NVDA</b></a>: the daily call went from <span class="chip hold">'
           'WAIT</span> to <span class="chip long">BUY</span>.' in flat(card), flat(card)[:600])
+    # 30 minutes old when written; a busy machine may take a minute to get here.
     check("with the move and when it was checked",
           'Up <span class="fig gain">2.81%</span> since the previous close.' in flat(card)
-          and "Checked 30m ago." in card)
+          and re.search(r"Checked 3[01]m ago\.", card))
     check("a popular stock opens its public page, any other an analysis",
           'href="/stock/nvda"' in card and 'href="/analyse?symbol=ZZUP&amp;interval=1d"' in card)
     check("an alert and a crossed stop are named, not repeated in full",
@@ -461,8 +479,8 @@ try:
           in flat(card) and "last 24 hours" in card)
     mine = body[body.index("Your watchlist"):body.index("BUY calls in today")]
     check("the watchlist card shows the same daily check, not 'not analysed yet'",
-          '<b class="fig">ZZUP</b></a> <span class="chip hold">WAIT</span> <span '
-          'class="faint">daily check 30m ago at 51.5</span>' in flat(mine)
+          re.search(r'<b class="fig">ZZUP</b></a> <span class="chip hold">WAIT</span> <span '
+                    r'class="faint">daily check 3[01]m ago at 51.5</span>', flat(mine))
           and "its daily check, made with the standard settings" in flat(mine), flat(mine)[:900])
 
     sign_in(free)
@@ -484,7 +502,7 @@ try:
     watch(bo, "ZZNEVER")
     body = c.get("/").data.decode("utf-8", "replace")
     check("a watchlist not checked yet says so",
-          "One has no check from the session before to compare with yet." in flat(body))
+          "One instrument has no price to compare with yet." in flat(body))
     check("and drawing it never analysed or fetched anything", not started, started)
 
     head("THE WEEKLY EMAIL")
