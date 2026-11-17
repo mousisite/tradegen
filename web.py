@@ -376,7 +376,17 @@ def _just_signed_in(conn) -> bool:
     return age is not None and age < SIGNED_IN_JUST_NOW
 
 
-def _allowance_left(symbol: str, interval: str) -> bool:
+def _look_item(symbol: str, interval: str, exact: bool = False) -> str:
+    """What a free look is counted against: an instrument at a bar size.
+
+    LINK exactly (Interlink Electronics) is not the bare LINK (the Chainlink
+    coin), so each is its own look. The routines count the same way
+    (workflows._Looks).
+    """
+    return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+
+
+def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     """Whether a free account may open this instrument now, taking the look if so.
 
     The look is taken before the analysis runs, in one transaction with the
@@ -386,7 +396,7 @@ def _allowance_left(symbol: str, interval: str) -> bool:
     """
     if g.demo or _pro():
         return True
-    item = "%s|%s" % (symbol.upper(), interval)
+    item = _look_item(symbol, interval, exact)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _from_another_site() and not _just_signed_in(conn) \
@@ -401,11 +411,11 @@ def _allowance_left(symbol: str, interval: str) -> bool:
     return bool(taken)
 
 
-def _spend_view(symbol: str, interval: str) -> None:
+def _spend_view(symbol: str, interval: str, exact: bool = False) -> None:
     """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
     if g.demo or _pro():
         return
-    item = "%s|%s" % (symbol.upper(), interval)
+    item = _look_item(symbol, interval, exact)
     pending = g.get("views_pending") or set()
     if item in pending:
         pending.discard(item)       # shown, so the look taken for it stands
@@ -625,11 +635,15 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
-                    ttl: Optional[float] = None) -> engine.Analysis:
+                    ttl: Optional[float] = None,
+                    exact: bool = False) -> engine.Analysis:
     # The settings are part of the key. Position sizes, stops and the call
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
-    key = (symbol.upper(), interval, bool(with_news), _settings_key(cfg))
+    # So is exact: LINK exactly is Interlink Electronics, and the bare LINK
+    # the Chainlink coin.
+    key = (symbol.upper(), bool(exact), interval, bool(with_news),
+           _settings_key(cfg))
     me = uid()
     owned = None
     while True:
@@ -674,7 +688,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
     try:
         result = engine.analyse(symbol, cfg, interval=interval, with_news=with_news,
                                 source="web", db_path=app.config.get("DB_PATH"),
-                                user=me, record=record)
+                                user=me, record=record, exact=exact)
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
             _CACHE[key] = (time.time(), result,
@@ -760,6 +774,22 @@ def _strategy(name):
 
 # Whether a coin's newest finished day is one the source left blank.
 app.jinja_env.globals["blank_day"] = public_mod.blank_day
+
+
+@app.template_global()
+def exact_arg(symbol, saved=None) -> Optional[int]:
+    """exact=1 for a link or a form about Yahoo's own symbol, where it is needed.
+
+    An analysis, a run, a thesis and a scan's row all hold Yahoo's symbol, so
+    the mark goes on wherever the bare ticker reads otherwise: LINK is the
+    Chainlink coin unless it says exact=1, which makes it Interlink
+    Electronics. A watchlist entry or an alert carries its own answer (saved):
+    one saved before there was a mark was typed into the box, and keeps the
+    meaning the box gives it.
+    """
+    if saved is not None and not saved:
+        return None
+    return 1 if market_mod.needs_exact(symbol or "") else None
 
 
 @app.template_filter("day")
@@ -931,6 +961,19 @@ def _latest_runs(conn, me: int, symbols) -> Tuple[Dict, Dict]:
     return by_pair, by_symbol
 
 
+def _watched_instrument(row) -> str:
+    """Yahoo's symbol for what a watchlist entry opens, to look its calls up by.
+
+    An entry saved before the exact mark as a bare LINK opens the Chainlink
+    coin, so its calls are LINK-USD's, never those of Interlink Electronics,
+    whose analyses are kept under LINK.
+    """
+    try:
+        return market_mod.normalise_symbol(row["symbol"], exact=bool(row["exact"]))
+    except DataError:
+        return row["symbol"]
+
+
 def _attention_stored(conn, me: int) -> Dict:
     """The front page's first section, as far as the database has it."""
     now = time.time()
@@ -940,18 +983,20 @@ def _attention_stored(conn, me: int) -> Dict:
     fresh = [v for v in popular.values() if now - v["at"] <= POPULAR_FRESH]
     watched = db_mod.watchlist(conn, user=me)
     shown = watched[:WATCH_SHOWN]
-    by_pair, by_symbol = _latest_runs(conn, me, [w["symbol"] for w in shown])
+    meant = {w["symbol"]: _watched_instrument(w) for w in shown}
+    by_pair, by_symbol = _latest_runs(conn, me, meant.values())
     watch = []
     for w in shown:
         symbol, interval = w["symbol"], w["interval"] or "1d"
+        instrument = meant[symbol]
         # The public check is a daily one, so it answers only a daily watch.
-        snap = popular.get(symbol) if interval == "1d" else None
-        own = by_pair.get((symbol, interval)) or by_symbol.get(symbol)
-        item = {"symbol": symbol, "interval": interval}
+        snap = popular.get(instrument) if interval == "1d" else None
+        own = by_pair.get((instrument, interval)) or by_symbol.get(instrument)
+        item = {"symbol": symbol, "interval": interval, "exact": bool(w["exact"])}
         if snap and snap.get("action"):
             item.update(call=snap["action"], at=snap["at"], price=snap.get("price"),
                         public=True, quote_day=_quote_day(snap),
-                        slug=public_mod.slug(symbol))
+                        slug=public_mod.slug(instrument))
         elif own is not None and own["action"]:
             item.update(call=own["action"], at=own["ts"], price=own["price"],
                         public=False, run_interval=own["interval"],
@@ -1025,9 +1070,33 @@ def _safe_back(raw, fallback):
     return raw
 
 
+def _symbol_from(values) -> Tuple[str, bool]:
+    """The ticker a request names, and whether it names Yahoo's symbol exactly.
+
+    exact=1 comes with a pick from the suggestions and with every link the
+    site makes to a listing whose ticker is also a coin's: LINK alone is the
+    Chainlink coin, LINK with exact=1 is Interlink Electronics. It is kept
+    only where it changes the answer, so AAPL with or without it is one
+    analysis, one cache entry and one free look.
+    """
+    symbol = (values.get("symbol") or "").strip()
+    return symbol, values.get("exact") == "1" and market_mod.needs_exact(symbol)
+
+
+def _canonical(endpoint: str, bars) -> str:
+    """The public address of an analysis or research page, instrument and all.
+
+    Without the query every analysis gave /analyse as its own address, so a
+    shared Interlink Electronics page and a Chainlink one named the same page.
+    """
+    return _public_base() + url_for(endpoint, symbol=bars.symbol,
+                                    interval=bars.interval,
+                                    exact=exact_arg(bars.symbol))
+
+
 @app.route("/analyse")
 def analyse():
-    symbol = (request.args.get("symbol") or "").strip()
+    symbol, exact = _symbol_from(request.args)
     interval = request.args.get("interval") or "1d"
     with_news = request.args.get("news", "1") != "0"
     if not symbol:
@@ -1061,7 +1130,7 @@ def analyse():
         cfg["allow_shorts"] = True
 
 
-    if not _allowance_left(symbol, interval):
+    if not _allowance_left(symbol, interval, exact):
         return _allowance_used()
 
     if g.demo:
@@ -1070,12 +1139,12 @@ def analyse():
     try:
         result = cached_analysis(symbol, interval, cfg, with_news,
                                  record=not g.demo,
-                                 ttl=DEMO_TTL if g.demo else None)
+                                 ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
     except Exception as exc:                        # keep the app usable
         return render_template("error.html", message=str(exc), symbol=symbol), 500
-    _spend_view(symbol, interval)
+    _spend_view(symbol, interval, exact)
 
     families = _family_rollup(result)
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
@@ -1121,7 +1190,8 @@ def analyse():
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
                                result.bars.symbol))
-                               if result.bars.symbol in public_mod.NAMES else ""))
+                               if result.bars.symbol in public_mod.NAMES else ""),
+                           canonical_url=_canonical("analyse", result.bars))
 
 
 def _trade_chart(result) -> Dict:
@@ -1462,9 +1532,17 @@ def open_trade_manual():
         stop = float(request.form["stop"])
         target = request.form.get("target") or None
         qty = request.form.get("quantity") or None
+        # The ticker an analysis would use, as the alert and watch forms do:
+        # "btc" is Bitcoin, priced as BTC-USD, where it was the fund listed
+        # as BTC. Picked from the suggestions with exact=1, BTC is that fund.
+        # A journal entry is priced by its symbol as stored, so it is stored
+        # as Yahoo's own.
+        symbol, exact = _symbol_from(request.form)
+        if not symbol:
+            raise KeyError("symbol")
         db_mod.open_trade(
             conn,
-            symbol=request.form["symbol"].strip().upper(),
+            symbol=market_mod.normalise_symbol(symbol, exact=exact),
             interval=request.form.get("interval") or "1d",
             direction=direction, entry=entry, stop=stop,
             target1=float(target) if target else None,
@@ -1473,10 +1551,12 @@ def open_trade_manual():
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid())
         events_mod.bump(conn, "paper_trade")
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
         if isinstance(exc, KeyError):
             message = "Instrument, entry and stop are all required."
+        elif isinstance(exc, DataError):
+            message = "Type a ticker, for example AAPL."
         elif "could not convert" in message or "invalid literal" in message:
             message = "Entry, stop, target and size must be numbers."
         return render_template("error.html", symbol="", message=message), 400
@@ -1647,7 +1727,7 @@ def _interval_from(timeframe: Optional[str]) -> str:
 @app.route("/research")
 def research():
     """Fundamentals, valuation, filings, options and a two-sided thesis."""
-    symbol = (request.args.get("symbol") or "").strip()
+    symbol, exact = _symbol_from(request.args)
     interval = request.args.get("interval") or "1d"
     if not symbol:
         return redirect(url_for("index"))
@@ -1666,7 +1746,7 @@ def research():
                            "can look at any timeframe.")
 
 
-    if not _allowance_left(symbol, interval):
+    if not _allowance_left(symbol, interval, exact):
         return _allowance_used()
 
     cfg = _cfg()
@@ -1675,10 +1755,10 @@ def research():
     try:
         analysis = cached_analysis(symbol, interval, cfg, with_news,
                                    record=not g.demo,
-                                   ttl=DEMO_TTL if g.demo else None)
+                                   ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval)
+    _spend_view(symbol, interval, exact)
 
     # Keyed like the analysis it is built from: the thesis and the reasoning
     # quote that person's own plan, so one person's stops and targets were
@@ -1709,7 +1789,10 @@ def research():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         saved = db_mod.thesis_list(conn, analysis.bars.symbol, limit=6, user=uid())
-        watched = any(r["symbol"] == analysis.bars.symbol
+        # Watched as this instrument: an entry saved as a bare LINK is the
+        # coin, and does not make Interlink Electronics' page say watched.
+        listing = exact_arg(analysis.bars.symbol) is not None
+        watched = any(r["symbol"] == analysis.bars.symbol and bool(r["exact"]) == listing
                       for r in db_mod.watchlist(conn, user=uid()))
     finally:
         conn.close()
@@ -1729,7 +1812,8 @@ def research():
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
                            price_svg=price_svg, filed_charts=filed_charts,
-                           plain=plain_mod.explain_company(found))
+                           plain=plain_mod.explain_company(found),
+                           canonical_url=_canonical("research", analysis.bars))
 
 
 # Each save runs the research pipeline again: fundamentals, filings and risk.
@@ -1759,7 +1843,8 @@ def _thesis_price(row, bars):
 
 @app.route("/thesis/save", methods=["POST"])
 def save_thesis():
-    symbol = (request.form.get("symbol") or "").strip().upper()[:20]
+    symbol, exact = _symbol_from(request.form)
+    symbol = symbol.upper()[:20]
     interval = request.form.get("interval") or "1d"
     if not symbol or interval not in dict(INTERVALS):
         return render_template("error.html", symbol="",
@@ -1767,14 +1852,14 @@ def save_thesis():
                                        "the thesis from there."), 400
     # Saving analyses the instrument, so it costs a free look as opening it
     # does. Without this a free account could research anything from here.
-    if not _allowance_left(symbol, interval):
+    if not _allowance_left(symbol, interval, exact):
         return _allowance_used()
     if _rate_limited("thesis", THESES_PER_HOUR):
         return _too_often("saved theses")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         cfg = _cfg()
-        analysis = cached_analysis(symbol, interval, cfg, False)
+        analysis = cached_analysis(symbol, interval, cfg, False, exact=exact)
         found = engine.research(symbol, analysis.bars.last_price, cfg,
                                 analysis=analysis, with_options=False,
                                 with_reasoning=False)
@@ -1802,8 +1887,9 @@ def save_thesis():
                                        "Try again in a minute."), 500
     finally:
         conn.close()
-    _spend_view(symbol, interval)
-    return redirect(url_for("research", symbol=symbol, interval=interval))
+    _spend_view(symbol, interval, exact)
+    return redirect(url_for("research", symbol=symbol, interval=interval,
+                            exact=1 if exact else None))
 
 
 @app.route("/thesis/delete", methods=["POST"])
@@ -2816,15 +2902,18 @@ def add_alert():
         kind = request.form["kind"]
         threshold = _alert_value(kind, request.form.get("threshold"))
         # The same ticker an analysis would use: "btc" is Bitcoin, not the
-        # fund listed as BTC, and " aapl" is AAPL.
-        symbol = market_mod.normalise_symbol(request.form["symbol"])
+        # fund listed as BTC, and " aapl" is AAPL. Picked from the
+        # suggestions, or set from its analysis, with exact=1, BTC is the
+        # fund, and the alert remembers that it means it exactly.
+        symbol, exact = _symbol_from(request.form)
+        symbol = market_mod.normalise_symbol(symbol, exact=exact)
         # Pro is promised as many alerts as it likes; the ceiling keeps any
         # other account's list in bounds.
         db_mod.alert_add(conn, symbol, kind, threshold,
                          request.form.get("interval") or "1d",
                          request.form.get("note", ""),
                          request.form.get("repeat") == "1", user=uid(),
-                         cap=None if _pro() else db_mod.MAX_ALERTS)
+                         cap=None if _pro() else db_mod.MAX_ALERTS, exact=exact)
         events_mod.bump(conn, "alert_add")
     except (KeyError, ValueError, DataError) as exc:
         message = str(exc)
@@ -2919,10 +3008,12 @@ def watch(action):
         symbol = request.form["symbol"]
         if action == "add":
             # The ticker an analysis would use, so the watchlist routine and
-            # an alert on it look at the same instrument.
-            db_mod.watch_add(conn, market_mod.normalise_symbol(symbol),
+            # an alert on it look at the same instrument. With exact=1 it is
+            # Yahoo's own, and kept as that: LINK for Interlink Electronics.
+            _, exact = _symbol_from(request.form)
+            db_mod.watch_add(conn, market_mod.normalise_symbol(symbol, exact=exact),
                              request.form.get("interval") or "1d",
-                             request.form.get("note", ""), user=uid())
+                             request.form.get("note", ""), user=uid(), exact=exact)
             events_mod.bump(conn, "watch_add")
         elif action == "remove":
             # Exactly as stored, so an entry saved before tickers were
@@ -3078,17 +3169,17 @@ def api_search():
 @app.route("/api/analyse")
 def api_analyse():
     """JSON, for anything you want to build on top."""
-    symbol = (request.args.get("symbol") or "").strip()
+    symbol, exact = _symbol_from(request.args)
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
     # The same allowance as the pages, or the API is a way round it.
-    if not _allowance_left(symbol, interval):
+    if not _allowance_left(symbol, interval, exact):
         return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
         result = cached_analysis(symbol, interval, cfg,
-                                 request.args.get("news", "1") != "0")
+                                 request.args.get("news", "1") != "0", exact=exact)
     except DataError as exc:
         wait = _source_wait(exc)
         if wait is not None:
@@ -3097,7 +3188,7 @@ def api_analyse():
             answer.headers["Retry-After"] = str(wait)
             return answer
         return jsonify({"error": str(exc)}), 404
-    _spend_view(symbol, interval)
+    _spend_view(symbol, interval, exact)
 
     from bot import report as report_mod
     import json as _json
@@ -3263,17 +3354,18 @@ def stock_card(sym):
 @app.route("/share", methods=["POST"])
 def share():
     """Freeze what this person is looking at into a page they can pass on."""
-    symbol = (request.form.get("symbol") or "").strip().upper()[:20]
+    symbol, exact = _symbol_from(request.form)
+    symbol = symbol.upper()[:20]
     interval = request.form.get("interval") or "1d"
     if not symbol or interval not in dict(INTERVALS):
         abort(400)
-    if not _allowance_left(symbol, interval):
+    if not _allowance_left(symbol, interval, exact):
         return _allowance_used()
     try:
-        result = cached_analysis(symbol, interval, _cfg(), record=False)
+        result = cached_analysis(symbol, interval, _cfg(), record=False, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval)
+    _spend_view(symbol, interval, exact)
     snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -3376,12 +3468,16 @@ def email_stop():
                            t=request.values.get("t", ""))
 
 
-def _public_snapshot(symbol: str) -> dict:
-    """One popular instrument, analysed with the shared settings."""
+def _public_snapshot(symbol: str, exact: bool = False) -> dict:
+    """One popular instrument, analysed with the shared settings.
+
+    The weekly email uses it for watched symbols too, with exact for an
+    entry saved as Yahoo's own symbol (LINK for Interlink Electronics).
+    """
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
-                            db_path=app.config.get("DB_PATH"))
+                            db_path=app.config.get("DB_PATH"), exact=exact)
     horizon = config_mod.horizon_for("1d", cfg)
     snap = public_mod.snapshot(
         result, plain_mod.explain_plan(result.plan, result.bars),
@@ -3399,9 +3495,10 @@ def _public_snapshot(symbol: str) -> dict:
     return snap
 
 
-def _digest_look_up(symbol: str):
+def _digest_look_up(symbol: str, exact: bool = False):
     """A symbol's call for the weekly email: today's public one if there is
-    one, otherwise a fresh analysis."""
+    one, otherwise a fresh analysis. exact is for a watched listing whose
+    ticker is also a coin's, which is never one of the public ones."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         stored = public_mod.verdict(conn, symbol)
@@ -3409,7 +3506,7 @@ def _digest_look_up(symbol: str):
         conn.close()
     if stored and time.time() - stored["at"] < 2 * 86400:
         return stored
-    return _public_snapshot(symbol)
+    return _public_snapshot(symbol, exact)
 
 
 def _refresh_popular_job():
@@ -3502,13 +3599,15 @@ _CALLS: Dict = {}
 _CALLS_LOCK = threading.Lock()
 
 
-def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
+def _call_now(symbol: str, interval: str = "1d",
+              exact: bool = False) -> Optional[str]:
     """BUY, WAIT, AVOID or SHORT for an instrument, with the standard settings.
 
     A popular symbol's daily call is read from its public check when that is
-    recent; anything else is analysed once and kept for CALL_TTL.
+    recent; anything else is analysed once and kept for CALL_TTL. exact is
+    for an alert saved for Yahoo's own symbol: LINK as Interlink Electronics.
     """
-    key = (symbol.upper(), interval)
+    key = (symbol.upper(), interval, bool(exact))
     with _CALLS_LOCK:
         hit = _CALLS.get(key)
         if hit and time.time() - hit[0] < CALL_TTL:
@@ -3526,7 +3625,7 @@ def _call_now(symbol: str, interval: str = "1d") -> Optional[str]:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
         result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
                                 with_learning=True, record=False,
-                                db_path=app.config.get("DB_PATH"))
+                                db_path=app.config.get("DB_PATH"), exact=exact)
         action = (result.plan.action or "").upper() or None
     with _CALLS_LOCK:
         _CALLS[key] = (time.time(), action)

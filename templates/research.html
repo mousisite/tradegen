@@ -32,8 +32,9 @@
     <span>researched in {{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
   <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap">
+    {% set exact = exact_arg(r.symbol) %}
     <a class="btn quiet sm" data-working
-       href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval) }}">
+       href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval, exact=exact) }}">
       Back to the trade view</a>
     {% if watched %}
       <form method="post" action="{{ url_for('watch', action='remove') }}">
@@ -44,6 +45,7 @@
     {% else %}
       <form method="post" action="{{ url_for('watch', action='add') }}">
         <input type="hidden" name="symbol" value="{{ r.symbol }}">
+        {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
         <input type="hidden" name="interval" value="{{ a.bars.interval }}">
         <input type="hidden" name="back" value="{{ request.full_path }}">
         <button class="btn quiet sm" type="submit">Add to watchlist</button>
@@ -51,6 +53,7 @@
     {% endif %}
     <form method="post" action="{{ url_for('save_thesis') }}">
       <input type="hidden" name="symbol" value="{{ r.symbol }}">
+      {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
       <input type="hidden" name="interval" value="{{ a.bars.interval }}">
       <button class="btn sm" type="submit">Save this thesis</button>
     </form>

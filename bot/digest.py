@@ -120,16 +120,19 @@ def run(conn: sqlite3.Connection, secret, base: str,
         return {"checked": 0}
     this_week = week(now)
     picks = strongest(public.verdicts(conn))
-    seen: Dict[str, Optional[Dict]] = {}
+    seen: Dict[Tuple[str, bool], Optional[Dict]] = {}
 
-    def check(symbol: str) -> Dict:
-        # One look-up per symbol per run, however many people watch it.
-        if symbol not in seen:
+    def check(symbol: str, exact: bool = False) -> Dict:
+        # One look-up per symbol per run, however many people watch it. An
+        # entry saved as Yahoo's own symbol (LINK for Interlink Electronics)
+        # is looked up as that, apart from the coin a bare LINK is.
+        key = (symbol, exact)
+        if key not in seen:
             try:
-                seen[symbol] = look_up(symbol)
+                seen[key] = look_up(symbol, exact=True) if exact else look_up(symbol)
             except Exception:
-                seen[symbol] = None
-        return seen[symbol] or {"symbol": symbol}
+                seen[key] = None
+        return seen[key] or {"symbol": symbol}
 
     sent, errors = 0, []
     due = conn.execute("SELECT * FROM users WHERE weekly_email=1 AND "
@@ -145,11 +148,11 @@ def run(conn: sqlite3.Connection, secret, base: str,
             continue
         conn.commit()
         try:
-            symbols = [w["symbol"] for w in db.watchlist(conn, user=user.id)]
+            watched = db.watchlist(conn, user=user.id)[:MAX_SYMBOLS]
             stop = "%s/email/stop?u=%d&t=%s" % (base, user.id,
                                                 token(secret, user.id))
-            subject, body = compose(user, [check(s) for s in symbols[:MAX_SYMBOLS]],
-                                    picks, base, stop)
+            subject, body = compose(user, [check(w["symbol"], bool(w["exact"]))
+                                           for w in watched], picks, base, stop)
             send(user.email, subject, body,
                  {"List-Unsubscribe": "<%s>" % stop,
                   "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"})

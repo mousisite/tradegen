@@ -193,6 +193,8 @@ def _rebuild_watchlist_if_needed(conn: sqlite3.Connection, local_id: int) -> Non
     if already:
         return
 
+    # exact is the column database._migrate has just added, before this runs:
+    # left out here, the rebuilt table would lack it until the next start.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS watchlist_rekeyed (
             symbol     TEXT NOT NULL,
@@ -201,6 +203,7 @@ def _rebuild_watchlist_if_needed(conn: sqlite3.Connection, local_id: int) -> Non
             note       TEXT,
             last_run   INTEGER,
             user_id    INTEGER NOT NULL DEFAULT 1,
+            exact      INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, symbol)
         )""")
     owner = "user_id" if "user_id" in by_name else str(int(local_id))

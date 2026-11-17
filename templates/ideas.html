@@ -172,7 +172,7 @@
             </td>
             <td class="r">
               <a data-working href="{{ url_for('analyse', symbol=r.symbol,
-                 interval=result.interval) }}">Open</a>
+                 interval=result.interval, exact=exact_arg(r.symbol)) }}">Open</a>
             </td>
           </tr>
         {% endfor %}
@@ -227,7 +227,7 @@
             <td><b>{{ r.symbol }}</b></td>
             <td class="soft">{{ r.dropped_because }}</td>
             <td class="r"><a data-working
-              href="{{ url_for('research', symbol=r.symbol) }}">See why</a></td>
+              href="{{ url_for('research', symbol=r.symbol, exact=exact_arg(r.symbol)) }}">See why</a></td>
           </tr>
         {% endfor %}
         </tbody>
@@ -272,6 +272,7 @@
               <form method="post" action="{{ url_for('watch', action='add') }}"
                     style="display:inline">
                 <input type="hidden" name="symbol" value="{{ r.symbol }}">
+                {% if exact_arg(r.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
                 <input type="hidden" name="interval" value="{{ result.interval }}">
                 <input type="hidden" name="back" value="{{ request.full_path }}">
                 <button class="btn quiet sm" type="submit">Watch</button>

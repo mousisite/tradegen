@@ -22,7 +22,7 @@ from . import database as db
 from . import engine
 from . import portfolio as portfolio_mod
 from . import screener as screener_mod
-from .market import DataError, fetch_bars, format_price
+from .market import DataError, fetch_bars, format_price, needs_exact
 
 
 @dataclass
@@ -151,25 +151,30 @@ class _Looks:
         return not billing_mod.is_pro(person, (person.email or "").lower() in admins)
 
     @staticmethod
-    def _item(symbol: str, interval: str) -> str:
-        return "%s|%s" % (symbol.upper(), interval)
+    def _item(symbol: str, interval: str, exact: bool = False) -> str:
+        # The same item the site counts (web._look_item), so a look taken
+        # here and on a page is one look.
+        return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
 
-    def take(self, symbol: str, interval: str) -> str:
+    def take(self, symbol: str, interval: str, exact: bool = False) -> str:
         """"new" or "seen" when the analysis may run, "free" when no limit
         applies, and "" when today's looks are used up."""
         if not self.limited:
             return "free"
         from . import billing as billing_mod
-        taken = billing_mod.reserve_view(self.conn, self.user, self._item(symbol, interval))
+        taken = billing_mod.reserve_view(self.conn, self.user,
+                                         self._item(symbol, interval, exact))
         if not taken:
             self.refused.append(symbol)
         return taken
 
-    def give_back(self, symbol: str, interval: str, taken: str) -> None:
+    def give_back(self, symbol: str, interval: str, taken: str,
+                  exact: bool = False) -> None:
         """Return a look taken for an analysis that failed, as the site does."""
         if taken == "new":
             from . import billing as billing_mod
-            billing_mod.release_view(self.conn, self.user, self._item(symbol, interval))
+            billing_mod.release_view(self.conn, self.user,
+                                     self._item(symbol, interval, exact))
 
     def report(self, report: RunReport) -> None:
         """One step naming what was not analysed for want of a look."""
@@ -189,6 +194,12 @@ class _Looks:
 # ---------------------------------------------------------------------------
 # The routines
 # ---------------------------------------------------------------------------
+
+def _exactly(exact: bool) -> Dict:
+    """engine.analyse's exact argument, given only when it is set, so a
+    stand-in for engine.analyse that predates it still works."""
+    return {"exact": True} if exact else {}
+
 
 def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> None:
     step("Checking alerts")
@@ -274,7 +285,10 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
     looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
-        taken = looks.take(symbol, interval)
+        # Saved as Yahoo's own symbol (LINK for Interlink Electronics, not the
+        # Chainlink coin a bare LINK means), and analysed as saved.
+        exact = bool(row["exact"])
+        taken = looks.take(symbol, interval, exact)
         if not taken:
             continue
         step("Analysing %s" % symbol)
@@ -282,9 +296,10 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
             # Recorded as this person's, so it is the "before" next time.
             result = engine.analyse(symbol, cfg, interval=interval,
                                     with_news=False, record=True,
-                                    db_path=db_path, user=user, source="workflow")
+                                    db_path=db_path, user=user, source="workflow",
+                                    **_exactly(exact))
         except (DataError, Exception) as exc:
-            looks.give_back(symbol, interval, taken)
+            looks.give_back(symbol, interval, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
             continue
@@ -306,12 +321,13 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                 "Changed: %s" % symbol,
                 "%s went from %s to %s. %s" % (symbol, was, now,
                                                result.plan.headline),
-                "attention", {"symbol": symbol, "interval": interval}))
+                "attention", {"symbol": symbol, "interval": interval,
+                              "exact": exact}))
         else:
             report.steps.append(Step(
                 "Watchlist: %s" % symbol,
                 "%s, unchanged. %s" % (now, result.plan.headline), "ok",
-                {"symbol": symbol, "interval": interval}))
+                {"symbol": symbol, "interval": interval, "exact": exact}))
 
     looks.report(report)
     looked = len(rows) - len(looks.refused)
@@ -340,14 +356,15 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
         # morning check take minutes, so the deeper pass is its own routine.
         def grab(row):
             try:
-                return row["symbol"], fetch_bars(row["symbol"], row["interval"] or "1d")
+                return row, fetch_bars(row["symbol"], row["interval"] or "1d")
             except Exception:
-                return row["symbol"], None
+                return row, None
 
         with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
-            for symbol, bars in pool.map(grab, rows):
+            for row, bars in pool.map(grab, rows):
                 if bars is None:
                     continue
+                symbol = row["symbol"]
                 if bars.prev_close:
                     move = (bars.last_price - bars.prev_close) / bars.prev_close
                     if abs(move) >= 0.04:
@@ -355,7 +372,8 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
                             "Watchlist: %s" % symbol,
                             "%s moved %.1f%% to %s since the previous close."
                             % (symbol, move * 100, format_price(bars.last_price)),
-                            "attention", {"symbol": symbol}))
+                            "attention", {"symbol": symbol,
+                                          "exact": bool(row["exact"])}))
 
     counts = db.stats(conn, user=user)
     report.steps.append(Step(
@@ -387,16 +405,19 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
     looks = _Looks(conn, user)
     best = found.passed[:4]
     for candidate in best:
-        taken = looks.take(candidate.symbol, cfg["interval"])
+        # The screen lists Yahoo's own symbols, all of them companies: LINK
+        # there is Interlink Electronics, never the coin.
+        exact = needs_exact(candidate.symbol)
+        taken = looks.take(candidate.symbol, cfg["interval"], exact)
         if not taken:
             continue
         step("Analysing %s" % candidate.symbol)
         try:
             result = engine.analyse(candidate.symbol, cfg, interval=cfg["interval"],
                                     with_news=False, record=True, db_path=db_path,
-                                    user=user, source="workflow")
+                                    user=user, source="workflow", **_exactly(exact))
         except Exception as exc:
-            looks.give_back(candidate.symbol, cfg["interval"], taken)
+            looks.give_back(candidate.symbol, cfg["interval"], taken, exact)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))
             continue
@@ -404,7 +425,8 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
         report.steps.append(Step(
             "Candidate: %s" % candidate.symbol,
             "%s. %s" % (result.plan.action, result.plan.headline), status,
-            {"symbol": candidate.symbol, "interval": cfg["interval"]}))
+            {"symbol": candidate.symbol, "interval": cfg["interval"],
+             "exact": exact}))
 
     looks.report(report)
     if len(looks.refused) == len(best):

@@ -88,7 +88,7 @@
             {% for w in att.watch %}
               {# A popular stock opens its public page, which costs no look;
                  anything else opens a fresh analysis. #}
-              <li>{% if w.public %}<a href="{{ url_for('stock_page', sym=w.slug) }}">{% else %}<a data-working href="{{ url_for('analyse', symbol=w.symbol, interval=w.interval) }}">{% endif %}<b class="fig">{{ w.symbol }}</b></a>
+              <li>{% if w.public %}<a href="{{ url_for('stock_page', sym=w.slug) }}">{% else %}<a data-working href="{{ url_for('analyse', symbol=w.symbol, interval=w.interval, exact=exact_arg(w.symbol, w.exact)) }}">{% endif %}<b class="fig">{{ w.symbol }}</b></a>
                 {% if w.call %}
                   {% set a = w.call %}
                   <span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
@@ -379,7 +379,8 @@
             <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}">
               {{ r['expectancy_r']|signed(3) ~ 'R' if r['expectancy_r'] is not none else '—' }}</td>
             <td class="r"><a data-working
-              href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval']) }}">Run again</a></td>
+              href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval'],
+                               exact=exact_arg(r['symbol'])) }}">Run again</a></td>
           </tr>
         {% endfor %}
         </tbody>

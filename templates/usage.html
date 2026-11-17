@@ -100,7 +100,8 @@
           <tbody>
           {% for s in data.symbols %}
             <tr>
-              <td><a href="{{ url_for('research', symbol=s.symbol) }}">{{ s.symbol }}</a></td>
+              <td><a href="{{ url_for('research', symbol=s.symbol,
+                                      exact=exact_arg(s.symbol)) }}">{{ s.symbol }}</a></td>
               <td class="r fig">{{ s.runs }}</td>
               <td class="r fig soft">{{ s.people }}</td>
             </tr>
