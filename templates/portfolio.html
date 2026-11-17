@@ -211,7 +211,7 @@
             <td class="r fig {{ tone }}">{{ s.total_change|money }}</td>
             <td class="r fig {{ tone }}">{{ "%.1f%%"|format(s.pct_of_account)
                 if s.pct_of_account is not none else '—' }}</td>
-            <td class="soft">{% if s.rows and s.rows[0].change < 0 %}{{ s.rows[0].symbol }}
+            <td class="soft say">{% if s.rows and s.rows[0].change < 0 %}{{ s.rows[0].symbol }}
               <span class="fig loss">{{ s.rows[0].change|money }}</span>{% if s.rows[0].assumed %}
               <span class="faint">(beta assumed 1)</span>{% endif %}{% else %}—{% endif %}</td>
           </tr>

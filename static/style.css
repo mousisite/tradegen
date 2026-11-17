@@ -569,6 +569,57 @@ tbody tr:hover { background: var(--paper); }
 th.r, td.r { text-align: right; }
 .card.pad0 thead th:first-child, .card.pad0 tbody td:first-child { padding-left: var(--s3); }
 .card.pad0 thead th:last-child,  .card.pad0 tbody td:last-child  { padding-right: var(--s3); }
+/* A row's buttons, side by side at the end of the row. */
+.acts { display: flex; gap: 5px; justify-content: flex-end; align-items: center;
+        flex-wrap: wrap; }
+
+/* A row of things to act on (a trade, an alert, a result) is a card of its
+   own on a phone: what it is about across the top, each figure under its
+   column's name two to a line, and its buttons across the bottom. As a
+   table it scrolled sideways, and the journal's Close and Monitor's Pause
+   sat a screen to the right of the trade or alert they belong to. The
+   names are written on each cell as data-label; a cell without one spans
+   the card, and .lead puts a cell first. */
+@media (max-width: 760px) {
+  table.stack, table.stack > tbody { display: block; }
+  table.stack > thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  table.stack > tbody > tr {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--hairline);
+  }
+  .card.pad0 table.stack > tbody > tr { padding: var(--s2) var(--s3); }
+  table.stack > tbody > tr:last-child { border-bottom: 0; }
+  /* One to a line, for cells of sentences rather than figures, under the
+     row's name in bold. */
+  table.stack.one > tbody > tr { grid-template-columns: minmax(0, 1fr); }
+  table.stack.one > tbody > tr > td:first-child { font-weight: 600; }
+  .card.pad0 table.stack > tbody > tr > td, table.stack > tbody > tr > td {
+    display: block; min-width: 0; padding: 0; border: 0; text-align: left;
+  }
+  table.stack > tbody > tr > td:not([data-label]),
+  table.stack > tbody > tr > td.wide { grid-column: 1 / -1; }
+  table.stack > tbody > tr > td.lead { order: -1; }
+  table.stack > tbody > tr > td[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    font: 500 var(--t-xs)/1.4 var(--sans); letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  table.stack .acts, table.stack .inline-form { justify-content: flex-start; }
+  /* The close form's size and price share a line, the price the wider: it
+     is filled in to the last digit. The reason and Close go under them. */
+  table.stack .inline-form .field { flex: 1 1 92px; }
+  table.stack .inline-form input[name="price"] { flex-basis: 130px; }
+}
+/* A long sentence in a table that still scrolls sideways: wide enough to
+   read in a few lines, not one word to a line down a narrow column. */
+@media (max-width: 760px) {
+  .tablewrap td.say { min-width: 15em; }
+  /* A company's name under its ticker, as the screener lists them. */
+  .tablewrap table.named td:first-child { min-width: 10em; }
+}
 
 /* ---------- meters ---------- */
 
