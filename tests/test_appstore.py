@@ -9,8 +9,10 @@ belongs to, and what the site does with it.
     refunds and their reversal, notifications out of order or twice, old
     copies sent again, one Apple ID shared by two accounts, test purchases,
     moving a subscription, and deleting an account.
-  - What the site does with it (web.py): Apple's notification address, and
-    the app's state, transactions and move addresses.
+  - What the site does with it (web.py): Apple's notification address, the
+    app's state, transactions and move addresses, Stripe checkout refused to
+    someone already paying Apple, and the subscribe screen inside the app and
+    what the website says instead.
 
 Apple's tests cannot sign with Apple's key either: they swap in a test root
 (testCA.der) and sign with a key under it, and so do these.
@@ -1512,6 +1514,128 @@ class Notifications(WebBase):
             monitoring.note = real
         self.assertEqual(len(notes), 1)
         self.assertIn("APPLE_APP_ID", notes[0][0])
+
+
+class Pages(WebBase):
+    def make_apple_pro(self, user, renews=True, env="Production"):
+        client = self.client(user)
+        token = self.state(client)["appAccountToken"]
+        otid = uuid.uuid4().hex[:12]
+        self.post(client, "/api/apple/transactions",
+                  {"jws": [self.tx(token, otid=otid, txid=otid + "1", env=env)]})
+        if not renews:
+            payload = self.note("DID_CHANGE_RENEWAL_STATUS",
+                                self.tx(token, otid=otid, txid=otid + "1", env=env),
+                                renewal={"autoRenewStatus": 0}, env=env)
+            CLIENT.post("/apple/notifications", json={"signedPayload": payload})
+        return client
+
+    def test_the_app_sells_nothing_while_it_is_off(self):
+        _os.environ.pop("APPLE_APP_ID")
+        page = self.text(self.client(self.ann).get("/pricing", headers=IN_APP))
+        self.assertIn("data-app-purchase", page)
+        self.assertIn("Upgrading is not available in the app yet", page)
+        for word in ("Restore Purchases", "data-iap-shop", "app-purchase.js", "stdeula"):
+            self.assertNotIn(word, page)
+        self.assertIsNone(PRICE.search(page))
+        self.assertFalse(self.leaks(page), self.leaks(page))
+        # Nor does the top bar offer Pro the app cannot sell.
+        self.assertNotIn(">Go Pro<", self.text(self.client(self.ann).get("/monitor", headers=IN_APP)))
+
+    def test_the_subscribe_screen_for_a_free_account(self):
+        client = self.client(self.ann)
+        page = self.text(client.get("/pricing", headers=IN_APP))
+        for needed in ('data-iap-shop data-products="app.orenth.ios.pro.monthly,app.orenth.ios.pro.yearly"',
+                       "data-iap-restore", "Restore Purchases",
+                       "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/",
+                       "Terms of Use (EULA)", 'href="/terms"', 'href="/privacy"', "Privacy Policy",
+                       "renews automatically", "at least 24 hours before the", "Settings &gt; Apple Account &gt;",
+                       "/static/app-purchase.js", "data-iap-move",
+                       "As many stocks and coins a day as you like"):
+            self.assertIn(needed, page, needed)
+        # No price at all until StoreKit gives one, and nothing of Stripe's.
+        self.assertIsNone(PRICE.search(page))
+        self.assertFalse(self.leaks(page), self.leaks(page))
+        self.assertFalse(self.sent_to_stripe)
+        # Every page in the app carries the script; a browser never does.
+        self.assertIn("/static/app-purchase.js", self.text(client.get("/monitor", headers=IN_APP)))
+        self.assertIn(">Go Pro<", self.text(client.get("/monitor", headers=IN_APP)))
+        self.assertNotIn("app-purchase.js", self.text(client.get("/pricing", headers={"User-Agent": SAFARI_UA})))
+
+    def test_signed_out_in_the_app(self):
+        page = self.text(self.client().get("/pricing", headers=IN_APP))
+        self.assertIn("Create free account", page)
+        self.assertIn("Terms of Use (EULA)", page)
+        for word in ("data-iap-shop", "data-iap-restore", "app-purchase.js"):
+            self.assertNotIn(word, page)
+        self.assertFalse(self.leaks(page), self.leaks(page))
+
+    def test_an_apple_subscriber_in_the_app(self):
+        client = self.make_apple_pro(self.ann)
+        page = self.text(client.get("/pricing", headers=IN_APP))
+        self.assertIn("You have Pro through Apple", page)
+        self.assertIn("It renews on", page)
+        self.assertIn('data-iap-manage>Manage subscription', page)
+        self.assertNotIn("data-iap-shop", page)
+        self.assertFalse(self.leaks(page), self.leaks(page))
+        account = self.text(client.get("/account", headers=IN_APP))
+        self.assertIn("Through\n        Apple", account)
+        self.assertIn("data-iap-manage", account)
+        self.assertFalse(self.leaks(account), self.leaks(account))
+
+    def test_a_web_subscriber_in_the_app_is_sold_nothing(self):
+        conn = db.connect(WEB_DB)
+        billing.set_plan(conn, self.ben.id, "pro", "active", "cus_ben")
+        conn.close()
+        page = self.text(self.client(self.ben).get("/pricing", headers=IN_APP))
+        self.assertIn("Your account already has Pro", page)
+        self.assertIn("paid for on the Orenth website", page)
+        self.assertNotIn("data-iap-shop", page)
+        self.assertFalse(self.leaks(page), self.leaks(page))
+
+    def test_the_website_points_apple_subscribers_to_apple(self):
+        client = self.make_apple_pro(self.ann)
+        page = self.text(client.get("/pricing", headers={"User-Agent": SAFARI_UA}))
+        self.assertIn(web.APPLE_PRO_SAID.replace("'", "&#39;").replace(">", "&gt;"), page)
+        self.assertNotIn('action="/billing/checkout"', page)
+        account = self.text(client.get("/account", headers={"User-Agent": SAFARI_UA}))
+        self.assertIn("https://apps.apple.com/account/subscriptions", account)
+
+    def test_stripe_checkout_is_refused_while_apple_bills(self):
+        client = self.make_apple_pro(self.ann)
+        del self.sent_to_stripe[:]
+        r = client.post("/billing/checkout", data={"plan": "monthly"}, headers={"User-Agent": SAFARI_UA})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("You have Pro through Apple", self.text(r))
+        self.assertFalse([s for s in self.sent_to_stripe if s[1] == "checkout/sessions"])
+        # Someone without Apple Pro still gets to Stripe.
+        r = self.client(self.ben).post("/billing/checkout", data={"plan": "monthly"},
+                                       headers={"User-Agent": SAFARI_UA})
+        self.assertEqual(r.status_code, 303)
+
+    def test_a_test_purchase_is_labelled(self):
+        client = self.make_apple_pro(self.ann, env="Sandbox")
+        self.assertIn("from a test purchase", self.text(client.get("/pricing", headers=IN_APP)))
+
+class Script(unittest.TestCase):
+    """static/app-purchase.js, read the way the app will run it."""
+
+    def test_script_contract(self):
+        with open(_os.path.join(_os.path.dirname(HERE), "static", "app-purchase.js"),
+                  encoding="utf-8") as f:
+            js = f.read()
+        for needed in ("nativePromise", "'AppPurchase'", "isNativePlatform", "'transaction'",
+                       "ap('unfinished')", "ap('finish'", "result.outcome === 'invalid'",
+                       "appAccountToken: state.appAccountToken", "if (state.pro)",
+                       "ap('restore')", "ap('manageSubscriptions')", "ap('entitlements')",
+                       "/api/apple/transactions", "/api/apple/move", "/api/apple/state",
+                       "textContent"):
+            self.assertIn(needed, js, needed)
+        # StoreKit's words go in as text, never as markup.
+        self.assertNotIn("innerHTML", js)
+        # Restore asks for the Apple Account's password: only from its button.
+        self.assertEqual(js.count("ap('restore')"), 1)
+        self.assertLess(js.index("function restore()"), js.index("ap('restore')"))
 
 
 if __name__ == "__main__":

@@ -49,8 +49,16 @@
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
     {% if plan.pro %}
-      <p class="prose"><b>Pro.</b> No limits.{% if plan.bonus_until and not plan.customer %}
+      <p class="prose"><b>Pro.</b> No limits.{% if apple.pro %} Through
+        Apple{% if apple.pro.test %}, from a test purchase{% endif %},
+        {% if apple.pro.renews %}renewing on{% else %}until{% endif %}
+        {{ apple.pro.until|day }}.{% elif plan.bonus_until and not plan.customer %}
         Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
+      {% if apple.pro %}
+        <p class="fine">{{ apple_pro_said }}</p>
+        <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage
+           style="margin-top:var(--s2)">Manage subscription</a>
+      {% endif %}
       {# Stripe's own page, so never inside the iPhone app. #}
       {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
