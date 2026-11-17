@@ -38,7 +38,7 @@ from rich.table import Table
 from bot import config as config_mod
 from bot import database as db
 from bot.market import DataError, fetch_bars, format_price, split_factor_since
-from bot.portfolio import atr_of, read_trade_stop, trail_from, trail_problem
+from bot.portfolio import atr_of, read_trade_stop, trade_interval, trail_from, trail_problem
 
 console = Console()
 
@@ -66,7 +66,7 @@ def _bars_for(trade):
 
     Raises DataError when either cannot be had just now.
     """
-    bars = fetch_bars(trade["symbol"], trade["interval"] or "5m")
+    bars = fetch_bars(trade["symbol"], trade_interval(trade))
     return bars, split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
 
 
@@ -342,7 +342,7 @@ def cmd_check(args, conn) -> int:
 
     def grab(trade):
         try:
-            return trade["id"], fetch_bars(trade["symbol"], trade["interval"] or "5m")
+            return trade["id"], fetch_bars(trade["symbol"], trade_interval(trade))
         except Exception:
             return trade["id"], None
 

@@ -92,6 +92,19 @@ def bars_of(highs, lows, live, start=None, splits=(), closes=None, symbol="X"):
               prev_close=float(cl[-1]) if n else float(live))
 
 
+def bars_at(rows, live, interval="1h", symbol="X"):
+    """Stand-in bars that start at the times given, each row (start, high, low)."""
+    ts = np.array([r[0] for r in rows], dtype=np.int64)
+    hi = np.array([r[1] for r in rows], dtype=float)
+    lo = np.array([r[2] for r in rows], dtype=float)
+    cl = (hi + lo) / 2
+    return NS(symbol=symbol, name=symbol, interval=interval, timestamp=ts, open=cl,
+              high=hi, low=lo, close=cl, volume=np.ones(len(ts)), last_price=float(live),
+              splits=[], asset_class="equity", currency="USD",
+              meta={"regularMarketTime": int(ts[-1]) + 3600}, market_open=False,
+              last_bar_time="", gmt_offset=0, prev_close=float(cl[-1]))
+
+
 def first(bars, k):
     """The first k bars of a stand-in, as if read k days in."""
     return NS(**dict(vars(bars), timestamp=bars.timestamp[:k], high=bars.high[:k],
@@ -428,6 +441,8 @@ SPLITS = {}
 
 def fake_bars(symbol, interval="1d", lookback=None):
     found = BARS.get(symbol)
+    if isinstance(found, dict):                 # bars for each bar size
+        found = found.get(interval)
     if found is None:
         raise market_mod.DataError("no instrument found for %r" % symbol)
     return found(lookback) if callable(found) else found
@@ -598,6 +613,56 @@ try:
           len(told) == 1 and "traded at 113 on" in told[0].message
           and "past the trailing stop of 114" in told[0].message
           and "is at 116 now" in told[0].message, [f.message for f in told])
+
+    # An hourly trade is read on its own hourly bars by all four. Yesterday's
+    # high at 10:30 trailed the stop up to 106.7, and the 14:30 bar's low of
+    # 106 crossed it before the price came back to 109. On daily bars the
+    # whole day is held to the stop from before it, 97, and shows nothing.
+    hour = 3600
+    d2 = NOW - 2 * hour - DAY                   # yesterday's session
+    d1 = d2 - DAY
+    tk = db.open_trade(conn, "ZZK", "1h", 1, 100.0, 95.0, quantity=10, trail_pct=0.03,
+                       user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                 (d1 + 1800, d1 + 1800, d1 + 1800, tk))
+    conn.commit()
+    climb = [(105, 100), (110, 104), (109, 107.5), (109, 107), (108.5, 107), (108, 106),
+             (109.5, 107.8)]
+    BARS["ZZK"] = {
+        "1h": bars_at([(d1 + k * hour, 99.8, 98.5) for k in range(7)]
+                      + [(d2 + k * hour, hi, lo) for k, (hi, lo) in enumerate(climb)]
+                      + [(d2 + DAY, 109.6, 108.8)], live=109, interval="1h"),
+        "1d": bars_of([99, 99, 99, 99, 99, 99.8, 110], [97, 97, 97, 97, 97, 98.5, 100],
+                      live=109, start=d1 - 5 * DAY)}
+    mark, pos, said, told = four("ZZK")
+    check("an hourly trade: all four read its own bars, and agree its trail was crossed",
+          mark["status"] == "past stop" and close(mark["touched"], 106.0)
+          and close(mark["touched_stop"], 106.7) and pos.breached
+          and close(pos.touched, 106.0) and close(pos.touched_stop, 106.7)
+          and "STOP HIT" in said and len(told) == 1
+          and "traded at 106 on" in told[0].message
+          and "past the trailing stop of 106.7" in told[0].message,
+          (mark.get("status"), pos.breached, pos.touched, said, [f.message for f in told]))
+    routine = workflows.RunReport(name="positions", started=0, finished=0)
+    workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH), routine,
+                               lambda _label: None, user=alice.id)
+    named = [s.detail for s in routine.steps if s.label == "Position: ZZK"]
+    check("and the positions routine names it at the level it was crossed",
+          named and "has crossed its trailing stop of 106.7" in named[0], named)
+
+    # One logged with no bar size is read on daily bars by all four.
+    tn = db.open_trade(conn, "ZZN", None, 1, 100.0, 95.0, quantity=10, trail_pct=0.05,
+                       user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                 (start - DAY + 3600, start - DAY + 3600, start - DAY + 3600, tn))
+    conn.commit()
+    BARS["ZZN"] = {"1d": bars_of([102, 106, 110, 108, 109], [100, 103, 106, 104.6, 104.4],
+                                 live=105, start=start)}
+    mark, pos, said, told = four("ZZN")
+    check("and one logged with no bar size is read on daily bars by all four",
+          mark["status"] == "past stop" and close(mark["touched_stop"], 104.5)
+          and pos.breached and "STOP HIT" in said and len(told) == 1,
+          (mark.get("status"), pos.breached, said, [f.message for f in told]))
 
 
     # -----------------------------------------------------------------------

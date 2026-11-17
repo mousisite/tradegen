@@ -217,6 +217,18 @@ def read_trade_stop(row, bars, split: float = 1.0) -> StopRead:
                      int(row["ts_opened"]), split, trail_of(row))
 
 
+def trade_interval(row) -> str:
+    """The bars a journal trade is read on: its own bar size, daily when it has none.
+
+    Every reader of its stop reads the same bars, so a stop crossed and
+    recovered inside an hourly trade's day is a crossing to all of them.
+    """
+    try:
+        return row["interval"] or "1d"
+    except (KeyError, IndexError):
+        return "1d"
+
+
 def atr_of(bars, n: int = 14) -> Optional[float]:
     """The bars' latest ATR, in their own prices, or None when it cannot be measured."""
     from .indicators import atr
@@ -312,6 +324,8 @@ class Position:
     # trail moves; R is always measured from this one, the plan's.
     initial_stop: Optional[float] = None
     trail: Optional[Trail] = None
+    # The trade's own bar size, which its stop is read on (trade_interval).
+    interval: str = "1d"
 
     @property
     def risk_per_unit(self) -> float:
@@ -423,7 +437,7 @@ def build(rows, account: float, with_correlation: bool = True,
                  entry=float(r["entry"]), stop=float(r["stop"]),
                  target=float(r["target1"]) if r["target1"] else None,
                  opened=int(r["ts_opened"]), initial_stop=float(r["stop"]),
-                 trail=trail_of(r))
+                 trail=trail_of(r), interval=trade_interval(r))
         for r in rows
     ]
 
@@ -493,7 +507,11 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
     """Attach live price, sector and risk stats to each holding, concurrently."""
     def grab(p: Position):
         try:
-            bars = fetch_bars(p.symbol, "1d")
+            # The trade's own bars, which the journal, paper.py and the stop
+            # notice read it on: on daily bars a whole day is held to the stop
+            # from before it, and an hourly trade's crossing inside it would
+            # not show. Beta and volatility below stay daily.
+            bars = fetch_bars(p.symbol, p.interval or "1d")
             # The journal's prices are in the shares of the day it opened.
             # After a split Yahoo quotes today's, ten times fewer dollars a
             # share after a ten-for-one: read as is, a long looked 90% down and
