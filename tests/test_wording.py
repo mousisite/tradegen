@@ -538,6 +538,38 @@ try:
     check("and real figures as before", (web._pct(0.25), web._signed(-0.004),
                                          web._money(1234.5)) == ("25%", "0.00", "1,234.50"))
 
+    head("THE APP STORE TEXT")
+    # What the owner pastes into App Store Connect is read by more people than
+    # any page here, so it says the counts the way the site does, and offers
+    # no download the Account page does not have.
+    from bot import export as export_mod
+    guide = open(_os.path.join(harness.ROOT, "mobile", "APP_STORE.md"), encoding="utf-8").read()
+
+    def pasted(label):
+        """The text in the code block after a **label** line of the guide."""
+        after = guide[guide.index("**%s" % label):]
+        return after.split("```", 2)[1].strip()
+
+    store = flat(pasted("Promotional Text") + " " + pasted("Description:"))
+    check("the promotional text fits App Store Connect's 170 characters",
+          len(pasted("Promotional Text")) <= 170, len(pasted("Promotional Text")))
+    check("it never says a strategy 'actually worked', or how often a setup "
+          "appeared or worked 'before'",
+          not [w for w in ("actually worked", "appeared before", "worked before")
+               if w in store], store[:300])
+    check("it says the counts are tests on past prices",
+          "how often this setup came up in tests on past prices" in store
+          and "did best in tests on past prices" in store)
+    privacy = store[store.index("PRIVACY"):store.index("Orenth is analysis software")]
+    said = [s for s in re.split(r"(?<=\.)\s+", privacy) if "download" in s]
+    exported = {"journal": "trades", "theses": "theses", "watchlist": "watchlist",
+                "alerts": "alerts"}
+    named = [w for s in said for w in exported if w in s]
+    check("it offers to download, by name, only what the Account page lets "
+          "people download",
+          said and named and "download them" not in privacy
+          and all(exported[w] in export_mod.DATASETS for w in named), (said, named))
+
     head("OFFLINE")
     check("no page reached for the network", not reached, reached[:5])
 

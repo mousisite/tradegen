@@ -269,7 +269,7 @@ Go to https://appstoreconnect.apple.com.
 **Promotional Text** (can be changed any time without a review):
 
 ```
-See how often a setup worked before, after real trading costs, and get a straight answer when there is no edge. Free to start.
+See how often a setup worked in tests on past prices, after real trading costs, and get a straight answer when there is no edge. Free to start.
 ```
 
 **Description:**
@@ -278,7 +278,7 @@ See how often a setup worked before, after real trading costs, and get a straigh
 Orenth is a research and learning tool for stocks and crypto: charts, historical back-tests, a practice (paper-trading) journal that uses virtual money only, and price alerts. Orenth is not a broker, exchange or wallet. You cannot buy, sell, deposit or hold real securities, crypto or money in Orenth, and nothing in the app is personalized investment advice.
 
 WHAT IT DOES
-- Analyse any stock or coin. Orenth back-tests 34 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how many times this setup appeared before, and how many of those times it worked.
+- Analyse any stock or coin. Orenth back-tests 34 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how often this setup came up in tests on past prices, and how often it reached its target first.
 - Says so when there is no edge. Often the honest answer is to wait, and Orenth says it plainly.
 - Find: choose stocks or crypto and a risk level, and Orenth ranks what is worth a closer look.
 - Screener: filter companies by the numbers in their SEC filings. Company figures on the research page link to the filing they came from.
@@ -286,7 +286,7 @@ WHAT IT DOES
 - Portfolio: see what your logged positions add up to, and what a bad day could cost.
 - Alerts: pick a price or watch a stock, and get a notification when something happens.
 - Track record: every day Orenth writes down its call on popular stocks and coins, and scores every one of them, wins and losses alike.
-- Strategy tests: see which strategies actually worked on which stocks and coins, after costs.
+- Strategy tests: see which strategies did best in tests on past prices of each stock and coin, after costs.
 
 LOOK AROUND FIRST
 Explore a full example account without signing up. Create a free account to keep your own journal, watchlist and alerts.
@@ -295,7 +295,7 @@ FREE AND PRO
 Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits.
 
 PRIVACY
-No ads and no tracking. Your journal, watchlist and alerts belong to your account. You can download them or delete your account at any time from the Account page.
+No ads and no tracking. Your journal, watchlist and alerts belong to your account. Your journal and saved theses can be downloaded, and your account deleted, at any time from the Account page.
 
 Orenth is analysis software, not financial advice. Every figure is measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
 

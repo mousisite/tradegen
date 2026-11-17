@@ -395,6 +395,20 @@ try:
           "starts, and keeps the last few of those copies" in page
           and "can stay until newer versions replace it, however long that takes" in page)
 
+    # It said "Every dataset can be downloaded", right after listing the
+    # watchlist and alerts, which have no download.
+    from bot import export as export_mod  # noqa: E402
+    keeping = page[page.find("<h2>Keeping and deleting</h2>"):]
+    keeping = keeping[:keeping.find("</p>")]
+    offered = " ".join(s for s in keeping.split(". ") if "download" in s)
+    check("the page names what can be downloaded, and nothing that cannot be",
+          "Every dataset" not in offered
+          and "Your journal and each of its exits, your saved theses and your "
+              "analysis history can be downloaded" in offered
+          and {"trades", "exits", "theses", "runs"} <= set(export_mod.DATASETS)
+          and all(w in export_mod.DATASETS or w not in offered
+                  for w in ("watchlist", "alerts")), offered)
+
     # -----------------------------------------------------------------------
     head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")
     # -----------------------------------------------------------------------
