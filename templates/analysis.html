@@ -602,8 +602,10 @@
 </div>
 
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
-  <a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
-  · Data from Yahoo Finance, Google News and StockTwits
+  {# The JSON is for an account's own use: for a visitor looking around the
+     example it answered only "Not signed in." #}
+  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
+  · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
 </p>
 
