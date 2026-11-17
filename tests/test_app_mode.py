@@ -596,11 +596,45 @@ check("WebAuthPlugin is the WebAuth plugin with a start method",
       and 'CAPPluginMethod(name: "start", returnType: CAPPluginReturnPromise)' in plugin
       and '"CANCELLED"' in plugin and "ASWebAuthenticationPresentationContextProviding" in plugin)
 
+purchase = read("ios", "App", "App", "AppPurchasePlugin.swift")
+check("MainViewController registers the App Store plugin at launch, beside the sign-in sheet",
+      controller.find("registerPluginInstance(WebAuthPlugin())")
+      < controller.find("registerPluginInstance(AppPurchasePlugin())")
+      < controller.find("guard let webView"))
+methods = re.findall(r'CAPPluginMethod\(name: "(\w+)", returnType: CAPPluginReturnPromise\)', purchase)
+check("AppPurchasePlugin is the AppPurchase plugin, with its eight methods",
+      'jsName: String = "AppPurchase"' in purchase and "import StoreKit" in purchase
+      and sorted(methods) == sorted(["products", "purchase", "entitlements", "restore",
+                                     "unfinished", "finish", "manageSubscriptions",
+                                     "storefront"]), methods)
+page_script = open(_os.path.join(harness.ROOT, "static", "app-purchase.js"), encoding="utf-8").read()
+called = set(re.findall(r"\bap\('(\w+)'", page_script))
+check("every method the page calls is one the plugin has", called and called <= set(methods),
+      called - set(methods))
+check("it listens to StoreKit from launch and keeps events until a page listens",
+      "Transaction.updates" in purchase and "retainUntilConsumed: true" in purchase
+      and "override public func load()" in purchase)
+check("every purchase carries the account's token, and none goes without one",
+      "[.appAccountToken(token)]" in purchase and "UUID(uuidString: tokenText)" in purchase
+      and '"appAccountToken must be a UUID", "BAD_INPUT"' in purchase)
+check("the sheet shows over the app's window on iOS 17, and iOS 15 still buys",
+      "#available(iOS 17.0, *)" in purchase and "purchase(confirmIn: scene, options: options)" in purchase
+      and "product.purchase(options: options)" in purchase)
+check("a transaction is finished only when the page asks, after the server",
+      purchase.count(".finish()") == 1
+      and purchase.index(".finish()") > purchase.index("@objc func finish("))
+check("the server gets Apple's signed copy of each transaction",
+      purchase.count('"jws": result.jwsRepresentation') == 1)
+check("restore and manage are Apple's own (AppStore.sync, showManageSubscriptions)",
+      "try await AppStore.sync()" in purchase
+      and "AppStore.showManageSubscriptions(in: scene)" in purchase)
+
 pbx = read("ios", "App", "App.xcodeproj", "project.pbxproj")
 check("Xcode project: iPhone only",
       pbx.count("TARGETED_DEVICE_FAMILY = 1;") == 2 and '"1,2"' not in pbx)
 for name, phase in (("MainViewController.swift", "Sources"),
                     ("WebAuthPlugin.swift", "Sources"),
+                    ("AppPurchasePlugin.swift", "Sources"),
                     ("PrivacyInfo.xcprivacy", "Resources")):
     check("Xcode project: %s is built into the app" % name,
           pbx.count("/* %s in %s */" % (name, phase)) == 2
