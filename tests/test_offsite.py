@@ -740,6 +740,9 @@ cli_restore = tempfile.mkdtemp(prefix="stockbot-offsite-cli-")
 code, said = run("--fetch", name, "--out", cli_restore)
 check("--fetch downloads it, checks it and verifies the database in it", code == 0
       and "matches the backup that was uploaded" in said and "integrity  ok" in said, said)
+check("and says to restore it with --restore, not by copying it over the database",
+      "python backup.py --restore " in said and "in place of the database" not in said,
+      said[-400:])
 
 corrupt = _os.path.join(folder, "stockbot-2026-11-15-000000.db")
 with open(corrupt, "wb") as fh:
@@ -825,6 +828,132 @@ check("the store saw no request it could not verify", store.problems == [], stor
 settings_off()
 store.server.shutdown()
 logging.getLogger().removeHandler(_catch)
+
+print()
+print("=" * 72)
+print("RESTORING A BACKUP")
+print("=" * 72)
+# Copying a backup over stockbot.db is not a restore. A server that was
+# stopped or killed (SIGTERM, which nothing here handles, kills it) leaves
+# stockbot.db-wal beside the file with its last writes still in it, and
+# SQLite lays them over the copy at the next open: the restore silently does
+# not take. --restore writes the backup in through SQLite's backup API.
+import subprocess  # noqa: E402
+
+home = tempfile.mkdtemp(prefix="stockbot-restore-")
+live = _os.path.join(home, "data", "stockbot.db")
+was = {k: _os.environ.get(k) for k in ("STOCKBOT_DB", "STOCKBOT_BACKUP_DIR")}
+_os.environ["STOCKBOT_DB"] = live
+_os.environ.pop("STOCKBOT_BACKUP_DIR", None)
+conn = db.connect(live)
+conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY, body TEXT)")
+conn.executemany("INSERT INTO probe (body) VALUES (?)",
+                 [("before-%d" % i + "x" * 300,) for i in range(200)])
+conn.commit()
+conn.close()
+saved = backup_mod.take(_os.path.join(home, "saved"))
+
+SERVER = r"""
+import sqlite3, sys, time
+c = sqlite3.connect(sys.argv[1])
+c.executemany("INSERT INTO probe (body) VALUES (?)",
+              [("after-%d" % i + "y" * 300,) for i in range(300)])
+c.execute("DELETE FROM probe WHERE id <= 150")
+c.commit()
+if sys.argv[2] == "hold":
+    c.execute("BEGIN IMMEDIATE")
+    c.execute("INSERT INTO probe (body) VALUES ('held')")
+print("READY", flush=True)
+time.sleep(120)
+"""
+
+
+def server(mode):
+    """A stand-in for the server: it writes, and with "hold" keeps the write
+    lock, until it is killed with no clean-up."""
+    proc = subprocess.Popen([_sys.executable, "-c", SERVER, live, mode],
+                            stdout=subprocess.PIPE, text=True)
+    for line in proc.stdout:
+        if line.strip() == "READY":
+            break
+    return proc
+
+
+kept_by_restore = _os.path.join(home, "data", "backups")
+
+
+def kept():
+    if not _os.path.isdir(kept_by_restore):
+        return []
+    return sorted(f for f in _os.listdir(kept_by_restore) if f.endswith(".db"))
+
+
+def rows(path):
+    raw = sqlite3.connect(path)
+    try:
+        return (raw.execute("SELECT COUNT(*) FROM probe").fetchone()[0],
+                raw.execute("SELECT COUNT(*) FROM probe WHERE body NOT LIKE 'before-%'")
+                .fetchone()[0])
+    finally:
+        raw.close()
+
+
+try:
+    proc = server("write")
+    proc.kill()
+    proc.wait()
+    check("a killed server leaves its last writes in the -wal",
+          _os.path.exists(live + "-wal") and _os.path.getsize(live + "-wal") > 0)
+    code, said = run("--restore", saved)
+    check("--restore checks the backup and writes it in", code == 0
+          and "integrity  ok" in said and "Restart the app" in said, said[-800:])
+    check("the database is then the backup, row for row, with nothing laid over it",
+          rows(live) == (200, 0), rows(live))
+    undo = kept()
+    check("the database as it was is backed up first, so a wrong restore can be undone",
+          len(undo) == 1 and rows(_os.path.join(kept_by_restore, undo[0])) == (350, 300)
+          and undo[0] in said, (undo, said[-400:]))
+
+    backup_mod.RESTORE_WAIT = 0.5
+    proc = server("hold")
+    try:
+        code, said = run("--restore", saved)
+    finally:
+        proc.kill()
+        proc.wait()
+    check("while another program holds the write lock it refuses, and says so",
+          code == 1 and "nothing was changed" in said.lower(), said[-600:])
+    check("and changes nothing, not even a copy taken for undoing",
+          rows(live) == (350, 300) and kept() == undo, (rows(live), kept()))
+
+    real_take = backup_mod.take
+
+    def full(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    backup_mod.take = full
+    try:
+        code, said = run("--restore", saved)
+    finally:
+        backup_mod.take = real_take
+    check("with no room to back the database up first, it changes nothing",
+          code == 1 and rows(live) == (350, 300) and "Nothing was changed" in said,
+          said[-300:])
+
+    spoilt = _os.path.join(home, "spoilt.db")
+    with open(spoilt, "wb") as fh:
+        fh.write(b"not a database at all" * 50)
+    code, said = run("--restore", spoilt)
+    check("a file that is not an intact backup is refused", code == 1
+          and rows(live) == (350, 300), said[-300:])
+    code, said = run("--restore", live)
+    check("so is the database itself", code == 1 and rows(live) == (350, 300), said[-300:])
+finally:
+    for key, value in was.items():
+        if value is None:
+            _os.environ.pop(key, None)
+        else:
+            _os.environ[key] = value
 
 print()
 print("%d failure(s)" % len(fails))

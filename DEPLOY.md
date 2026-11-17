@@ -253,6 +253,30 @@ the database inside is intact:
 python backup.py --fetch <its name> --out /data/restore
 ```
 
+Then put it in place of the live database, and restart the service in Render
+straight after, so the app brings the restored database up to date and forgets
+what it read before:
+
+```
+python backup.py --restore /data/restore/<its name>
+```
+
+`--restore` checks the copy, backs up the database as it is now into
+`/data/backups` (it prints that file's name, so a restore from the wrong copy
+can be undone the same way), and then writes the copy into the live database
+through SQLite, as one change. It works while the app is running, and if
+something holds the database's write lock for more than ten seconds it changes
+nothing and says so. Everything written since the copy was taken is lost: new
+accounts, journal entries, and plan changes from Stripe's webhooks, which
+Stripe does not send again. Accounts deleted since come back, and have to be
+deleted again. The same command restores a local backup, such as one in
+`/data/backups` or `/data/backups/before-release`.
+
+Never restore by copying a backup over `stockbot.db`. A server that was
+stopped or killed leaves `stockbot.db-wal` beside it with its last writes, and
+SQLite lays those over the copy the next time the app opens it: the database
+opens cleanly, but it is not the backup.
+
 The app only ever deletes copies named the way its backups are named. So to
 keep one for good, copy a backup by hand under another name, such as
 `keep-2026-11.db`, with `--offsite`; it stays until you delete it in
@@ -536,7 +560,12 @@ live database, then verifies the result before keeping it:
 ```
 python backup.py --csv           snapshot, plus plain-text exports
 python backup.py --verify FILE   check an existing backup is intact
+python backup.py --restore FILE  put a backup in place of the database; then restart the app
 ```
+
+Restore with `--restore`, never by copying the file over `stockbot.db`: the
+`-wal` file beside it would lay the latest writes back over the backup.
+Section 6 says more.
 
 On the server:
 
