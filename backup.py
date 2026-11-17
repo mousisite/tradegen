@@ -15,6 +15,13 @@ it is being written to, which is what this uses.
     python backup.py --keep 30           prune to the newest 30
     python backup.py --csv               also write the plain-text exports
     python backup.py --verify <file>     check a backup opens and is intact
+
+Off-site copies, once their settings are in place (see DEPLOY.md). The server
+copies each automatic backup by itself; these are for doing it by hand:
+
+    python backup.py --offsite <file>    check a backup, copy it to the bucket
+    python backup.py --offsite-list      list the copies kept there
+    python backup.py --fetch <name>      download one and check it, to restore
 """
 from __future__ import annotations
 
@@ -41,7 +48,10 @@ HEADROOM = 50 * 1024 * 1024
 
 
 def _size(path: str) -> str:
-    n = os.path.getsize(path)
+    return _bytes(os.path.getsize(path))
+
+
+def _bytes(n: float) -> str:
     for unit in ("bytes", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
             return "%.0f %s" % (n, unit) if unit == "bytes" else "%.1f %s" % (n, unit)
@@ -207,18 +217,111 @@ def first_run_in(out_dir: str, every_seconds: float,
     return max(soon, every_seconds - age)
 
 
+def _offsite_list(offsite_mod, settings) -> bool:
+    copies = offsite_mod.list_copies(settings)
+    print("  Off-site copies in %s at %s, under %s"
+          % (settings.bucket, settings.host, settings.prefix or "the top level"))
+    print()
+    if not copies:
+        print("  None yet.")
+        return True
+    for item in copies:
+        when = item["modified"][:16].replace("T", " ")
+        print("  %-36s %10s   %s" % (item["name"], _bytes(item["size"]),
+                                     (when + " UTC") if when else ""))
+    print()
+    print("  %d in all, %s. Kept there: the newest %d, the newest of each of the "
+          "last %d days and the oldest of each of the last %d months."
+          % (len(copies), _bytes(sum(i["size"] for i in copies)),
+             offsite_mod.KEEP_NEWEST, offsite_mod.KEEP_DAYS, offsite_mod.KEEP_MONTHS))
+    return True
+
+
+def _offsite_fetch(offsite_mod, settings, name: str, out_dir: str) -> bool:
+    print("  Fetching %s from %s at %s" % (name, settings.bucket, settings.host))
+    path, got = offsite_mod.fetch_copy(name, out_dir, settings)
+    print("  saved     %s  (%s)" % (path, _size(path)))
+    print("  %s" % ("it matches the backup that was uploaded" if got["checked"] else
+                    "no fingerprint was stored with it, so only its size was checked"))
+    print()
+    print("  Verifying it")
+    if not verify(path):
+        print("  It downloaded whole but is not an intact backup. Do not restore from it.")
+        return False
+    print()
+    print("  To restore from it, put it in place of the database while the app is stopped.")
+    return True
+
+
+def _offsite_copy(offsite_mod, settings, path: str) -> bool:
+    print("  Checking the backup before copying it")
+    if not verify(path):
+        print("  It did not verify, so it was not copied.")
+        return False
+    print()
+    print("  Copying it to %s at %s" % (settings.bucket, settings.host))
+    result = offsite_mod.copy_backup(path, settings=settings)
+    if not result["ok"]:
+        print("  %s" % result["detail"])
+        return False
+    print("  stored and checked: %s in %.1f s" % (_size(path), result["seconds"]))
+    print("  %s" % (result.get("note") or offsite_mod.tally(result)))
+    if not offsite_mod.managed(os.path.basename(path)):
+        print("  Its name is not one the automatic history uses, so the app never "
+              "deletes it.")
+    return True
+
+
+def _offsite(args) -> bool:
+    """The three off-site commands. Prints what happened; True when it worked."""
+    from bot import offsite as offsite_mod
+
+    settings, problem = offsite_mod.load()
+    if settings is None:
+        print("  Off-site copies are not set up%s" % (": " + problem if problem else "."))
+        print("  DEPLOY.md, under \"Copies of the backups somewhere else\", has the steps.")
+        return False
+    try:
+        if args.offsite_list:
+            return _offsite_list(offsite_mod, settings)
+        if args.fetch:
+            return _offsite_fetch(offsite_mod, settings, args.fetch, args.out)
+        return _offsite_copy(offsite_mod, settings, args.offsite)
+    except (offsite_mod.OffsiteError, OSError) as exc:
+        print("  %s" % exc)
+        return False
+
+
 def main(argv=None) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        epilog="The off-site commands need the four BACKUP_S3_ settings, which "
+               "DEPLOY.md explains. Once they are set, the server copies each "
+               "automatic backup by itself.")
     parser.add_argument("--out", default=os.path.join(here, "backups"),
-                        help="where to write backups")
+                        help="where to write backups, and where --fetch saves one")
     parser.add_argument("--keep", type=int, default=14,
                         help="how many to keep, 0 for all")
     parser.add_argument("--csv", action="store_true",
                         help="also write plain-text exports")
     parser.add_argument("--verify", metavar="FILE",
                         help="check an existing backup instead of taking one")
+    parser.add_argument("--offsite", metavar="FILE",
+                        help="check a backup, then copy it to the off-site bucket "
+                             "and check the copy that arrived")
+    parser.add_argument("--offsite-list", action="store_true",
+                        help="list the copies kept in the off-site bucket, newest first")
+    parser.add_argument("--fetch", metavar="NAME",
+                        help="download one off-site copy into the --out folder and "
+                             "check it, to restore from")
     args = parser.parse_args(argv)
+
+    if args.offsite or args.offsite_list or args.fetch:
+        print()
+        ok = _offsite(args)
+        print()
+        return 0 if ok else 1
 
     if args.verify:
         print()
@@ -251,4 +354,13 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    # The app reads its settings from .env as well as the environment, and so
+    # must this, or a local install's off-site commands find no settings. Only
+    # here, not in main(), so the tests that call main() never pick up a real
+    # bucket from a .env file.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    except ImportError:
+        pass
     sys.exit(main())

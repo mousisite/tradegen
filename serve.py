@@ -62,7 +62,7 @@ def main(argv=None) -> int:
 
     import web
     from bot import database as db_mod
-    from bot import monitoring, scheduler as scheduler_mod
+    from bot import monitoring, offsite as offsite_mod, scheduler as scheduler_mod
 
     # Before anything else, so a failure during start-up is reported too.
     monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
@@ -138,6 +138,10 @@ def main(argv=None) -> int:
                                 path=path)
                 raise RuntimeError("backup at %s did not verify" % path)
             backup_mod.prune(target, int(os.environ.get("STOCKBOT_BACKUP_KEEP", "8")))
+            # Then off this disk, when that is set up. In a thread of its own,
+            # so a slow or failing copy never holds up or fails this backup;
+            # how it went is logged and shown on /usage.
+            offsite_mod.copy_in_background(path)
             # Off a terminal, print is block-buffered, and a backup you cannot
             # see happening is nearly as bad as one that fails quietly.
             sys.stdout.flush()
@@ -164,6 +168,7 @@ def main(argv=None) -> int:
               % (every_hours, target, when))
     else:
         print("    backups        off")
+    print("    off-site       %s" % offsite_mod.describe(backups_on=every_hours > 0))
     print()
     sys.stdout.flush()
 

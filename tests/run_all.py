@@ -34,6 +34,7 @@ SUITES = [
     ("test_thesis.py",       True,  "closing a thesis out, scoring the record, safe redirects"),
     ("test_operations.py",   True,  "earnings in the window, background checking, export, overlap"),
     ("test_ops.py",          True,  "charts, scrubbed error reports, verified backups, usage access"),
+    ("test_offsite.py",      False, "off-site backup copies: signing, checks, history, restore"),
     ("test_accounts.py",     True,  "sign-in, sessions, and one person's data staying theirs"),
     ("test_signin_flow.py",  False, "the whole Google sign-in path, against a stubbed Google"),
     ("test_database.py",     True,  "schema, journal, statistics and invariants"),
