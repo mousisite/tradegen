@@ -450,12 +450,23 @@
             </tbody>
           </table>
         </div>
+      {% elif r.sentiment.method == 'skipped' %}
+        <div class="blank">News was not read for this analysis.</div>
       {% else %}
         <div class="blank">No news retrieved for this instrument.</div>
       {% endif %}
+      {% if r.sentiment.method != 'skipped' %}
       <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-        Scored by {{ r.sentiment.method }}.
+        Scored {{ 'with a built-in list of finance words'
+                  if r.sentiment.method == 'finance lexicon'
+                  else 'by ' ~ r.sentiment.method }}.
+        {# The analysis is shared by everyone who opens this ticker, so the
+           hint travels with it and the page decides who sees it: only the
+           owner of a copy on their own machine can add a key. #}
+        {% if r.sentiment.setup_hint and current_user and current_user.is_local %}
+          {{ r.sentiment.setup_hint }}{% endif %}
       </p>
+      {% endif %}
     </div>
 
     <div>
@@ -592,8 +603,10 @@
 </div>
 
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
-  <a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
-  · Data from Yahoo Finance, Google News and StockTwits
+  {# The JSON is for an account's own use: for a visitor looking around the
+     example it answered only "Not signed in." #}
+  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
+  · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
 </p>
 

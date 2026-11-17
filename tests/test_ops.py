@@ -523,7 +523,7 @@ check("the get-out price is named", "95" in " ".join(said["points"]))
 
 # The whole point of the plain version: turn a rate into counted events.
 check("the odds are given as counts, not a percentage",
-      "103 times" in said["sure"] and "34 of those" in said["sure"], said["sure"])
+      "103 times" in said["sure"] and "worked 34 of them" in said["sure"], said["sure"])
 check("and it says the bar was not cleared",
       "not been shown to make money" in said["sure"], said["sure"])
 check("gap risk is spelled out in cash", "160" in said["risk"], said["risk"])

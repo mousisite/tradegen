@@ -201,9 +201,9 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
     separate = int(round(n_eff)) if n_eff and samples and n_eff < samples - 0.5 else None
     # The page leads with the counts, so the plain explanation's own opening
     # sentence saying the same thing is dropped rather than read twice.
+    from .plain import counted
     sure = plain.get("sure", "")
-    said = ("The app looked at %d times this same setup happened before. "
-            "It worked %d of those times." % (samples, worked))
+    said = counted(samples, worked)
     if sure.startswith(said):
         sure = sure[len(said):].strip()
     return {"symbol": bars.symbol,
@@ -1136,13 +1136,18 @@ def _wrap(text: str, font, width: int, lines: int) -> List[str]:
 
 
 def counts_line(snap: Dict, short: bool = False) -> str:
-    """The page's line about past examples. short leaves out the overlap
-    sentence, for the picture card, which has room for one line only."""
+    """The page's line about past examples, said as the test on past prices
+    it is. short is for the picture card, which has room for one line of
+    1,032 pixels: this fills 946 at 13 of 42, and at most 1,031 with four-figure
+    counts, which is as large as a test of up to 2,500 sampled days goes."""
     if not snap.get("samples"):
         return "Too few past examples to count."
-    line = ("Found this setup %d times before. It worked %d of them."
-            % (snap["samples"], snap["worked"]))
-    if snap.get("separate") and not short:
+    if short:
+        return ("Tested on past prices: it hit its target before its stop "
+                "%d of %d times." % (snap["worked"], snap["samples"]))
+    from .plain import counted
+    line = counted(snap["samples"], snap["worked"])
+    if snap.get("separate"):
         line += (" Many overlap in time, so together they are worth about %d "
                  "separate tests." % snap["separate"])
     return line

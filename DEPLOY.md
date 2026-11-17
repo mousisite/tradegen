@@ -181,9 +181,12 @@ Leave it empty to let anyone with a Google account in.
 ANTHROPIC_API_KEY = <from console.anthropic.com>
 ```
 
-Without it the app works and says so plainly where a feature is unavailable.
-With it you additionally get screenshot reading, LLM sentiment scoring, and the
-written reasoning on the research page.
+Without it the app works. On a public deployment the features it would switch
+on are simply not offered: no screenshot box, no written reasoning section, and
+headlines scored by the built-in word list, with no note to visitors about a
+missing key. On your own machine the pages tell you, the owner, what the key
+would add. With it you additionally get screenshot reading, LLM sentiment
+scoring, and the written reasoning on the research page.
 
 ---
 

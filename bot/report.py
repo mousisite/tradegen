@@ -291,6 +291,10 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
                 colour, it.score, it.age_hours, it.kind,
                 it.text[:78].replace("\n", " ")))
         sent.add_row("Top items", "\n".join(lines))
+    # The terminal is only ever its owner's, so the setup hint the web pages
+    # keep to the owner is always said here.
+    if getattr(sentiment, "setup_hint", ""):
+        sent.add_row("Note", "[dim]%s[/]" % sentiment.setup_hint)
     console.print(Panel(sent, title="News and social", border_style="magenta"))
 
     # --- risks and confirmations -----------------------------------------

@@ -15,11 +15,14 @@ ratio computed from it.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from . import sec as sec_mod
 from . import yahoo
+
+log = logging.getLogger(__name__)
 
 _MODULES = ("quoteType,price,assetProfile,financialData,defaultKeyStatistics,summaryDetail,"
             "incomeStatementHistory,balanceSheetHistory,cashflowStatementHistory,"
@@ -103,7 +106,12 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
     try:
         mods = yahoo.quote_summary(symbol, _MODULES)
     except yahoo.YahooError as exc:
-        out.notes.append("Yahoo fundamentals unavailable: %s" % exc)
+        # The notes are shown on the research page, so the error's own text,
+        # which can name hosts and addresses, goes to the log. The opening
+        # words stay: Find and the screener look for them.
+        log.warning("Yahoo fundamentals for %s: %s", symbol, exc)
+        out.notes.append("Yahoo fundamentals unavailable: Yahoo did not send "
+                         "this company's figures this time.")
         mods = {}
 
     profile = mods.get("assetProfile") or {}
@@ -222,7 +230,9 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
                     "detail": "figures as filed, %s" % facts.entity,
                 })
         except Exception as exc:
-            out.notes.append("SEC data unavailable: %s" % str(exc)[:120])
+            log.warning("SEC figures for %s: %s", out.symbol, exc)
+            out.notes.append("SEC data unavailable: the filed figures could not be "
+                             "read this time.")
 
     missing = [k for k in ("revenue", "net_margin", "roe", "pe") if out.get(k) is None]
     if missing:

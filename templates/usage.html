@@ -6,8 +6,8 @@
 <div class="pagehead">
   <h1>What people actually do</h1>
   <p>Read from what the app already records, and from a daily count of a few
-    things people do here, which holds no account, address or ticker. There
-    is no analytics script on any page and nothing leaves this server.</p>
+    things people do here, which holds no account, address or ticker. These
+    counts never leave this server.</p>
 </div>
 
 <div class="card">
@@ -274,9 +274,10 @@
 <p class="legal">
   Most of this comes from rows the app already wrote in the course of doing its
   job. The day-by-day counts are kept for this page alone, as a day, what
-  happened and how many times. No analytics script runs on any page, nothing
-  is sent to a third party, and this view is limited to whoever runs the
-  installation.
+  happened and how many times, and none of them is sent to a third party.
+  Separately, pages seen by people not signed in send Metricool a visit
+  counter with no cookie, as the privacy page says. This view is limited to
+  whoever runs the installation.
 </p>
 
 {% endblock %}

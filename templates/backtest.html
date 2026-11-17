@@ -3,7 +3,7 @@
 {% if summary.tested %}
   {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ summary.tested ~ " popular stocks and coins, after trading costs, with its margin of error and beside simply buying every day. Not financial advice." %}
 {% endif %}
-{% block title %}Does {{ label }} work? Back-tested on {{ summary.tested or 'popular' }} stocks and coins · Orenth{% endblock %}
+{% block title %}Does {{ label }} work?{% if not intraday %} Back-tested on {{ summary.tested or 'popular' }} stocks and coins{% endif %} · Orenth{% endblock %}
 {% block og_title %}Does {{ label }} work? · Orenth{% endblock %}
 {% block head_extra %}{% if not summary.tested %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
@@ -11,11 +11,20 @@
 <div class="pagehead">
   <span class="eyebrow">Strategy test · {{ info.family.replace('_', ' ') }}</span>
   <h1>Does {{ label }} work?</h1>
-  <p>{{ info.description }}. Tested on every popular stock and coin, with real
-    trading costs taken off.</p>
+  <p>{{ info.description }}.{% if not intraday %} Tested on every popular stock
+    and coin, with real trading costs taken off.{% endif %}</p>
 </div>
 
-{% if not summary.tested %}
+{% if not summary.tested and intraday %}
+  {# "Being tested" would never end for this one: it cannot fire on the daily
+     prices these tests use. #}
+  <div class="plainbox">
+    <span class="eyebrow">Not in the daily test</span>
+    <p class="prose">This strategy reads the inside of a trading day, so it
+      only fires on hourly or shorter bars. These tests run on daily prices,
+      so it has no result here. An analysis on shorter bars still uses it.</p>
+  </div>
+{% elif not summary.tested %}
   <div class="plainbox">
     <span class="eyebrow">Being tested</span>
     <p class="prose">Nothing to show yet. These tests run once a day on daily

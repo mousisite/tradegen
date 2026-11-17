@@ -60,7 +60,9 @@
       {% if email_ready or phone_ready %}Email and phone sign-in send you a
       six-digit code instead of using a password.{% endif %}
     </p>
-  {% else %}
+  {% elif setup %}
+    {# Only on a copy run on its own machine, where whoever reads this is
+       whoever can set it up. #}
     <div class="card" style="text-align:left">
       <span class="eyebrow">Not set up yet</span>
       <p class="prose" style="margin-top:var(--s1)">
@@ -74,6 +76,14 @@
         somewhere other people can reach.
       </p>
     </div>
+  {% else %}
+    <div class="card" style="text-align:left">
+      <span class="eyebrow">Signing in is off for now</span>
+      <p class="prose" style="margin-top:var(--s1)">
+        Accounts cannot be opened or signed in to on this site just now. You
+        can still look around the example account.
+      </p>
+    </div>
   {% endif %}
 
   <p class="fine" style="margin-top:var(--s3)">
@@ -81,12 +91,8 @@
     <a href="{{ url_for('analyse', symbol='NVDA', interval='1d') }}">Look around first</a>,
     no account needed.
   </p>
-
-  <p class="legal" style="border-top:0;padding-top:0;margin-top:var(--s4)">
-    <b>Analysis software, not financial advice.</b>
-    Every figure this produces is measured from historical price data and can
-    stop describing the future at any moment.
-  </p>
+  {# The footer says "Analysis software, not financial advice" right below,
+     in the same words, so the page does not say it a second time. #}
 </div>
 
 {% endblock %}

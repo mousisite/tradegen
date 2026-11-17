@@ -516,7 +516,7 @@
         if (!data) { return; }
         failures = 0;
         announce(data.new_fires || [], data.now || (Date.now() / 1000));
-        if (data.cursor !== undefined && data.cursor !== null) {
+        if (data.cursor != null) {             // missing or null alike
           after = String(data.cursor);
           try { window.localStorage.setItem(KEY, after); } catch (e) {}
         }

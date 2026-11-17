@@ -57,10 +57,20 @@
   </div>
 </div>
 
+{# Research is shared by everyone who opens this ticker. What failed is said
+   by name; the errors themselves, which name hosts and libraries, are only
+   for the owner of a copy on their own machine (and the server log). #}
+{% set owner = current_user and current_user.is_local %}
 {% if r.unavailable %}
   <div class="card" style="border-color:var(--hold)">
-    <span class="eyebrow">Not available for this instrument</span>
+    <span class="eyebrow">Not available here</span>
     <ul class="list warn">{% for u in r.unavailable %}<li>{{ u }}</li>{% endfor %}</ul>
+    <p class="prose" style="margin-top:var(--s2)">Either the source has none for
+      this instrument, or it did not answer just now. Opening this page again in
+      a few minutes asks again.</p>
+    {% if owner and r.problems %}
+      <ul class="list faint">{% for p in r.problems %}<li>{{ p }}</li>{% endfor %}</ul>
+    {% endif %}
   </div>
 {% endif %}
 
@@ -68,7 +78,9 @@
    top bar; it is filled in below from the headings that actually rendered. #}
 <nav class="jump" id="jump" aria-label="Sections" hidden></nav>
 
-{% if r.reasoning %}
+{# A step this copy does not have switched on is not shown to anyone who
+   could not switch it on: it is not a fault of the page they are reading. #}
+{% if r.reasoning and (r.reasoning.available or not r.reasoning.switched_off or owner) %}
 <section style="margin-top:0">
   <div class="sechead">
     <h2>What the evidence supports</h2>
@@ -128,6 +140,9 @@
       </p>
     {% else %}
       <p class="prose">{{ r.reasoning.reason_unavailable }}</p>
+      {% if owner and r.reasoning.detail %}
+        <p class="prose faint" style="margin-top:var(--s2)">{{ r.reasoning.detail }}</p>
+      {% endif %}
     {% endif %}
   </div>
 </section>

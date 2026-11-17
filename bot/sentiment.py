@@ -119,6 +119,11 @@ class Sentiment:
     items: List[Item] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
     fresh_catalyst: bool = False
+    # How whoever runs this copy could score headlines better. Kept out of
+    # `notes`, which become the call's risks: an analysis is shared by every
+    # viewer of the same ticker, and only the owner of the copy can add a key,
+    # so the page decides who is shown this.
+    setup_hint: str = ""
 
     def label(self) -> str:
         s = self.score
@@ -356,6 +361,7 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     news = gather_news(symbol, name)
     social = gather_social(symbol)
     notes: List[str] = []
+    setup_hint = ""
 
     scored_by = "finance lexicon"
     all_items = news + social
@@ -365,9 +371,10 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         for it in all_items:
             it.score = lexicon_score(it.text)
         if use_llm and not os.environ.get("ANTHROPIC_API_KEY"):
-            notes.append("No ANTHROPIC_API_KEY set, so headlines were scored by "
-                         "keyword lexicon. LLM scoring is materially better on "
-                         "financial phrasing.")
+            setup_hint = ("No ANTHROPIC_API_KEY is set, so headlines were scored "
+                          "with the built-in word list. Claude reads financial "
+                          "phrasing much better: add the key to .env and start "
+                          "Orenth again.")
 
     # StockTwits self-tags are a direct statement of intent. Trust them over
     # inferred text sentiment, but do not let them fully override it.
@@ -398,10 +405,9 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     else:
         combined = news_score if news else social_score
 
+    # Said once, by the plan, which reads fresh_catalyst. A note here as well
+    # put the same warning on the page twice in different words.
     fresh = any(i.age_hours <= 3.0 and abs(i.score) >= 0.5 for i in news)
-    if fresh:
-        notes.append("A high-impact headline landed in the last 3 hours. "
-                     "Technical levels are less reliable right after a catalyst.")
     if not news:
         notes.append("No news retrieved for this symbol.")
     if not social:
@@ -414,5 +420,5 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         bullish_tags=bullish, bearish_tags=bearish,
         method=scored_by,
         items=sorted(all_items, key=lambda i: -abs(i.score) * i.recency_weight)[:12],
-        notes=notes, fresh_catalyst=fresh,
+        notes=notes, fresh_catalyst=fresh, setup_hint=setup_hint,
     )

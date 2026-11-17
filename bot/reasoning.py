@@ -13,12 +13,14 @@ Three safeguards:
   evidence is insufficient, which is the behaviour that makes it useful rather
   than merely fluent.
 * **Nothing here is required.** With no API key the rest of the bot works
-  unchanged, and the interface says the reasoning step is unavailable instead
-  of quietly degrading.
+  unchanged. The owner of a copy is told the reasoning step is off and what it
+  needs, instead of it quietly degrading; a visitor to a public site is not
+  shown a step that site does not offer.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +28,15 @@ from typing import Dict, List, Optional
 
 DEFAULT_MODEL = "claude-sonnet-5"
 _MAX_TOKENS = 2000
+
+log = logging.getLogger(__name__)
+
+# What anyone reading the page is told when the step is not switched on, and
+# when it was asked and failed. Every measured figure stands either way.
+_OFF = ("The written reasoning step is not switched on here. Every measured "
+        "figure on this page is unaffected.")
+_FAILED = ("The written reasoning could not be produced just now. Every "
+           "measured figure on this page is unaffected.")
 
 
 @dataclass
@@ -40,12 +51,20 @@ class Reasoning:
     blind_spots: List[str] = field(default_factory=list)
     confidence: str = ""
     model: str = ""
+    # Why there is no reasoning, in words anyone may read.
     reason_unavailable: str = ""
     raw: str = ""
     # Figures the model stated that could not be traced back to the evidence
     # it was given. Empty is the expected case; anything here is a warning.
     unverified: List[str] = field(default_factory=list)
     checked_figures: int = 0
+    # The rest of why, for whoever runs this copy: the key to add, or the
+    # error itself. Research is shared by everyone who opens a ticker, so the
+    # page decides who is shown it.
+    detail: str = ""
+    # No key or no package: the step is not part of this copy at all, rather
+    # than switched on and failing this once.
+    switched_off: bool = False
 
     @property
     def grounded(self) -> bool:
@@ -60,6 +79,16 @@ def available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def switched_off() -> Reasoning:
+    """The answer when the step cannot be asked at all, saying why to the owner."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        why = ("It needs an ANTHROPIC_API_KEY in .env, and Orenth started "
+               "again after adding it.")
+    else:
+        why = "The anthropic package is not installed."
+    return Reasoning(False, reason_unavailable=_OFF, detail=why, switched_off=True)
 
 
 def _facts_block(payload: Dict) -> str:
@@ -120,15 +149,9 @@ about markets being unpredictable."""
 
 def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
     """Ask the model to reason over gathered evidence."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return Reasoning(False, reason_unavailable=(
-            "No Anthropic API key is set, so the reasoning step is unavailable. "
-            "Every measured figure elsewhere is unaffected."))
-    try:
-        import anthropic
-    except ImportError:
-        return Reasoning(False, reason_unavailable=(
-            "The anthropic package is not installed."))
+    if not available():
+        return switched_off()
+    import anthropic
 
     chosen = model or os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
     prompt = _PROMPT.format(facts=_facts_block(payload))
@@ -145,13 +168,17 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
         text = "".join(b.text for b in response.content
                        if getattr(b, "type", "") == "text").strip()
     except Exception as exc:
-        return Reasoning(False, reason_unavailable=(
-            "The reasoning request failed: %s" % str(exc)[:160]))
+        # The error's text names hosts and the SDK's own wording: kept for
+        # the log and the owner, not for whoever opened the page.
+        log.warning("The reasoning request failed: %s", exc)
+        return Reasoning(False, reason_unavailable=_FAILED,
+                         detail="The reasoning request failed: %s" % str(exc)[:160])
 
     parsed = _parse(text)
     if parsed is None:
-        return Reasoning(False, raw=text, reason_unavailable=(
-            "The model's reply could not be read as structured output."))
+        return Reasoning(False, raw=text, reason_unavailable=_FAILED,
+                         detail="The model's reply could not be read as "
+                                "structured output.")
 
     result = Reasoning(
         available=True,

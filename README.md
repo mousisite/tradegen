@@ -580,11 +580,9 @@ Credentials are read from the environment and never from `config.json`, because
 ## Tests
 
 ```
-.runtime\python\python.exe tests
-un_all.py             all sixteen suites
-.runtime\python\python.exe tests
-un_all.py --offline   only those needing no network
-.runtime\python\python.exe tests	est_options.py        one suite on its own
+.runtime\python\python.exe tests\run_all.py             every suite
+.runtime\python\python.exe tests\run_all.py --offline   only those needing no network
+.runtime\python\python.exe tests\test_options.py        one suite on its own
 ```
 
 Each suite is an ordinary script that exits non-zero when something fails, so it
