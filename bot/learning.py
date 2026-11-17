@@ -53,6 +53,10 @@ class StrategyStat:
     sum_r: float = 0.0         # net of costs
     sum_r_gross: float = 0.0   # before costs
     sum_bars: float = 0.0
+    # How many of the trades were buys; the rest were shorts. The public
+    # strategy pages set a strategy beside buying every day or shorting
+    # every day by the side it mostly took.
+    longs: int = 0
     # What a standard error on sum_r needs. Trades a few bars apart share most
     # of their bars and win or lose together, so the spread of the results is
     # not enough on its own. These sums cover every pair of trades whose
@@ -225,6 +229,7 @@ def measure_strategies(ctx: Context, stop_atr: float, target_atr: float,
                 st = _stat(store, store_key, sig.name, sig.family, regime_label)
                 st.n += 1
                 st.wins += 1 if won else 0
+                st.longs += 1 if direction > 0 else 0
                 st.sum_r += r_mult
                 st.sum_r_gross += r_mult + cost_r
                 st.sum_bars += held

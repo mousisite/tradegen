@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
 {% if summary.tested %}
-  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ summary.tested ~ " popular stocks and coins, after trading costs, with its margin of error and beside simply buying every day. Not financial advice." %}
+  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ summary.tested ~ " popular stocks and coins, after trading costs, with its margin of error and beside simply buying or shorting every day, and holding the index. Not financial advice." %}
 {% endif %}
 {% block title %}Does {{ label }} work?{% if not intraday %} Back-tested on {{ summary.tested or 'popular' }} stocks and coins{% endif %} · Orenth{% endblock %}
 {% block og_title %}Does {{ label }} work? · Orenth{% endblock %}
@@ -43,14 +43,34 @@
       a trade averaged
       <span class="fig {{ 'gain' if summary.verdict == 1 else 'loss' if summary.verdict == -1 }}">{{ summary.kept|signed(2) }}R</span>{% if summary.se is not none %},
       give or take {{ '%.2f'|format(2 * summary.se) }}R{% endif %}.
-      {% if summary.base is not none %}Buying on every tested day of the same
-      stocks, weighted the same way, kept {{ summary.base|signed(2) }}R.{% endif %}
       It kept money on {{ summary.paid }} of the {{ summary.tested }}.</p>
     <p class="prose">It took a pretend trade on {{ "{:,}".format(summary.n) }}
       days{% if summary.separate < summary.n %}, worth about
       {{ "{:,}".format(summary.separate|round|int) }} separate trades, since
       trades a few days apart overlap{% endif %}, and worked
       {{ "{:,}".format(summary.wins) }} times ({{ (summary.wins / summary.n)|pct(0) }}).</p>
+    {% set buys = summary.side == 'buy' %}
+    {% if summary.side and summary.base is not none and summary.short_base is not none %}
+      <p class="prose">It {{ 'bought' if buys else 'shorted' }} on
+        {{ (summary.long_share if buys else 1 - summary.long_share)|pct(0) }} of its
+        trades, so set it beside <b>{{ 'buying' if buys else 'shorting' }} on
+        every tested day</b> of the same stocks, weighted the same way, which
+        kept <b>{{ (summary.base if buys else summary.short_base)|signed(2) }}R</b>.
+        {{ 'Shorting' if buys else 'Buying' }} on every one kept
+        {{ (summary.short_base if buys else summary.base)|signed(2) }}R.</p>
+    {% elif summary.base is not none %}
+      <p class="prose">Buying on every tested day of the same stocks, weighted
+        the same way, kept {{ summary.base|signed(2) }}R.</p>
+    {% endif %}
+    {% if summary.index is not none %}
+      <p class="prose">Holding the index instead, the same money for
+        {{ method.days }} trading days from each tested day of the same
+        stocks, after the same costs and weighted the same way, kept
+        {{ summary.index|signed(2) }}R a trade. The index is
+        {% if 'SPY' in summary.indexes %}SPY, a fund holding the S&amp;P
+        500{% if 'BTC-USD' in summary.indexes %}, for the stocks, and Bitcoin for
+        the coins{% endif %}{% else %}Bitcoin{% endif %}.</p>
+    {% endif %}
   </div>
 
   <div class="card pad0" style="margin-top:var(--s3)">
@@ -58,8 +78,8 @@
       <table>
         <thead><tr>
           <th>Instrument</th><th class="r">Kept a trade</th>
-          <th class="r">Buying every day</th><th class="r">Hit rate</th>
-          <th class="r">Worked</th><th class="r">Days tested</th>
+          <th class="r">Buying every day</th><th class="r">Shorting every day</th>
+          <th class="r">Hit rate</th><th class="r">Worked</th><th class="r">Days tested</th>
         </tr></thead>
         <tbody>
         {% for r in results %}
@@ -68,7 +88,9 @@
               <span class="soft">{{ r.name }}</span></td>
             <td class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if r.verdict == 1 else 'loss' if r.verdict == -1 }}">{{ r.kept|signed(2) }}R</span>{% if r.se is not none %}
               <span class="soft">±{{ '%.2f'|format(2 * r.se) }}</span>{% endif %}</td>
-            <td class="r fig soft">{% if r.base is not none %}{{ r.base|signed(2) }}R{% else %}—{% endif %}</td>
+            {# The yardstick on the strategy's own side is in full ink. #}
+            <td class="r fig{{ '' if summary.side == 'buy' else ' soft' }}">{% if r.base is not none %}{{ r.base|signed(2) }}R{% else %}—{% endif %}</td>
+            <td class="r fig{{ '' if summary.side == 'short' else ' soft' }}">{% if r.short_base is not none %}{{ r.short_base|signed(2) }}R{% else %}—{% endif %}</td>
             <td class="r fig">{{ (r.wins / r.n)|pct(0) }}</td>
             <td class="r fig">{{ "{:,}".format(r.wins) }}</td>
             <td class="r fig soft">{{ "{:,}".format(r.n) }}</td>

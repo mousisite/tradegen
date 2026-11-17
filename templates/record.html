@@ -60,6 +60,11 @@
       {{ (1 - rec.buy_worked)|pct(0) }}: that is what calling BUY, or calling
       AVOID, on every one of them would have scored. A kind of call shows skill
       only if it clearly beats that.{% endif %}</p>
+    {% if rec.classes|selectattr('together')|list %}
+    <p class="prose">The 95% ranges allow for calls on different stocks
+      settling alike, as they do on a day the whole market moves, which makes
+      them wider than the number of calls alone would.</p>
+    {% endif %}
   </div>
 
   <div class="plans" style="margin-top:var(--s3)">
@@ -68,7 +73,7 @@
         <span class="eyebrow">{{ c.label }}</span>
         {% if c.decided %}
           <p class="lead" style="margin:0">Right {{ c.rate|pct(0) }}
-            <span class="soft" style="font-size:var(--t-sm)">(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }})</span></p>
+            <span class="soft" style="font-size:var(--t-sm)">{% if c.together %}(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }}){% else %}(too early for a 95% range){% endif %}</span></p>
           <p class="prose" style="margin:0">Right {{ times(c.right) }}, wrong
             {{ times(c.wrong) }}{% if c.flat %}, {{ c.flat }} went nowhere{% endif %}.
             {{ c.decided }} decided call{{ '' if c.decided == 1 else 's' }}, about
@@ -76,13 +81,16 @@
             {% if c.waiting %}{{ c.waiting }} more still to count.{% endif %}</p>
           {% if c.chance is not none %}
             <p class="prose" style="margin:0">Chance level: {{ c.chance|pct(0) }}.
-              {% if c.lo > c.chance %}Above it, beyond the margin of error.
+              {% if not c.together %}Not yet distinguishable from chance: these
+              calls cover too few weeks of the market to tell.
+              {% elif c.lo > c.chance %}Above it, beyond the margin of error.
               {% elif c.hi < c.chance %}Below it, beyond the margin of error.
               {% else %}Not yet distinguishable from chance.{% endif %}</p>
           {% endif %}
           <p class="prose faint" style="margin:0;font-size:var(--t-xs)">A buy after
-            these calls moved {{ move(c.mean_move) }} on average (median
-            {{ move(c.median_move) }}), after costs{% if c.mean_r is not none %}:
+            these calls moved {{ move(c.mean_move) }} on average{% if c.move_lo is not none %}
+            (95% range {{ (c.move_lo * 100)|signed(1) }}% to {{ (c.move_hi * 100)|signed(1) }}%){% endif %},
+            median {{ move(c.median_move) }}, after costs{% if c.mean_r is not none %}:
             {{ c.mean_r|signed(2) }}R a trade{% endif %}.</p>
         {% else %}
           <p class="prose">Nothing scored yet{% if c.waiting %}: {{ c.waiting }} still to count{% endif %}.</p>
@@ -125,6 +133,47 @@
   </section>
 {% endif %}
 
+{% if prints %}
+  <section id="fingerprints" style="margin-top:var(--s4)">
+    <div class="sechead"><h2>A fingerprint of each day's calls</h2>
+      <a class="tail" href="{{ url_for('record_fingerprints') }}">every day's, as a file &rarr;</a></div>
+    <p class="prose">Once a day is over, the calls written down that day get a
+      fingerprint: a SHA-256 hash of each call's stock, what it said, its
+      price, stop and target, how many days it runs and when it was written.
+      Change any of those by any amount, or add or remove a call, and the
+      fingerprint changes. Save a copy, and you can check later that none of
+      that day's calls was edited.{% if prints|selectattr('late')|list %}
+      A day fingerprinted more than a day after it ended, as the days before
+      fingerprints began were, says so: its fingerprint vouches for its calls
+      only from the day it was taken.{% endif %}</p>
+    <div class="card" style="margin-top:var(--s2)">
+      <ul style="list-style:none;margin:0;padding:0">
+      {% for f in prints %}
+        <li style="padding:var(--s1) 0{% if not loop.first %};border-top:1px solid var(--rule){% endif %}">
+          <span style="font-size:var(--t-sm)"><b>{{ f.start|day }}</b></span>
+          <span class="soft" style="font-size:var(--t-sm)">· {{ f.count }} call{{ '' if f.count == 1 else 's' }} written</span>{% if f.late %}
+          <span class="faint" style="font-size:var(--t-xs)">· fingerprinted on {{ f.created_ts|day }}, after the fact</span>{% endif %}
+          <div class="fig soft" style="font-size:var(--t-xs);overflow-wrap:anywhere">{{ f.sha256 }}</div>
+        </li>
+      {% endfor %}
+      </ul>
+    </div>
+    <details class="card" style="margin-top:var(--s2)">
+      <summary><b>How to check one yourself</b></summary>
+      <p class="prose" style="margin-top:var(--s2)">Download
+        <a href="{{ url_for('record_csv') }}">every call</a>. Take that day's
+        rows, the ones whose <b>written_utc</b> starts with its date, in the
+        order the file lists them. Keep each row's first seven columns,
+        <b>symbol</b> to <b>horizon_days</b>, exactly as the file has them,
+        joined by commas, with a line break after each row. The SHA-256 of
+        that text is the day's fingerprint. A call's score, and any reason it
+        is left out, come in the columns after those, so scoring a call never
+        changes its day's fingerprint. On a Mac or Linux, for {{ prints[0].start|day }}:</p>
+      <p class="fig" style="font-size:var(--t-xs);overflow-wrap:anywhere;margin:var(--s1) 0 0">grep '^[^,]*,{{ prints[0].day }} ' orenth-record.csv | cut -d, -f1-7 | shasum -a 256</p>
+    </details>
+  </section>
+{% endif %}
+
 <div class="card" style="margin-top:var(--s3)">
   <span class="eyebrow">How it is scored</span>
   <ul class="list">
@@ -162,12 +211,17 @@
       quickly, so counting them sooner would favour calls that said not to
       buy.</li>
     <li>The 95% range is how far the right rate could be from its true value.
-      It is worked out on separate tests, not on every call: the next day's
-      call on a stock shares most of its {{ method.days }} days, so per stock a
-      call counts as a new test only once the last one's days are over, and
-      SPY and VOO, which hold the same companies, count as one. Stocks still
-      settle alike on days the whole market moves, so even this range is on
-      the narrow side.</li>
+      It allows for calls that are not separate tests, in two ways. The next
+      day's call on a stock shares most of its {{ method.days }} days, so per
+      stock a call counts as a new test only once the last one's days are
+      over, and SPY and VOO, which hold the same companies, count as one. And
+      on a day the whole market moves, calls on different stocks settle
+      alike, so any two calls whose days overlap are counted as moving
+      together, by as much as they actually did. The range given is the
+      wider of the two. The second needs calls spread over about
+      {{ rec.range_weeks }} weeks of the market; until then, no range is
+      given. The average move after a kind of call has its range worked out
+      the second way.</li>
     <li>Moves are after trading costs: {{ method.equity }}% a round trip for
       stocks, {{ method.crypto }}% for crypto.</li>
     {% if splits %}<li>When a stock splits, a call made before the split is
@@ -175,7 +229,9 @@
       it.</li>{% endif %}
     <li>Calls are never edited or removed. One left out of the scores stays
       listed below, with the reason. Every call, left-out ones included, is in
-      <a href="{{ url_for('record_csv') }}">one file</a> anyone can check.</li>
+      <a href="{{ url_for('record_csv') }}">one file</a> anyone can
+      check{% if prints %}, and each day's calls have a
+      <a href="#fingerprints">fingerprint</a> that an edit would change{% endif %}.</li>
   </ul>
   <p class="prose faint" style="font-size:var(--t-xs)">This is a forward test
     of software calls, not a record of real trades or money. Past results do
