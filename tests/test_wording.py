@@ -538,6 +538,53 @@ try:
     check("and real figures as before", (web._pct(0.25), web._signed(-0.004),
                                          web._money(1234.5)) == ("25%", "0.00", "1,234.50"))
 
+    head("WITH EVERY OTHER WAY IN AND OUT SWITCHED ON")
+    # The pages above run with Google and Stripe only. Apple sign-in, email
+    # and text codes, and backups kept off the server each add words to the
+    # pages, in a browser and in the iPhone app, and none may be setup text.
+    from cryptography.hazmat.primitives import serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    apple_p8 = _ec.generate_private_key(_ec.SECP256R1()).private_bytes(
+        _ser.Encoding.PEM, _ser.PrivateFormat.PKCS8, _ser.NoEncryption()).decode("ascii")
+    EVERYTHING = {"APPLE_TEAM_ID": "TEAM123456", "APPLE_SIGNIN_KEY_ID": "KEY1234567",
+                  "APPLE_SIGNIN_PRIVATE_KEY": apple_p8.strip().replace("\n", "\\n"),
+                  "APPLE_SERVICES_ID": "app.orenth.web", "SMTP_HOST": "smtp.example.com",
+                  "SMTP_USER": "u", "SMTP_PASSWORD": "p", "MAIL_FROM": "hi@orenth.app",
+                  "MAIL_POSTAL_ADDRESS": "1 Example St, Town", "TWILIO_ACCOUNT_SID": "AC1",
+                  "TWILIO_AUTH_TOKEN": "t", "TWILIO_VERIFY_SID": "VA1",
+                  "BACKUP_S3_ENDPOINT": "https://abc123.r2.cloudflarestorage.com",
+                  "BACKUP_S3_BUCKET": "orenth-backups", "BACKUP_S3_ACCESS_KEY_ID": "k",
+                  "BACKUP_S3_SECRET_ACCESS_KEY": "s"}
+    SETUP = ("APPLE_", "APNS_", "BACKUP_S3", "VAPID_", "MAIL_POSTAL", "MAIL_FROM",
+             "REVIEW_LOGIN", "abc123", "orenth-backups")
+    IN_APP_UA = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                               "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                               "OrenthApp/1"}
+    _os.environ.update(EVERYTHING)
+    try:
+        everyone = web.app.test_client()
+        signed = web.app.test_client()
+        sign_in(signed, free)
+        for who, client, paths in (
+                ("visitor", everyone, ("/", "/signin", "/signin/email", "/signin/phone",
+                                       "/privacy", "/terms", "/pricing")),
+                ("free", signed, ("/", "/account", "/settings", "/monitor", "/privacy",
+                                  "/terms", "/pricing"))):
+            for where, headers in (("website", {}), ("app", IN_APP_UA)):
+                for path in paths:
+                    r = client.get(path, base_url=BASE, headers=headers)
+                    page = text(r)
+                    found = leaks(page) + [w for w in SETUP if w in page]
+                    check("%s on the %s, all switched on: %s keeps setup text to itself"
+                          % (who, where, path), r.status_code == 200 and not found,
+                          (r.status_code, found))
+        page = flat(text(everyone.get("/signin", base_url=BASE)))
+        check("and the ways in it adds are there to use",
+              "with Apple" in page and "/signin/email" in page and "/signin/phone" in page)
+    finally:
+        for _k in EVERYTHING:
+            _os.environ.pop(_k, None)
+
     head("A NOTIFICATION THAT FAILED, AS THE PERSON READS IT")
     # Settings lists each device with why its last notice failed, and "Send a
     # test" says why it could not go. The reasons start as push services'
