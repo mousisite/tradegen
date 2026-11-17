@@ -702,17 +702,20 @@ def send_web(row, note: Note, keys: VapidKeys, sub: str,
     try:
         status = (post or _web_post)(row["address"], body, headers)
     except Exception as exc:
+        # Waiting on a service that does not answer is what costs the round
+        # time, so the rest of the round leaves that service alone.
         return Sent(False, "the push service did not answer (%s)" % type(exc).__name__,
                     blame=False, stop=True)
     if 200 <= status < 300:
         return Sent(True)
     if status in (404, 410):
         return Sent(False, "the browser has stopped listening (%d)" % status, drop=True)
+    # A quick refusal costs no waiting, and may be about this browser alone,
+    # so the others on the same service are still sent theirs.
     if status == 429:
-        return Sent(False, "the push service asked Orenth to slow down (429)",
-                    blame=False, stop=True)
+        return Sent(False, "the push service asked Orenth to slow down (429)", blame=False)
     if status >= 500:
-        return Sent(False, "the push service failed (%d)" % status, blame=False, stop=True)
+        return Sent(False, "the push service failed (%d)" % status, blame=False)
     return Sent(False, "the push service refused it (%d)" % status)
 
 
@@ -871,9 +874,15 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
         if status == 410 or reason in _GONE:
             return Sent(False, "Apple says the app is no longer on that device (%s)"
                         % (reason or status), drop=True)
-        if status == 429:
+        if status == 429 and reason == "TooManyProviderTokenUpdates":
+            # About this server's token, so the same for every iPhone.
             _APNS_PAUSED["until"] = time.time() + APNS_PAUSE
             return Sent(False, "Apple asked Orenth to slow down", blame=False, stop=True)
+        if status == 429:
+            # Apple's TooManyRequests: too many notices to this one token.
+            # The other iPhones are sent theirs as usual.
+            return Sent(False, "Apple says this iPhone was sent too many notifications "
+                               "just now (%s)" % (reason or status), blame=False)
         if status == 403 or status >= 500 or (status == 400 and reason):
             # The key, the bundle id, or Apple itself: the same for every device.
             return Sent(False, "Apple refused it (%s)" % (reason or status),
@@ -916,9 +925,10 @@ def _send_all(conn: sqlite3.Connection, rows, note: Note, site: str,
               apns_post: Optional[ApnsPost] = None) -> Dict:
     """One notice to each of these devices, each outcome written down.
 
-    halted holds services that failed in a way every device on them would
-    (a timeout, an outage, a request to slow down), so the rest of the round
-    skips them instead of waiting on each in turn.
+    halted holds services that did not answer, or refused in a way every
+    device on them would (Apple refusing this server's key, or asking the
+    server itself to slow down), so the rest of the round skips them instead
+    of waiting on each in turn. A quick refusal of one device does not.
     """
     halted = set() if halted is None else halted
     keys = vapid_keys() if any(r["kind"] == "web" for r in rows) else None

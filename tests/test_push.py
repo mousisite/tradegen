@@ -668,12 +668,24 @@ try:
     check("without holding the server's fault against the devices",
           len(rows) == 2 and all(r["failures"] == 0 for r in rows)
           and "InvalidProviderToken" in (rows[0]["last_error"] or ""))
-    apple = use_apple(lambda r: (429, "TooManyRequests"))
+    apple = use_apple(lambda r: (429, "TooManyProviderTokenUpdates"))
     push.send_test(conn, alice.id, SITE)
     apple.requests.clear()
     out = push.send_test(conn, alice.id, SITE)
     check("asked to slow down, the next round waits rather than asking again",
           not apple.requests and out["failed"] == 2)
+    push._APNS_PAUSED["until"] = 0.0
+    # TooManyRequests is Apple's answer for one token sent too much.
+    apple = use_apple(lambda r: (429, "TooManyRequests") if str(r.url).endswith("11" * 32)
+                      else (200, ""))
+    out = push.send_test(conn, alice.id, SITE)
+    check("one iPhone sent too much does not hold back the other",
+          len(apple.requests) == 2 and out["sent"] == 1 and out["failed"] == 1, out)
+    apple.requests.clear()
+    out = push.send_test(conn, alice.id, SITE)
+    check("nor pause the next round", len(apple.requests) == 2 and out["sent"] == 1, out)
+    check("and is not held against that iPhone",
+          all(r["failures"] == 0 for r in device_rows(alice.id)))
     push._APNS_PAUSED["until"] = 0.0
 
     def timeout(request):
@@ -683,6 +695,28 @@ try:
     out = push.send_test(conn, alice.id, SITE)
     check("Apple not answering is said once, not waited on for each iPhone",
           len(apple.requests) == 1 and out["failed"] == 2, len(apple.requests))
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    section("ONE BROWSER'S TROUBLE IS NOT EVERYONE'S")
+    use_apple(lambda r: (200, ""))
+    busy = []
+    for n in range(3):
+        someone = person("busy-%d@example.com" % n)
+        endpoint, p256dh, auth = push.clean_subscription(subscription(FCM + "busy-%d" % n))
+        push.register(conn, someone.id, "web", endpoint, p256dh, auth)
+        busy.append(alerts.Fired(70 + n, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                 someone.id, ""))
+    for answer, why in ((503, "fails quickly for one browser"),
+                        (429, "asks Orenth to slow down for one browser")):
+        post = Recorder(lambda url, answer=answer: answer if url.endswith("busy-0") else 201)
+        out = push.deliver(conn, busy, SITE, web_post=post)
+        check("a push service that %s still gets the others' notices" % why,
+              len(post.calls) == 3 and out["sent"] == 2 and out["failed"] == 1, out)
+    post = Recorder(lambda url: TimeoutError("no answer") if url.endswith("busy-0") else 201)
+    out = push.deliver(conn, busy, SITE, web_post=post)
+    check("one that does not answer at all is not waited on again this round",
+          len(post.calls) == 1 and out["failed"] == 3, out)
     conn.execute("DELETE FROM push_devices")
     conn.commit()
 
