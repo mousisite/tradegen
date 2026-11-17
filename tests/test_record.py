@@ -613,6 +613,16 @@ try:
     check("index prices that cannot be read leave the comparison out, never the call",
           broken["index"] is None and broken["action"] == snap["action"]
           and broken["baseline_short"] == both["baseline_short"])
+    # The run before stored its comparison. This run's fetch of SPY was
+    # refused, which _index_bars hands on as None for the rest of the run.
+    public.save_verdict(conn, both)
+    kept = public.verdict(conn, "NVDA")["index"]
+    refused = web._public_snapshot("NVDA", {"SPY": None})
+    check("a run that could not fetch the index keeps the comparison stored before",
+          kept and kept["symbol"] == "SPY" and refused["index"] == kept
+          and refused["action"] == snap["action"], (kept, refused.get("index")))
+    check("and one never checked before has none to keep",
+          web._public_snapshot("ZZNEVER", {"SPY": None})["index"] is None)
     asked = []
 
     def fetch_index(symbol, interval):

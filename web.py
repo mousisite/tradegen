@@ -4714,9 +4714,10 @@ def _public_snapshot(symbol: str, indexes: Optional[dict] = None,
 
     indexes holds the index bars a background run has fetched, by symbol,
     for setting the strategy tests beside holding the index; without it the
-    snapshot leaves that comparison out. The weekly email uses it for
-    watched symbols too, with exact for an entry saved as Yahoo's own
-    symbol (LINK for Interlink Electronics).
+    snapshot leaves that comparison out, and an index the run could not
+    fetch (None) keeps the one stored at the last check. The weekly email
+    uses it for watched symbols too, with exact for an entry saved as
+    Yahoo's own symbol (LINK for Interlink Electronics).
     """
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
@@ -4750,6 +4751,15 @@ def _public_snapshot(symbol: str, indexes: Optional[dict] = None,
             app.logger.warning("Could not set %s's strategy tests beside %s",
                                symbol, index, exc_info=True)
     snap["index"] = {"symbol": index, "hold": held} if held else None
+    if indexes is not None and indexes.get(index) is None:
+        # The run could not fetch the index. The comparison kept from the last
+        # check stands until one can: written as None, one failed download
+        # took holding the index off every strategy page for six hours.
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            snap["index"] = (public_mod.verdict(conn, symbol) or {}).get("index")
+        finally:
+            conn.close()
     return snap
 
 
