@@ -56,7 +56,8 @@ IN_SAFARI = {"User-Agent": SAFARI_UA}
 
 # Words that must never reach a page drawn inside the app.
 NEVER_IN_APP = ("stripe", "metricool", "android", "google play", "play store",
-                "install the app", "install app", "/billing/checkout",
+                "install the app", "install app", "install orenth",
+                "add to home screen", "to your home screen", "/billing/checkout",
                 "/billing/portal", "/billing/code", "discount code",
                 "$9.99", "$79.99", "manage subscription")
 
