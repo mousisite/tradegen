@@ -405,10 +405,9 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     else:
         combined = news_score if news else social_score
 
+    # Said once, by the plan, which reads fresh_catalyst. A note here as well
+    # put the same warning on the page twice in different words.
     fresh = any(i.age_hours <= 3.0 and abs(i.score) >= 0.5 for i in news)
-    if fresh:
-        notes.append("A high-impact headline landed in the last 3 hours. "
-                     "Technical levels are less reliable right after a catalyst.")
     if not news:
         notes.append("No news retrieved for this symbol.")
     if not social:
