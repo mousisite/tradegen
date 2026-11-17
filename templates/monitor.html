@@ -99,7 +99,8 @@
         <div class="setfield">
           <label for="a-symbol">Instrument</label>
           <input class="field fig" id="a-symbol" name="symbol" type="text" data-suggest="fill"
-                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+                 placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+                 autocorrect="off" spellcheck="false" enterkeyhint="go">
         </div>
         <div class="setfield">
           <label for="a-kind">Tell me when it</label>
@@ -112,7 +113,7 @@
         <div class="setfield">
           <label for="a-threshold">Value</label>
           <input class="field fig" id="a-threshold" name="threshold" type="number"
-                 step="any" placeholder="price, percent or level">
+                 step="any" inputmode="decimal" placeholder="price, percent or level">
           <div class="hint">A percent is a whole number: 5 means 5%. Leave empty
             for the conditions that need no value: the moving average, and a
             change of call.</div>
@@ -208,7 +209,7 @@
                   {% if kinds.get(row['kind'], {}).get('needs_threshold') %}
                     <label class="sr" for="e-th-{{ row['id'] }}">Value</label>
                     <input class="field fig sm" id="e-th-{{ row['id'] }}" name="threshold" type="number"
-                           step="any" style="max-width:110px"
+                           step="any" inputmode="decimal" style="max-width:110px"
                            value="{{ (row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
                   {% endif %}
                   <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
@@ -280,7 +281,8 @@
     <form class="searchrow" method="post" action="{{ url_for('watch', action='add') }}">
       <label class="sr" for="w-symbol">Instrument to watch</label>
       <input class="field fig" id="w-symbol" name="symbol" type="text" data-suggest="fill"
-             placeholder="AAPL" required autocomplete="off" spellcheck="false">
+             placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+             autocorrect="off" spellcheck="false" enterkeyhint="go">
       <label class="sr" for="w-interval">Interval</label>
       <select class="field" id="w-interval" name="interval">
         {% for code, label in intervals %}

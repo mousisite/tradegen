@@ -47,7 +47,8 @@
           <label for="symbols">Or your own list</label>
           <input class="field fig" id="symbols" name="symbols" type="text"
                  value="{{ symbols_raw }}" placeholder="AAPL MSFT NVDA"
-                 autocomplete="off" spellcheck="false">
+                 autocomplete="off" autocapitalize="characters" autocorrect="off"
+                 spellcheck="false" enterkeyhint="go">
           <div class="hint">Separated by spaces or commas.</div>
         </div>
       </div>

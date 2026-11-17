@@ -83,7 +83,8 @@
         <div class="setfield">
           <label for="m-symbol">Instrument</label>
           <input class="field fig" id="m-symbol" name="symbol" type="text" data-suggest="fill"
-                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+                 placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+                 autocorrect="off" spellcheck="false" enterkeyhint="go">
         </div>
         <div class="setfield">
           <label for="m-direction">Side</label>
@@ -95,21 +96,23 @@
         <div class="setfield">
           <label for="m-entry">Entry price</label>
           <input class="field fig" id="m-entry" name="entry" type="number"
-                 step="any" required>
+                 step="any" inputmode="decimal" required>
         </div>
         <div class="setfield">
           <label for="m-stop">Stop price</label>
           <input class="field fig" id="m-stop" name="stop" type="number"
-                 step="any" required>
+                 step="any" inputmode="decimal" required>
           <div class="hint">Below the entry for a long, above it for a short.</div>
         </div>
         <div class="setfield">
           <label for="m-target">Target <span class="faint">optional</span></label>
-          <input class="field fig" id="m-target" name="target" type="number" step="any">
+          <input class="field fig" id="m-target" name="target" type="number" step="any"
+                 inputmode="decimal">
         </div>
         <div class="setfield">
           <label for="m-qty">Size <span class="faint">optional</span></label>
-          <input class="field fig" id="m-qty" name="quantity" type="number" step="any">
+          <input class="field fig" id="m-qty" name="quantity" type="number" step="any"
+                 inputmode="decimal">
           <div class="hint">Units. Needed for cash P&amp;L, not for R.</div>
         </div>
         <div class="setfield">
@@ -125,7 +128,7 @@
           <label for="m-trail">Trailing stop <span class="faint">optional</span></label>
           <div style="display:flex;gap:6px">
             <input class="field fig" id="m-trail" name="trail" type="number" step="any"
-                   min="0" placeholder="5" style="flex:0 0 72px;min-width:0">
+                   min="0" inputmode="decimal" placeholder="5" style="flex:0 0 72px;min-width:0">
             <label class="sr" for="m-trail-kind">Trail measured as</label>
             <select class="field" id="m-trail-kind" name="trail_kind" style="flex:1 1 auto;min-width:0">
               <option value="pct">% of price</option>
@@ -215,11 +218,11 @@
                 {% if sized %}
                 <label class="sr" for="q{{ t['id'] }}">How much of {{ t['symbol'] }} to close, empty for all of it</label>
                 <input class="field fig" id="q{{ t['id'] }}" type="number" name="quantity"
-                       step="any" min="0" placeholder="all">
+                       step="any" min="0" inputmode="decimal" placeholder="all">
                 {% endif %}
                 <label class="sr" for="px{{ t['id'] }}">Exit price for {{ t['symbol'] }}</label>
-                <input class="field fig" id="px{{ t['id'] }}" type="number" name="price"
-                       step="any" required placeholder="price"
+                <input class="field fig" id="px{{ t['id'] }}" type="number" inputmode="decimal"
+                       name="price" step="any" required placeholder="price"
                        value="{{ '%s'|format(m.quoted if m.split_words else m.price) if m.price else '' }}">
                 {% if m.split_words %}
                 <label class="sr" for="sh{{ t['id'] }}">Which shares the price{{ ' and size are' if sized else ' is' }} in: today's, or the ones you opened with</label>
@@ -244,7 +247,8 @@
                   <input type="hidden" name="trade_id" value="{{ t['id'] }}">
                   <label class="sr" for="tr{{ t['id'] }}">How far behind the {{ 'high' if long else 'low' }} the stop of {{ t['symbol'] }} trails</label>
                   <input class="field fig sm" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
-                         min="0" required placeholder="5" style="max-width:80px">
+                         min="0" required inputmode="decimal" placeholder="5"
+                         style="max-width:80px">
                   <label class="sr" for="tk{{ t['id'] }}">Trail measured as</label>
                   <select class="field sm" id="tk{{ t['id'] }}" name="trail_kind">
                     <option value="pct">% of price</option>
