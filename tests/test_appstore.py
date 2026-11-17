@@ -1677,6 +1677,22 @@ class Pages(WebBase):
         pricing = self.text(client.get("/pricing", headers=IN_APP))
         self.assertIn("will not renew", pricing)
 
+    def test_paying_twice_is_said(self):
+        client = self.make_apple_pro(self.ann)
+        conn = db.connect(WEB_DB)
+        billing.set_plan(conn, self.ann.id, "pro", "active", "cus_ann")
+        conn.close()
+        for path, headers in (("/pricing", IN_APP), ("/account", IN_APP),
+                              ("/pricing", {"User-Agent": SAFARI_UA}),
+                              ("/account", {"User-Agent": SAFARI_UA})):
+            page = self.text(client.get(path, headers=headers))
+            self.assertIn("paying for Pro", page, (path, headers))
+            self.assertIn("twice", page, (path, headers))
+            if headers is IN_APP:
+                self.assertFalse(self.leaks(page), self.leaks(page))
+        page = self.text(self.make_apple_pro(self.ben).get("/account", headers=IN_APP))
+        self.assertNotIn("twice", page)
+
     def test_a_test_purchase_is_labelled(self):
         client = self.make_apple_pro(self.ann, env="Sandbox")
         self.assertIn("from a test purchase", self.text(client.get("/pricing", headers=IN_APP)))

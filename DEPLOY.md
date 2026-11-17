@@ -374,6 +374,10 @@ accounts whose email addresses are in `APPLE_SANDBOX_USERS`, and `none` to
 nobody. Never use either while a build is in review, unless the review
 account is on the list. A change takes effect when Render restarts.
 
+**Never remove `APPLE_APP_ID` while anyone has Pro through Apple.** Apple
+keeps billing them, but without it the server stops recording their
+renewals, and their Pro would end with the period they had already paid.
+
 **Before each App Review submission**, put the review account back on Free,
 in Render's **Shell** tab:
 

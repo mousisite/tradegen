@@ -56,6 +56,11 @@
         Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
       {% if apple.pro %}
         <p class="fine">{{ apple_pro_said }}</p>
+        {% if apple.twice %}
+          <p class="notice" style="margin-top:var(--s2)">You are paying for Pro
+            twice: through Apple, and on the {{ 'Orenth website' if in_app
+            else 'website' }}. Cancel one of them.</p>
+        {% endif %}
         <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage
            style="margin-top:var(--s2)">Manage subscription</a>
       {% endif %}
@@ -221,7 +226,8 @@
       want to keep first, using the buttons above. The shared strategy record
       stays, because it was never yours alone.
       {% if plan.on and plan.customer %}It also cancels your Pro subscription
-        straight away, with no further charges.{% endif %}
+        {% if apple.billing %}on the website {% endif %}straight away, with no
+        further charges{% if apple.billing %} from it{% endif %}.{% endif %}
     </p>
     <form method="post" action="{{ url_for('delete_account') }}"
           onsubmit="return confirm('Delete this account and everything in it? This cannot be undone.');"

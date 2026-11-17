@@ -379,7 +379,7 @@ def _apple_plan() -> Dict:
     "invite" or "other".
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
-           "products": apple_store_mod.product_ids(), "via": "",
+           "products": apple_store_mod.product_ids(), "via": "", "twice": False,
            "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
@@ -398,6 +398,9 @@ def _apple_plan() -> Dict:
             out["via"], out["invite_until"] = "invite", plain.bonus_until
         else:
             out["via"] = "other"
+    # Paying Apple and Stripe for the same Pro, which checkout and the app
+    # both try to prevent: said plainly wherever the plan is shown.
+    out["twice"] = bool(out["pro"]) and out["via"] == "web"
     return out
 
 

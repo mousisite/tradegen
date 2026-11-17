@@ -74,6 +74,10 @@
             from a test purchase{% endif %}.
             {% if apple.pro.renews %}It renews on {{ apple.pro.until|day }}.{% else %}It
             ends on {{ apple.pro.until|day }} and will not renew.{% endif %}</p>
+          {% if apple.twice %}
+            <p class="notice">You are paying for Pro twice: through Apple, and
+              on the Orenth website. Cancel one of them.</p>
+          {% endif %}
           <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage>Manage subscription</a>
           <p class="fine">Or in your iPhone's Settings &gt; Apple Account &gt;
             Subscriptions.</p>
@@ -119,6 +123,11 @@
       <p class="prose"><b>You have Pro.</b></p>
       {% if apple.pro %}
         <p class="prose">{{ apple_pro_said }}</p>
+      {% endif %}
+      {% if apple.twice %}
+        <p class="notice">You are paying for Pro twice: through Apple, and here
+          on the website. Cancel one of them: this one below, Apple's in your
+          iPhone's Settings.</p>
       {% endif %}
       {% if has_customer %}
         <form method="post" action="{{ url_for('billing_portal') }}">
