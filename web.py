@@ -3580,28 +3580,40 @@ def _alert_limits(conn):
     return limit_of
 
 
-def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True) -> Dict:
+def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True,
+                    skip_closed: bool = False, now: Optional[float] = None) -> Dict:
     """Check alerts and open positions' stops, record and email what fired.
 
     stops=False leaves crossed stops to the caller: a routine reports those
-    in its own words.
+    in its own words. skip_closed leaves what cannot have changed, a stock
+    whose market has been closed since its last good check, for the open.
     """
     result = alerts_mod.check(conn, user=user, call_of=_call_now,
-                              limit_of=_alert_limits(conn))
-    crossed = (alerts_mod.check_stops(conn, user=user) if stops
-               else {"checked": 0, "fired": [], "errors": []})
+                              limit_of=_alert_limits(conn),
+                              skip_closed=skip_closed, now=now)
+    crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed, now=now)
+               if stops else {"checked": 0, "fired": [], "errors": [], "skipped": 0})
     fired = list(result["fired"]) + list(crossed["fired"])
     if fired and codes_mod.email_ready():
         alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
-            "errors": result["errors"] + crossed["errors"], "when": result["when"]}
+            "errors": result["errors"] + crossed["errors"], "when": result["when"],
+            "skipped": result.get("skipped", 0) + crossed.get("skipped", 0)}
 
 
-def _check_alerts_job():
-    """What the background loop actually does, every interval."""
+def _check_alerts_job(now: Optional[float] = None):
+    """What the background loop actually does, every interval.
+
+    Unlike a check someone asks for, it leaves a stock whose market has been
+    closed since its last good check until the market opens: nothing it reads
+    can have changed. How many it left is counted, by the day and with
+    nothing about whose they were, for the operator's usage page.
+    """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        return _check_and_tell(conn)
+        result = _check_and_tell(conn, skip_closed=True, now=now)
+        events_mod.bump(conn, "closed_skips", result["skipped"])
+        return result
     finally:
         conn.close()
 

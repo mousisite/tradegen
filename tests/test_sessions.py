@@ -1,10 +1,11 @@
-"""When a market's price can move, and a call worked out before a close.
+"""When a market's price can move, and the alert loop asking only then.
 
 The NYSE calendar worked out by rule: weekends, holidays and the days they are
 taken, Good Friday, the 13:00 closes and summer time. Then the hour after a
 close, listings elsewhere read from their own data, coins and anything unknown
-always checked, a data clock that disagrees, and a call worked out before a
-close not used after it. No network: the analysis is stubbed."""
+always checked, a data clock that disagrees, and loop rounds on a fixed clock
+that leave a closed stock and its stop alone but check a coin. No network:
+prices are stubbed."""
 import calendar
 import os as _os
 import sys as _sys
@@ -32,10 +33,21 @@ def head(title):
     print("=" * 72)
 
 
+# Nothing fires here, but a mail setting in the environment must not be used.
+for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM"):
+    _os.environ.pop(key, None)
+
 import web  # noqa: E402
+from bot import accounts as A  # noqa: E402
+from bot import alerts  # noqa: E402
+from bot import database as db  # noqa: E402
+from bot import events  # noqa: E402
+from bot import scheduler  # noqa: E402
 from bot import sessions  # noqa: E402
 
-harness.isolated_web("sessions")
+c, DB = harness.isolated_web("sessions")
+# One local account, which is the operator, so every page below is open to it.
+web.app.config["AUTH_MODE"] = "off"
 HOUR = 3600
 
 
@@ -311,6 +323,151 @@ check("and left alone from an hour after its after-market until midnight there",
       not may("005930.KS", at(2026, 11, 17, 10, 5), at(2026, 11, 17, 14, 55))
       and may("005930.KS", at(2026, 11, 17, 10, 5), at(2026, 11, 17, 15, 5)))
 
+head("ROUNDS OF THE LOOP ON A FIXED CLOCK")
+sessions._SEEN.clear()
+alerts._STOPS_LOOKED.clear()
+conn = db.connect(DB)
+alice = A.upsert_email_user(conn, "alice@example.com")
+stock = db.alert_add(conn, "AAPL", "price_above", threshold=1000.0, user=alice.id)
+db.alert_add(conn, "BTC-USD", "price_above", threshold=10.0 ** 9, user=alice.id)
+held = db.open_trade(conn, "AAPL", "1d", 1, entry=210.0, stop=100.0, target1=260.0,
+                     quantity=1, user=alice.id)
+conn.close()
+
+ASKED = []
+DESCRIBED = {"day": date(2026, 11, 13)}
+
+
+def bars_for(symbol, interval="1d", lookback=None):
+    ASKED.append(symbol)
+    meta = (us_meta(DESCRIBED["day"]) if symbol == "AAPL" else
+            {"instrumentType": "CRYPTOCURRENCY", "exchangeTimezoneName": "UTC"})
+    price = 200.0 if symbol == "AAPL" else 90000.0
+    return SimpleNamespace(symbol=symbol, last_price=price, close=[price] * 60,
+                           volume=[1.0] * 60, prev_close=price, market_open=False,
+                           last_bar_time="", meta=meta)
+
+
+def looked():
+    conn = db.connect(DB)
+    try:
+        return {r["id"]: r["last_checked"] for r in conn.execute(
+            "SELECT id, last_checked FROM alerts")}
+    finally:
+        conn.close()
+
+
+def stamp(before, when):
+    """The database writes the real time on what it checks. On this
+    test's clock that check was at `when`, so that is what it keeps."""
+    conn = db.connect(DB)
+    for alert_id, last in looked().items():
+        if last is not None and last != before.get(alert_id):
+            conn.execute("UPDATE alerts SET last_checked=? WHERE id=?", (when, alert_id))
+    conn.commit()
+    conn.close()
+
+
+def round_at(when):
+    """One round of the loop at `when`: what it said, and what it asked for."""
+    del ASKED[:]
+    before = looked()
+    out = web._check_alerts_job(now=when)
+    stamp(before, when)
+    return out, sorted(set(ASKED))
+
+
+def skips_today():
+    conn = db.connect(DB)
+    try:
+        return events.read(conn, 1)["total"]["closed_skips"]
+    finally:
+        conn.close()
+
+
+real_fetch = alerts.fetch_bars
+alerts.fetch_bars = bars_for
+try:
+    out, asked = round_at(at(2026, 11, 13, 20, 0))
+    check("in the session both the stock and the coin are asked for",
+          asked == ["AAPL", "BTC-USD"] and out["skipped"] == 0, (asked, out["skipped"]))
+    out, asked = round_at(at(2026, 11, 13, 21, 30))
+    check("in the hour after the close the stock is still asked for",
+          "AAPL" in asked, asked)
+    out, asked = round_at(at(2026, 11, 13, 22, 5))
+    check("and once more after that hour, the first round to look after it",
+          "AAPL" in asked and out["skipped"] == 0, (asked, out["skipped"]))
+    before = skips_today()
+    out, asked = round_at(at(2026, 11, 14, 15, 0))
+    check("on Saturday the stock is not asked for, and the coin is",
+          asked == ["BTC-USD"], asked)
+    check("its alert and its position's stop are both left, and said to be",
+          out["skipped"] == 2 and out["checked"] == 1, out)
+    check("which is counted for the operator, by the day",
+          skips_today() == before + 2, (before, skips_today()))
+    conn = db.connect(DB)
+    row = conn.execute("SELECT last_checked, last_error FROM alerts WHERE id=?",
+                       (stock,)).fetchone()
+    conn.close()
+    check("a left alert keeps its last good check and gains no error",
+          row["last_checked"] == at(2026, 11, 13, 22, 5) and row["last_error"] is None,
+          dict(row))
+    check("and its position keeps the time its stop was last read",
+          alerts._STOPS_LOOKED.get(held) == at(2026, 11, 13, 22, 5),
+          alerts._STOPS_LOOKED)
+
+    conn = db.connect(DB)
+    db.alert_add(conn, "AAPL", "price_below", threshold=1.0, user=alice.id)
+    conn.close()
+    out, asked = round_at(at(2026, 11, 14, 15, 5))
+    check("an alert set on Saturday is checked at once, closed market or not",
+          "AAPL" in asked and out["skipped"] == 2, (asked, out["skipped"]))
+    out, asked = round_at(at(2026, 11, 14, 15, 10))
+    check("and once it has an answer it waits with the rest",
+          asked == ["BTC-USD"] and out["skipped"] == 3, (asked, out["skipped"]))
+    conn = db.connect(DB)
+    conn.execute("UPDATE alerts SET last_error='No price: the data source did not "
+                 "answer' WHERE id=?", (stock,))
+    conn.commit()
+    conn.close()
+    out, asked = round_at(at(2026, 11, 14, 15, 15))
+    check("an alert whose last check failed is tried again, closed market or not",
+          "AAPL" in asked, asked)
+    conn = db.connect(DB)
+    db.alert_edit(conn, stock, 900.0, "", user=alice.id)
+    conn.close()
+    out, asked = round_at(at(2026, 11, 14, 15, 20))
+    check("so is one whose level was changed, a new question",
+          "AAPL" in asked, asked)
+
+    conn = db.connect(DB)
+    try:
+        del ASKED[:]
+        before = looked()
+        web._check_and_tell(conn, user=alice.id, now=at(2026, 11, 14, 15, 25))
+        stamp(before, at(2026, 11, 14, 15, 25))
+    finally:
+        conn.close()
+    check("'Check them all now' checks a closed market's stock as asked",
+          "AAPL" in ASKED, ASKED)
+
+    busy = scheduler.Scheduler(lambda: web._check_alerts_job(now=at(2026, 11, 14, 16, 0)),
+                               interval_seconds=3600, name="test-sessions")
+    busy._run_once()
+    entry = busy.status()["history"][0]
+    check("the loop's own record of a Saturday round says what it left",
+          entry["ok"] and entry["skipped"] == 3 and entry["checked"] == 1, entry)
+
+    DESCRIBED["day"] = date(2026, 11, 16)
+    out, asked = round_at(at(2026, 11, 16, 14, 35))
+    check("Monday's open asks for the stock again",
+          "AAPL" in asked and out["skipped"] == 0, (asked, out["skipped"]))
+    check("for its position's stop too",
+          alerts._STOPS_LOOKED.get(held) == at(2026, 11, 16, 14, 35),
+          alerts._STOPS_LOOKED)
+finally:
+    alerts.fetch_bars = real_fetch
+
 head("A CALL IS NOT CARRIED ACROSS A CLOSE")
 sessions._SEEN.clear()
 us_day("AAPL", date(2026, 11, 13))
@@ -350,6 +507,24 @@ try:
 finally:
     web.engine.analyse, web.public_mod.verdict = real
     web._CALLS.clear()
+
+head("THE PAGES SAY WHEN ALERTS ARE CHECKED")
+loop = scheduler.Scheduler(lambda: {}, interval_seconds=300, name="test-page")
+loop.start()
+real_loop, web.ALERTS = web.ALERTS, loop
+try:
+    page = c.get("/monitor").data.decode("utf-8", "replace")
+    check("the Monitor page says a stock waits while its market is closed",
+          "A stock waits while its market is" in page and "Coins are checked every time" in page)
+    page = c.get("/settings").data.decode("utf-8", "replace")
+    check("the setting for how often says so too",
+          "A stock waits" in page and "coins are checked every time" in page)
+    page = c.get("/usage").data.decode("utf-8", "replace")
+    check("the operator's usage page counts what was skipped",
+          "Skipped, market closed" in page and "alert and stop checks" in page)
+finally:
+    loop.stop()
+    web.ALERTS = real_loop
 
 print()
 print("%d failure(s)" % len(fails))

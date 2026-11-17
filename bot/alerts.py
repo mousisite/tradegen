@@ -3,7 +3,9 @@
 Checked on demand, and by the server's background loop (web.start_alert_loop),
 which keeps going when nobody has the page open. Nothing here starts a thread
 or sends mail itself: the loop calls check() and check_stops(), and deliver()
-emails what fired, through whatever sender it is handed.
+emails what fired, through whatever sender it is handed. The loop asks them to
+leave alone what cannot have changed, a stock whose market has been closed
+since its last good check (sessions.py); a check someone asks for checks all.
 
 Each alert states its condition in plain terms and, when it fires, records the
 value that triggered it. An alert that says only "AAPL alert triggered" is
@@ -16,6 +18,7 @@ that keeps watching speaks again only after the condition has cleared.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,6 +27,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from . import indicators as ind
+from . import sessions
 from .market import (DataError, fetch_bars, format_price, split_factor_since,
                      split_words, splits_since)
 
@@ -403,8 +407,24 @@ def _within_plan(conn, rows, limit_of: Callable[[int], Optional[int]]):
     return kept
 
 
+def _waits(row, now: float) -> bool:
+    """Whether an alert can be left until its market opens.
+
+    Only when its last check worked and nothing it reads can have changed
+    since. One never checked, or not since it was set, edited or re-armed
+    (it has no state yet), asks a new question; one whose last check failed
+    has no answer yet. Both are checked whatever the hour.
+    """
+    if "last_error" in row.keys() and row["last_error"]:
+        return False
+    if not row["last_checked"] or _state(row) is None:
+        return False
+    return not sessions.can_change(row["symbol"], int(row["last_checked"]), now)
+
+
 def check(conn, only_active: bool = True, user=None, call_of=None,
-          limit_of: Optional[Callable[[int], Optional[int]]] = None) -> Dict:
+          limit_of: Optional[Callable[[int], Optional[int]]] = None,
+          skip_closed: bool = False, now: Optional[float] = None) -> Dict:
     """Check alerts against fresh data and record anything that fired.
 
     With no user this checks every alert in the database, which is what the
@@ -416,9 +436,15 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
     person's plan checks, or None for all of them. Every fire is also written
     to the person's alert history, and a check that fails is kept on the
     alert with its reason.
+
+    skip_closed leaves alone an alert whose market has been closed since its
+    last good check, which is what the loop wants; how many is "skipped". A
+    person who asks for a check gets every one. `now` is the time the round is
+    judged at, the present unless given.
     """
     from . import database as db
 
+    now = time.time() if now is None else now
     rows = [r for r in db.alert_list(conn, active_only=only_active, user=user)]
     if call_of is None:
         # Nothing here can work out a call, so a call alert is not checked at
@@ -440,8 +466,15 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         else:
             usable.append(row)
     rows = usable
+    skipped = 0
+    if skip_closed:
+        # After the plan's limit and the values are seen to: an alert left
+        # out of either is told why, open market or not.
+        due = [r for r in rows if not _waits(r, now)]
+        skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
+        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+                "skipped": skipped}
 
     calls: Dict = {}
     if call_of is not None:
@@ -471,6 +504,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                 failed[key] = str(result)[:120]
             else:
                 data[key] = result
+                sessions.note(key[0], result, now)
 
     fired: List[Fired] = []
     for row in rows:
@@ -526,7 +560,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         fired.append(hit)
 
     return {"checked": len(rows), "fired": fired, "errors": errors,
-            "when": int(time.time())}
+            "when": int(time.time()), "skipped": skipped}
 
 
 def _after_splits(conn, row, bars):
@@ -572,7 +606,15 @@ def _after_splits(conn, row, bars):
     return fresh if fresh is not None else row
 
 
-def check_stops(conn, user=None) -> Dict:
+# When each open position's stop was last checked with prices that could be
+# read, by position id. Kept in memory: after a restart every stop is checked
+# once more, which is the safe way to forget.
+_STOPS_LOOKED: Dict[int, float] = {}
+_STOPS_LOCK = threading.Lock()
+
+
+def check_stops(conn, user=None, skip_closed: bool = False,
+                now: Optional[float] = None) -> Dict:
     """Tell the owner, once, when an open journal position crosses its stop.
 
     A stop in the journal is a plan, not an order: nothing closes the trade.
@@ -580,14 +622,31 @@ def check_stops(conn, user=None) -> Dict:
     time the price is at or past the stop, with the time of that price. It is
     written to the person's alert history like any alert, and never repeats
     for the same position.
+
+    skip_closed leaves alone a position whose stop was checked and whose
+    market has been closed since, as check() does for alerts.
     """
     from . import database as db
 
+    now = time.time() if now is None else now
     sql, args = db._own("SELECT * FROM trades WHERE status='open' "
                         "AND breach_noticed IS NULL", [], user)
     rows = list(conn.execute(sql, args))
+    with _STOPS_LOCK:
+        if user is None:
+            # Everybody's open positions: forget those closed or already told.
+            still = {int(r["id"]) for r in rows}
+            for gone in [k for k in _STOPS_LOOKED if k not in still]:
+                del _STOPS_LOOKED[gone]
+        looked = dict(_STOPS_LOOKED)
+    skipped = 0
+    if skip_closed:
+        due = [r for r in rows
+               if sessions.can_change(r["symbol"], looked.get(int(r["id"])), now)]
+        skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time())}
+        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+                "skipped": skipped}
 
     def bar_size(row) -> str:
         # The trade's own bars, as the journal reads it, so a stop touched
@@ -601,6 +660,7 @@ def check_stops(conn, user=None) -> Dict:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
             data[key] = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
+            sessions.note(key[0], data[key], now)
         except Exception as exc:
             errors.append({"symbol": key[0], "error": str(exc)[:120]})
 
@@ -622,6 +682,9 @@ def check_stops(conn, user=None) -> Dict:
             errors.append({"symbol": row["symbol"],
                            "error": "split history: %s" % str(exc)[:100]})
             continue
+        # Read in full from here on, so a closed market can wait for its open.
+        with _STOPS_LOCK:
+            _STOPS_LOOKED[int(row["id"])] = now
         quote = float(bars.last_price)
         price, stop, side = quote * split, float(row["stop"]), int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:
@@ -665,7 +728,7 @@ def check_stops(conn, user=None) -> Dict:
                                         message, price, hit.as_of, trade_id=hit.trade_id)
         fired.append(hit)
     return {"checked": len(rows), "fired": fired, "errors": errors,
-            "when": int(time.time())}
+            "when": int(time.time()), "skipped": skipped}
 
 
 def deliver(conn, fired: List[Fired], send, address_of) -> Dict:
