@@ -703,6 +703,45 @@ try:
     conn.execute("DELETE FROM push_devices")
     conn.commit()
 
+    # A typo in APNS_BUNDLE_ID, or a changed one: Apple says every token is
+    # not for that topic, and the fault is the server's.
+    _os.environ["APNS_BUNDLE_ID"] = "app.orenth.iso"
+    phones = []
+    for n in range(3):
+        someone = person("topic-%d@example.com" % n)
+        push.register(conn, someone.id, "apns", ("3%d" % n) * 32)
+        phones.append(alerts.Fired(80 + n, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                   someone.id, ""))
+    conn.execute("UPDATE push_devices SET last_ok_ts=?", (int(time.time()) - 3600,))
+    conn.commit()
+    apple = use_apple(lambda r: (400, "DeviceTokenNotForTopic"))
+    out = push.deliver(conn, phones, SITE)
+    kept = conn.execute("SELECT last_error FROM push_devices WHERE kind='apns'").fetchall()
+    check("iPhones that have had notices are kept when Apple calls the topic wrong",
+          out["dropped"] == 0 and len(kept) == 3, out)
+    check("Apple is asked once that round, not about each",
+          len(apple.requests) == 1, len(apple.requests))
+    check("and the device says which app the server named",
+          kept and "app.orenth.iso" in (kept[0]["last_error"] or ""),
+          [r["last_error"] for r in kept])
+    _os.environ.pop("APNS_BUNDLE_ID")
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+    pasted = person("topic-new@example.com")
+    push.register(conn, pasted.id, "apns", "40" * 32)          # never had a notice
+    push.register(conn, pasted.id, "apns", "41" * 32)
+    conn.execute("UPDATE push_devices SET last_ok_ts=? WHERE address=?",
+                 (int(time.time()) - 3600, "41" * 32))
+    conn.commit()
+    apple = use_apple(lambda r: (400, "DeviceTokenNotForTopic")
+                      if str(r.url).endswith("40" * 32) else (200, ""))
+    out = push.send_test(conn, pasted.id, SITE)
+    check("a token that never had a notice, for another app, is forgotten, and the "
+          "round goes on", out["dropped"] == 1 and out["sent"] == 1
+          and [d["address"] for d in device_rows(pasted.id)] == ["41" * 32], out)
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
     section("ONE BROWSER'S TROUBLE IS NOT EVERYONE'S")
     use_apple(lambda r: (200, ""))
     busy = []

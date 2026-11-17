@@ -842,6 +842,9 @@ def _apns_post(environment: str, token: str, payload: bytes,
 
 
 # Reasons Apple gives that are about the device, not about this server.
+# DeviceTokenNotForTopic is, for a token that never had a notice: another
+# app's token handed over. For one that had notices, it is the bundle id the
+# server names that is wrong (send_apns).
 _GONE = ("Unregistered", "DeviceTokenNotForTopic")
 
 
@@ -889,6 +892,14 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
             return Sent(True, environment=environment)
         if status == 400 and reason == "BadDeviceToken":
             continue                            # perhaps the other environment's
+        if reason == "DeviceTokenNotForTopic" and row["last_ok_ts"]:
+            # This token has had notices from this server, so it is this
+            # app's: what changed is the bundle id the server names, and Apple
+            # would say the same of every iPhone. Kept, and the round stops.
+            log.warning("push: Apple says a token that had notices is not for %s; "
+                        "check APNS_BUNDLE_ID", s["topic"])
+            return Sent(False, "Apple says this token is not for %s" % s["topic"],
+                        blame=False, stop=True)
         if status == 410 or reason in _GONE:
             return Sent(False, "Apple says the app is no longer on that device (%s)"
                         % (reason or status), drop=True)
