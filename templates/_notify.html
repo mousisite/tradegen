@@ -1,0 +1,33 @@
+{# Notifications on this device, on the Monitor and Settings pages. Drawn
+   hidden: static/notify.js works out what this phone or browser can do and
+   only then shows the card, so nobody is offered a switch that cannot work.
+   Without JavaScript there is nothing to switch on, and nothing shows. #}
+{% if current_user and not demo %}
+<div class="card notify" data-notify hidden>
+  <div class="notify-head">
+    <h3>Notifications on this device</h3>
+    <span class="chip mute" data-notify-state></span>
+  </div>
+  <p class="prose">When one of your alerts fires, or an open position crosses
+    its stop, this device shows a notification, even with Orenth closed. It
+    says what happened and when the price behind it was set. Alerts are
+    checked on a timer, so one can arrive a few minutes after the price
+    moved.</p>
+  <p class="prose notify-said" data-notify-said role="status" aria-live="polite"></p>
+  <div class="notify-acts">
+    <button class="btn sm" type="button" data-notify-act="on" hidden>Turn on</button>
+    <button class="btn quiet sm" type="button" data-notify-act="test" hidden>Send a test</button>
+    <button class="btn quiet sm" type="button" data-notify-act="off" hidden>Turn off</button>
+  </div>
+  {% set leaving = 'Turning it off removes' if current_user.is_local else
+                   'Turning it off, signing out here, or deleting your account removes' %}
+  <p class="fine" data-notify-web>On the way it passes through the push service
+    your browser uses: Apple's, Google's, Mozilla's or Microsoft's. It is
+    encrypted for this browser, so that service cannot read it. {{ leaving }}
+    this device. <a href="{{ url_for('privacy') }}#notifications">More on the
+    privacy page</a>.</p>
+  <p class="fine" data-notify-app hidden>It comes through Apple's push service,
+    which delivers every iPhone app's notifications. {{ leaving }} this iPhone.
+    <a href="{{ url_for('privacy') }}#notifications">More on the privacy page</a>.</p>
+</div>
+{% endif %}

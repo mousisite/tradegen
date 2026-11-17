@@ -140,6 +140,11 @@ def main(argv=None) -> int:
           % ("every %g minutes" % cfg.get("alert_check_minutes", 5)
              if loop else "off"))
     print("    error reports  %s" % monitoring.status()["detail"])
+    # Asking also makes the browsers' key the first time, here at start-up.
+    off = web.push_mod.why_not()
+    print("    notifications  browsers %s; iPhone app %s"
+          % ("on" if not off["web"] else "off: " + off["web"],
+             "on" if not off["apns"] else "off: " + off["apns"]))
 
     def _backup_failed(exc):
         """A silent backup failure is the worst kind: loud in the log as well.

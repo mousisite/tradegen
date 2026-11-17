@@ -987,7 +987,8 @@ try:
           "Comes within … of its 52-week high" in labels
           and "Comes within … of its 52-week low" in labels, labels)
     check("the form says how a percent is typed", "5 means 5%" in page)
-    check("a desktop notice can be asked for", 'id="notifyask"' in page)
+    check("notifications on this device can be switched on",
+          'data-notify-act="on"' in page)
 finally:
     web.market_mod.split_history = REAL_HISTORY
     for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):

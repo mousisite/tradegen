@@ -61,6 +61,20 @@
     Pro. These are counts only: a day, what happened and how many times. No
     account, address, ticker or network address is kept with them, so they
     cannot be traced back to you.</p>
+  <p class="prose" id="notifications">If you turn on notifications on a phone
+    or a computer, Orenth keeps what that device's push service gave it to
+    reach the device (for a browser, a web address and two keys; for the
+    iPhone app, a device token), a short name such as "Chrome on Android",
+    and when a notification last went through or why it failed. When one of
+    your alerts fires, its text and the time of its price go to the device
+    through that push service: Apple's for iPhones, iPads and Safari,
+    Google's for Chrome and Android, Mozilla's for Firefox and Microsoft's
+    for Edge. A browser's notifications are encrypted for that browser, so
+    the push service carries them without being able to read them.
+    Notifications to the Orenth iPhone app pass through Apple's service,
+    which can read them, as it can every app's. Turning notifications off on
+    a device, removing it on the Settings page, signing out on it, or
+    deleting your account removes the device here.</p>
 
   <h2>What you create</h2>
   <p class="prose">
@@ -105,6 +119,12 @@
             <td>Delivering the code</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
             <td>Sending and checking the code</td></tr>
+        <tr><td>Apple, Google, Mozilla or Microsoft</td><td>A fired alert's text
+            and the time of its price, only to devices you turned
+            notifications on for. Encrypted so the push service cannot read
+            it, except on the way to the iPhone app, which Apple delivers
+            readable as it does for every app</td>
+            <td>Showing the alert on your phone or computer</td></tr>
         <tr><td>Metricool</td><td>The page address without anything after a ?, the
             window size and the page you came from, only while not signed in</td>
             <td>Counting visits. No cookie, and nothing that identifies you</td></tr>
@@ -136,6 +156,11 @@
     <li>No selling, renting or sharing of personal data with anyone.</li>
     <li>No cookies except the one that keeps you signed in. It holds an opaque
       session token and nothing else.</li>
+    <li>No copies of your pages on your device. So that Orenth can open and
+      say so plainly when there is no connection, your browser keeps the
+      site's style sheet, its icons and a "no connection" page, which are
+      the same for everybody. Every page with anything of yours on it comes
+      from the server each time and is never kept.</li>
   </ul>
 
   <h2>Keeping and deleting</h2>
@@ -143,7 +168,8 @@
     Your data stays until you remove it. Every dataset can be downloaded as CSV
     or JSON from the Account page at any time, without asking anyone. Deleting
     your account removes your trades, watchlist, alerts, theses, analysis
-    history, shared pages and sign-in records straight away; the shared
+    history, shared pages, sign-in records and the devices you turned
+    notifications on for straight away; the shared
     strategy record stays, because it was never yours alone and contains
     nothing about you.
   </p>

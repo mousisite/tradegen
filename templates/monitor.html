@@ -240,15 +240,7 @@
     </form>
   {% endif %}
 
-  {% if not demo %}
-    {# Shown by the script in base.html, and only where the browser can show
-       notices. They come from an open Orenth page, so the text says that. #}
-    <p class="prose" id="notifywrap" style="margin-top:var(--s3)" hidden>
-      <button class="btn quiet sm" type="button" id="notifyask">Show a desktop notice too</button>
-      <span id="notifynote">A fired alert pops up on your screen while any Orenth page
-        is open in this browser.</span>
-    </p>
-  {% endif %}
+  {% include "_notify.html" %}
 
   <div class="sechead" style="margin-top:var(--s4)">
     <h3>What it has told you</h3>

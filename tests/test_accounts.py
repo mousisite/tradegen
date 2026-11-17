@@ -893,6 +893,12 @@ _STDLIB = set(_sys.stdlib_module_names)
 _LOCAL = {"bot", "web", "analyze", "paper", "menu", "serve", "harness", "setup",
           "backup", "preflight"}
 _ALIAS = {"pil": "pillow", "dotenv": "python_dotenv"}
+# Modules a pinned package installs as its own dependency, so they are not
+# pinned themselves. httpx2 is the HTTP client the anthropic SDK requires;
+# bot/push.py uses it for HTTP/2 to Apple, and treats it being absent as the
+# iPhone app's notifications being off. Checked below against what the pinned
+# package actually requires, so this fails if it ever stops bringing it.
+_COMES_WITH = {"httpx2": "anthropic"}
 
 # Anything that is a .py file or a package in this repository is local by
 # definition. A hand-kept list meant every new script read as a missing
@@ -932,6 +938,15 @@ third_party = {n: w for n, w in imported.items()
                if n not in _STDLIB and n not in _LOCAL}
 check("the scan found the imports at all", len(third_party) >= 5)
 for name, where in sorted(third_party.items()):
+    host = _COMES_WITH.get(name.lower())
+    if host:
+        brought = {r.split(";")[0].replace(" ", "").split("<")[0].split(">")[0]
+                   .split("=")[0].split("!")[0].split("~")[0].lower()
+                   for r in (_md.requires(host) or [])}
+        check("%s comes with %s, which is in requirements.txt" % (name, host),
+              host in req_names and name.lower() in brought,
+              "imported by %s" % ", ".join(sorted(where)[:3]))
+        continue
     check("%s is in requirements.txt" % name,
           _ALIAS.get(name.lower(), name.lower()) in req_names,
           "imported by %s" % ", ".join(sorted(where)[:3]))

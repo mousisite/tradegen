@@ -46,6 +46,7 @@ SUITES = [
     ("test_codes.py",        False, "sign-in codes by email and text, and their limits"),
     ("test_billing.py",      False, "paid plans: signed webhooks, allowances, checkout"),
     ("test_growth.py",       False, "popular pages, sharing, invites, weekly email"),
+    ("test_push.py",         False, "notifications to phones and browsers, and the installable app"),
     ("test_portfolio_risk.py", False, "open risk, breached stops, shorts, gaps and costs"),
     ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),
     ("test_sessions.py",     False, "market hours, and the alert loop leaving a closed market"),

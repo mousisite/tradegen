@@ -16,7 +16,8 @@ sizing, the same thing a typeface does, not a second design.
 
 Run it from the project root:
 
-    python tools/make_logo.py
+    python tools/make_logo.py              every file
+    python tools/make_logo.py --app-icons  only the installable app's icons
 """
 from __future__ import annotations
 
@@ -163,6 +164,47 @@ def _partial() -> str:
 ICON_SIZES = (48, 96, 180, 192, 512)
 ICO_SIZES = (16, 32, 48)
 
+# The installable app's icons (bot/webapp.py lists them in the manifest).
+#   maskable: a phone crops an app icon to its own shape, a circle, a
+#             squircle or a teardrop, and only a circle of 40% radius about
+#             the centre is promised to survive every crop. The tile's ring
+#             already reaches 37% of the width, so the mark is drawn at 88%
+#             of that and the dark ground runs to every edge.
+#   badge:    the small icon beside a notification in a phone's status bar.
+#             Android takes only its shape, so it is the mark in white on
+#             nothing, in the bold weight because it is shown at 24 pixels.
+TILE_SCALE = 0.74
+MASKABLE_SCALE = TILE_SCALE * 0.88
+MASKABLE_SIZES = (192, 512)
+BADGE_SIZE = 96
+WHITE = (255, 255, 255)
+
+
+def maskable(size: int) -> Image.Image:
+    return render(size, background=INK, ring=PAPER, candle=PAPER,
+                  scale=MASKABLE_SCALE)
+
+
+def badge(size: int = BADGE_SIZE) -> Image.Image:
+    return render(size, ring=WHITE, candle=WHITE, accent=WHITE, scale=0.92,
+                  bold=True)
+
+
+def write_app_icons(root: str) -> List[Tuple[str, int]]:
+    """Only the installable app's icons, leaving every other file as it is.
+
+        python tools/make_logo.py --app-icons
+    """
+    static = os.path.join(root, "static")
+    wrote: List[Tuple[str, int]] = []
+    images = [("icon-maskable-%d.png" % size, maskable(size)) for size in MASKABLE_SIZES]
+    images.append(("badge-%d.png" % BADGE_SIZE, badge()))
+    for name, img in images:
+        full = os.path.join(static, name)
+        img.save(full, "PNG", optimize=True)
+        wrote.append((name, os.path.getsize(full)))
+    return wrote
+
 
 def _write(root: str) -> List[Tuple[str, int]]:
     static = os.path.join(root, "static")
@@ -178,11 +220,12 @@ def _write(root: str) -> List[Tuple[str, int]]:
     def tile(size: int) -> Image.Image:
         bold = size <= 48
         return render(size, background=INK, ring=PAPER, candle=PAPER,
-                      scale=0.82 if bold else 0.74, bold=bold)
+                      scale=0.82 if bold else TILE_SCALE, bold=bold)
 
     for size in ICON_SIZES:
         save(tile(size), "icon-%d.png" % size)
     save(tile(512), "logo.png")
+    wrote.extend(write_app_icons(root))
 
     # Each size of the .ico drawn at its own size, so 16px gets the bold
     # weight rather than a blurred reduction of the 48px one.
@@ -214,6 +257,8 @@ def _write(root: str) -> List[Tuple[str, int]]:
 
 
 if __name__ == "__main__":
+    import sys
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name, size in _write(here):
+    made = write_app_icons(here) if "--app-icons" in sys.argv[1:] else _write(here)
+    for name, size in made:
         print("  %-26s %7d bytes" % (name, size))

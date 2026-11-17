@@ -249,6 +249,43 @@
 
 </form>
 
+{% if current_user and not demo %}
+{# After the form rather than beside the other sections, so it is spaced here. #}
+<section id="notifications" style="margin-top:var(--s5)">
+  <div class="sechead"><h2>Notifications</h2>
+    <span class="tail">alerts on your phone or computer</span></div>
+  {% include "_notify.html" %}
+  {# Every device that gets this account's notifications, so one that was
+     lost or sold can be switched off from another. #}
+  {% if push_devices %}
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Device</th><th>Turned on</th><th>Last notification</th>
+          <th><span class="sr">Actions</span></th></tr></thead>
+        <tbody>
+        {% for d in push_devices %}
+          <tr>
+            <td><b>{{ d['label'] or 'A device' }}</b></td>
+            <td class="soft">{{ d['created_ts']|ago }}</td>
+            <td class="soft">{{ d['last_ok_ts']|ago if d['last_ok_ts'] else 'none yet' }}
+              {% if d['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">Last try failed: {{ d['last_error'] }}</div>{% endif %}</td>
+            <td class="r">
+              <form method="post" action="{{ url_for('push_remove') }}">
+                <input type="hidden" name="device_id" value="{{ d['id'] }}">
+                <button class="btn quiet sm" type="submit">Remove</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section>
   <div class="sechead"><h2>Take your data with you</h2>
     <span class="tail">{{ 'download what is yours' if personal

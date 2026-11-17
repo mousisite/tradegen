@@ -14,3 +14,7 @@ anthropic==1.4.0  # Optional features only, but the import must resolve when a k
 # Optional: error reporting. Inert unless SENTRY_DSN is set, but the
 # import has to resolve for the feature to be switchable at all.
 sentry-sdk[flask]==2.69.1
+# Signing and encrypting: Sign in with Apple, and phone and browser notifications.
+cryptography==50.0.2
+# HTTP/2, which Apple's push service requires.
+h2==4.4.1

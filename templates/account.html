@@ -79,6 +79,21 @@
 </section>
 {% endif %}
 
+{# Installing Orenth as an app. Hidden until the script below knows how this
+   browser does it, and for good once Orenth is installed or inside the
+   iPhone app. Said here once, never popped up. #}
+<section id="install" hidden>
+  <div class="sechead"><h2>Add Orenth to your home screen</h2></div>
+  <div class="card">
+    <p class="prose">It then opens like an app, in its own window, without the
+      browser's bars around it. Everything stays where it is: the app is this
+      site, signed in as you.</p>
+    <p class="prose" data-install-how hidden style="margin-top:var(--s1)"></p>
+    <button class="btn quiet" type="button" data-install-go hidden
+            style="margin-top:var(--s2)">Install Orenth</button>
+  </div>
+</section>
+
 {% if weekly.ready %}
 <section id="weekly">
   <div class="sechead"><h2>Weekly email</h2></div>
@@ -186,6 +201,51 @@
 {% endif %}
 
 <script>
+(function () {
+  var box = document.getElementById('install');
+  var cap = window.Capacitor;
+  if (!box || (cap && cap.isNativePlatform && cap.isNativePlatform())) { return; }
+  var installed = navigator.standalone === true
+    || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  if (installed) { return; }
+  var how = box.querySelector('[data-install-how]');
+  var go = box.querySelector('[data-install-go]');
+  var ua = navigator.userAgent || '';
+  var waiting = null;
+
+  function say(text) {
+    how.textContent = text;
+    how.hidden = false;
+    box.hidden = false;
+  }
+  // Chrome and Edge offer to install a site themselves; held here, the offer
+  // becomes this button instead of a bar across the page.
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    waiting = e;
+    how.hidden = true;
+    go.hidden = false;
+    box.hidden = false;
+  });
+  window.addEventListener('appinstalled', function () { box.hidden = true; });
+  go.addEventListener('click', function () {
+    if (!waiting) { return; }
+    var offer = waiting;
+    waiting = null;
+    go.hidden = true;
+    offer.prompt();
+    offer.userChoice.then(function (choice) {
+      if (choice.outcome === 'accepted') { box.hidden = true; }
+      else { say('Changed your mind? Your browser’s menu has Install Orenth too.'); }
+    }).catch(function () {});
+  });
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) {
+    say('Tap the Share button, then Add to Home Screen.');
+  } else if (/Android/.test(ua)) {
+    say('Open your browser’s menu and choose Install app, or Add to Home screen.');
+  }
+})();
+
 (function () {
   var bar = document.querySelector('#invite .sharebar');
   if (!bar) { return; }
