@@ -794,11 +794,11 @@ try:
     real_read, real_research = web.read_chart, web.engine.research
     web.read_chart = lambda png: ChartRead(symbol="AAPL")
     try:
-        got = [c.post("/analyse/image", data={"chart": (png_bytes(), "c.png")},
+        got = [c.post("/analyse/image", data={"chart": (png_bytes(), "c.png"), "ai_ok": "1"},
                       content_type="multipart/form-data").status_code
                for _ in range(web.IMAGE_READS_PER_HOUR)]
         check("a Pro account can read screenshots", set(got) == {302}, got)
-        r = c.post("/analyse/image", data={"chart": (png_bytes(), "c.png")},
+        r = c.post("/analyse/image", data={"chart": (png_bytes(), "c.png"), "ai_ok": "1"},
                    content_type="multipart/form-data")
         check("but not without end, since every read is paid for",
               r.status_code == 429, r.status_code)

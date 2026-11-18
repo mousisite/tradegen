@@ -254,6 +254,21 @@
       <input type="file" id="chart" name="chart" accept="image/*"
              {{ '' if has_key else 'disabled' }}>
     </label>
+    {# The picture goes to another company's AI, so the person says yes
+       first, once, and can take it back in Settings. Outside the label, so
+       ticking it does not open the file picker. #}
+    {% if has_key and not ai_ok %}
+      <label class="consent" for="ai_ok">
+        <input type="checkbox" id="ai_ok" name="ai_ok" value="1">
+        <span>Send my screenshot to Anthropic, the company that makes Claude,
+          so it can read which chart it is. Orenth does not keep the picture.
+          <a href="{{ url_for('privacy') }}#anthropic">More on this</a></span>
+      </label>
+      <p class="fine" id="ai_say" role="status" hidden>Tick the box above first,
+        then add the picture again.</p>
+    {% elif has_key %}
+      <input type="hidden" name="ai_ok" value="1">
+    {% endif %}
   </form>
   {% endif %}
 </div>
@@ -270,8 +285,18 @@
     var ivSel = document.getElementById('interval');
     var ivOut = document.getElementById('shotinterval');
 
+    var agree = document.getElementById('ai_ok');
+    var agreeSay = document.getElementById('ai_say');
+
     function send(file) {
       if (!file || !file.type.startsWith('image/')) { return; }
+      // Nothing leaves before the yes: the box is asked about, not ticked.
+      if (agree && agree.type === 'checkbox' && !agree.checked) {
+        if (agreeSay) { agreeSay.hidden = false; }
+        agree.focus();
+        input.value = '';
+        return;
+      }
       // Show the chart back to the user so it is obvious which image is going.
       var reader = new FileReader();
       reader.onload = function (e) { thumb.src = e.target.result; thumb.hidden = false; };

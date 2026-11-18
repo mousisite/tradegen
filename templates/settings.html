@@ -286,6 +286,23 @@
 </section>
 {% endif %}
 
+{# The yes given on the Analyse page before a screenshot first went to
+   Anthropic, shown where it can be taken back. #}
+{% if has_key and ai_since %}
+<section id="screenshots" style="margin-top:var(--s5)">
+  <div class="sechead"><h2>Screenshot reading</h2></div>
+  <div class="card">
+    <p class="prose">You agreed {{ ai_since|ago }} that chart screenshots you
+      upload are sent to Anthropic, the company that makes Claude, to read which
+      chart they show. Orenth does not keep the pictures.</p>
+    <form method="post" action="{{ url_for('ai_consent_withdraw') }}"
+          style="margin-top:var(--s2)">
+      <button class="btn quiet sm" type="submit">Stop sending screenshots</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
 <section>
   <div class="sechead"><h2>Take your data with you</h2>
     <span class="tail">{{ 'download what is yours' if personal

@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS user_settings (
 -- older versions of the app read them. The refresh token is only kept so that
 -- deleting the account can ask Apple to end it, and it is useless without
 -- this site's .p8 key, which is never in the database.
+-- When a person agreed to their chart screenshots being sent to Anthropic
+-- to be read. Asked once, before the first picture leaves, because the App
+-- Store and plain fairness both want an explicit yes before anything a
+-- person uploads goes to another company's AI. Withdrawn by deleting the row.
+CREATE TABLE IF NOT EXISTS ai_consents (
+    user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    ts       INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS identities (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -778,6 +787,28 @@ def redeem_handoff(conn: sqlite3.Connection, handoff_token: str,
     return int(row["user_id"]), row["next_url"]
 
 
+# --- sending a screenshot to Anthropic ----------------------------------------
+
+def ai_consent(conn: sqlite3.Connection, user_id: int) -> int:
+    """When this person agreed to screenshots going to Anthropic, or 0."""
+    row = conn.execute("SELECT ts FROM ai_consents WHERE user_id=?",
+                       (int(user_id),)).fetchone()
+    return int(row["ts"]) if row else 0
+
+
+def give_ai_consent(conn: sqlite3.Connection, user_id: int) -> None:
+    """Record the yes, keeping the first time it was given."""
+    conn.execute("INSERT OR IGNORE INTO ai_consents (user_id, ts) VALUES (?, ?)",
+                 (int(user_id), int(time.time())))
+    conn.commit()
+
+
+def withdraw_ai_consent(conn: sqlite3.Connection, user_id: int) -> None:
+    """Take the yes back: the next screenshot asks again."""
+    conn.execute("DELETE FROM ai_consents WHERE user_id=?", (int(user_id),))
+    conn.commit()
+
+
 # --- deleting an account ----------------------------------------------------
 
 def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
@@ -809,6 +840,7 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM ai_consents WHERE user_id=?", (user_id,))
     from . import billing, codes, public
     billing.ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))

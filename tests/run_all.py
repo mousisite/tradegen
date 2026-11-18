@@ -65,6 +65,7 @@ SUITES = [
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
     ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
     ("test_lock.py",         False, "the lock file the server installs from agrees with requirements.txt"),
+    ("test_ai_consent.py",   False, "a screenshot goes to Anthropic only after the person says yes"),
     ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it, the review sign-in"),
 ]
 

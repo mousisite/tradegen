@@ -1060,10 +1060,12 @@ def index():
     finally:
         conn.close()
     attention = _attention(stored, open_trades)
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return render_template("index.html", runs=runs,
                            open_trades=_held(open_trades, attention["marks"]),
                            summary=summary, counts=counts, attention=attention,
-                           has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
+                           has_key=has_key,
+                           ai_ok=has_key and _ai_consented())
 
 
 # The signed-in front page starts with what needs the person now. It is built
@@ -2092,6 +2094,25 @@ def analyse_image():
     if _rate_limited("image", IMAGE_READS_PER_HOUR):
         return _too_often("read screenshots")
 
+    # Nothing a person uploads goes to another company's AI without their
+    # explicit yes: the box on the Analyse page, ticked once and remembered,
+    # or ticked with this picture. Asked after the allowance, so a used-up
+    # one is said first; either way nothing has been sent.
+    if not _ai_consented():
+        if request.form.get("ai_ok") != "1":
+            return render_template(
+                "error.html", symbol="",
+                message="To read a screenshot, Orenth sends the picture to "
+                        "Anthropic, the company that makes Claude. Tick the box "
+                        "under the picture area to agree, then try again. "
+                        "Typing the ticker needs no picture at all."), 400
+        if not g.demo and not g.user.is_local:
+            conn = db_mod.connect(app.config.get("DB_PATH"))
+            try:
+                accounts_mod.give_ai_consent(conn, uid())
+            finally:
+                conn.close()
+
     from PIL import Image
     if not _DECODING.acquire(timeout=20):
         return render_template("error.html", symbol="",
@@ -2154,6 +2175,37 @@ def analyse_image():
     interval = request.form.get("interval") or _interval_from(read.timeframe)
     return redirect(url_for("analyse", symbol=read.symbol, interval=interval,
                             fromimage="1"))
+
+
+def _ai_consented() -> bool:
+    """Whether this person has said yes to screenshots going to Anthropic.
+
+    The owner of a copy on their own machine set the key up themselves, so
+    the choice is theirs already. The example account is shared, so its yes
+    is never kept: whoever is looking around ticks the box each time.
+    """
+    user = getattr(g, "user", None)
+    if user is None or getattr(g, "demo", False):
+        return False
+    if user.is_local:
+        return True
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return bool(accounts_mod.ai_consent(conn, uid()))
+    finally:
+        conn.close()
+
+
+@app.route("/settings/ai-consent", methods=["POST"])
+def ai_consent_withdraw():
+    """Take back the yes to screenshots going to Anthropic."""
+    if not g.demo and not g.user.is_local:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            accounts_mod.withdraw_ai_consent(conn, uid())
+        finally:
+            conn.close()
+    return redirect(url_for("settings") + "#screenshots")
 
 
 def _interval_from(timeframe: Optional[str]) -> str:
@@ -4751,7 +4803,21 @@ def settings():
                            scheduler=(ALERTS.status() if ALERTS else None),
                            saved=saved or request.args.get("saved") == "1",
                            error=error,
-                           has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
+                           has_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
+                           ai_since=_ai_consent_since())
+
+
+def _ai_consent_since() -> int:
+    """When a signed-in person said yes to screenshots going to Anthropic, or 0.
+    Only an account of one's own has a yes to show or take back."""
+    user = getattr(g, "user", None)
+    if user is None or getattr(g, "demo", False) or user.is_local:
+        return 0
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        return accounts_mod.ai_consent(conn, uid())
+    finally:
+        conn.close()
 
 
 @app.route("/api/search")
