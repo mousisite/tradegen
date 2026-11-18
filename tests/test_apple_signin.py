@@ -31,6 +31,7 @@ from bot import accounts as A
 from bot import apple as apple_mod
 from bot import database as db
 from bot import demo as demo_mod
+from bot import push as push_mod
 
 c, DB = harness.isolated_web("apple")
 
@@ -522,6 +523,12 @@ try:
           "\n" not in noisy and len(noisy) <= 130, noisy)
     check("a name that is not JSON is ignored",
           apple_mod.name_from_post("{not json") == "")
+    try:
+        nested = apple_mod.name_from_post("[" * 999 + "]" * 999)
+    except RecursionError:
+        nested = None
+    check("a name nested deeper than Python reads is ignored, not a crash",
+          nested == "", nested)
 
     section("WHICH ACCOUNT AN APPLE ID REACHES")
 
@@ -610,6 +617,54 @@ try:
                                                 "is_private_email": True})
         check("after taking consent back, signing in again reaches the same account",
               back_again.id == relay.id, (back_again.id, relay.id))
+
+        # An address handed to someone new after its first Apple ID was taken
+        # off: ever tied to another Apple ID counts, not only tied now.
+        def reaches(sub, email):
+            """The account an Apple ID with this verified address reaches,
+            or None when it is refused."""
+            try:
+                return A.upsert_apple_user(conn, {"sub": sub, "email": email,
+                                                  "email_verified": True}).id
+            except ValueError:
+                return None
+
+        frank = A.upsert_google_user(conn, {"sub": "g-frank",
+                                            "email": "frank@corp.example",
+                                            "email_verified": True})
+        check("a Google account no Apple ID was ever tied to is joined by its "
+              "own address", reaches("a-frank", "frank@corp.example") == frank.id)
+
+        alice = A.upsert_apple_user(conn, {"sub": "a-alice",
+                                           "email": "alice@corp.example",
+                                           "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-alice")
+        check("an address cannot take over the account another Apple ID made, "
+              "even once that one was taken off it",
+              reaches("a-alice-next", "alice@corp.example") is None)
+        check("while the Apple ID that made it still reaches it",
+              reaches("a-alice", "alice@corp.example") == alice.id)
+
+        carol = A.upsert_google_user(conn, {"sub": "g-carol",
+                                            "email": "carol@corp.example",
+                                            "email_verified": True})
+        reaches("a-carol", "carol@corp.example")
+        A.unlink_identity(conn, "apple", "a-carol")
+        check("nor a Google account another Apple ID was linked to and taken "
+              "off", reaches("a-carol-next", "carol@corp.example") is None)
+        check("while the Apple ID that was linked still reaches it",
+              reaches("a-carol", "carol@corp.example") == carol.id)
+
+        erin = A.upsert_apple_user(conn, {"sub": "a-erin",
+                                          "email": "erin@corp.example",
+                                          "email_verified": True})
+        A.upsert_google_user(conn, {"sub": "g-erin", "email": "erin@corp.example",
+                                    "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-erin")
+        check("nor one Apple made, once Google has signed in to it too",
+              reaches("a-erin-next", "erin@corp.example") is None)
+        check("while the Apple ID that made it still reaches it",
+              reaches("a-erin", "erin@corp.example") == erin.id)
     finally:
         conn.close()
 
@@ -811,6 +866,24 @@ try:
                 conn.execute("SELECT COUNT(*) FROM app_handoffs WHERE user_id=?",
                              (doomed.id,)).fetchone()[0])
         check("delete_user removes its identities and app codes", left == (0, 0), left)
+
+        def remembered(user_id):
+            """Rows kept of Apple IDs taken off this account."""
+            try:
+                return conn.execute("SELECT COUNT(*) FROM former_identities "
+                                    "WHERE user_id=?", (user_id,)).fetchone()[0]
+            except Exception as exc:             # no such table, before it
+                return repr(exc)
+
+        parted = A.upsert_apple_user(conn, {"sub": "a-parted", "email": "p@example.com",
+                                            "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-parted")
+        before_delete = remembered(parted.id)
+        A.delete_user(conn, parted.id)
+        check("an Apple ID taken off an account is remembered against it",
+              before_delete == 1, before_delete)
+        check("and delete_user removes that too", remembered(parted.id) == 0,
+              remembered(parted.id))
         older = A.upsert_apple_user(conn, {"sub": "a-older", "email": "o@example.com",
                                            "email_verified": True}, "", "r.o",
                                     SERVICES)
@@ -825,6 +898,14 @@ try:
                              (older.id,)).fetchone()[0])
         check("and the previous version's plain delete clears them too",
               left == (0, 0), left)
+        older_parted = A.upsert_apple_user(conn, {"sub": "a-older-parted",
+                                                  "email": "op@example.com",
+                                                  "email_verified": True})
+        A.unlink_identity(conn, "apple", "a-older-parted")
+        conn.execute("DELETE FROM users WHERE id=?", (older_parted.id,))
+        conn.commit()
+        check("including what it remembered of Apple IDs taken off it",
+              remembered(older_parted.id) == 0, remembered(older_parted.id))
         A.ensure_schema(conn)
         A.ensure_schema(conn)
         check("the new tables are safe to create again", True)
@@ -848,6 +929,15 @@ try:
         A.upsert_apple_user(conn, {"sub": "a-dana", "email": "dana@example.com",
                                    "email_verified": True})
         dana_session = A.start_session(conn, dana.id)
+        # Notifications that sign-in switched on, on a shared iPad, and
+        # someone else's phone, which none of this may touch.
+        push_mod.register(conn, dana.id, "web",
+                          "https://fcm.googleapis.com/fcm/send/dana-ipad", "p", "a",
+                          label="iPad", session_ref=web._session_ref(dana_session))
+        robin_id = people()["robin@example.com"].id
+        push_mod.register(conn, robin_id, "web",
+                          "https://fcm.googleapis.com/fcm/send/robin", "p", "a",
+                          label="Robin's", session_ref=web._session_ref("robin-1"))
     finally:
         conn.close()
     out = notify("consent-revoked", "a-dana")
@@ -860,6 +950,11 @@ try:
               A.user_for_session(conn, dana_session) is None)
         check("but the account stays, Google still opens it",
               A.get_user(conn, dana.id) is not None)
+        left = [d["label"] for d in push_mod.devices(conn, dana.id)]
+        check("and, as signing out does, the devices those sign-ins switched "
+              "on stop getting its alerts", left == [], left)
+        check("while nobody else's devices are touched",
+              len(push_mod.devices(conn, robin_id)) == 1)
     finally:
         conn.close()
 
@@ -899,6 +994,40 @@ try:
     check("one with a real address it can still be reached at is kept",
           "real@example.com" in people() and identity_row("005.real.1") is None)
 
+    # Consent taken back first, which unlinks Apple; the Apple Account itself
+    # deleted later. The account Apple made still names it.
+    web_sign_in("005.hidden.2", "q9@privaterelay.appleid.com", relay=True)
+    notify("consent-revoked", "005.hidden.2")
+    check("someone who hid their address stops using Apple here, and the "
+          "account stays for now", "q9@privaterelay.appleid.com" in people()
+          and identity_row("005.hidden.2") is None)
+    out = notify("account-delete", "005.hidden.2")
+    check("when their Apple Account is deleted later, the account only it "
+          "could open goes with it", out.status_code == 200
+          and "q9@privaterelay.appleid.com" not in people(), out.status_code)
+    web_sign_in("005.real.2", "real2@example.com")
+    notify("consent-revoked", "005.real.2")
+    # Back in with a code since, with notifications on for that sign-in.
+    conn = db.connect(DB)
+    try:
+        real2 = A.upsert_email_user(conn, "real2@example.com")
+        since = A.start_session(conn, real2.id)
+        push_mod.register(conn, real2.id, "web",
+                          "https://fcm.googleapis.com/fcm/send/real2", "p", "a",
+                          session_ref=web._session_ref(since))
+    finally:
+        conn.close()
+    notify("account-delete", "005.real.2")
+    check("while one with a real address is kept that way too",
+          "real2@example.com" in people())
+    conn = db.connect(DB)
+    try:
+        check("and a sign-in made since, with its devices, is left alone",
+              A.user_for_session(conn, since) is not None
+              and len(push_mod.devices(conn, real2.id)) == 1)
+    finally:
+        conn.close()
+
     web_sign_in("005.late.1", "late@example.com")
     out = notify("consent-revoked", "005.late.1", at=int(time.time()) - 3600)
     check("a notice older than the latest sign-in changes nothing",
@@ -923,6 +1052,29 @@ try:
         json={"payload": sign(claims_for("005.late.1", BUNDLE, apple_mod.new_nonce()))})
     check("an identity token posted as a notification is refused",
           other_kind.status_code == 400)
+
+    def status_of(path, **kwargs):
+        """A post's status, counting an error that escapes as the 500 it is
+        on the site."""
+        try:
+            return web.app.test_client().post(path, **kwargs).status_code
+        except RecursionError:
+            return 500
+
+    # Nested past what Python reads, and unsigned: anyone can send these.
+    deep = "[" * 2500 + "]" * 2500
+    nested_token = "%s.%s.%s" % (b64(deep.encode("ascii")), b64(b"{}"), b64(b"x"))
+    check("a token whose header is nested thousands deep is refused, not a 500",
+          status_of("/auth/apple/notifications",
+                    json={"payload": nested_token}) == 400)
+    deep_body = "[" * 20000 + "]" * 20000
+    check("so is a notification body nested thousands deep",
+          status_of("/auth/apple/notifications", data=deep_body,
+                    content_type="application/json") == 400)
+    check("and the same body posted to the app's Apple sign-in",
+          status_of("/auth/apple/native", data=deep_body,
+                    content_type="application/json",
+                    headers={"Origin": "http://localhost"}) == 400)
 
 finally:
     apple_mod.requests = _real_requests

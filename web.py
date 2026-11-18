@@ -2681,7 +2681,12 @@ def apple_native():
                                               "itself."}), 403
     request.max_content_length = APPLE_JSON_LIMIT
     # Named so that an error report strips it: it holds the identity token.
-    token_post = request.get_json(silent=True)
+    try:
+        token_post = request.get_json(silent=True)
+    except RecursionError:
+        # silent= covers only what is not JSON; this is JSON nested too
+        # deep for Python to read, which anyone can send.
+        token_post = None
     if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
@@ -2766,7 +2771,10 @@ def apple_notifications():
     if not apple_mod.native_ready():
         abort(404)
     request.max_content_length = APPLE_JSON_LIMIT
-    body = request.get_json(silent=True, force=True)
+    try:
+        body = request.get_json(silent=True, force=True)
+    except RecursionError:
+        body = None              # nested too deep to read, as in apple_native
     try:
         event = apple_mod.read_notification(
             body.get("payload") if isinstance(body, dict) else None)
@@ -2779,13 +2787,23 @@ def apple_notifications():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         owner = accounts_mod.identity_owner(conn, "apple", event["sub"])
+        if owner is None and deleted:
+            # Unlinked already, when its consent was taken back. The account
+            # it made still names it, and goes too if nothing else opens it.
+            owner = accounts_mod.made_by(conn, "apple", event["sub"])
         # Unknown here, or signed in again since it happened: nothing to undo.
         if owner is None or owner["last_used_ts"] > event["at"]:
             return jsonify({"received": True})
         user_id = int(owner["user_id"])
         if not deleted or accounts_mod.can_still_sign_in(conn, user_id, "apple",
                                                          event["sub"]):
-            accounts_mod.unlink_identity(conn, "apple", event["sub"])
+            # Unlinking signs the account out everywhere. As /signout does
+            # for one sign-in, the devices those sign-ins switched on stop
+            # being sent its alerts, so a shared iPad stops showing them.
+            accounts_mod.unlink_identity(
+                conn, "apple", event["sub"],
+                ending=lambda token: push_mod.forget_session(conn,
+                                                             _session_ref(token)))
             return jsonify({"received": True})
         # Their Apple Account is gone and nothing else opens this one. The
         # subscription stops first, as when they delete it themselves.
@@ -2821,7 +2839,8 @@ def _app_challenge() -> Tuple[str, bool]:
     and the SHA-256 of a secret it keeps, base64url, 43 characters. A link on
     another site cannot start one: the browser marks it cross-site, and it
     becomes an ordinary sign-in in that browser, which hands nothing to
-    anyone.
+    anyone. Another app on the phone can start one, in a sheet of its own,
+    and nothing here tells it from Orenth's app: see accounts.py.
     """
     if request.args.get("app") != "1":
         return "", False
