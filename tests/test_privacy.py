@@ -547,6 +547,26 @@ try:
                   for w in ("watchlist", "alerts")), offered)
 
     # -----------------------------------------------------------------------
+    head("THE SERVICES THAT GET DATA, AND WHAT THEY MAY DO WITH IT")
+    # -----------------------------------------------------------------------
+    # The App Store's guideline 5.1.1(i) wants a privacy policy to confirm
+    # that whoever gets data from the app protects it as the policy does.
+    # The page listed Stripe, Twilio, Sentry, a storage bucket and more as
+    # getting personal data, then said "No selling, renting or sharing of
+    # personal data with anyone".
+    page = flat(text(visitor.get("/privacy")))
+    table_end = page.find("</table>")
+    promise = page.find("Each service above gets only what its row says.")
+    check("under the list of services, each is held to its row and to this page",
+          table_end < promise and "It may use that only to do the job its row names, "
+          "for Orenth, and must protect it at least as well as this page promises."
+          in page, page[table_end:table_end + 400])
+    check("and the page no longer says personal data is shared with no one",
+          "sharing of personal data with anyone" not in page
+          and "No selling or renting of personal data, and no sharing of it beyond "
+              "the services listed above" in page)
+
+    # -----------------------------------------------------------------------
     head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")
     # -----------------------------------------------------------------------
     from bot import billing  # noqa: E402
