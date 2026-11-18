@@ -334,6 +334,8 @@ class Position:
     interval: str = "1d"
     # A crossing of the stop a reader saw and kept (crossing_of), or None.
     kept: Optional[tuple] = None
+    # How its stop was read just now, for keep_reads; None when unpriced.
+    read: Optional[StopRead] = None
 
     @property
     def risk_per_unit(self) -> float:
@@ -511,6 +513,27 @@ def build(rows, account: float, with_correlation: bool = True,
     return view
 
 
+def keep_reads(conn, view: PortfolioView, now: Optional[float] = None) -> None:
+    """Keep what reading the positions saw, as every reader of a stop does.
+
+    The best price under a trailing stop (database.trail_seen) and the first
+    crossing of any stop (database.stop_crossed). A dip through a stop
+    between two rounds of the background check may be seen here alone, and
+    once that bar is finished its high and low no longer show it: kept, it
+    is still a crossing for the journal, the notice and everything else.
+    """
+    from . import database as db
+    now = time.time() if now is None else now
+    for p in view.positions:
+        if p.read is None:
+            continue
+        if p.trail is not None and p.read.best_at is not None:
+            db.trail_seen(conn, p.trade_id, p.read.best, p.read.best_at)
+        crossed = p.read.crossing(now)
+        if crossed is not None:
+            db.stop_crossed(conn, p.trade_id, *crossed)
+
+
 def _enrich(positions: List[Position], view: PortfolioView) -> None:
     """Attach live price, sector and risk stats to each holding, concurrently."""
     def grab(p: Position):
@@ -534,6 +557,7 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             p.price, p.stop = read.price, read.stop
             p.touched_at, p.touched = read.touched_at, read.touched
             p.touched_stop = read.touched_stop
+            p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
             return

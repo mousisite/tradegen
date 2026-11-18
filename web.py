@@ -1091,6 +1091,14 @@ def index():
     finally:
         conn.close()
     attention = _attention(stored, open_trades)
+    # What the prices just read saw is kept, as the journal keeps it: a dip
+    # through a stop between two rounds of the background check may be seen
+    # here alone. Nothing, if the prices were late.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        _keep_trail_bests(conn, open_trades, attention["marks"])
+    finally:
+        conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return render_template("index.html", runs=runs,
                            open_trades=_held(open_trades, attention["marks"]),
@@ -4283,6 +4291,12 @@ def portfolio():
 
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
         kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
+    # What the prices just read saw is kept, as the journal keeps it.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        portfolio_mod.keep_reads(conn, view)
+    finally:
+        conn.close()
     shocks = {pct: portfolio_mod.what_if(view, pct)
               for pct in (-0.05, -0.10, -0.20)} if view.positions else {}
     return render_template("portfolio.html", view=view, cfg=cfg,

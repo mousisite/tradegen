@@ -942,6 +942,34 @@ try:
           and "Stop breached on ZZQ5: it traded through its stop of 95" in page,
           [body[body.find("<b>ZZQ5</b>") - 20:][:200]])
 
+    # The front page, /portfolio and the positions routine read positions as
+    # well, and keep what they see as the journal does. A round of the
+    # background check at the high trails the stop up to 114; the dip to 113
+    # comes between two rounds, and only one of them sees it. Once the day is
+    # done the finished bar no longer shows it, but it is still a crossing.
+    def positions_routine():
+        workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH),
+                                   workflows.RunReport(name="positions", started=0, finished=0),
+                                   lambda _label: None, user=alice.id)
+
+    for symbol, where, look in (("ZZJ3", "the front page", lambda: c.get("/")),
+                                ("ZZJ4", "/portfolio", lambda: c.get("/portfolio")),
+                                ("ZZJ5", "the positions routine", positions_routine)):
+        tid = opened_yesterday(symbol)
+        BARS[symbol] = NS(**dict(vars(days), last_price=120.0))
+        alerts.check_stops(conn)
+        BARS[symbol] = NS(**dict(vars(days), last_price=113.0))
+        look()
+        BARS[symbol] = done
+        kept = conn.execute("SELECT trail_best, trail_hit_price, trail_hit_stop FROM trades "
+                            "WHERE id=?", (tid,)).fetchone()
+        mark = web._mark_one(conn.execute("SELECT * FROM trades WHERE id=?", (tid,)).fetchone())
+        told = [f for f in alerts.check_stops(conn)["fired"] if f.trade_id == tid]
+        check("a crossing only %s saw is kept: the journal and the notice count it" % where,
+              tuple(kept) == (120.0, 113.0, 114.0) and mark["status"] == "past stop"
+              and len(told) == 1 and "traded at 113 on" in told[0].message,
+              (tuple(kept), mark.get("status"), [f.message for f in told]))
+
     # Its table of open positions shows the stop in force, which a trail
     # moves, and what that stop risks from the entry on what is still held.
     def front_row(symbol):
