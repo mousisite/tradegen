@@ -368,8 +368,10 @@ HELP: Dict[str, Dict[str, str]] = {
         "up).")},
     "weight": {"name": "weight", "text": (
         "How much its opinion counts: its starting weight, raised when it suits "
-        "today's kind of market and lowered when it does not, then scaled by its "
-        "record on this instrument.")},
+        "today's kind of market and lowered when it does not, scaled by its "
+        "record on this instrument, and by how sure the strategy is of today's "
+        "reading (many count half or less when they see nothing clear, such as "
+        "no cross or breakout).")},
     "sees": {"name": "what it sees", "text": (
         "What it read on the chart, in traders' shorthand. The common words "
         "follow.")},

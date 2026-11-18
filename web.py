@@ -137,6 +137,14 @@ def _harden(response):
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if app.config.get("SESSION_COOKIE_SECURE"):
         h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    # Anything sent to someone signed in may hold their journal, so no copy
+    # is kept: not in the browser's cache, nor the app's, nor for Back after
+    # signing out on a shared computer. What is the same for everybody, and
+    # a route that sets its own, keeps its caching.
+    if (getattr(g, "user", None) is not None and not getattr(g, "demo", False)
+            and request.endpoint != "static"
+            and response.mimetype in ("text/html", "application/json", "text/csv")):
+        h.setdefault("Cache-Control", "private, no-store")
     return response
 
 
@@ -3972,16 +3980,46 @@ def sitemap():
 @app.route("/privacy")
 def privacy():
     """Required by Google's consent screen, and worth having regardless."""
+    import serve
+    from bot import monitoring
     from bot import offsite as offsite_mod
     # Copies of the backups hold everyone's data, so once they are kept off
     # this server the page names who holds them and for how long. Never the
     # bucket or its address.
     offsite = {"provider": offsite_mod.provider(), "days": offsite_mod.KEEP_DAYS,
                "months": offsite_mod.KEEP_MONTHS}
+    # So does the copy serve.py takes each time a new version starts. The
+    # page gives how many it keeps and, where serve.py also deletes them by
+    # age (RELEASE_COPY_DAYS), after how many days; read from serve.py, so the
+    # two cannot drift apart.
+    release = {"keep": serve.KEEP_RELEASE_COPIES,
+               "days": getattr(serve, "RELEASE_COPY_DAYS", 0)}
+    # Who carries and runs this copy, named where it can be told: Cloudflare
+    # adds CF-Connecting-IP to every request it carries (_client_ip reads
+    # it), Render sets RENDER and RENDER_SERVICE_ID on its machines, and Fly
+    # sets FLY_APP_NAME.
+    hosting = {"proxy": "Cloudflare" if request.headers.get("CF-Connecting-IP") else "",
+               "server": ("Render" if os.environ.get("RENDER")
+                          or os.environ.get("RENDER_SERVICE_ID")
+                          else "Fly.io" if os.environ.get("FLY_APP_NAME") else "")}
     return render_template("legal.html", page="privacy",
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
-                           contact=_contact(), offsite=offsite)
+                           contact=_contact(), offsite=offsite, hosting=hosting,
+                           release=release,
+                           sampled=_sampled_words(monitoring.status()["sampled"]))
+
+
+def _sampled_words(share: float) -> str:
+    """How many page loads go to Sentry when nothing breaks, in words; empty
+    when none do."""
+    if share <= 0:
+        return ""
+    if share >= 1:
+        return "all"
+    if share >= 0.01:
+        return "about %d in every 100" % round(share * 100)
+    return "fewer than 1 in every 100"
 
 
 @app.route("/terms")

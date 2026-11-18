@@ -547,6 +547,167 @@ try:
     check("and real figures as before", (web._pct(0.25), web._signed(-0.004),
                                          web._money(1234.5)) == ("25%", "0.00", "1,234.50"))
 
+    head("WITH EVERY OTHER WAY IN AND OUT SWITCHED ON")
+    # The pages above run with Google and Stripe only. Apple sign-in, email
+    # and text codes, and backups kept off the server each add words to the
+    # pages, in a browser and in the iPhone app, and none may be setup text.
+    from cryptography.hazmat.primitives import serialization as _ser
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    apple_p8 = _ec.generate_private_key(_ec.SECP256R1()).private_bytes(
+        _ser.Encoding.PEM, _ser.PrivateFormat.PKCS8, _ser.NoEncryption()).decode("ascii")
+    EVERYTHING = {"APPLE_TEAM_ID": "TEAM123456", "APPLE_SIGNIN_KEY_ID": "KEY1234567",
+                  "APPLE_SIGNIN_PRIVATE_KEY": apple_p8.strip().replace("\n", "\\n"),
+                  "APPLE_SERVICES_ID": "app.orenth.web", "SMTP_HOST": "smtp.example.com",
+                  "SMTP_USER": "u", "SMTP_PASSWORD": "p", "MAIL_FROM": "hi@orenth.app",
+                  "MAIL_POSTAL_ADDRESS": "1 Example St, Town", "TWILIO_ACCOUNT_SID": "AC1",
+                  "TWILIO_AUTH_TOKEN": "t", "TWILIO_VERIFY_SID": "VA1",
+                  "BACKUP_S3_ENDPOINT": "https://abc123.r2.cloudflarestorage.com",
+                  "BACKUP_S3_BUCKET": "orenth-backups", "BACKUP_S3_ACCESS_KEY_ID": "k",
+                  "BACKUP_S3_SECRET_ACCESS_KEY": "s"}
+    SETUP = ("APPLE_", "APNS_", "BACKUP_S3", "VAPID_", "MAIL_POSTAL", "MAIL_FROM",
+             "REVIEW_LOGIN", "abc123", "orenth-backups")
+    IN_APP_UA = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                               "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                               "OrenthApp/1"}
+    _os.environ.update(EVERYTHING)
+    try:
+        everyone = web.app.test_client()
+        signed = web.app.test_client()
+        sign_in(signed, free)
+        for who, client, paths in (
+                ("visitor", everyone, ("/", "/signin", "/signin/email", "/signin/phone",
+                                       "/privacy", "/terms", "/pricing")),
+                ("free", signed, ("/", "/account", "/settings", "/monitor", "/privacy",
+                                  "/terms", "/pricing"))):
+            for where, headers in (("website", {}), ("app", IN_APP_UA)):
+                for path in paths:
+                    r = client.get(path, base_url=BASE, headers=headers)
+                    page = text(r)
+                    found = leaks(page) + [w for w in SETUP if w in page]
+                    check("%s on the %s, all switched on: %s keeps setup text to itself"
+                          % (who, where, path), r.status_code == 200 and not found,
+                          (r.status_code, found))
+        page = flat(text(everyone.get("/signin", base_url=BASE)))
+        check("and the ways in it adds are there to use",
+              "with Apple" in page and "/signin/email" in page and "/signin/phone" in page)
+    finally:
+        for _k in EVERYTHING:
+            _os.environ.pop(_k, None)
+
+    head("A NOTIFICATION THAT FAILED, AS THE PERSON READS IT")
+    # Settings lists each device with why its last notice failed, and "Send a
+    # test" says why it could not go. The reasons start as push services'
+    # codes, exception names and this server's own setup, none of which is
+    # the person's to read, on the website or in the iPhone app.
+    import httpx2
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from bot import push as push_mod
+
+    CODES = re.compile(r"\b[A-Z][a-z]+[A-Z][A-Za-z]*\b|\(\d+\)|on this server|set up")
+    APP_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 "
+              "(KHTML, like Gecko) Mobile/15E148 OrenthApp/1")
+    p8 = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode("ascii")
+    APNS = {"APPLE_TEAM_ID": "TEAM123456", "APNS_KEY_ID": "KEY1234567",
+            "APNS_PRIVATE_KEY": p8.strip().replace("\n", "\\n")}
+    apple_says = {"answer": (403, "InvalidProviderToken")}
+
+    def stalls(url, body, headers):
+        raise requests.ConnectTimeout("no answer")
+
+    real_push = (push_mod._web_post, push_mod._CLIENT["apns"])
+    push_mod._web_post = stalls
+    push_mod._CLIENT["apns"] = httpx2.Client(transport=httpx2.MockTransport(
+        lambda request: httpx2.Response(apple_says["answer"][0],
+                                        json={"reason": apple_says["answer"][1]})))
+    _os.environ.update(APNS)
+    said = {}
+    try:
+        browser_key = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        conn = db.connect(DB)
+        try:
+            push_mod.register(conn, free.id, "web", "https://fcm.googleapis.com/fcm/send/w",
+                              push_mod.b64url(browser_key), push_mod.b64url(b"0123456789abcdef"),
+                              label="Chrome on Android")
+            push_mod.register(conn, free.id, "apns", "ab" * 32, label="iPhone app")
+        finally:
+            conn.close()
+        phone = web.app.test_client()
+        sign_in(phone, free)
+        for case, answer, env_off in (("Apple refusing this server's key",
+                                       (403, "InvalidProviderToken"), False),
+                                      ("Apple asking it to wait", (429, "TooManyRequests"),
+                                       False),
+                                      ("the iPhone app's half not set up", None, True)):
+            if answer:
+                apple_says["answer"] = answer
+            if env_off:
+                for _k in APNS:
+                    _os.environ.pop(_k, None)
+            for where, headers in (("website", {}), ("app", {"User-Agent": APP_UA})):
+                r = phone.post("/api/push/test", json={}, base_url=BASE, headers=headers)
+                words = list((r.get_json() or {}).get("errors") or [])
+                page = text(phone.get("/settings", base_url=BASE, headers=headers))
+                words += re.findall(r"Last try failed: ([^<]*)<", page)
+                said[(case, where)] = words
+                push_mod._APNS_PAUSED["until"] = 0.0
+                web._RATE.clear()
+    finally:
+        push_mod._web_post, push_mod._CLIENT["apns"] = real_push
+        for _k in APNS:
+            _os.environ.pop(_k, None)
+        push_mod._APNS_PAUSED["until"] = 0.0
+    for (case, where), words in sorted(said.items()):
+        coded = [w for w in words if CODES.search(_html.unescape(w))]
+        check("%s, on the %s: the reasons are words, with no code or setup" % (case, where),
+              len(words) >= 4 and not coded, coded or words)
+
+    head("THE APP STORE TEXT")
+    # What the owner pastes into App Store Connect is read by more people than
+    # any page here, so it says the counts the way the site does, and offers
+    # no download the Account page does not have.
+    from bot import export as export_mod
+    guide = open(_os.path.join(harness.ROOT, "mobile", "APP_STORE.md"), encoding="utf-8").read()
+
+    def pasted(label):
+        """The text in the code block after a **label** line of the guide."""
+        after = guide[guide.index("**%s" % label):]
+        return after.split("```", 2)[1].strip()
+
+    store = flat(pasted("Promotional Text") + " " + pasted("Description:"))
+    check("the promotional text fits App Store Connect's 170 characters",
+          len(pasted("Promotional Text")) <= 170, len(pasted("Promotional Text")))
+    check("it never says a strategy 'actually worked', or how often a setup "
+          "appeared or worked 'before'",
+          not [w for w in ("actually worked", "appeared before", "worked before")
+               if w in store], store[:300])
+    check("it says the counts are tests on past prices",
+          "how often this setup came up in tests on past prices" in store
+          and "did best in tests on past prices" in store)
+    privacy = store[store.index("PRIVACY"):store.index("Orenth is analysis software")]
+    said = [s for s in re.split(r"(?<=\.)\s+", privacy) if "download" in s]
+    exported = {"journal": "trades", "theses": "theses", "watchlist": "watchlist",
+                "alerts": "alerts"}
+    named = [w for s in said for w in exported if w in s]
+    check("it offers to download, by name, only what the Account page lets "
+          "people download",
+          said and named and "download them" not in privacy
+          and all(exported[w] in export_mod.DATASETS for w in named), (said, named))
+    # The pricing page's Free plan said "Download everything you have
+    # entered", though the watchlist and alerts have no download.
+    exported["analysis history"] = "runs"
+    for where, headers in (("website", {}), ("app", IN_APP_UA)):
+        plans = flat(text(web.app.test_client().get("/pricing", base_url=BASE,
+                                                    headers=headers)))
+        offered = [s for s in re.findall(r"<li>([^<]*)</li>", plans) if "ownload" in s]
+        named = [w for s in offered for w in exported if w in s]
+        check("the pricing page in the %s offers to download only what can be" % where,
+              offered and named and not any("everything" in s for s in offered)
+              and all(exported[w] in export_mod.DATASETS for w in named), (offered, named))
+
     head("OFFLINE")
     check("no page reached for the network", not reached, reached[:5])
 

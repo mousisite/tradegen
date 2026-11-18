@@ -26,7 +26,7 @@
       email address changes.</li>
   </ul>
   <p class="prose">
-    That is the whole of it. Orenth asks Google only for the
+    That is all Orenth gets from Google. It asks Google only for the
     <span class="fig">openid</span>, <span class="fig">email</span> and
     <span class="fig">profile</span> scopes. It cannot read your Gmail, Drive,
     contacts or calendar, and it never sees your Google password.
@@ -64,6 +64,10 @@
       them.</li>
   </ul>
   <p class="prose">There are no passwords, so there are none to leak.</p>
+  <p class="prose">However you sign in, each sign-in is kept with the
+    description your browser or the app gives of itself (its User-Agent),
+    such as which browser and phone it is, until you sign out or it runs out
+    after {{ session_days }} days.</p>
   <p class="prose">If you subscribe to Pro{% if iap_on %} on the website{% endif %},
     Orenth stores the customer number Stripe gives it and whether your plan
     is active. It never sees or stores your card.</p>
@@ -86,7 +90,9 @@
   <p class="prose">Your invite link records who joined through it, so both of
     you can be given the free week. If you turn on the weekly email, Orenth
     sends it to your sign-in address every Monday until you turn it off, with
-    a link in every one to stop it.</p>
+    a link in every one to stop it. If you ask for alert emails on the
+    Monitor page, each alert that fires and each position that crosses its
+    stop is emailed to that address too, until you switch them off there.</p>
   <p class="prose">Orenth also keeps a daily count of a few things done on the
     site: front page visits by people not signed in, new accounts, first
     analyses, watchlist additions, alerts set, paper trades and upgrades to
@@ -98,11 +104,15 @@
     reach the device (for a browser, a web address and two keys; for the
     iPhone app, a device token), a short name such as "Chrome on Android",
     and when a notification last went through or why it failed. When one of
-    your alerts fires, its text and the time of its price go to the device
-    through that push service: Apple's for iPhones, iPads and Safari,
-    Google's for Chrome and Android, Mozilla's for Firefox and Microsoft's
-    for Edge. A browser's notifications are encrypted for that browser, so
-    the push service carries them without being able to read them.
+    your alerts fires, or a position in your journal crosses its stop, its
+    text and the time of its price go to the device through that push
+    service: Apple's for iPhones, iPads and Safari, Google's for Chrome and
+    Android, Mozilla's for Firefox and Microsoft's for Edge. For a stop, the
+    text names the stock, its price, the stop and whether your position is
+    long or short. A browser's notifications are encrypted for that browser,
+    so the push service carries them without being able to read them; only a
+    short label for which alert or position one is about travels
+    unencrypted, so that a newer one can replace it.
     Notifications to the Orenth iPhone app pass through Apple's service,
     which can read them, as it can every app's. Turning notifications off on
     a device, removing it on the Settings page, signing out on it, or
@@ -149,19 +159,26 @@
             screenshot you upload, only if an API key is configured</td>
             <td>Sentiment, written reasoning, and reading which instrument a
               screenshot shows</td></tr>
-        <tr><td>The email delivery service</td><td>Your email address and the code, only if you sign in by email</td>
-            <td>Delivering the code</td></tr>
+        <tr><td>The email delivery service</td><td>Your email address and the code, if you sign in by email.
+            If you turn on the weekly email or alert emails, those emails
+            too: your name, what Orenth says about your watchlist, and the
+            alerts that fired and the stops your positions crossed</td>
+            <td>Delivering sign-in codes and the emails you turned on</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
             <td>Sending and checking the code</td></tr>
-        <tr><td>Apple, Google, Mozilla or Microsoft</td><td>A fired alert's text
-            and the time of its price, only to devices you turned
-            notifications on for. Encrypted so the push service cannot read
-            it, except on the way to the iPhone app, which Apple delivers
-            readable as it does for every app</td>
-            <td>Showing the alert on your phone or computer</td></tr>
+        <tr><td>Apple, Google, Mozilla or Microsoft</td><td>A fired alert's or
+            crossed stop's text (for a stop: the stock, its price, the stop
+            and whether your position is long or short) and the time of its
+            price, only to devices you turned notifications on for. Encrypted
+            so the push service cannot read it, except on the way to the
+            iPhone app, which Apple delivers readable as it does for every
+            app</td>
+            <td>Showing the alert or stop on your phone or computer</td></tr>
         <tr><td>Metricool</td><td>The page address without anything after a ?, the
-            window size and the page you came from, only while not signed in</td>
-            <td>Counting visits. No cookie, and nothing that identifies you</td></tr>
+            window size and the page you came from, only while not signed in.
+            As with any request your browser makes, it also gets your network
+            address and the description your browser gives of itself</td>
+            <td>Counting visits. No cookie is set</td></tr>
         <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe{% if iap_on %} on the website{% endif %}</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
@@ -172,17 +189,32 @@
               about its renewals and refunds</td></tr>
         {% endif %}
         <tr><td>Sentry</td><td>When something breaks: the error, the page
-            address and the values the failing code was working with, which
-            can include your email address. Cookies, form contents and
-            anything that looks like a password or key are removed first. Only
+            address, the description your browser gives of itself, and the
+            values the failing code was working with, which can include your
+            email address or network address. Cookies, form contents and
+            anything that looks like a password or key are removed first.{% if sampled %}
+            Also, even when nothing breaks, {{ sampled }} page loads: the page
+            address without anything after a ?, and how long it took.{% endif %} Only
             if error reporting is switched on</td>
-            <td>Finding and fixing faults</td></tr>
+            <td>Finding and fixing faults{% if sampled %}, and slow pages{% endif %}</td></tr>
         <tr><td>{{ offsite.provider or "A storage service" }}</td><td>A copy of
             the whole database, which holds your email address and everything
             you have created here, in a private storage bucket{% if not offsite.provider %}.
             Only if copies of the backups are kept off this server{% endif %}</td>
             <td>Keeping the backups somewhere other than this server, so that
               losing the server does not lose your data</td></tr>
+        {% if hosting.proxy %}
+        <tr><td>{{ hosting.proxy }}</td><td>Everything your browser and Orenth
+            send each other, your network address and cookies included, on
+            its way through</td>
+            <td>Carrying traffic to the server and keeping attacks off it, for
+              which it may set a cookie of its own</td></tr>
+        {% endif %}
+        {% if hosting.server %}
+        <tr><td>{{ hosting.server }}</td><td>Everything the server receives and
+            sends, and the disk that holds the database and its backups</td>
+            <td>Running the server</td></tr>
+        {% endif %}
       </tbody>
     </table>
   </div>
@@ -194,19 +226,30 @@
       Visits are counted only while you are not signed in, as described
       above, with no cookie.</li>
     <li>No selling, renting or sharing of personal data with anyone.</li>
-    <li>No cookies except the one that keeps you signed in. It holds an opaque
-      session token and nothing else.</li>
+    <li>No tracking cookies. Orenth's own cookie keeps you signed in. It
+      holds a random session token and, only while something is under way,
+      what that needs: the invite you arrived with, the email address or
+      phone number a sign-in code was sent to, the checks and the page to go
+      back to for a sign-in with Google{% if apple_native %} or Apple{% endif %}, or a note of an exit the
+      journal just recorded, until the journal shows it. It is signed so
+      that it cannot be changed, but it is not encrypted.{% if apple_ready %}
+      While you sign in with Apple on the website, a second cookie of
+      Orenth's lasts ten minutes and holds only that sign-in's checks, the
+      page to go back to and any invite.{% endif %}</li>
     <li>No copies of your pages on your device. So that Orenth can open and
       say so plainly when there is no connection, your browser keeps the
       site's style sheet, its icons and a "no connection" page, which are
-      the same for everybody. Every page with anything of yours on it comes
-      from the server each time and is never kept.</li>
+      the same for everybody. Every page with anything of yours on it is
+      sent marked not to be stored, so it comes from the server each time
+      and is not kept.</li>
   </ul>
 
   <h2>Keeping and deleting</h2>
   <p class="prose">
-    Your data stays until you remove it. Every dataset can be downloaded as CSV
-    or JSON from the Account page at any time, without asking anyone. Deleting
+    Your data stays until you remove it. Your journal and each of its exits,
+    your saved theses and your analysis history can be downloaded as CSV or
+    JSON at any time, from the Account and Settings pages, without asking
+    anyone. Deleting
     your account removes your trades, watchlist, alerts, theses, analysis
     history, shared pages, sign-in records and the devices you turned
     notifications on for straight away; the shared
@@ -221,12 +264,18 @@
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
     A backup made before you deleted your account still holds a copy until it
-    is replaced by newer ones, which takes about a week.
+    is replaced by newer ones, which takes about a week. The server also
+    copies the database each time a new version of Orenth starts, and keeps
+    the last {{ release.keep }} of those copies{% if release.days %}, deleting
+    each after {{ release.days }} days{% else %}; one made before you deleted
+    your account can stay until newer versions replace it, however long that
+    takes{% endif %}.
     {% if offsite.provider %}Copies of the backups are also kept off this
     server: the newest from each of the last {{ offsite.days }} days and the
     oldest from each of the last {{ offsite.months }} months. So a copy made
     before you deleted your account can last up to {{ offsite.months }} months
-    there.{% endif %}
+    there, and if copies stop being sent there, those already there stay
+    until they are deleted by hand.{% endif %}
   </p>
   <p class="prose">
     Sessions expire after {{ session_days }} days. Signing out ends the session

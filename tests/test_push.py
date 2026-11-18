@@ -7,6 +7,7 @@ fired alert, the manifest, the service worker, the offline page and the
 icons. No network: every push service is a stand-in.
 """
 import json
+import logging
 import os as _os
 import re
 import shutil
@@ -442,6 +443,20 @@ async function ask(url, mode) {
 })().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
 """
 
+class Logged(logging.Handler):
+    """What bot/push.py writes to the server log, where its codes belong."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+LOGGED = Logged()
+logging.getLogger("bot.push").addHandler(LOGGED)
+
 
 SITE = "https://orenth.app"
 FCM = "https://fcm.googleapis.com/fcm/send/"
@@ -731,8 +746,12 @@ try:
     for _ in range(push.MAX_FAILURES - 1):
         push.send_test(conn, alice.id, SITE, web_post=Recorder(400))
     row = device_rows(alice.id)[0]
-    check("one that keeps being refused is kept a while, with the reason",
-          row["failures"] == push.MAX_FAILURES - 1 and "400" in row["last_error"], dict(row))
+    check("one that keeps being refused is kept a while, with the reason in words",
+          row["failures"] == push.MAX_FAILURES - 1
+          and row["last_error"] == "the notification service turned it away", dict(row))
+    check("and the service's code in the server log only", "400" not in row["last_error"]
+          and any(line.endswith("turned it away (400)") for line in LOGGED.lines),
+          LOGGED.lines[-2:])
     push.send_test(conn, alice.id, SITE, web_post=Recorder(201))
     check("one that works again starts afresh", device_rows(alice.id)[0]["failures"] == 0)
     for _ in range(push.MAX_FAILURES):
@@ -744,7 +763,9 @@ try:
         push.send_test(conn, alice.id, SITE, web_post=Recorder(503))
     row = device_rows(alice.id)
     check("a push service that is down is not held against the device",
-          row and row[0]["failures"] == 0 and "503" in row[0]["last_error"])
+          row and row[0]["failures"] == 0
+          and row[0]["last_error"] == "the notification service had a fault just now"
+          and any(line.endswith("(503)") for line in LOGGED.lines))
     conn.execute("DELETE FROM push_devices")
     conn.execute("INSERT INTO push_devices (user_id, kind, address, p256dh, auth, "
                  "created_ts) VALUES (?, 'web', 'https://evil.example/x', ?, ?, 1)",
@@ -776,7 +797,11 @@ try:
     rows = device_rows(alice.id)
     check("without holding the server's fault against the devices",
           len(rows) == 2 and all(r["failures"] == 0 for r in rows)
-          and "InvalidProviderToken" in (rows[0]["last_error"] or ""))
+          and "not this iPhone's" in (rows[0]["last_error"] or "")
+          and "InvalidProviderToken" not in (rows[0]["last_error"] or ""))
+    check("whose code Apple gave goes to the server log for whoever runs it",
+          any(line.endswith("(403 InvalidProviderToken)") for line in LOGGED.lines),
+          LOGGED.lines[-2:])
     apple = use_apple(lambda r: (429, "TooManyProviderTokenUpdates"))
     push.send_test(conn, alice.id, SITE)
     apple.requests.clear()
@@ -825,9 +850,14 @@ try:
           out["dropped"] == 0 and len(kept) == 3, out)
     check("Apple is asked once that round, not about each",
           len(apple.requests) == 1, len(apple.requests))
-    check("and the device says which app the server named",
-          kept and "app.orenth.iso" in (kept[0]["last_error"] or ""),
+    # Plain words for the person; the bundle id it named goes to the log,
+    # for whoever runs the server to correct.
+    check("and the device says so in plain words",
+          kept and "names the app differently" in (kept[0]["last_error"] or "")
+          and "app.orenth.iso" not in (kept[0]["last_error"] or ""),
           [r["last_error"] for r in kept])
+    check("while the server log names the app id it used",
+          any("app.orenth.iso" in line for line in LOGGED.lines), LOGGED.lines[-3:])
     _os.environ.pop("APNS_BUNDLE_ID")
     conn.execute("DELETE FROM push_devices")
     conn.commit()

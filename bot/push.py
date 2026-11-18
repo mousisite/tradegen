@@ -25,8 +25,9 @@ Nothing here starts on its own. web.py hands each round of fired alerts to
 deliver_later(), which sends them from one background thread, so neither the
 alert loop nor a page ever waits on a push service. What became of each
 notice is kept on the device's row: when one last went through, and the last
-error. A device its push service calls gone is forgotten, and so is one that
-keeps failing.
+error, in words the person can read; the service's code goes to the log. A
+device its push service calls gone is forgotten, and so is one that keeps
+failing.
 """
 from __future__ import annotations
 
@@ -674,7 +675,12 @@ def switched_on_note() -> Note:
 
 @dataclass
 class Sent:
-    """What became of one notice to one device."""
+    """What became of one notice to one device.
+
+    error is what the person reads under their device on the Settings page
+    and after "Send a test", so it is plain words. detail is the service's
+    own code or the exception's name, for the server log only.
+    """
     ok: bool
     error: str = ""
     drop: bool = False          # the device is gone for good: forget it
@@ -683,6 +689,7 @@ class Sent:
     environment: str = ""       # APNs: where the token turned out to live
     soft: bool = False          # the push service's own failure: counts only once
                                 # no notice has got through for STALE_AFTER
+    detail: str = ""            # for the log: a status code, Apple's reason, an exception
 
 
 WebPost = Callable[[str, bytes, Dict[str, str]], int]
@@ -721,20 +728,22 @@ def send_web(row, note: Note, keys: VapidKeys, sub: str,
     except Exception as exc:
         # Waiting on a service that does not answer is what costs the round
         # time, so the rest of the round leaves that service alone.
-        return Sent(False, "the push service did not answer (%s)" % type(exc).__name__,
-                    blame=False, stop=True, soft=True)
+        return Sent(False, "the notification service did not answer just now",
+                    blame=False, stop=True, soft=True, detail=type(exc).__name__)
     if 200 <= status < 300:
         return Sent(True)
     if status in (404, 410):
-        return Sent(False, "the browser has stopped listening (%d)" % status, drop=True)
+        return Sent(False, "the browser has stopped taking notifications from Orenth",
+                    drop=True, detail=str(status))
     # A quick refusal costs no waiting, and may be about this browser alone,
     # so the others on the same service are still sent theirs.
     if status == 429:
-        return Sent(False, "the push service asked Orenth to slow down (429)",
-                    blame=False, soft=True)
+        return Sent(False, "the notification service asked Orenth to wait a little",
+                    blame=False, soft=True, detail=str(status))
     if status >= 500:
-        return Sent(False, "the push service failed (%d)" % status, blame=False, soft=True)
-    return Sent(False, "the push service refused it (%d)" % status)
+        return Sent(False, "the notification service had a fault just now",
+                    blame=False, soft=True, detail=str(status))
+    return Sent(False, "the notification service turned it away", detail=str(status))
 
 
 # --- APNs ------------------------------------------------------------------------------
@@ -856,7 +865,7 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
     from Xcode lives, and wherever it works is remembered on the device.
     """
     if time.time() < _APNS_PAUSED["until"]:
-        return Sent(False, "held back: Apple asked Orenth to slow down",
+        return Sent(False, "held back: Apple asked Orenth to wait a little",
                     blame=False, stop=True)
     try:
         clean_token(row["address"])         # it goes into the request's path
@@ -879,8 +888,8 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
             try:
                 status, reason = post(environment, row["address"], payload, headers)
             except Exception as exc:
-                return Sent(False, "Apple's service did not answer (%s)"
-                            % type(exc).__name__, blame=False, stop=True)
+                return Sent(False, "Apple's notification service did not answer just now",
+                            blame=False, stop=True, detail=type(exc).__name__)
             if status == 403 and reason in ("ExpiredProviderToken",
                                             "InvalidProviderToken") and not renewed:
                 renewed = True
@@ -892,31 +901,35 @@ def send_apns(row, note: Note, post: Optional[ApnsPost] = None) -> Sent:
             return Sent(True, environment=environment)
         if status == 400 and reason == "BadDeviceToken":
             continue                            # perhaps the other environment's
+        said = ("%s %s" % (status, reason)).strip()
         if reason == "DeviceTokenNotForTopic" and row["last_ok_ts"]:
             # This token has had notices from this server, so it is this
             # app's: what changed is the bundle id the server names, and Apple
             # would say the same of every iPhone. Kept, and the round stops.
             log.warning("push: Apple says a token that had notices is not for %s; "
                         "check APNS_BUNDLE_ID", s["topic"])
-            return Sent(False, "Apple says this token is not for %s" % s["topic"],
-                        blame=False, stop=True)
+            return Sent(False, "Apple turned it away: this server names the app "
+                               "differently from the iPhone", blame=False, stop=True,
+                        detail="%s (topic %s)" % (said, s["topic"]))
         if status == 410 or reason in _GONE:
-            return Sent(False, "Apple says the app is no longer on that device (%s)"
-                        % (reason or status), drop=True)
+            return Sent(False, "Apple says the app is no longer on that iPhone",
+                        drop=True, detail=said)
         if status == 429 and reason == "TooManyProviderTokenUpdates":
             # About this server's token, so the same for every iPhone.
             _APNS_PAUSED["until"] = time.time() + APNS_PAUSE
-            return Sent(False, "Apple asked Orenth to slow down", blame=False, stop=True)
+            return Sent(False, "Apple asked Orenth to wait a little", blame=False,
+                        stop=True, detail=said)
         if status == 429:
             # Apple's TooManyRequests: too many notices to this one token.
             # The other iPhones are sent theirs as usual.
-            return Sent(False, "Apple says this iPhone was sent too many notifications "
-                               "just now (%s)" % (reason or status), blame=False)
+            return Sent(False, "Apple says this iPhone was sent too many "
+                               "notifications just now", blame=False, detail=said)
         if status == 403 or status >= 500 or (status == 400 and reason):
             # The key, the bundle id, or Apple itself: the same for every device.
-            return Sent(False, "Apple refused it (%s)" % (reason or status),
-                        blame=False, stop=True)
-        return Sent(False, "Apple refused it (%s)" % (reason or status))
+            return Sent(False, "Apple turned it away for a reason on Orenth's side or "
+                               "Apple's, not this iPhone's", blame=False, stop=True,
+                        detail=said)
+        return Sent(False, "Apple turned it away", detail=said)
     return Sent(False, "Apple does not know this device", drop=True)
 
 
@@ -980,16 +993,18 @@ def _send_all(conn: sqlite3.Connection, rows, note: Note, site: str,
             result = Sent(False, "not tried this time: the others took too long",
                           blame=False)
         elif service in halted:
-            result = Sent(False, "not tried this time: its push service had just "
-                                 "failed for another device", blame=False)
+            result = Sent(False, "not tried this time: the notification service had "
+                                 "just failed for another device", blame=False)
         elif row["kind"] == "web":
             result = (send_web(row, note, keys, sub, web_post) if keys is not None
-                      else Sent(False, "browser notifications are off on this server",
-                                blame=False))
+                      else Sent(False, "notifications to browsers are paused on "
+                                       "Orenth's side", blame=False,
+                                detail="no VAPID key"))
         elif row["kind"] == "apns":
             result = (send_apns(row, note, apns_post) if apns_ready()
-                      else Sent(False, "the iPhone app's notifications are not set up "
-                                       "on this server", blame=False))
+                      else Sent(False, "notifications to the iPhone app are paused on "
+                                       "Orenth's side", blame=False,
+                                detail="APNs is not set up"))
         else:
             result = Sent(False, "not a kind of device Orenth knows", drop=True)
         if result.stop:
@@ -999,9 +1014,11 @@ def _send_all(conn: sqlite3.Connection, rows, note: Note, site: str,
         if not result.ok:
             out["errors"].append({"id": int(row["id"]), "label": row["label"],
                                   "error": result.error})
-            # The service's name and the row's id, never its address or token.
-            log.warning("push: device %d on %s %s: %s", int(row["id"]), service,
-                        outcome, result.error)
+            # The service's name and the row's id, never its address or token;
+            # the code or exception is said here, and only here.
+            log.warning("push: device %d on %s %s: %s%s", int(row["id"]), service,
+                        outcome, result.error,
+                        " (%s)" % result.detail if result.detail else "")
     return out
 
 
