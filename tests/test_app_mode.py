@@ -805,6 +805,160 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# static/native.js run as the app runs it, under Node: its app links. The app
+# shows any page it is sent to with the whole bridge to the phone (sign-in
+# sheets, purchases), so a link must never take it off orenth.app.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+# One page of the app at https://orenth.app/monitor, with stand-ins for
+# Capacitor's bridge and plugins. Each link in __LINKS__ arrives on a page of
+# its own as an app link (appUrlOpen); it prints where each one sent the page
+# (location.assign), if anywhere. Then, on a light page, a dark one and one
+# with no colour of its own, what native.js asks of the status bar as the
+# page opens and again when the in-app browser sheet closes.
+NATIVE_IN_APP = r"""
+const fs = require('fs');
+const vm = require('vm');
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const LINKS = __LINKS__;
+
+function page(ground) {
+  const heard = {};
+  const went = [];
+  const asked = [];
+  const names = ['App', 'Browser', 'StatusBar', 'SplashScreen', 'Share', 'Haptics'];
+  const C = {
+    isNativePlatform: () => true,
+    isPluginAvailable: (name) => names.indexOf(name) !== -1,
+    nativePromise: (plugin, method, options) => {
+      asked.push([plugin, method, options]);
+      return Promise.resolve({});
+    },
+    Plugins: {},
+  };
+  names.forEach((name) => {
+    C.Plugins[name] = { addListener: (event, fn) => { heard[name + '.' + event] = fn; return { remove() {} }; } };
+  });
+  const ctx = {
+    console, Promise, URL, JSON, setTimeout,
+    Capacitor: C,
+    navigator: {},
+    location: { origin: 'https://orenth.app', href: 'https://orenth.app/monitor', host: 'orenth.app',
+                assign: (to) => { went.push(String(to)); } },
+    document: { readyState: 'complete', addEventListener() {}, body: {}, documentElement: {} },
+    getComputedStyle: () => ({ backgroundColor: ground }),
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    MutationObserver: function () { this.observe = function () {}; },
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  return { heard: heard, went: went, asked: asked };
+}
+
+(async () => {
+  const out = { links: {} };
+  for (const link of LINKS) {
+    const p = page('rgb(244, 243, 238)');
+    if (!p.heard['App.appUrlOpen']) { throw new Error('native.js does not listen for app links'); }
+    p.heard['App.appUrlOpen']({ url: link });
+    out.links[link] = p.went;
+  }
+  out.bar = {};
+  const grounds = { light: 'rgb(244, 243, 238)', dark: 'rgb(25, 24, 23)', none: 'rgba(0, 0, 0, 0)' };
+  for (const name of Object.keys(grounds)) {
+    const p = page(grounds[name]);
+    const asked = () => p.asked.filter((a) => a[0] === 'StatusBar').map((a) => [a[1], a[2]]);
+    const opened = asked();
+    if (!p.heard['Browser.browserFinished']) { throw new Error('native.js does not hear the sheet close'); }
+    p.heard['Browser.browserFinished']();
+    out.bar[name] = { opened: opened, closed: asked().slice(opened.length) };
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+
+
+def run_node(script, *args):
+    """A harness under Node, given the file it runs: the JSON it printed last,
+    None without Node, or {"error": ...} if the script failed."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".js", prefix="orenth-test-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    try:
+        proc = subprocess.run([node, path] + list(args),
+                              capture_output=True, text=True, encoding="utf-8", timeout=120)
+    finally:
+        _os.remove(path)
+    lines = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        return {"error": (proc.stderr or proc.stdout or "no output")[-1500:]}
+    return json.loads(lines[-1])
+
+
+print()
+print("=" * 72)
+print("APP LINKS OPEN PAGES OF THIS SITE, AND NEVER ANOTHER")
+print("=" * 72)
+OPEN = "app.orenth.ios://open?path="
+# Each must open nothing, written into the link as it is and fully escaped.
+# Those with a dot segment ("/./", "/%2e/", "/../") resolve to a path that
+# starts "//", which the browser, given that path alone, reads as the address
+# of another site; "%2F" in a link is a slash once the link is read.
+REFUSED = ["/.//orenth.app.evil.example/x", "/%2e//orenth.app.evil.example/x",
+           "/%2E//orenth.app.evil.example/x", "/..//orenth.app.evil.example/x",
+           "/.//orenth.app@evil.example/x", "//orenth.app.evil.example/x",
+           "/\\orenth.app.evil.example/x", "/\\/orenth.app.evil.example/x",
+           "/\t/orenth.app.evil.example/x",
+           "javascript:alert(document.cookie)", "data:text/html,<script>alert(1)</script>",
+           "https://orenth.app.evil.example/x", "http://orenth.app/monitor"]
+refused_links = [OPEN + p for p in REFUSED] + [OPEN + quote(p, safe="") for p in REFUSED]
+# Read once more as a link, this one is "/.//orenth.app@evil.example/x".
+refused_links.append(OPEN + "/.%2F/orenth.app@evil.example/x")
+GOOD_LINKS = {OPEN + "/monitor": "https://orenth.app/monitor",
+              OPEN + quote("/analyse?symbol=NVDA&interval=1d", safe=""):
+                  "https://orenth.app/analyse?symbol=NVDA&interval=1d",
+              OPEN + quote("/research?symbol=NVDA&interval=1d#s-news", safe=""):
+                  "https://orenth.app/research?symbol=NVDA&interval=1d#s-news",
+              # Escaped twice, it is a page of this site that does not exist.
+              OPEN + quote("/.%2F/orenth.app@evil.example/x", safe=""):
+                  "https://orenth.app/.%2F/orenth.app@evil.example/x"}
+NATIVE_JS = _os.path.join(harness.ROOT, "static", "native.js")
+ran = run_node(NATIVE_IN_APP.replace("__LINKS__", json.dumps(refused_links + list(GOOD_LINKS))),
+               NATIVE_JS)
+if ran is None:
+    print("   (Node is not installed, so native.js is read here rather than run)")
+    native_js = open(NATIVE_JS, encoding="utf-8").read()
+    check("an app link opens the full address it resolved to, never a bare path",
+          "return resolved.href;" in native_js
+          and "resolved.pathname.slice(0, 2) === '//'" in native_js)
+elif "error" in ran:
+    check("native.js runs as the app runs it", False, ran["error"])
+else:
+    for link, address in sorted(GOOD_LINKS.items()):
+        check("%s opens %s" % (link, address), ran["links"][link] == [address],
+              ran["links"][link])
+    for link in refused_links:
+        check("%r opens nothing" % link, ran["links"][link] == [], ran["links"][link])
+    # The page runs under the status bar, so only the bar's text is set: dark
+    # on a light page, light (DARK) on a dark one, and again once the sheet
+    # has closed, which puts the app's own style back.
+    for ground, style in (("light", "LIGHT"), ("dark", "DARK"), ("none", "LIGHT")):
+        want = [["setStyle", {"style": style}]]
+        check("on a page with %s ground the status bar's style is %s, and again after the "
+              "browser sheet closes, with no colour of its own" % (ground, style),
+              ran["bar"][ground] == {"opened": want, "closed": want}, ran["bar"][ground])
+
+
+# ---------------------------------------------------------------------------
 # The iPhone project in mobile/. Xcode cannot run here, so these read the
 # committed files the way Xcode and Capacitor will, and hold them to what was
 # decided: a decision undone by a later edit fails here, not at App Review.
@@ -852,8 +1006,10 @@ check("the launch screen hides itself quickly, with no spinner",
       splash.get("launchAutoHide") is True and splash.get("launchShowDuration") == 800
       and splash.get("showSpinner") is False, splash)
 bar = config["plugins"]["StatusBar"]
-check("the status bar sits above the page and follows the phone",
-      bar.get("overlaysWebView") is False and bar.get("style") == "DEFAULT", bar)
+check("the page runs under the status bar, whose text follows the phone, with no strip "
+      "of a colour of its own",
+      bar.get("overlaysWebView") is True and bar.get("style") == "DEFAULT"
+      and "backgroundColor" not in bar, bar)
 check("notifications show while the app is open",
       config["plugins"]["PushNotifications"].get("presentationOptions")
       == ["badge", "sound", "banner", "list"])
@@ -868,6 +1024,73 @@ check("and says what is wrong in plain words",
 check("and tries the site again", "https://orenth.app/" in offline)
 check("and has a dark version", "prefers-color-scheme: dark" in offline)
 check("and takes the launch screen away", "'SplashScreen', 'hide'" in offline)
+check("and sets only the status bar's text, since the page runs under the bar",
+      "'StatusBar', 'setStyle'" in offline and "setBackgroundColor" not in offline)
+
+# The offline page's own script, under Node: Try again, and coming back
+# online. Each case is what the app says when asked which page could not be
+# opened: an address, or "absent" for an app without the guard, or "browser"
+# for no app at all.
+OFFLINE_RETRY = r"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const SRC = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
+const CASES = __CASES__;
+
+async function offline(lastPage) {
+  const went = [];
+  const on = {};
+  const button = { disabled: false, textContent: 'Try again',
+                   addEventListener: (type, fn) => { on['button ' + type] = fn; } };
+  const ctx = {
+    console, Promise, URL, setTimeout,
+    document: { getElementById: () => button },
+    matchMedia: () => ({ matches: false }),
+    addEventListener: (type, fn) => { on['window ' + type] = fn; },
+    location: { replace: (to) => { went.push(String(to)); },
+                assign: (to) => { went.push('assign ' + to); } },
+  };
+  if (lastPage !== 'browser') {
+    ctx.Capacitor = {
+      isPluginAvailable: (name) => name !== 'NavigationGuard' || lastPage !== 'absent',
+      nativePromise: (plugin, method) => Promise.resolve(
+        plugin === 'NavigationGuard' && method === 'lastPage' ? { url: lastPage } : {}),
+    };
+  }
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  on['button click']();
+  on['window online']();
+  return went;
+}
+
+(async () => {
+  const out = {};
+  for (const c of CASES) { out[c] = await offline(c); }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+HOME = "https://orenth.app/"
+RETRY = {"https://orenth.app/trades?view=open#t-12": "https://orenth.app/trades?view=open#t-12",
+         "https://orenth.app.evil.example/x": HOME, "http://orenth.app/trades": HOME,
+         "https://orenth.app:8443/trades": HOME, "javascript:alert(1)": HOME, "": HOME,
+         "absent": HOME, "browser": HOME}
+retried = run_node(OFFLINE_RETRY.replace("__CASES__", json.dumps(list(RETRY))),
+                   _os.path.join(MOBILE, "www", "offline.html"))
+if retried is None:
+    print("   (Node is not installed, so the offline page is read here rather than run)")
+    check("Try again opens the page that failed, in place of the offline page",
+          "'NavigationGuard', 'lastPage'" in offline and "location.replace(again)" in offline)
+elif "error" in retried:
+    check("the offline page's script runs", False, retried["error"])
+else:
+    for case, address in RETRY.items():
+        check("Try again, and coming back online, with the app saying %r, open %s in place "
+              "of the offline page" % (case, address), retried[case] == [address, address],
+              retried[case])
 
 package = json.loads(read("package.json"))
 pins = dict(package.get("dependencies", {}), **package.get("devDependencies", {}))
@@ -938,6 +1161,68 @@ check("MainViewController registers the App Store plugin at launch, beside the s
       controller.find("registerPluginInstance(WebAuthPlugin())")
       < controller.find("registerPluginInstance(AppPurchasePlugin())")
       < controller.find("guard let webView"))
+
+guard_swift = read("ios", "App", "App", "NavigationGuardPlugin.swift")
+check("MainViewController registers the navigation guard before the first page loads",
+      "navigationGuard: NavigationGuardPlugin = NavigationGuardPlugin()" in controller
+      and -1 < controller.find("registerPluginInstance(navigationGuard)")
+      < controller.find("guard let webView"))
+check("MainViewController wraps Capacitor's navigation delegate before the first page loads, "
+      "and keeps the wrapper",
+      "CancelledLoadFilter(wrapping: capacitorDelegate)" in controller
+      and "cancelledLoadFilter = filter" in controller
+      and "webView.navigationDelegate = filter" in controller)
+check("the wrapper passes Capacitor everything but a load that was only cut short "
+      "(-999, or WebKit's 102), which would show No connection",
+      "override func responds(to aSelector: Selector!) -> Bool" in controller
+      and "override func forwardingTarget(for aSelector: Selector!) -> Any?" in controller
+      and "nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled" in controller
+      and 'nsError.domain == "WebKitErrorDomain" && nsError.code == 102' in controller
+      and controller.count("if CancelledLoadFilter.wasCutShort(error) {") == 2
+      and "capacitorDelegate.webView?(webView, didFailProvisionalNavigation: navigation, "
+          "withError: error)" in controller
+      and "capacitorDelegate.webView?(webView, didFail: navigation, withError: error)"
+          in controller)
+pull = controller[controller.index("func pulledToRefresh("):controller.index("func stopRefreshing(")]
+check("a pull to refresh on a page that answered a form never sends the form again",
+      -1 < pull.find("navigationGuard.pullToRefreshStarting()") < pull.find("webView.reload()")
+      and "afterPull && navigationAction.navigationType == .formResubmitted" in guard_swift
+      and "refreshControl?.endRefreshing()" in guard_swift)
+check("but only the reload a pull asked for: the next page after it uses the pull up",
+      "let afterPull: Bool = mainFrame && pullPending" in guard_swift
+      and "pullPending = false" in guard_swift)
+check("the guard remembers the last page asked for with a GET, and a pull on the offline "
+      "page opens it again",
+      'CAPPluginMethod(name: "lastPage", returnType: CAPPluginReturnPromise)' in guard_swift
+      and 'method.uppercased() == "GET"' in guard_swift
+      and "navigationGuard.pageToRetry() ?? bridge?.config.serverURL" in controller)
+check("the guard answers Capacitor's question about every page the web view opens",
+      "override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber?"
+      in guard_swift and "isMainFrame" in guard_swift
+      and "return NSNumber(value: true)" in guard_swift)
+check("and lets in only https on orenth.app exactly, and the app's own offline page",
+      'static let host: String = "orenth.app"' in guard_swift
+      and 'scheme.lowercased() == "https" && host.lowercased() == OrenthSite.host' in guard_swift
+      and "if OrenthSite.isSitePage(url) {" in guard_swift
+      and "if isOfflinePage(url) {" in guard_swift
+      and "bridge?.config.errorPathURL" in guard_swift and "url.path == page.path" in guard_swift)
+check("anywhere else opens outside the app, and only while it is in use",
+      "UIApplication.shared.open(url" in guard_swift
+      and "activationState == .foregroundActive" in guard_swift)
+check("the sign-in sheet opens only for orenth.app's own pages, at its /auth/ addresses",
+      "OrenthSite.showsSitePage(plugin.webView)" in plugin
+      and "OrenthSite.isSignInAddress(url)" in plugin
+      and 'path.hasPrefix("/auth/")' in guard_swift
+      and "callbackScheme == OrenthSite.appScheme" in plugin and '"NOT_ALLOWED"' in plugin)
+purchase_methods = re.findall(r"@objc func (\w+)\(_ call: CAPPluginCall\) \{(.*?)\n    \}\n",
+                              purchase, re.S)
+check("every App Store method answers only orenth.app's own pages",
+      len(purchase_methods) == 8
+      and all("guard self.fromSitePage(call) else" in body for _name, body in purchase_methods)
+      and "OrenthSite.showsSitePage(self.webView)" in purchase and '"NOT_ALLOWED"' in purchase,
+      [name for name, body in purchase_methods if "fromSitePage" not in body])
+check("a page counts as orenth.app's only if both its address and its history say so",
+      "isSitePage(view.url) && isSitePage(view.backForwardList.currentItem?.url)" in guard_swift)
 methods = re.findall(r'CAPPluginMethod\(name: "(\w+)", returnType: CAPPluginReturnPromise\)', purchase)
 check("AppPurchasePlugin is the AppPurchase plugin, with its eight methods",
       'jsName: String = "AppPurchase"' in purchase and "import StoreKit" in purchase
@@ -972,10 +1257,22 @@ check("Xcode project: iPhone only",
 for name, phase in (("MainViewController.swift", "Sources"),
                     ("WebAuthPlugin.swift", "Sources"),
                     ("AppPurchasePlugin.swift", "Sources"),
+                    ("NavigationGuardPlugin.swift", "Sources"),
                     ("PrivacyInfo.xcprivacy", "Resources")):
     check("Xcode project: %s is built into the app" % name,
           pbx.count("/* %s in %s */" % (name, phase)) == 2
           and pbx.count("path = %s;" % name) == 1, name)
+with open(_os.path.join(IOS_APP, "App.entitlements"), "rb") as fh:
+    entitlements = plistlib.load(fh)
+check("the app's entitlements grant notifications and Sign in with Apple, and nothing more",
+      entitlements == {"aps-environment": "development",
+                       "com.apple.developer.applesignin": ["Default"]}, entitlements)
+check("Xcode project: both App configurations are signed with them, so a fresh copy is too",
+      pbx.count("CODE_SIGN_ENTITLEMENTS = App/App.entitlements;") == 2)
+check("Xcode project: the file is listed once, as entitlements, and built into nothing",
+      pbx.count("path = App.entitlements;") == 1
+      and "lastKnownFileType = text.plist.entitlements; path = App.entitlements;" in pbx
+      and "App.entitlements in " not in pbx)
 check("Xcode project: no value left as undefined", "= undefined;" not in pbx)
 check("Xcode project: deployment target stays at iOS 15.0",
       set(re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([\d.]+);", pbx)) == {"15.0"})

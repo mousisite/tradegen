@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os as _os
+import re
 import sys as _sys
 import time
 from urllib.parse import parse_qs, urlparse
@@ -859,6 +860,14 @@ try:
     check("but the app shows it, for its own Apple sheet",
           "Continue with Apple" in page and 'data-web="0"' in page
           and 'data-native="1"' in page)
+    # /auth/apple does not exist here, so a tap before the deferred
+    # signin-app.js has run must not follow the button's link.
+    apple_button = re.search(r'<a class="abtn" data-app-via="apple"\s+href="([^"]*)"\s+'
+                             r'data-start="([^"]*)"([^>]*)>', page)
+    check("and there the button goes nowhere by itself: the script starts from data-start",
+          apple_button and apple_button.group(1) == "#"
+          and apple_button.group(2).startswith("/auth/apple")
+          and 'role="button"' in apple_button.group(3), apple_button and apple_button.groups())
     check("the operator is told the website half is missing",
           "APPLE_SERVICES_ID" in apple_mod.why_not())
     check("while a visitor is not", "APPLE_SERVICES_ID" not in page)

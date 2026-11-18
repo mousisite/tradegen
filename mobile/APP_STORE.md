@@ -87,9 +87,10 @@ Submit.
 11. Wait until the bar at the top of Xcode stops saying **Resolving
     packages** (it downloads Capacitor from GitHub, so you need internet).
 
-Run steps 9 and 10 again any time you download a newer copy of the code.
+Run steps 8 to 10 again any time you download a newer copy of the code,
+then steps 12 to 18.
 
-### Sign the app and add the three capabilities
+### Sign the app and check its capabilities
 
 12. In Xcode's left column, click the blue **App** icon at the very top.
 13. In the middle, under **TARGETS**, click **App**. Then click the
@@ -97,14 +98,19 @@ Run steps 9 and 10 again any time you download a newer copy of the code.
 14. Tick **Automatically manage signing**. Next to **Team**, pick your team
     (the parent's name, if they signed up).
 15. Check that **Bundle Identifier** says `app.orenth.ios`.
-16. Click **+ Capability** (top left of that tab). Type `Push`. Double-click
-    **Push Notifications**.
-17. Click **+ Capability** again. Type `Apple`. Double-click **Sign in with
-    Apple**.
-18. Click **+ Capability** again. Type `Purchase`. Double-click **In-App
-    Purchase**.
+16. Check that **Push Notifications** is listed below. It comes with the
+    project, so there is nothing to add. (If it is missing, click
+    **+ Capability** at the top left of that tab, type `Push`, and
+    double-click **Push Notifications**.)
+17. Check that **Sign in with Apple** is listed too. It also comes with the
+    project. (If it is missing: **+ Capability**, type `Apple`, double-click
+    **Sign in with Apple**.)
+18. Check that **In-App Purchase** is listed. If it is not, click
+    **+ Capability**, type `Purchase`, and double-click **In-App Purchase**.
 
-Xcode writes these into the project itself. Do not edit any other file.
+Push Notifications and Sign in with Apple are kept in the project itself
+(`ios/App/App/App.entitlements`), so a newer copy of the code has them
+too. Do not edit any other file.
 
 ### Run it on your iPhone
 
@@ -116,16 +122,23 @@ Xcode writes these into the project itself. Do not edit any other file.
 22. Press the **Play** button (top left). The first time, it can take a few
     minutes. Orenth opens on the iPhone.
 23. Try these on the iPhone:
-    - Pull a page down: it reloads.
+    - Pull a page down: it reloads. Check that you can see the small
+      spinner turning at the top while it does, and not only the notch or
+      the Dynamic Island over it.
     - Swipe in from the left edge: it goes back.
     - Tap a link to another website (the research page has filing links):
       it opens in a sheet over the app, with **Done** to close it.
     - Tap **More** in the bar along the bottom, then **Popular stocks**, any
       stock, and **Share**: the iPhone's share sheet opens.
-    - Turn on **Airplane Mode** and pull a page down: the **No connection**
-      page shows. Turn Airplane Mode off and tap **Try again**.
-    - In dark mode (Settings > Display & Brightness), the launch screen and
-      the status bar are dark too.
+    - Turn on **Airplane Mode** and tap a link to another page: the **No
+      connection** page shows. Turn Airplane Mode off and tap **Try again**:
+      the page you tapped opens.
+    - Tap a link, and before its page opens, tap another or swipe back: you
+      get the second one, and never the **No connection** page.
+    - In dark mode (Settings > Display & Brightness), the launch screen is
+      dark too, and the clock and battery at the top are light, easy to
+      read on the dark page, also after you close a sheet opened from a
+      link. In light mode they are dark.
 
 ### Send the app to Apple (each new version)
 
@@ -781,27 +794,44 @@ with the review address: Orenth refuses those for it.
   site at once.
 - **Something in this `mobile` folder changed:** on the Mac, get the new
   code, run `npm ci`, `npx cap sync ios` and `npx cap open ios` in the
-  `mobile` folder, raise the **Build** number (Part 2, step 24), then
-  Archive and Distribute again (steps 25 to 27). In App Store Connect, make
-  a new version, pick the new build, and submit.
+  `mobile` folder, pick your **Team** again (Part 2, step 14) and check the
+  capabilities are listed (steps 16 to 18), raise the **Build** number
+  (step 24), then Archive and Distribute again (steps 25 to 27). In App
+  Store Connect, make a new version, pick the new build, and submit.
 
 ## For whoever works on the code next
 
 - `capacitor.config.json`: the site the app loads, its offline page, and
   the launch screen, status bar and notification settings. Run
   `npx cap sync ios` after any change.
-- `www/offline.html`: the page shown when orenth.app cannot be reached.
+- `www/offline.html`: the page shown when orenth.app cannot be reached. Its
+  **Try again** opens the page that could not be opened, which the app
+  remembers.
 - `ios/App/App/MainViewController.swift`: the screen (swipe back, pull to
-  refresh). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
+  refresh), and `CancelledLoadFilter`, which stops Capacitor showing the
+  offline page for a load that was only cut short (another tap, a swipe
+  back). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
   Google sign-in (JavaScript name `WebAuth`).
+- `ios/App/App/NavigationGuardPlugin.swift`: keeps the app's web view on
+  https://orenth.app itself. Capacitor gives every page it shows the whole
+  bridge to the phone, and its own check (the address starts with
+  `https://orenth.app`) also lets in `https://orenth.app.evil.example`, so
+  any other address opens outside the app instead. The sign-in sheet and
+  in-app purchase also answer only pages of orenth.app. It remembers the
+  last page the app set out to open, for the offline page.
 - `ios/App/App/AppPurchasePlugin.swift`: Apple's in-app purchase, StoreKit 2
   (JavaScript name `AppPurchase`). It hands every transaction to the page as
   Apple's signed JWS and finishes one only when the page says the server has
   it. On the website, `static/app-purchase.js` is the subscribe screen and
   the go-between, `bot/appstore.py` checks Apple's signatures, and
   `bot/apple_store.py` decides who has Pro.
-- `scripts/add-native-files.js`: lists new native files in the Xcode project
-  and keeps the app iPhone-only. `scripts/check-project.js` checks it.
+- `ios/App/App/App.entitlements`: the app's Push Notifications and Sign in
+  with Apple. `aps-environment` says `development`; Xcode makes it
+  `production` when it exports a build for the App Store.
+- `scripts/add-native-files.js`: lists new native files in the Xcode project,
+  names `App.entitlements` in both of the App target's configurations
+  (`CODE_SIGN_ENTITLEMENTS`), and keeps the app iPhone-only.
+  `scripts/check-project.js` checks it.
 - `scripts/make_assets.py`, then `npx @capacitor/assets generate --ios`:
   the icon and launch screens, drawn from `tools/make_logo.py`.
 - On the website, `static/native.js` connects pages to the phone, and

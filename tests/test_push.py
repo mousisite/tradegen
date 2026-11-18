@@ -340,6 +340,61 @@ const released = (calls) => calls.some((c) => c.url.indexOf('/unsubscribe') !== 
 })().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
 """
 
+# static/notify.js inside the iPhone app, on https://orenth.app/monitor and
+# signed out, with a stand-in for Capacitor's push plugin. Each address in
+# __PATHS__ arrives as a tapped notification's url, on a page of its own; it
+# prints where each one sent the page (location.assign), if anywhere.
+NOTIFY_TAPPED = r"""
+const fs = require('fs');
+const vm = require('vm');
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const PATHS = __PATHS__;
+
+function page() {
+  const went = [];
+  const heard = {};
+  const push = { addListener: (event, fn) => { heard[event] = fn; return Promise.resolve({ remove() {} }); } };
+  const ctx = {
+    console, Promise, URL, JSON, setTimeout,
+    Capacitor: { isNativePlatform: () => true, Plugins: { PushNotifications: push } },
+    navigator: { userAgent: 'Mozilla/5.0 (iPhone) OrenthApp/1' },
+    location: { origin: 'https://orenth.app', href: 'https://orenth.app/monitor',
+                assign: (to) => { went.push(String(to)); } },
+    document: { readyState: 'complete', currentScript: { getAttribute: () => '' },
+                querySelectorAll: () => [], addEventListener() {} },
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  return { went: went, heard: heard };
+}
+
+const out = {};
+for (const path of PATHS) {
+  const p = page();
+  if (!p.heard.pushNotificationActionPerformed) { throw new Error('no listener for a tapped notification'); }
+  p.heard.pushNotificationActionPerformed({ notification: { data: { url: path } } });
+  out[path] = p.went;
+}
+console.log(JSON.stringify(out));
+"""
+
+# Addresses that must never take the app's web view to another site. Those
+# with a dot segment ("/./", "/%2e/", "/../") resolve to a path that starts
+# "//", which the browser, given that path alone, reads as the address of
+# another site.
+OFF_SITE = ["/.//orenth.app.evil.example/x", "/%2e//orenth.app.evil.example/x",
+            "/%2E//orenth.app.evil.example/x", "/..//orenth.app.evil.example/x",
+            "/.//orenth.app@evil.example/x", "//orenth.app.evil.example/x",
+            "/\\orenth.app.evil.example/x", "/\\/orenth.app.evil.example/x",
+            "/\t/orenth.app.evil.example/x",
+            "javascript:alert(document.cookie)", "data:text/html,<script>alert(1)</script>",
+            "https://orenth.app.evil.example/x", "http://orenth.app/monitor"]
+# Odd, but a path on this site all the same: "%2F" is not a slash in a path,
+# so this asks orenth.app for a page it does not have. In an app link the
+# address is decoded once more first, and there it is "/.//orenth.app@...".
+ODD_BUT_HERE = "/.%2F/orenth.app@evil.example/x"
+
 # A service worker (argv[2]) in a stand-in for the browser's worker scope:
 # its caches, the network, the open windows and its registration.
 # argv[3] is 'worker' for /sw.js, with argv[4] the release's version, or
@@ -1511,6 +1566,35 @@ try:
               and off["then"]["kept"] == {}, off["then"])
         check("switched off in the iPhone's Settings, it is kept until the server is told",
               got["revoked"] == phone, got["revoked"])
+
+    section("A TAPPED NOTIFICATION OPENS A PAGE OF THIS SITE, AND NEVER ANOTHER")
+    # The app shows any page it is sent to with the whole bridge to the phone,
+    # so a notification's url must never take it off orenth.app.
+    good = {"/monitor": "https://orenth.app/monitor",
+            "/analyse?symbol=NVDA&interval=1d":
+                "https://orenth.app/analyse?symbol=NVDA&interval=1d",
+            "/research?symbol=NVDA&interval=1d#s-news":
+                "https://orenth.app/research?symbol=NVDA&interval=1d#s-news"}
+    tapped = run_node(NOTIFY_TAPPED.replace(
+        "__PATHS__", json.dumps(OFF_SITE + [ODD_BUT_HERE] + list(good))), notify_js)
+    if tapped is None:
+        print("   (Node is not installed, so notify.js is read here rather than run)")
+        source = open(notify_js, encoding="utf-8").read()
+        check("a tapped notification opens the full address, never a bare path",
+              "window.location.assign(address)" in source
+              and "pathname.slice(0, 2) === '//'" in source)
+    elif "error" in tapped:
+        check("notify.js runs as the app runs it", False, tapped["error"])
+    else:
+        for path, address in sorted(good.items()):
+            check("a notification for %s opens %s" % (path, address),
+                  tapped[path] == [address], tapped[path])
+        for path in OFF_SITE:
+            check("a notification for %r opens nothing" % path, tapped[path] == [],
+                  tapped[path])
+        check("one for %r stays on orenth.app" % ODD_BUT_HERE,
+              tapped[ODD_BUT_HERE] == ["https://orenth.app" + ODD_BUT_HERE],
+              tapped[ODD_BUT_HERE])
 
     section("RETIRING THE WORKER AFTER A ROLLBACK")
     # A version from before the worker answers /sw.js with "not found", and a

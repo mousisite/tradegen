@@ -11,6 +11,7 @@ from another site, and a link from another site trying to start one.
 """
 import hashlib
 import os as _os
+import re
 import secrets
 import sys as _sys
 from urllib.parse import parse_qs, urlparse
@@ -296,6 +297,26 @@ try:
     check("tells it where to finish", 'data-finish="/auth/app/finish"' in page)
     check("and marks the Google button for it", 'data-app-via="google"' in page)
     check("with no Apple set up, no Apple button", "Continue with Apple" not in page)
+    # The script is deferred. In the app a tap before it has run must start
+    # nothing: Google refuses sign-in inside the app's own view, and the app
+    # would send it to Safari, where the sign-in cannot come back. So there the
+    # button goes nowhere, and the script starts the sign-in from data-start.
+    button = re.compile(r'<a class="gbtn" data-app-via="google"\s+href="([^"]*)"\s+'
+                        r'data-start="([^"]*)"([^>]*)>')
+    on_web = button.search(page)
+    check("on the website the Google button is a link to Google's sign-in",
+          on_web and on_web.group(1).startswith("/auth/google")
+          and on_web.group(2) == on_web.group(1) and "role=" not in on_web.group(3),
+          on_web and on_web.groups())
+    app_page = web.app.test_client().get("/signin?next=/trades", headers={
+        "User-Agent": "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 OrenthApp/1"}
+    ).data.decode("utf-8", "replace")
+    in_app = button.search(app_page)
+    check("in the app it goes nowhere by itself, a button whose sign-in starts from "
+          "data-start, next page and all",
+          in_app and in_app.group(1) == "#" and in_app.group(2).startswith("/auth/google?")
+          and "next=/trades" in in_app.group(2) and 'role="button"' in in_app.group(3),
+          in_app and in_app.groups())
     script = web.app.test_client().get("/static/signin-app.js")
     text = script.data.decode("utf-8", "replace")
     check("the script is served", script.status_code == 200)

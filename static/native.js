@@ -11,7 +11,7 @@
  *   - Links to other sites open in a sheet over the app (the in-app browser)
  *     instead of leaving it, so the app never browses the open web.
  *   - The share buttons open the phone's own share sheet.
- *   - The status bar takes the page's own light or dark colours.
+ *   - The status bar's text is dark on a light page and light on a dark one.
  *   - The launch screen goes away as soon as the page is ready.
  *   - app.orenth.ios://open?path=/monitor opens that page of this site.
  *   - window.OrenthNotify.onAppStart(), if the notifications script is there.
@@ -28,8 +28,6 @@
   }
 
   var SCHEME = 'app.orenth.ios';
-  var LIGHT_GROUND = '#f4f3ee';
-  var DARK_GROUND = '#191817';
 
   function noop() {}
 
@@ -103,26 +101,34 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Same-site paths, checked strictly: one leading slash, no scheme, nothing
-  // that a browser would read as another host.
+  // Same-site addresses, checked strictly. A path must start with one slash
+  // and hold no backslash, space or control character. It is then resolved
+  // as the browser resolves it, and must still be on this site, with a path
+  // the browser could not take for another host: "/.//evil.example" resolves
+  // to the path "//evil.example", which on its own is the address of another
+  // site. What comes back is the full address it resolved to, so the page
+  // goes exactly there and nothing reads the path a second time.
   // ---------------------------------------------------------------------------
-  function safePath(path) {
+  function siteAddress(path) {
     if (typeof path !== 'string' || !path || path.length > 1024) { return null; }
     if (path.charAt(0) !== '/' || path.charAt(1) === '/') { return null; }
     if (/[\\\s\u0000-\u001f\u007f]/.test(path)) { return null; }
     var resolved;
     try { resolved = new URL(path, location.origin); } catch (e) { return null; }
     if (resolved.origin !== location.origin) { return null; }
-    return resolved.pathname + resolved.search + resolved.hash;
+    if (resolved.pathname.slice(0, 2) === '//') { return null; }
+    if (/[\\\u0000-\u001f\u007f]/.test(resolved.pathname)) { return null; }
+    return resolved.href;
   }
 
-  // app.orenth.ios://open?path=/monitor gives "/monitor"; anything else, null.
-  function deepLinkPath(raw) {
+  // app.orenth.ios://open?path=/monitor gives https://orenth.app/monitor;
+  // anything else, null.
+  function deepLinkAddress(raw) {
     if (typeof raw !== 'string' || raw.length > 2048) { return null; }
     var u;
     try { u = new URL(raw); } catch (e) { return null; }
     if (u.protocol !== SCHEME + ':' || u.host !== 'open') { return null; }
-    return safePath(u.searchParams.get('path'));
+    return siteAddress(u.searchParams.get('path'));
   }
 
   // A sign-in answer: this app's scheme, anything but the "open" links.
@@ -317,43 +323,34 @@
   }, true);
 
   // ---------------------------------------------------------------------------
-  // Status bar: the same ground as the page, light or dark, and dark text on a
-  // light ground. Read from the page itself, so it follows whatever the CSS
-  // decided, and checked again when the phone switches appearance.
+  // Status bar: the app draws the page under it, and the site's top bar keeps
+  // its own contents below it, so only the bar's text changes: dark on a
+  // light page, light on a dark one. Read from the page itself, so it follows
+  // whatever the CSS decided, and set again when the phone switches
+  // appearance, and when the in-app browser sheet closes, since the app then
+  // puts back the style it started with.
   // ---------------------------------------------------------------------------
-  function hex(n) {
-    var s = Math.max(0, Math.min(255, Math.round(n))).toString(16);
-    return s.length === 1 ? '0' + s : s;
-  }
-
-  function pageGround() {
-    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    var fallback = dark ? DARK_GROUND : LIGHT_GROUND;
+  function pageIsDark() {
     var node = document.body || document.documentElement;
     var colour = '';
     try { colour = window.getComputedStyle(node).backgroundColor || ''; } catch (e) { colour = ''; }
     var m = colour.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/);
-    if (!m || (m[4] !== undefined && parseFloat(m[4]) === 0)) { return fallback; }
-    return '#' + hex(+m[1]) + hex(+m[2]) + hex(+m[3]);
+    if (!m || (m[4] !== undefined && parseFloat(m[4]) === 0)) {
+      // No colour of its own: the phone's appearance, which the site follows.
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    return (0.299 * Number(m[1]) + 0.587 * Number(m[2]) + 0.114 * Number(m[3])) < 128;
   }
 
-  function isDarkGround(colour) {
-    var r = parseInt(colour.substr(1, 2), 16);
-    var g = parseInt(colour.substr(3, 2), 16);
-    var b = parseInt(colour.substr(5, 2), 16);
-    return (0.299 * r + 0.587 * g + 0.114 * b) < 128;
-  }
-
-  var lastGround = '';
+  var lastStyle = '';
 
   function syncStatusBar() {
     if (!has('StatusBar')) { return; }
-    var ground = pageGround();
-    if (ground === lastGround) { return; }
-    lastGround = ground;
-    // DARK means light text, for a dark ground; LIGHT means dark text.
-    call('StatusBar', 'setStyle', { style: isDarkGround(ground) ? 'DARK' : 'LIGHT' }).catch(noop);
-    call('StatusBar', 'setBackgroundColor', { color: ground }).catch(noop);
+    // DARK means light text, for a dark page; LIGHT means dark text.
+    var style = pageIsDark() ? 'DARK' : 'LIGHT';
+    if (style === lastStyle) { return; }
+    lastStyle = style;
+    call('StatusBar', 'setStyle', { style: style }).catch(noop);
   }
 
   if (window.matchMedia) {
@@ -368,14 +365,18 @@
     new MutationObserver(syncStatusBar).observe(document.documentElement,
       { attributes: true, attributeFilter: ['data-theme', 'class'] });
   }
+  listen('Browser', 'browserFinished', function () {
+    lastStyle = '';
+    syncStatusBar();
+  });
 
   // ---------------------------------------------------------------------------
   // App links: app.orenth.ios://open?path=/monitor. A link that started the
   // app is held by the app until this listener is in place.
   // ---------------------------------------------------------------------------
   listen('App', 'appUrlOpen', function (event) {
-    var path = deepLinkPath(event && event.url);
-    if (path !== null) { location.assign(path); }
+    var address = deepLinkAddress(event && event.url);
+    if (address !== null) { location.assign(address); }
   });
 
   // ---------------------------------------------------------------------------
