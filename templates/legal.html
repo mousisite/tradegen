@@ -99,15 +99,18 @@
     Pro. These are counts only: a day, what happened and how many times. No
     account, address, ticker or network address is kept with them, so they
     cannot be traced back to you.</p>
+  {# Inside the iPhone app nothing names another phone's system (App Store
+     rule 2.3.10), and the subscribe screen links here. #}
   <p class="prose" id="notifications">If you turn on notifications on a phone
     or a computer, Orenth keeps what that device's push service gave it to
     reach the device (for a browser, a web address and two keys; for the
-    iPhone app, a device token), a short name such as "Chrome on Android",
+    iPhone app, a device token), a short name such as "{{ 'iPhone app' if in_app
+    else 'Chrome on Android' }}",
     and when a notification last went through or why it failed. When one of
     your alerts fires, or a position in your journal crosses its stop, its
     text and the time of its price go to the device through that push
-    service: Apple's for iPhones, iPads and Safari, Google's for Chrome and
-    Android, Mozilla's for Firefox and Microsoft's for Edge. For a stop, the
+    service: Apple's for iPhones, iPads and Safari, Google's for Chrome{% if not in_app %} and
+    Android{% endif %}, Mozilla's for Firefox and Microsoft's for Edge. For a stop, the
     text names the stock, its price, the stop and whether your position is
     long or short. A browser's notifications are encrypted for that browser,
     so the push service carries them without being able to read them; only a

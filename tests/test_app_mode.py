@@ -67,6 +67,13 @@ NEVER_IN_APP = ("stripe", "metricool", "android", "google play", "play store",
                 "add to home screen", "to your home screen", "/billing/checkout",
                 "/billing/portal", "/billing/code", "discount code",
                 "$9.99", "$79.99", "buy on the website", "subscribe on the website")
+# What no page inside the app may say, the privacy policy included. It has
+# to name Stripe and the website's visit counter among the services that get
+# data, but another phone's system, or an app to install, has no place in an
+# App Store app (rule 2.3.10), and the subscribe screen links to it.
+OTHER_PLATFORMS = ("android", "google play", "play store", "install the app",
+                   "install app", "install orenth", "add to home screen",
+                   "to your home screen")
 # A price written into a page. Inside the app only StoreKit may show one.
 PRICE = re.compile(r"[$£€]\s?\d")
 # A link to tap out of the app, to a site's pricing or billing pages. The
@@ -92,6 +99,11 @@ def sign_in(client, user):
 
 def text(response):
     return response.data.decode("utf-8", "replace")
+
+
+def other_platforms(body):
+    low = body.lower()
+    return [w for w in OTHER_PLATFORMS if w in low]
 
 
 def leaks(body):
@@ -144,6 +156,12 @@ try:
           "/static/native.js" in page, "native.js missing")
     page = text(c.get("/privacy", headers=IN_SAFARI))
     check("a browser page does not", "native.js" not in page)
+    check("and the website's privacy page still names every push service's systems",
+          '"Chrome on Android"' in page and "Google's for Chrome and Android" in " ".join(
+              page.split()))
+    page = text(c.get("/privacy", headers=IN_APP))
+    check("while inside the app it names no other phone's system",
+          not other_platforms(page) and '"iPhone app"' in page, other_platforms(page))
     script = c.get("/static/native.js")
     body = text(script)
     check("the script is served", script.status_code == 200, script.status_code)
@@ -194,12 +212,16 @@ try:
             conn = db.connect(DB)
             billing.set_plan(conn, paid.id, "pro", "active", "cus_paid")
             conn.close()
-        for path in ("/", "/pricing", "/account", "/monitor", "/ideas"):
+        for path in ("/", "/pricing", "/account", "/monitor", "/ideas", "/settings"):
             response = client.get(path, headers=IN_APP)
             page = text(response)
             check("%s: %s inside the app shows no Stripe or Android" % (who, path),
                   response.status_code in (200, 402) and not leaks(page),
                   (response.status_code, leaks(page)))
+        for path in ("/privacy", "/terms"):
+            page = text(client.get(path, headers=IN_APP))
+            check("%s: %s inside the app names no other phone's system" % (who, path),
+                  not other_platforms(page), other_platforms(page))
         if user is paid:
             browser = text(client.get("/account", headers=IN_SAFARI))
             check("a Pro account still manages Stripe from a browser",
@@ -266,7 +288,8 @@ try:
             client = web.app.test_client()
             sign_in(client, user)
             # The Terms too: the subscribe screen links to them.
-            for path in ("/", "/pricing", "/account", "/monitor", "/ideas", "/terms"):
+            for path in ("/", "/pricing", "/account", "/monitor", "/ideas", "/terms",
+                         "/settings"):
                 response = client.get(path, headers=IN_APP)
                 page = text(response)
                 check("%s: %s inside the app sells only through Apple" % (who, path),
@@ -274,6 +297,10 @@ try:
                       (response.status_code, leaks(page)))
                 check("%s: %s inside the app carries the purchase script" % (who, path),
                       "/static/app-purchase.js" in page)
+            # And the Privacy Policy, which it links to as well.
+            page = text(client.get("/privacy", headers=IN_APP))
+            check("%s: /privacy inside the app names no other phone's system" % who,
+                  not other_platforms(page), other_platforms(page))
             pricing = text(client.get("/pricing", headers=IN_APP))
             if user is free:
                 check("a free account gets Apple's subscribe screen",
