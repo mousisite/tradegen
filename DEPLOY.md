@@ -253,10 +253,36 @@ the database inside is intact:
 python backup.py --fetch <its name> --out /data/restore
 ```
 
+Then put it in place of the live database, and restart the service in Render
+straight after, so the app brings the restored database up to date and forgets
+what it read before:
+
+```
+python backup.py --restore /data/restore/<its name>
+```
+
+`--restore` checks the copy, backs up the database as it is now into
+`/data/backups` (it prints that file's name, so a restore from the wrong copy
+can be undone the same way), and then writes the copy into the live database
+through SQLite, as one change. It works while the app is running, and if
+something holds the database's write lock for more than ten seconds it changes
+nothing and says so. Everything written since the copy was taken is lost: new
+accounts, journal entries, and plan changes from Stripe's webhooks, which
+Stripe does not send again. Accounts deleted since come back, and have to be
+deleted again. The same command restores a local backup, such as one in
+`/data/backups` or `/data/backups/before-release`.
+
+Never restore by copying a backup over `stockbot.db`. A server that was
+stopped or killed leaves `stockbot.db-wal` beside it with its last writes, and
+SQLite lays those over the copy the next time the app opens it: the database
+opens cleanly, but it is not the backup.
+
 The app only ever deletes copies named the way its backups are named. So to
 keep one for good, copy a backup by hand under another name, such as
 `keep-2026-11.db`, with `--offsite`; it stays until you delete it in
-Cloudflare. Two more settings are optional: `BACKUP_S3_REGION`
+Cloudflare. If you later remove these settings, the copies already in the
+bucket stay too, and nothing prunes them any more: delete them in Cloudflare,
+since each holds every account, deleted ones included. Two more settings are optional: `BACKUP_S3_REGION`
 (default `auto`, which R2 uses) and `BACKUP_S3_PREFIX` (default `orenth/`, the
 folder in the bucket). Any storage that speaks the S3 protocol works, not only
 R2.
@@ -509,6 +535,12 @@ server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
 disk as the database: section 6 copies each one somewhere else as it is taken.
 
+Each new release also copies the database, verified, before its start-up
+changes anything in it, into `/data/backups/before-release`, and writes the
+release's name to `/data/release.txt` so a restart takes no second copy. The
+last three are kept, none for more than a week: they are pruned at every start
+and with every timed backup. They are not copied off the server.
+
 ---
 
 ## Notifications to phones and browsers
@@ -623,9 +655,10 @@ operator:
   `.db` file is the backup.
 - Backups hold every account's data. A deleted account is gone from them once
   the last copy taken before the deletion is pruned, about four days at the
-  defaults, and from any copy you downloaded only when you delete that. With
-  copies kept off the server (section 6), the monthly ones keep it for up to
-  12 months, and the privacy page says so.
+  defaults and a week for the copies taken before a release, and from any copy
+  you downloaded only when you delete that. With copies kept off the server
+  (section 6), the monthly ones keep it for up to 12 months, and the privacy
+  page says so.
 
 Do not `cat` or `cp` the database. It runs in WAL mode, so at any moment some
 committed data lives in the `-wal` file rather than the main one; a copy taken
@@ -639,7 +672,12 @@ live database, then verifies the result before keeping it:
 ```
 python backup.py --csv           snapshot, plus plain-text exports
 python backup.py --verify FILE   check an existing backup is intact
+python backup.py --restore FILE  put a backup in place of the database; then restart the app
 ```
+
+Restore with `--restore`, never by copying the file over `stockbot.db`: the
+`-wal` file beside it would lay the latest writes back over the backup.
+Section 6 says more.
 
 On the server:
 

@@ -148,6 +148,74 @@ conn.close()
 check("an older 'canceled' delivered late is stale", outcome == "stale"
       and billing.is_pro(user(renewed)), outcome)
 
+head("PLANS STRIPE CANNOT ANSWER FOR DO NOT HOLD UP THE REST")
+# Customers left behind by switching from test keys to live ones, or deleted
+# at Stripe while the webhook was failing: Stripe refuses them, or has no
+# subscription for them. They stay Pro on record with the oldest ends, and
+# were picked first every hour, for ever: with a run's worth of them, nobody
+# else was read again, and a payer whose renewal webhook was lost lost Pro.
+conn = db.connect(DB)
+left = []
+for i in range(billing.RECHECK_PER_RUN + 5):
+    u = A.upsert_email_user(conn, "left%d@example.com" % i)
+    billing.set_plan(conn, u.id, "pro", "active", "cus_left_%d" % i,
+                     int(NOW - (200 - i) * DAY))
+    left.append("cus_left_%d" % i)
+payer = A.upsert_email_user(conn, "payer@example.com")
+billing.set_plan(conn, payer.id, "pro", "active", "cus_payer", int(NOW - 2 * 3600))
+conn.close()
+heard = []
+
+
+def stripe_left(method, path, data=None):
+    customer = path.rsplit("customer=", 1)[-1]
+    heard.append(customer)
+    if customer.startswith("cus_left_"):
+        if int(customer.rsplit("_", 1)[1]) % 2:
+            raise billing.BillingError("Payments refused the request. Nothing was charged.")
+        return {"data": []}
+    if customer == "cus_payer":
+        return {"data": [{"id": "sub_p", "status": "active", "created": int(NOW - 40 * DAY),
+                          "current_period_end": int(NOW + 28 * DAY)}]}
+    return stripe(method, path, data)
+
+
+def run_at(when):
+    del heard[:]
+    conn = db.connect(DB)
+    try:
+        return billing.recheck(conn, when, call=stripe_left)
+    finally:
+        conn.close()
+
+
+run_at(NOW)
+first_run = list(heard)
+check("a plan still inside its grace period is read before ones long past it",
+      "cus_payer" in first_run, first_run)
+p = user(payer)
+check("so the payer whose renewal webhook was lost keeps Pro, to the new end",
+      billing.is_pro(p) and p.plan_until == int(NOW + 28 * DAY), (p.plan, p.plan_until))
+run_at(NOW + 3600)
+second_run = list(heard)
+unread = [c for c in left if c not in first_run]
+check("the next run reads first those the last one did not reach",
+      unread and all(c in second_run for c in unread), (unread, second_run))
+check("and the ones Stripe cannot answer for are still read again in turn",
+      set(left) <= set(first_run) | set(second_run)
+      and any(c in first_run for c in second_run), second_run)
+conn = db.connect(DB)
+gone = A.get_user(conn, payer.id)
+A.delete_user(conn, payer.id)
+try:
+    kept = conn.execute("SELECT COUNT(*) FROM plan_checks WHERE user_id=?",
+                        (payer.id,)).fetchone()[0]
+except sqlite3.OperationalError as exc:
+    kept = str(exc)
+conn.close()
+check("when an account goes, so does the note of when its plan was read",
+      gone is not None and kept == 0, kept)
+
 head("THE JOB IS STARTED WITH THE OTHERS")
 check("start_background_jobs schedules it hourly",
       "_recheck_plans_job" in open(web.__file__, encoding="utf-8").read()
@@ -188,6 +256,101 @@ for n, release in enumerate(("bbbb2222", "cccc3333", "dddd4444", "eeee5555")):
     _os.environ["RENDER_GIT_COMMIT"] = release
     serve._copy_before_release(DB)
 check("only the last few are kept", len(held()) == serve.KEEP_RELEASE_COPIES, held())
+
+head("THOSE COPIES GO ONCE THEY ARE A WEEK OLD")
+# Each holds every account as it was, a deleted one included, and the privacy
+# page says a backup holding a deleted account is gone in about a week. Kept
+# by count alone, three copies stayed until three more releases, however
+# many months that took.
+WEEK_OLD = time.time() - 8 * DAY
+
+
+def age_copies():
+    for name in held():
+        _os.utime(_os.path.join(copies, name), (WEEK_OLD, WEEK_OLD))
+
+
+age_copies()
+serve._copy_before_release(DB)          # a restart of the same release
+check("a start deletes every copy more than a week old, the newest too",
+      held() == [], held())
+
+head("THE SERVER ITSELF TAKES THAT COPY WHEN IT STARTS")
+# serve.main([]) as the host runs it. Only web.main() sets DB_PATH, and
+# serve.py never calls it: STOCKBOT_DB names the database, as render.yaml and
+# the Dockerfile do. The copy was once asked of a path that was None there,
+# and quietly never taken.
+import waitress  # noqa: E402
+import backup as backup_mod  # noqa: E402
+from bot import scheduler as scheduler_mod  # noqa: E402
+
+jobs = []
+
+
+class Held:
+    """Stands in for the timed backups' scheduler, and keeps its job."""
+
+    def __init__(self, job, **_kw):
+        jobs.append(job)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def check_now(self):
+        pass
+
+
+marker = _os.path.join(folder, "release.txt")
+
+
+def release_noted():
+    with open(marker, encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+before = held()
+real = (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+        scheduler_mod.Scheduler)
+waitress.serve = lambda *a, **k: None
+web.start_alert_loop = lambda cfg: None
+web.start_background_jobs = lambda: None
+scheduler_mod.Scheduler = Held
+web.app.config["DB_PATH"] = None
+for key in [k for k in _os.environ if k.startswith("BACKUP_S3_")] + [
+        "SENTRY_DSN", "STOCKBOT_BACKUP_DIR", "STOCKBOT_BACKUP_HOURS"]:
+    _os.environ.pop(key, None)
+_os.environ["RENDER_GIT_COMMIT"] = "ffff6666"
+try:
+    started = serve.main([])
+finally:
+    (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+     scheduler_mod.Scheduler) = real
+    web.app.config["DB_PATH"] = DB
+new = sorted(set(held()) - set(before))
+check("serve.main takes the copy for a new release, and notes the release",
+      started == 0 and len(new) == 1 and release_noted() == "ffff6666",
+      (started, new, release_noted()))
+check("the timed backups are set up beside it", len(jobs) == 1, jobs)
+age_copies()
+jobs[0]()                               # a timed backup, every 12 hours
+check("each timed backup also deletes the copies a week old, so one goes "
+      "however long the next release takes", held() == [], held())
+
+head("A COPY THAT DOES NOT VERIFY IS NOT KEPT")
+before = held()
+real_verify = backup_mod.verify
+backup_mod.verify = lambda path: False
+_os.environ["RENDER_GIT_COMMIT"] = "gggg7777"
+try:
+    serve._copy_before_release(DB)
+finally:
+    backup_mod.verify = real_verify
+check("it is deleted, not left to be trusted", held() == before, (before, held()))
+check("and the release is not noted, so the next start tries again",
+      release_noted() == "ffff6666", release_noted())
 _os.environ.pop("RENDER_GIT_COMMIT", None)
 
 print()

@@ -38,6 +38,12 @@ except ImportError:
 # Copies kept of the database as each earlier release left it.
 KEEP_RELEASE_COPIES = 3
 
+# And for how long, the newest included. Each holds every account as it was,
+# a deleted one too, and the privacy page says a backup holding a deleted
+# account is gone in about a week. A release that damaged data shows it within
+# days; after that the timed backups are the ones to go back to.
+RELEASE_COPY_DAYS = 7
+
 
 def _code_fingerprint() -> str:
     """A stand-in for the release name when the host gives none: a hash of
@@ -57,6 +63,24 @@ def _code_fingerprint() -> str:
     return "code-" + digest.hexdigest()[:16]
 
 
+def _prune_release_copies(db_path) -> None:
+    """Delete the copies taken before releases that are past their week.
+
+    Run at every start and after every timed backup, not only when a new
+    release takes a copy: otherwise the last few stayed for as long as the
+    next releases took, months in a quiet spell. Never raises.
+    """
+    try:
+        import backup as backup_mod
+        folder = os.path.dirname(os.path.abspath(db_path))
+        backup_mod.prune(os.path.join(folder, "backups", "before-release"),
+                         KEEP_RELEASE_COPIES, max_age=RELEASE_COPY_DAYS * 86400.0)
+    except Exception as exc:
+        print("  could not prune the copies taken before releases: %s: %s"
+              % (type(exc).__name__, exc))
+    sys.stdout.flush()
+
+
 def _copy_before_release(db_path) -> None:
     """Back the database up before a new release's migrations touch it.
 
@@ -64,10 +88,14 @@ def _copy_before_release(db_path) -> None:
     RENDER_GIT_COMMIT), remembered in a file beside the database, so a restart
     of the same release takes no copy. A failed copy is said loudly but does
     not stop the start: the migrations only ever add, and the timed backups
-    carry on either way.
+    carry on either way. A copy that does not verify is deleted, as a timed
+    backup's is, and the release is not noted, so the next start tries again.
     """
     release = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or _code_fingerprint()
-    if not release or not db_path or not os.path.exists(db_path):
+    if not db_path or not os.path.exists(db_path):
+        return
+    _prune_release_copies(db_path)
+    if not release:
         return
     folder = os.path.dirname(os.path.abspath(db_path))
     marker = os.path.join(folder, "release.txt")
@@ -80,9 +108,14 @@ def _copy_before_release(db_path) -> None:
     try:
         import backup as backup_mod
         target = os.path.join(folder, "backups", "before-release")
-        path = backup_mod.take(target)
+        path = backup_mod.take(target, source=db_path)
         if not backup_mod.verify(path):
-            raise RuntimeError("the copy at %s did not verify" % path)
+            # Kept, it would be trusted on the day a release is undone.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise RuntimeError("the copy at %s did not verify, so it was deleted" % path)
         backup_mod.prune(target, KEEP_RELEASE_COPIES)
         with open(marker, "w", encoding="utf-8") as fh:
             fh.write(release)
@@ -124,13 +157,19 @@ def main(argv=None) -> int:
     # Before anything else, so a failure during start-up is reported too.
     monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
 
+    # The database every connection opens. DB_PATH is set only by web.main(),
+    # which this file never calls, so here it is STOCKBOT_DB or the default,
+    # as database.connect() works it out. Passing DB_PATH alone handed the copy
+    # below None on the host, and it was quietly never taken.
+    db_path = web.app.config.get("DB_PATH") or db_mod.default_path()
+
     # A copy of the database as the previous release left it, taken before this
     # release changes anything in it. Once per release, not per restart.
-    _copy_before_release(web.app.config.get("DB_PATH"))
+    _copy_before_release(db_path)
 
     # Once, on this one thread, before anything else can open the database:
     # new columns are added here rather than raced for by the first requests.
-    db_mod.migrate(web.app.config.get("DB_PATH"))
+    db_mod.migrate(db_path)
 
     cfg = web.config_mod.load(web.app.config.get("CFG_PATH"))
     loop = web.start_alert_loop(cfg)
@@ -195,6 +234,9 @@ def main(argv=None) -> int:
 
         def take_one():
             from bot import database as db_mod
+            # First, so a copy taken before a release goes when its week is
+            # up even when this backup fails.
+            _prune_release_copies(db_path)
             if not os.path.exists(db_mod.default_path()):
                 # Nothing has been written yet. Not a failure, and not worth
                 # an alert; the next run will find a database.

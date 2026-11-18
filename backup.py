@@ -15,6 +15,8 @@ it is being written to, which is what this uses.
     python backup.py --keep 30           prune to the newest 30
     python backup.py --csv               also write the plain-text exports
     python backup.py --verify <file>     check a backup opens and is intact
+    python backup.py --restore <file>    put a backup in place of the database
+                                         (STOCKBOT_DB), then restart the app
 
 Off-site copies, once their settings are in place (see DEPLOY.md). The server
 copies each automatic backup by itself; these are for doing it by hand:
@@ -63,11 +65,11 @@ def _free_bytes(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
-def take(out_dir: str, with_csv: bool = False) -> str:
-    """Copy a consistent snapshot of the live database."""
+def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> str:
+    """Copy a consistent snapshot of the live database, or of source."""
     from bot import database as db_mod
 
-    source_path = db_mod.default_path()
+    source_path = source or db_mod.default_path()
     if not os.path.exists(source_path):
         # A normal exception, not SystemExit. This is called from a scheduler
         # as well as from a command line, and a library that kills the process
@@ -173,17 +175,21 @@ def _copies(out_dir: str) -> list:
                    if _COPY.match(f)), key=os.path.getmtime, reverse=True)
 
 
-def prune(out_dir: str, keep: int) -> None:
+def prune(out_dir: str, keep: int, max_age: Optional[float] = None) -> None:
     """Delete all but the newest few, so this can run on a timer.
 
     A backup's CSV exports go with its database copy. They hold the same
     people's data, so keeping them would keep a deleted account's trades and
     notes for ever, and they would slowly fill the disk the database is on.
+    With max_age, a copy more than that many seconds old goes too, however
+    few are left.
     """
     if keep <= 0 or not os.path.isdir(out_dir):
         return
+    now = time.time()
     kept = {_COPY.match(os.path.basename(p)).group(1)
-            for p in _copies(out_dir)[:keep]}
+            for p in _copies(out_dir)[:keep]
+            if max_age is None or now - os.path.getmtime(p) <= max_age}
     for name in sorted(os.listdir(out_dir)):
         part = _PART.match(name)
         if part is None or part.group(1) in kept:
@@ -215,6 +221,129 @@ def first_run_in(out_dir: str, every_seconds: float,
     if age is None or age >= every_seconds:
         return soon
     return max(soon, every_seconds - age)
+
+
+# How long a restore waits for another program's write, such as the running
+# server's, to finish before it gives up and changes nothing. The server's own
+# writes take a fraction of a second.
+RESTORE_WAIT = 10.0
+
+
+class _Busy(Exception):
+    """Another program held the database's write lock for too long."""
+
+
+def _write_lock_free(path: str) -> bool:
+    """Whether the database's write lock can be had within RESTORE_WAIT."""
+    conn = sqlite3.connect(path, timeout=RESTORE_WAIT)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        return True
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc) and "busy" not in str(exc):
+            raise
+        return False
+    finally:
+        conn.close()
+
+
+def _said_busy() -> None:
+    print("  Something else has held the database's write lock for over %g seconds,"
+          % RESTORE_WAIT)
+    print("  so nothing was changed. Run this again in a minute, and stop the app "
+          "first if it keeps happening.")
+
+
+def restore(path: str) -> bool:
+    """Put a backup in place of the live database, through SQLite itself.
+
+    Copying the file over the database is not a restore. A server that was
+    stopped or killed leaves the -wal file beside the database with its last
+    writes still in it, and SQLite lays them over the copy at the next open:
+    the result opens cleanly and is the backup with newer pages over it.
+    SQLite's backup API writes every page of the backup into the database as
+    one change, which supersedes whatever the -wal holds, and any other
+    connection, the running server's included, sees all of it or none of it.
+
+    The backup is checked first, and the database as it is now is backed up
+    beside the timed backups, so a restore from the wrong file can be undone
+    the same way. Nothing is changed when the backup does not verify, when it
+    is the database itself, or when another program holds the write lock for
+    longer than RESTORE_WAIT. The app should be restarted straight after.
+    """
+    from bot import database as db_mod
+
+    live = db_mod.default_path()
+    print("  Checking the backup")
+    if not verify(path):
+        print("  It is not an intact backup, so nothing was changed.")
+        return False
+    if os.path.exists(live) and os.path.samefile(path, live):
+        print("  That is the live database itself, so nothing was changed.")
+        return False
+    print()
+    undo = ""
+    if os.path.exists(live):
+        try:
+            if not _write_lock_free(live):
+                _said_busy()
+                return False
+            print("  Backing up the database as it is now, so this can be undone")
+            undo = take((os.environ.get("STOCKBOT_BACKUP_DIR") or "").strip()
+                        or os.path.join(os.path.dirname(live), "backups"))
+        except (OSError, sqlite3.OperationalError) as exc:
+            # No room for the copy, or the file could not be opened: going on
+            # would leave nothing to undo with.
+            print("  %s" % exc)
+            print("  Nothing was changed.")
+            return False
+        except sqlite3.DatabaseError as exc:
+            # Not a database, or a damaged one: the usual reason to restore,
+            # and there is nothing in it to keep.
+            print("  It cannot be read (%s), so no copy of it is kept." % exc)
+        print()
+
+    print("  Restoring %s" % path)
+    print("  into      %s" % live)
+
+    def waited(status, _remaining, _total):
+        if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise _Busy()
+
+    try:
+        os.makedirs(os.path.dirname(live), exist_ok=True)
+        source = sqlite3.connect(path)
+        try:
+            target = sqlite3.connect(live, timeout=RESTORE_WAIT)
+            try:
+                source.backup(target, progress=waited)
+            finally:
+                target.close()
+        finally:
+            source.close()
+    except _Busy:
+        _said_busy()
+        return False
+    except (OSError, sqlite3.DatabaseError) as exc:
+        # A failed backup step is rolled back by SQLite.
+        print("  That did not work: %s. Nothing was changed." % exc)
+        print("  If the database file itself is broken, stop the app, move %s and"
+              % os.path.basename(live))
+        print("  any -wal and -shm files beside it out of the way, and run this again.")
+        return False
+    print()
+    print("  Checking the restored database")
+    if not verify(live):
+        print("  It did not verify. Restore another backup%s."
+              % (", or undo with %s" % undo if undo else ""))
+        return False
+    print()
+    print("  Restored. Restart the app now, so it brings the restored database up")
+    print("  to date and forgets what it read before.")
+    if undo:
+        print("  To undo, restore %s the same way." % undo)
+    return True
 
 
 def _offsite_list(offsite_mod, settings) -> bool:
@@ -249,7 +378,10 @@ def _offsite_fetch(offsite_mod, settings, name: str, out_dir: str) -> bool:
         print("  It downloaded whole but is not an intact backup. Do not restore from it.")
         return False
     print()
-    print("  To restore from it, put it in place of the database while the app is stopped.")
+    # Not by copying it over the database: the -wal file beside that would lay
+    # newer writes over the copy.
+    print("  To restore from it:  python backup.py --restore %s" % path)
+    print("  then restart the app.")
     return True
 
 
@@ -307,6 +439,10 @@ def main(argv=None) -> int:
                         help="also write plain-text exports")
     parser.add_argument("--verify", metavar="FILE",
                         help="check an existing backup instead of taking one")
+    parser.add_argument("--restore", metavar="FILE",
+                        help="check a backup, back up the database as it is now, "
+                             "then write the backup into it through SQLite; "
+                             "restart the app afterwards")
     parser.add_argument("--offsite", metavar="FILE",
                         help="check a backup, then copy it to the off-site bucket "
                              "and check the copy that arrived")
@@ -326,6 +462,12 @@ def main(argv=None) -> int:
     if args.verify:
         print()
         ok = verify(args.verify)
+        print()
+        return 0 if ok else 1
+
+    if args.restore:
+        print()
+        ok = restore(args.restore)
         print()
         return 0 if ok else 1
 

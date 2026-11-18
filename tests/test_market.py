@@ -491,6 +491,13 @@ conn = db.connect(spot)
 for sym in ("ARB-USD", "SUI-USD", "BTC-USD", "SUI"):
     conn.execute("INSERT INTO alerts (symbol, kind, threshold, created_ts, state, user_id) "
                  "VALUES (?, 'price_above', 1.0, 1, 'met', 1)", (sym,))
+# Picked from the suggestions as Yahoo's own ARbit and XBIT: saved exactly,
+# and meaning those coins, not the ones the old ids were moved to.
+for sym in ("ARB-USD", "XBT-USD"):
+    db.alert_add(conn, sym, "price_above", 1.0, exact=True)
+check("a pick of ARB-USD or XBT-USD is saved exactly, under that id",
+      [tuple(r) for r in conn.execute("SELECT symbol, exact FROM alerts WHERE id>4")]
+      == [("ARB-USD", 1), ("XBT-USD", 1)])
 conn.commit()
 conn.close()
 db.migrate(spot)
@@ -505,6 +512,16 @@ check("one on an id with no prices is moved the same way",
 check("Bitcoin's alert and a stock's are left alone",
       (rows[3]["symbol"], rows[3]["active"], rows[3]["state"]) == ("BTC-USD", 1, "met")
       and (rows[4]["symbol"], rows[4]["active"]) == ("SUI", 1))
+
+
+def exact_rows():
+    return [(r["symbol"], r["exact"], r["active"], r["last_error"])
+            for r in conn.execute("SELECT * FROM alerts WHERE id>4 ORDER BY id")]
+
+
+check("an alert saved exactly on ARbit's or XBIT's own id is not moved, paused "
+      "or given a note", exact_rows() == [("ARB-USD", 1, 1, None), ("XBT-USD", 1, 1, None)],
+      exact_rows())
 conn.execute("UPDATE alerts SET active=1 WHERE id=1")
 conn.commit()
 conn.close()
@@ -512,6 +529,8 @@ db.migrate(spot)
 conn = db.connect(spot)
 check("a second start finds nothing to move, and leaves a resumed alert on",
       conn.execute("SELECT active FROM alerts WHERE id=1").fetchone()[0] == 1)
+check("nor does it touch the exact ones, at this start or any other",
+      exact_rows() == [("ARB-USD", 1, 1, None), ("XBT-USD", 1, 1, None)], exact_rows())
 conn.close()
 
 # ---------------------------------------------------------------------------
