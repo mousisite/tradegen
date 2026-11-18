@@ -436,6 +436,71 @@ sandbox for a token only it knows, so one key serves both.
 
 ---
 
+## Rolling back to a version without the offline worker
+
+Every browser that opens Orenth installs its service worker, `/sw.js`: the
+small script that shows notifications and keeps the "No connection" page. A
+rollback does not remove it. A browser asks for `/sw.js` each time it opens
+an Orenth page, and a version from before the worker answers "not found",
+which a browser takes as "keep the one you have".
+
+Usually that does no harm, and a rollback needs nothing more. The worker
+answers only for files whose address ends in `?v=` and its own version's
+fingerprint, which the older pages never ask for, so they get their own style
+sheet and scripts from the server; and it fetches every page from the server.
+
+If the worker itself is what went wrong, retire it: the rolled-back version
+must answer `/sw.js` with `static/sw-retire.js`. That script deletes the files
+Orenth kept in the browser, removes the worker, and reloads the Orenth pages
+open there. Render's Rollback button cannot add it, so roll back with a revert
+instead. On your computer, in the repository:
+
+1. Undo the release, but keep the retiring script. `<merge>` is the merge
+   commit that brought the release in.
+   `git log main --first-parent --merges --oneline -5` lists the latest merges
+   into `main`, newest first; without `--first-parent` the merges inside the
+   release are listed too, and reverting one of those undoes only that part.
+
+   ```
+   git switch main
+   git pull
+   git revert --no-edit -m 1 <merge>
+   git checkout <merge> -- static/sw-retire.js
+   ```
+
+2. Open `web.py`, find the line `@app.route("/robots.txt")`, and paste this
+   just above it, followed by two blank lines:
+
+   ```python
+   @app.route("/sw.js")
+   def retired_worker():
+       """Retires the service worker a later version installed (DEPLOY.md)."""
+       return send_from_directory(os.path.join(app.root_path, "static"),
+                                  "sw-retire.js", mimetype="application/javascript",
+                                  max_age=0)
+
+
+   PUBLIC_ENDPOINTS.add("retired_worker")
+   ```
+
+   The last line matters: without it, a browser where nobody is signed in is
+   sent to the sign-in page, and a browser never takes a worker from there.
+
+3. Commit and push, and Render deploys it:
+
+   ```
+   git add web.py static/sw-retire.js
+   git commit -m "Retire the offline worker"
+   git push
+   ```
+
+Each browser drops the worker the next time it opens any Orenth page. Browser
+notifications stop wherever they were on; once a version with the worker is
+back, each person turns them on again. Before you deploy such a version,
+delete what step 2 pasted, since that version's own `/sw.js` takes its place.
+
+---
+
 ## Before you tell anyone about it
 
 Most of this is a script. Run it against the real address:

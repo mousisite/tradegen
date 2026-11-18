@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys as _sys
 import tempfile
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -333,6 +334,109 @@ const released = (calls) => calls.some((c) => c.url.indexOf('/unsubscribe') !== 
     page('2', local, FAILURES['no connection'], 'denied');
     await settle();
     out.revoked = local.dump();
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+
+# A service worker (argv[2]) in a stand-in for the browser's worker scope:
+# its caches, the network, the open windows and its registration.
+# argv[3] is 'worker' for /sw.js, with argv[4] the release's version, or
+# 'retire' for static/sw-retire.js.
+WORKER_SCOPE = r"""
+const fs = require('fs');
+const vm = require('vm');
+const ORIGIN = 'https://orenth.app';
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const MODE = process.argv[3];
+const VERSION = process.argv[4] || '';
+
+const address = (r) => new URL(typeof r === 'string' ? r : r.url, ORIGIN).href;
+class FakeRequest {
+  constructor(url, init) {
+    this.url = address(url);
+    this.method = (init && init.method) || 'GET';
+    this.mode = (init && init.mode) || 'no-cors';
+  }
+}
+const network = [];
+async function fakeFetch(request) {
+  const url = address(request);
+  network.push(url);
+  const type = url.indexOf('/static/') !== -1 ? 'text/css' : 'text/html';
+  return { ok: true, status: 200, type: 'basic', url: url, from: 'network',
+           headers: { get: (h) => (h.toLowerCase() === 'content-type' ? type : null) },
+           clone() { return Object.assign({}, this); } };
+}
+const stores = new Map();
+function cacheNamed(name) {
+  if (!stores.has(name)) { stores.set(name, new Map()); }
+  const kept = stores.get(name);
+  return {
+    match: async (r) => (kept.has(address(r)) ? Object.assign({}, kept.get(address(r)),
+                                                               { from: 'kept' }) : undefined),
+    put: async (r, response) => { kept.set(address(r), response); },
+    addAll: async (list) => { for (const r of list) { kept.set(address(r), await fakeFetch(r)); } },
+  };
+}
+const caches = { open: async (name) => cacheNamed(name), keys: async () => [...stores.keys()],
+                 delete: async (name) => stores.delete(name) };
+const listeners = {};
+const seen = { skipWaiting: 0, unregistered: 0, navigated: [] };
+const windows = ['/monitor', '/trades'].map((path) => ({
+  url: ORIGIN + path, navigate: async (to) => { seen.navigated.push(to); return null; } }));
+const self = {
+  location: { origin: ORIGIN },
+  addEventListener: (type, fn) => { listeners[type] = fn; },
+  skipWaiting: async () => { seen.skipWaiting += 1; },
+  registration: { navigationPreload: null, pushManager: {}, showNotification: async () => {},
+                  unregister: async () => { seen.unregistered += 1; return true; } },
+  clients: { claim: async () => {}, matchAll: async () => windows, openWindow: async () => null },
+};
+const ctx = { self: self, caches: caches, fetch: fakeFetch, Request: FakeRequest,
+              Response: { error: () => ({ from: 'error' }) }, URL: URL, console: console,
+              Promise: Promise, atob: atob, Uint8Array: Uint8Array, JSON: JSON };
+vm.createContext(ctx);
+vm.runInContext(SRC, ctx);
+
+async function dispatch(type) {
+  const waits = [];
+  if (listeners[type]) { listeners[type]({ waitUntil: (p) => { waits.push(p); } }); }
+  await Promise.all(waits);
+}
+async function ask(url, mode) {
+  let answer = null;
+  const event = { request: new FakeRequest(url, { mode: mode }),
+                  preloadResponse: Promise.resolve(undefined),
+                  respondWith: (p) => { answer = p; } };
+  if (listeners.fetch) { listeners.fetch(event); }
+  const response = answer ? await answer : null;
+  return { answered: !!answer, from: response ? response.from : null };
+}
+
+(async () => {
+  const out = {};
+  if (MODE === 'worker') {
+    await dispatch('install');
+    await dispatch('activate');
+    const before = network.length;
+    out.current = await ask('/static/style.css?v=' + VERSION);
+    out.current_fetched = network.slice(before).length > 0;
+    out.older = await ask('/static/style.css');
+    out.another = await ask('/static/style.css?v=000000000000');
+    out.page = await ask('/monitor', 'navigate');
+    out.api = await ask('/api/push/config');
+  } else {
+    for (const name of ['orenth-0123456789ab', 'orenth-ba9876543210', 'another-site']) {
+      stores.set(name, new Map());
+    }
+    await dispatch('install');
+    await dispatch('activate');
+    out.skip_waiting = seen.skipWaiting;
+    out.caches = [...stores.keys()];
+    out.unregistered = seen.unregistered;
+    out.navigated = seen.navigated;
+    out.listens = Object.keys(listeners).sort();
   }
   console.log(JSON.stringify(out));
 })().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
@@ -1175,9 +1279,17 @@ try:
     kept_list = json.loads(re.search(r"const PRECACHE = (\[.*?\]);", source).group(1))
     check("it keeps only public files under /static/",
           kept_list and all(u.startswith("/static/") for u in kept_list), kept_list)
+    marked = "?v=" + web.ASSET_VERSION
     check("including the style sheet and the icons",
-          {"/static/style.css", "/static/icon-192.png", "/static/badge-96.png"}
-          <= set(kept_list))
+          {"/static/style.css" + marked, "/static/icon-192.png" + marked,
+           "/static/badge-96.png" + marked} <= set(kept_list), kept_list)
+    # A version from before the worker asks for /static/style.css plain, so
+    # after a rollback it can never be handed this release's copy.
+    check("each one's address marked with this release's version, as the cache's name is",
+          all(u.endswith(marked) for u in kept_list), kept_list)
+    check("and so are the notification's icon and badge",
+          "const ICON = %s;" % json.dumps("/static/icon-192.png" + marked) in source
+          and "const BADGE = %s;" % json.dumps("/static/badge-96.png" + marked) in source)
     page_fn = source[source.index("async function page("):source.index("async function file(")]
     file_fn = source[source.index("async function file("):source.index("function keepable(")]
     check("a page always comes from the network and is never kept",
@@ -1206,6 +1318,32 @@ try:
     check("and a replaced subscription is renewed, the server told only as a check",
           "SUBSCRIBE" in renewal and "check: true" in renewal and "replaces:" in renewal)
     check("the files it keeps are fetched without cookies", "credentials: 'omit'" in source)
+    fd, worker_js = tempfile.mkstemp(suffix=".js", prefix="orenth-sw-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(source)
+    try:
+        ran = run_node(WORKER_SCOPE, worker_js, "worker", web.ASSET_VERSION)
+    finally:
+        _os.remove(worker_js)
+    if ran is None:
+        print("   (Node is not installed, so the worker is read here rather than run)")
+        routed = [line for line in source.splitlines() if "url.pathname.startsWith(STATIC)" in line]
+        check("it answers from its copy only for this release's marked files",
+              routed and all("VERSION" in line for line in routed), routed)
+    elif "error" in ran:
+        check("the worker runs as a browser runs it", False, ran["error"])
+    else:
+        check("this release's style sheet comes from the copy kept at install",
+              ran["current"] == {"answered": True, "from": "kept"}
+              and not ran["current_fetched"], ran)
+        check("an older version's page asking for /static/style.css is left to the "
+              "server, so a rollback gets its own style sheet",
+              ran["older"]["answered"] is False, ran["older"])
+        check("as is one marked with another version", ran["another"]["answered"] is False,
+              ran["another"])
+        check("pages still come from the network through it, and /api past it",
+              ran["page"] == {"answered": True, "from": "network"}
+              and ran["api"]["answered"] is False, ran)
 
     vic = person("victoria@example.com", "Victoria Secretname")
     sign_in(vic)
@@ -1221,6 +1359,9 @@ try:
     check("it says what is wrong and offers to try again",
           "No connection" in off and "Try again" in off)
     check("and is kept out of search results", 'name="robots" content="noindex"' in off)
+    check("its style sheet and icon are the kept ones, marked with the version",
+          'href="/static/style.css%s"' % marked in off
+          and 'href="/static/favicon.ico%s"' % marked in off)
 
     home = c.get("/").data.decode("utf-8")
     check("every page links the manifest", 'rel="manifest" href="/manifest.webmanifest"' in home)
@@ -1238,6 +1379,12 @@ try:
     check("registers the worker after load, and never inside the iPhone app",
           "'serviceWorker' in navigator && !window.Capacitor" in home
           and "navigator.serviceWorker.register('/sw.js'" in home)
+    check("every page asks for the style sheet and its scripts marked with the version",
+          'href="/static/style.css%s"' % marked in home
+          and 'src="/static/notify.js%s"' % marked in home)
+    in_app = c.get("/privacy", headers={"User-Agent": "Mozilla/5.0 (iPhone) OrenthApp/1"})
+    check("and so does an app page for the phone script",
+          'src="/static/native.js%s"' % marked in in_app.data.decode("utf-8"))
 
     sign_in(alice)
     account = c.get("/account").data.decode("utf-8")
@@ -1325,6 +1472,56 @@ try:
               and off["then"]["kept"] == {}, off["then"])
         check("switched off in the iPhone's Settings, it is kept until the server is told",
               got["revoked"] == phone, got["revoked"])
+
+    section("RETIRING THE WORKER AFTER A ROLLBACK")
+    # A version from before the worker answers /sw.js with "not found", and a
+    # browser keeps the worker it has. Served there instead, this removes it.
+    retire_js = _os.path.join(ROOT, "static", "sw-retire.js")
+    retire = open(retire_js, encoding="utf-8").read() if _os.path.exists(retire_js) else ""
+    check("static/sw-retire.js is there for a rolled-back version to serve", bool(retire))
+    ran = run_node(WORKER_SCOPE, retire_js, "retire") if retire else None
+    if retire and ran is None:
+        print("   (Node is not installed, so the retiring worker is read here rather than run)")
+        check("it takes over at once, deletes the kept files, removes itself and reloads",
+              all(x in retire for x in ("skipWaiting", "caches.delete", "unregister()",
+                                        "navigate(")) and "'fetch'" not in retire)
+    elif ran is not None and "error" in ran:
+        check("the retiring worker runs as a browser runs it", False, ran["error"])
+    elif ran is not None:
+        check("it takes over at once, rather than once every tab is closed",
+              ran["skip_waiting"] >= 1, ran)
+        check("deletes every file Orenth kept, and nothing of any other site's",
+              ran["caches"] == ["another-site"], ran["caches"])
+        check("removes itself", ran["unregistered"] == 1, ran)
+        check("and reloads each Orenth page open, so it comes from the server",
+              ran["navigated"] == ["https://orenth.app/monitor", "https://orenth.app/trades"],
+              ran["navigated"])
+        check("answering no request in the meantime", "fetch" not in ran["listens"],
+              ran["listens"])
+    deploy = open(_os.path.join(ROOT, "DEPLOY.md"), encoding="utf-8").read()
+    route = next((m.group(1) for m in re.finditer(r"```python\n(.*?)```", deploy, re.S)
+                  if "sw-retire.js" in m.group(1)), "")
+    check("DEPLOY.md gives the route a rolled-back version adds to serve it", bool(route))
+    if route and retire:
+        from flask import Flask, send_from_directory
+        # What that version has: the app, os, send_from_directory, and the
+        # endpoints a browser may reach without signing in.
+        rolled_back = Flask("rolled_back", root_path=ROOT)
+        names = {"app": rolled_back, "os": _os, "send_from_directory": send_from_directory,
+                 "PUBLIC_ENDPOINTS": set()}
+        exec(textwrap.dedent(route), names)
+        r = rolled_back.test_client().get("/sw.js")
+        check("pasted in, it serves the retiring worker at /sw.js, as JavaScript",
+              r.status_code == 200 and r.mimetype == "application/javascript"
+              and r.data == open(retire_js, "rb").read(), (r.status_code, r.mimetype))
+        check("checked afresh on every visit", "no-cache" in (r.headers.get("Cache-Control")
+                                                             or ""), r.headers.get("Cache-Control"))
+        r.close()
+        served_by = [rule.endpoint for rule in rolled_back.url_map.iter_rules()
+                     if rule.rule == "/sw.js"]
+        check("and to a browser nobody is signed in on, which would otherwise be sent "
+              "to sign in, and a worker is never taken from a redirect",
+              served_by and served_by[0] in names["PUBLIC_ENDPOINTS"], served_by)
 finally:
     push._web_post = REAL_WEB_POST
     web.market_mod.split_history = REAL_HISTORY

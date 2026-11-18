@@ -73,7 +73,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
 {# Real files, not a data: URI. Google fetches an icon to put beside a search
    result and ignores anything inline, so the inline version got a generic
    globe. The .ico covers browsers that ask for /favicon.ico unprompted. #}
@@ -562,11 +562,11 @@
    sheets, deep links. On every page, because the app forgets its listeners
    each time a page loads. Never sent to a browser. #}
 {% if in_app %}
-<script src="{{ url_for('static', filename='native.js') }}"></script>
+<script src="{{ url_for('static', filename='native.js', v=asset_version) }}"></script>
 {% endif %}
 {# Notifications on this device: the switch on the Monitor and Settings pages,
    and, inside the iPhone app, what a tapped notification opens. #}
-<script src="{{ url_for('static', filename='notify.js') }}" defer
+<script src="{{ url_for('static', filename='notify.js', v=asset_version) }}" defer
         data-user="{{ current_user.id if current_user and not demo else '' }}"
         data-mark="{{ push_mark }}"></script>
 </body>
