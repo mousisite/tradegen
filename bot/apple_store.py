@@ -403,6 +403,26 @@ def subscription(conn: sqlite3.Connection, user_id: int,
     return best
 
 
+def may_still_charge(conn: sqlite3.Connection, user_id: int) -> bool:
+    """Whether Apple may yet charge this person for Pro that has ended.
+
+    A renewal failed, Apple is still retrying it (for up to RETRY_DAYS), and
+    renewing has not been turned off: once the payment goes through, Pro is
+    back and billed. For checkout on the website, so nobody pays Stripe and
+    then Apple for the same Pro. Test purchases cost nothing and are left out.
+    """
+    ensure_schema(conn)
+    now = _now_ms()
+    for expires, grace, auto_renew, status in conn.execute(
+            "SELECT expires_ms, grace_until_ms, auto_renew, status FROM apple_subs "
+            "WHERE user_id=? AND environment=? AND revoked_ms=0", (user_id, PRODUCTION)):
+        if (int(status) == STATUS_RETRY and int(auto_renew) != 0
+                and max(int(expires), int(grace)) <= now
+                and int(expires) > now - RETRY_DAYS * DAY_MS):
+            return True
+    return False
+
+
 # --- applying what Apple signed --------------------------------------------------
 
 def _bought_anew(row: sqlite3.Row, tx: Dict[str, Any], purchase: int) -> bool:

@@ -134,6 +134,11 @@
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
       {% endif %}
+    {% elif current_user and not demo and apple.retrying %}
+      {# Apple may yet charge for the Pro it is renewing, so nothing is sold
+         here until that is settled one way or the other. #}
+      <p class="notice">{{ apple_retrying_said }}</p>
+      <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage>Manage subscription</a>
     {% elif current_user and not demo %}
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the

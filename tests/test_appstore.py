@@ -874,6 +874,31 @@ class Lifecycle(StoreBase):
         self.assertIsNone(st.subscription(self.conn, self.ann))
         found = st.subscription(self.conn, self.ann, counted_only=False)
         self.assertTrue(found and found["retrying"] and found["renews"])
+        # And so does Stripe's checkout, which then sells nothing.
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        self.assertFalse(st.may_still_charge(self.conn, self.ben))
+
+    def test_what_apple_may_still_charge_for(self):
+        purchase = now_ms() - 31 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.assertFalse(st.may_still_charge(self.conn, self.ann))      # ended, no renewal failed
+        self.send(self.at("DID_FAIL_TO_RENEW", now_ms() - 2000, status=3, purchase=purchase,
+                          renewal={"isInBillingRetryPeriod": True}))
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        # Renewing turned off: Apple stops trying.
+        self.send(self.at("DID_CHANGE_RENEWAL_STATUS", now_ms() - 1000, "AUTO_RENEW_DISABLED", status=3,
+                          purchase=purchase, renewal={"autoRenewStatus": 0}))
+        self.assertFalse(st.may_still_charge(self.conn, self.ann))
+        # Past Apple's 60 days of trying, refunded, or only a test purchase: no.
+        self.conn.execute("UPDATE apple_subs SET auto_renew=1")
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        was = self.conn.execute("SELECT expires_ms, revoked_ms, environment FROM apple_subs").fetchone()
+        for column, value in (("expires_ms", now_ms() - 61 * DAY), ("revoked_ms", now_ms()),
+                              ("environment", "Sandbox")):
+            self.conn.execute("UPDATE apple_subs SET %s=?" % column, (value,))
+            self.assertFalse(st.may_still_charge(self.conn, self.ann), column)
+            self.conn.execute("UPDATE apple_subs SET %s=?" % column, (was[column],))
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
 
     def test_cancel_keeps_pro_to_end_of_period(self):
         self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
@@ -1385,6 +1410,8 @@ NEVER_IN_APP = ("stripe", "/billing/checkout", "/billing/portal", "/billing/code
                 "discount code", "$9.99", "$79.99", "metricool")
 # A price written into a page: inside the app only StoreKit may show one.
 PRICE = re.compile(r"[$£€]\s?\d")
+# Apple's page for managing subscriptions, as a link on a page.
+APPLE_SUBSCRIPTIONS_LINK = 'href="https://apps.apple.com/account/subscriptions"'
 
 
 class WebBase(unittest.TestCase):
@@ -1876,6 +1903,38 @@ class Pages(WebBase):
         # Someone without Apple Pro still gets to Stripe.
         r = self.client(self.ben).post("/billing/checkout", data={"plan": "monthly"},
                                        headers={"User-Agent": SAFARI_UA})
+        self.assertEqual(r.status_code, 303)
+
+    def test_stripe_checkout_waits_while_apple_retries_a_renewal(self):
+        # Ann's card failed at renewal, with no grace period: her Pro has
+        # ended, but Apple keeps trying to charge her for up to 60 days. If it
+        # gets through after she paid Stripe, she pays twice.
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        bought = now_ms() - 31 * DAY
+        kept = dict(purchase=bought, expires=bought + 30 * DAY, product=MONTHLY)
+        self.post(client, "/api/apple/transactions", {"jws": [self.tx(token, signed=bought, **kept)]})
+        failed = self.note("DID_FAIL_TO_RENEW", self.tx(token, **kept), status=3,
+                           renewal={"autoRenewStatus": 1, "isInBillingRetryPeriod": True})
+        self.assertEqual(CLIENT.post("/apple/notifications", json={"signedPayload": failed}).status_code, 200)
+        self.assertLess(self.apple_until(self.ann), time.time())
+        del self.sent_to_stripe[:]
+        web_ua = {"User-Agent": SAFARI_UA}
+        page = self.text(client.get("/pricing", headers=web_ua))
+        self.assertIn("Apple is still trying to renew", page)
+        self.assertIn(APPLE_SUBSCRIPTIONS_LINK, page)
+        self.assertNotIn('action="/billing/checkout"', page)
+        r = client.post("/billing/checkout", data={"plan": "monthly"}, headers=web_ua)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("Apple is still trying to renew", self.text(r))
+        self.assertFalse([s for s in self.sent_to_stripe if s[1] == "checkout/sessions"])
+        # She turns renewing off with Apple, which will then not charge her
+        # again: Stripe it is.
+        off = self.note("DID_CHANGE_RENEWAL_STATUS", self.tx(token, **kept), status=3,
+                        renewal={"autoRenewStatus": 0})
+        CLIENT.post("/apple/notifications", json={"signedPayload": off})
+        self.assertIn('action="/billing/checkout"', self.text(client.get("/pricing", headers=web_ua)))
+        r = client.post("/billing/checkout", data={"plan": "monthly"}, headers=web_ua)
         self.assertEqual(r.status_code, 303)
 
     def test_deleting_an_account_apple_still_bills(self):

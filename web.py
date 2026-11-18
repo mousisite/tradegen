@@ -402,13 +402,14 @@ def _apple_plan() -> Dict:
     on: whether the app sells Pro. pro: the Apple subscription that gives
     this person Pro now, or None. billing: one Apple could still charge for
     (running, or retrying a failed renewal), test purchases included, for the
-    warning before an account is deleted. via: how Pro was got otherwise,
-    so the app can say why it sells nothing: "web" (paid on the website),
-    "invite" or "other".
+    warning before an account is deleted. retrying: whether Apple may yet
+    charge for Pro that has ended, so the website sells none meanwhile.
+    via: how Pro was got otherwise, so the app can say why it sells nothing:
+    "web" (paid on the website), "invite" or "other".
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
-           "products": apple_store_mod.product_ids(), "via": "", "twice": False,
-           "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
+           "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
         return out
@@ -416,6 +417,7 @@ def _apple_plan() -> Dict:
     try:
         out["pro"] = apple_store_mod.subscription(conn, user.id)
         out["billing"] = apple_store_mod.subscription(conn, user.id, counted_only=False)
+        out["retrying"] = apple_store_mod.may_still_charge(conn, user.id)
     finally:
         conn.close()
     plain = dataclasses.replace(user, apple_until=0)
@@ -676,6 +678,7 @@ def _expose_user():
             # static/app-purchase.js while it is on.
             "iap_on": apple_store_mod.enabled(),
             "apple_pro_said": APPLE_PRO_SAID,
+            "apple_retrying_said": APPLE_RETRYING_SAID,
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured(),
             # Apple on the website, and Apple anywhere (the app needs less).
@@ -3276,8 +3279,13 @@ def billing_checkout():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         customer = billing_mod.customer_of(conn, g.user.id)
+        retrying = apple_store_mod.may_still_charge(conn, g.user.id)
     finally:
         conn.close()
+    if retrying:
+        # Apple's renewal failed, but it keeps trying and may yet charge: a
+        # second bill all the same, only later.
+        return _pricing_page(APPLE_RETRYING_SAID, 409)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
@@ -3364,6 +3372,12 @@ def billing_webhook():
 
 APPLE_PRO_SAID = ("You have Pro through Apple; manage it in your iPhone's "
                   "Settings > Apple Account > Subscriptions.")
+APPLE_RETRYING_SAID = ("Apple is still trying to renew the Pro you bought in the "
+                       "iPhone app, after a payment did not go through, and will "
+                       "charge you once it can. To keep that, update the payment "
+                       "method in your iPhone's Settings > Apple Account. To pay "
+                       "here instead, first cancel it there, under Subscriptions, "
+                       "so you are not charged twice.")
 APPLE_SUBSCRIPTIONS = "https://apps.apple.com/account/subscriptions"
 # Apple's notifications are a few kilobytes.
 APPSTORE_NOTICE_LIMIT = 128 * 1024
