@@ -309,7 +309,9 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
 
     The email is the identity, but the Google subject id is what is actually
     matched on where one is already known: an email address can be reassigned
-    within a workspace, and the subject id cannot.
+    within a workspace, and the subject id cannot. It is looked for on the
+    account Google made or took over, then among the ways in linked to an
+    account Apple made.
     """
     email = (profile.get("email") or "").strip().lower()
     if not email:
@@ -322,18 +324,23 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
     picture = (profile.get("picture") or "").strip()
     now = int(time.time())
 
-    row = None
+    row = link = None
     if sub:
         row = conn.execute("SELECT * FROM users WHERE provider='google' AND "
                            "provider_id=?", (sub,)).fetchone()
+        if row is None:
+            link = conn.execute("SELECT * FROM identities WHERE provider='google' "
+                                "AND subject=?", (sub,)).fetchone()
+            if link is not None:
+                row = conn.execute("SELECT * FROM users WHERE id=?",
+                                   (link["user_id"],)).fetchone()
     if row is None:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        # Matching by address is how an account made with an emailed code is
-        # joined to Google. An account already tied to another Google
-        # identity is different: its address has been given to someone new,
-        # and the old owner's journal is not theirs to take over.
-        if row is not None and sub and row["provider"] == "google" \
-                and row["provider_id"] and row["provider_id"] != sub:
+        # Matching by address is how an account made with an emailed code, or
+        # with Apple, is joined to Google. An account ever tied to another
+        # Google identity is different: its address has been given to someone
+        # new, and the old owner's journal is not theirs to take over.
+        if row is not None and sub and _tied_to_another(conn, row, "google", sub):
             raise ValueError("That email address belongs to a different Google "
                              "account here. Sign in with that one instead.")
 
@@ -344,6 +351,25 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
             (email, name, picture, "google", sub, now, now))
         conn.commit()
         user_id = int(cur.lastrowid)
+    elif row["provider"] == "apple" and sub:
+        # An account Apple made keeps saying so: its Apple ID is how Apple's
+        # notices about that Apple Account find it, and what stops another
+        # Apple ID joining it by address. Google is linked beside it, as an
+        # Apple ID is linked to an account Google made, and the account keeps
+        # its own address.
+        user_id = int(row["id"])
+        conn.execute("UPDATE users SET name=?, picture=?, last_seen_ts=? WHERE id=?",
+                     (name or row["name"], picture or row["picture"], now, user_id))
+        if link is None:
+            # OR IGNORE: two sign-ins arriving together link it once.
+            conn.execute(
+                "INSERT OR IGNORE INTO identities (user_id, provider, subject, email, "
+                "created_ts, last_used_ts) VALUES (?,?,?,?,?,?)",
+                (user_id, "google", sub, email, now, now))
+        else:
+            conn.execute("UPDATE identities SET email=?, last_used_ts=? WHERE id=?",
+                         (email, now, link["id"]))
+        conn.commit()
     else:
         user_id = int(row["id"])
         conn.execute(
@@ -518,7 +544,8 @@ def _tied_to_another(conn: sqlite3.Connection, row: sqlite3.Row, provider: str,
     """Whether an account was ever tied to an id from this provider other
     than this one: the one that made it, one linked to it now, or one taken
     off it since. Only "never" lets an address bring a new id in: a person
-    who signed up with Google still reaches their account with Apple."""
+    who signed up with Google still reaches their account with Apple, and
+    one who signed up with Apple with Google, but only the first time."""
     if row["provider"] == provider and row["provider_id"] not in ("", subject):
         return True
     for table in ("identities", "former_identities"):

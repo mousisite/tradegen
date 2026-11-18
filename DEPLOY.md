@@ -796,3 +796,18 @@ Closing it needs a return address only Orenth's app can claim: an https
 Universal Link, with an apple-app-site-association file on orenth.app, the
 Associated Domains capability in the app, and the sheet sent back to that
 https address (iOS 17.4 and later).
+
+**Known limitation: an address given to someone new can open the old account
+once, through the other sign-in.** So that a person who signed up with Google
+can later use Sign in with Apple (or the other way round), an Apple ID whose
+address Apple has verified, and that is not a Hide My Email address, joins the
+account Google made with that address, and a Google account joins the one
+Apple made. Each joins only once: an account ever tied to one Apple ID refuses
+every other, and one ever tied to a Google account refuses every other Google
+account. But when a company hands an address on to someone new, that person's
+first sign-in with the provider the account was not made with reaches the old
+owner's account, and Orenth cannot tell them from the owner. With sign-in by
+emailed code switched on (the `SMTP_` settings and `MAIL_FROM`), the address
+alone opens the account anyway, by design, so this adds nothing; it matters
+only while codes by email are off. Closing it would mean refusing every join by address across providers,
+and adding a signed-in "Add Google" or "Add Apple" to the Account page instead.
