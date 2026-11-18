@@ -5,12 +5,14 @@ a proxy, Google sign-in, Stripe on, and no Anthropic key. Every page a
 visitor or a signed-in free account can reach is fetched, and none may show
 builder text: a setting's name, ".env", "restart", a traceback, or a value
 printed as None, nan or undefined. Setup advice is for the owner of a copy
-on their own machine, and the end checks that it still reaches them.
+on their own machine, and the end checks that it still reaches them. Inside
+the iPhone app the analysis lists the headlines but not a post's words, and
+offers no JSON file.
 
-No network: prices are made up, the news is two headlines, and every other
-source is a stand-in that fails the way a busy source does, so the plain
-words for a failure are tested too. Anything that still tries the network
-is recorded, and fails the suite.
+No network: prices are made up, the news is two headlines and one post, and
+every other source is a stand-in that fails the way a busy source does, so
+the plain words for a failure are tested too. Anything that still tries the
+network is recorded, and fails the suite.
 """
 import html as _html
 import os as _os

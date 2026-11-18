@@ -236,8 +236,8 @@ used only for App Review, signs in with a fixed code instead.
    Never sign in to Orenth with Google or Apple using it: while the review
    sign-in is on, Orenth refuses both for that address, because joined to
    Google the account would no longer open with the code. If an account
-   already exists at that address, made with Google, Apple or a text code,
-   pick another address: the code will not open it, and the Render log says
+   already exists at that address, made with Google or Apple, pick another
+   address: the code will not open it, and the Render log says
    so at start-up (`review sign-in on, but its code cannot open its
    account`).
 2. Make a long random code: in Terminal, type `openssl rand -hex 12` and
@@ -740,7 +740,9 @@ with the review address: Orenth refuses those for it.
    of the reviewer's own, beside the paused sample), the purchase screen,
    the share sheet, a filing link, pull to refresh, swiping back, the
    offline screen and deleting an account (try that last one with an
-   account of your own, not the review account).
+   account of your own, not the review account). Then delete the alert you
+   added, so App Review finds only the paused sample and has room for its
+   own.
 3. **Pro can be bought in the app with Apple's in-app purchase** (Part 5,
    "Sell Pro in the app", steps 18 to 23, with a sandbox account): both plans
    show with prices, **Restore Purchases** works, and **Manage subscription**

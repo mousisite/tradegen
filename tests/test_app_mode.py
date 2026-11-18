@@ -3,16 +3,24 @@
 The app is the live site in a native shell, and it adds "OrenthApp/1" to its
 User-Agent. Inside it there must be no third-party visit counting, no Stripe
 form, link, price or discount box (the App Store allows selling Pro there only
-through Apple), nothing about Android or installing an app, and the small
-script that reaches the phone. Once Pro is sold in the app, it is sold
-through Apple alone: a "Manage subscription" there is Apple's, every way to
-Pro leads to the app's own screen, and no page names a price StoreKit did not
-give. Outside it, nothing changes.
+through Apple), nothing about Android or installing an app, the privacy page
+included, and the small script that reaches the phone. A website's own parts
+stay out too: the footer's links but Terms and Privacy (the tab bar's More
+has them), the skip link, the screenshot box's talk of clicking and Ctrl+V,
+and any file to download, where one line says downloads are on the website.
+Once Pro is sold in the app, it is sold through Apple alone: a "Manage
+subscription" there is Apple's, every way to Pro leads to the app's own
+screen, and no page names a price StoreKit did not give. Outside it, nothing
+changes.
 
 Apple's reviewers cannot receive an email or a text, so one named account can
 be signed in to with a fixed code. That door must not exist until it is set
 up, must open only that one account, must never make it Pro, and must not
-let anyone guess at the code.
+let anyone guess at the code. Continue with email takes that address to it
+and sends it nothing, Google never takes that account over, and when the code
+is refused for its account the log and the start-up summary say why. The
+notes App Review follows, in mobile/APP_STORE.md, start with signing in, list
+the native features first, and their steps work for the review account.
 """
 import logging
 import os as _os

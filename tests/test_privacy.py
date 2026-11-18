@@ -9,8 +9,10 @@ of a signed-in person's on it is sent marked not to be stored.
 Then the page's own words, each beside the code it describes: what the
 sign-in cookie holds, what goes out by email and to phones, what each sign-in
 keeps, who carries and runs the site, the copies taken before each new
-version and those kept off the server, what can be downloaded, and what the
-terms say inside the iPhone app.
+version and those kept off the server, what can be downloaded, what the
+services listed may do with what they get, that the App Store's privacy
+answers in mobile/APP_STORE.md name the same things, and what the terms say
+inside the iPhone app.
 
 No network: Sentry's transport is a list, and nothing else is reached.
 """

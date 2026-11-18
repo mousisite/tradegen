@@ -4,7 +4,8 @@ App Store guideline 5.1.2(i), and plain fairness: personal data shared with
 a third-party AI needs a clear disclosure and an explicit yes first. A
 screenshot can show anything a person had on screen, so the Analyse page asks
 once, remembers the yes per account, shows it in Settings and takes it back
-there. The example account is shared, so its yes is never kept.
+there. The example account is shared, so its yes is never kept. Inside the
+iPhone app, where the picker can also take a photo, it is the same.
 """
 import io
 import os as _os

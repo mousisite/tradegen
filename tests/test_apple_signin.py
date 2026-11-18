@@ -6,6 +6,7 @@ with an RSA key made for this run standing in for Apple's signing key and an
 EC P-256 key standing in for the .p8 file. Everything below that boundary is
 the real code: the client secret is really signed, every token is really
 verified, accounts are really made and joined, and sessions really start.
+App Review's account, which only its fixed code opens, is never joined.
 """
 import base64
 import hashlib
