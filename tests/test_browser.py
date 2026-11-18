@@ -47,13 +47,17 @@ for _path in (ROOT, HERE):
 # A deployment as orenth.app runs it, minus https: Google and Stripe on, the
 # proxy flag that makes it a public site, and nothing that sends mail or
 # texts. Set before web is imported, which reads some of it at import.
+# APPLE_APP_ID sells Pro in the iPhone app through Apple, where the server
+# does that: the app's Pricing is then Apple's purchase screen, and the
+# privacy page lists Apple; both are measured like every other page.
 SITE_ENV = {"STOCKBOT_BEHIND_PROXY": "1",
             "STOCKBOT_SECRET_KEY": "browser-suite-only-not-a-real-key",
             "GOOGLE_CLIENT_ID": "1234.apps.googleusercontent.com",
             "GOOGLE_CLIENT_SECRET": "stub-secret",
             "STRIPE_SECRET_KEY": "sk_test_stub", "STRIPE_PRICE_ID": "price_month",
             "STRIPE_PRICE_ID_YEARLY": "price_year",
-            "STRIPE_WEBHOOK_SECRET": "whsec_stub"}
+            "STRIPE_WEBHOOK_SECRET": "whsec_stub",
+            "APPLE_APP_ID": "6740000001"}
 SITE_UNSET = ("STOCKBOT_PUBLIC_URL", "ANTHROPIC_API_KEY", "SMTP_HOST", "SMTP_USER",
               "SMTP_PASSWORD", "MAIL_FROM", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
               "TWILIO_VERIFY_SID", "SENTRY_DSN", "STOCKBOT_ADMIN_EMAIL",
