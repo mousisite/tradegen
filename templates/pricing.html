@@ -17,7 +17,8 @@
       <li>The top {{ limits.find_results }} in every Find list</li>
       <li>{{ limits.alerts }} alert running at a time</li>
       <li>The full journal, portfolio and strategies</li>
-      <li>Download your journal, saved theses and analysis history, any time</li>
+      <li>Download your journal, saved theses and analysis history{{ ' from the website'
+          if in_app }}, any time</li>
     </ul>
     {% if not current_user or demo %}
       <a class="btn quiet" href="{{ url_for('signin', next='/pricing') }}">Create free account</a>

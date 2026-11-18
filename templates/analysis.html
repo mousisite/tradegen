@@ -629,8 +629,9 @@
 
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
   {# The JSON is for an account's own use: for a visitor looking around the
-     example it answered only "Not signed in." #}
-  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
+     example it answered only "Not signed in." Inside the iPhone app it would
+     fill the app's one screen with bare text, so it is the website's. #}
+  {% if not demo and not in_app %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
                                        exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
   · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}

@@ -305,7 +305,7 @@ Orenth is free, with a daily limit on how many different stocks and coins you ca
 Orenth Pro is an auto-renewing subscription: Orenth Pro Monthly (1 month) or Orenth Pro Yearly (1 year). The price is shown in the app, in your currency, before you buy. Payment is charged to your Apple Account when you confirm the purchase. The subscription renews automatically unless it is cancelled at least 24 hours before the end of the current period. Manage or cancel it in Settings > Apple Account > Subscriptions.
 
 PRIVACY
-No ads and no tracking. Your journal, watchlist and alerts belong to your account. Your journal and saved theses can be downloaded, and your account deleted, at any time from the Account page.
+No ads and no tracking. Your journal, watchlist and alerts belong to your account. Your account can be deleted at any time from the Account page, and your journal and saved theses downloaded from the Orenth website.
 
 Orenth is analysis software, not financial advice. Every figure is measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
 

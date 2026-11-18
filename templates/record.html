@@ -102,8 +102,10 @@
 
 {% if rec.latest %}
   <section style="margin-top:var(--s4)">
+    {# Files only on the website: inside the iPhone app a file has nowhere to
+       go, and the app's one screen would show it as bare text. #}
     <div class="sechead"><h2>The latest results</h2>
-      <a class="tail" href="{{ url_for('record_csv') }}">every call, as a file &rarr;</a></div>
+      {% if not in_app %}<a class="tail" href="{{ url_for('record_csv') }}">every call, as a file &rarr;</a>{% endif %}</div>
     <p class="prose">The {{ rec.latest|length }} calls settled most recently,
       including newer ones not yet in the scores. Each is dated by the trading
       day of the price it was made at.</p>
@@ -136,7 +138,7 @@
 {% if prints %}
   <section id="fingerprints" style="margin-top:var(--s4)">
     <div class="sechead"><h2>A fingerprint of each day's calls</h2>
-      <a class="tail" href="{{ url_for('record_fingerprints') }}">every day's, as a file &rarr;</a></div>
+      {% if not in_app %}<a class="tail" href="{{ url_for('record_fingerprints') }}">every day's, as a file &rarr;</a>{% endif %}</div>
     <p class="prose">Once a day is over, the calls written down that day get a
       fingerprint: a SHA-256 hash of each call's stock, what it said, its
       price, stop and target, how many days it runs and when it was written.
@@ -158,6 +160,10 @@
       {% endfor %}
       </ul>
     </div>
+    {% if in_app %}
+    <p class="prose" style="margin-top:var(--s2)">The file of every call, to
+      check a fingerprint against, is on the Orenth website.</p>
+    {% else %}
     <details class="card" style="margin-top:var(--s2)">
       <summary><b>How to check one yourself</b></summary>
       <p class="prose" style="margin-top:var(--s2)">Download
@@ -171,6 +177,7 @@
         changes its day's fingerprint. On a Mac or Linux, for {{ prints[0].start|day }}:</p>
       <p class="fig" style="font-size:var(--t-xs);overflow-wrap:anywhere;margin:var(--s1) 0 0">grep '^[^,]*,{{ prints[0].day }} ' orenth-record.csv | cut -d, -f1-7 | shasum -a 256</p>
     </details>
+    {% endif %}
   </section>
 {% endif %}
 
@@ -229,8 +236,9 @@
       it.</li>{% endif %}
     <li>Calls are never edited or removed. One left out of the scores stays
       listed below, with the reason. Every call, left-out ones included, is in
-      <a href="{{ url_for('record_csv') }}">one file</a> anyone can
-      check{% if prints %}, and each day's calls have a
+      {% if in_app %}one file on the Orenth website that anyone can
+      check{% else %}<a href="{{ url_for('record_csv') }}">one file</a> anyone can
+      check{% endif %}{% if prints %}, and each day's calls have a
       <a href="#fingerprints">fingerprint</a> that an edit would change{% endif %}.</li>
   </ul>
   <p class="prose faint" style="font-size:var(--t-xs)">This is a forward test

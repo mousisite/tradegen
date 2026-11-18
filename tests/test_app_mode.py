@@ -261,6 +261,34 @@ try:
 
     print()
     print("=" * 72)
+    print("NO FILE TO DOWNLOAD INSIDE THE APP, AND ONE LINE SAYING WHERE")
+    print("=" * 72)
+    # The app's one web view shows a CSV or JSON answer as bare text, with
+    # no way to keep it and no way back but a swipe. The website keeps every
+    # download, and the app says so where the buttons were.
+    conn = db.connect(DB)
+    db.open_trade(conn, "AAPL", "1d", 1, 100.0, 95.0, user=free.id)
+    conn.close()
+    FILES = re.compile(r'href="([^"]*(?:/export/|\.csv|/api/analyse)[^"]*)"')
+    for path in ("/account", "/settings", "/record"):
+        on_web = text(client.get(path, headers=IN_SAFARI))
+        in_app = text(client.get(path, headers=IN_APP))
+        check("%s in a browser offers its files" % path, FILES.search(on_web) is not None)
+        check("%s inside the app offers none" % path, FILES.search(in_app) is None,
+              FILES.findall(in_app))
+        check("and says they are on the Orenth website", "on the Orenth website"
+              in " ".join(in_app.split()))
+    for path, said in (("/pricing", "analysis history from the website, any time"),
+                       ("/privacy", "from the Account and Settings pages of the Orenth "
+                                    "website, in a browser"),
+                       ("/terms", "export your data from the Account page of the "
+                                  "Orenth website")):
+        in_app = " ".join(text(client.get(path, headers=IN_APP)).split())
+        check("%s inside the app says downloads are on the website" % path,
+              said in in_app)
+
+    print()
+    print("=" * 72)
     print("PRO SOLD IN THE APP: THROUGH APPLE, AND NOTHING ELSE")
     print("=" * 72)
     from bot import apple_store  # noqa: E402

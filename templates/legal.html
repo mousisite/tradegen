@@ -273,8 +273,8 @@
   <p class="prose">
     Your data stays until you remove it. Your journal and each of its exits,
     your saved theses and your analysis history can be downloaded as CSV or
-    JSON at any time, from the Account and Settings pages, without asking
-    anyone. Deleting
+    JSON at any time, from the Account and Settings pages{% if in_app %} of
+    the Orenth website, in a browser{% endif %}, without asking anyone. Deleting
     your account removes your trades, watchlist, alerts, theses, analysis
     history, shared pages, sign-in records and the devices you turned
     notifications on for straight away; the shared
@@ -370,8 +370,10 @@
 
   <h2>Your account</h2>
   <p class="prose">
-    You are responsible for what happens under your account. You may export your
-    data or delete your account at any time from the Account page. Access may be
+    You are responsible for what happens under your account. {% if in_app %}You
+    may delete your account at any time from the Account page, and export your
+    data from the Account page of the Orenth website.{% else %}You may export your
+    data or delete your account at any time from the Account page.{% endif %} Access may be
     withdrawn for abuse of the service or of the data sources it depends on.
   </p>
 

@@ -155,12 +155,19 @@
       which is a fact about the market rather than about you, and every analysis
       anyone runs makes it better for everyone. It stays when an account goes.
     </p>
+    {# Inside the iPhone app a file has nowhere to go: the app's one screen
+       would show it as bare text, with no way to keep it. #}
+    {% if in_app %}
+      <p class="prose" style="margin-top:var(--s3)">Downloads are on the Orenth
+        website: sign in there in a browser, then open Account.</p>
+    {% else %}
     <div style="display:flex;gap:var(--s1);flex-wrap:wrap;margin-top:var(--s3)">
       {% for key, spec in datasets.items() %}
         <a class="btn quiet sm" href="{{ url_for('export_data', dataset=key, fmt='csv') }}">
           {{ spec.label }} as CSV</a>
       {% endfor %}
     </div>
+    {% endif %}
   </div>
 </section>
 
@@ -223,7 +230,8 @@
     <p class="prose" style="margin-top:var(--s1)">
       Deleting your account removes your trades, watchlist, alerts, saved theses
       and analysis history immediately and permanently. Download anything you
-      want to keep first, using the buttons above. The shared strategy record
+      want to keep first, {{ 'on the Orenth website' if in_app
+      else 'using the buttons above' }}. The shared strategy record
       stays, because it was never yours alone.
       {% if plan.on and plan.customer %}It also cancels your Pro subscription
         {% if apple.billing %}on the website {% endif %}straight away, with no

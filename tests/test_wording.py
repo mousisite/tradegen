@@ -495,6 +495,9 @@ try:
           re.search(r'Posts</div> <div class="v fig">1</div> <div class="n">1 bull · '
                     r'0 bear</div>', inside) is not None,
           inside[inside.find("News and chatter"):][:600])
+    # Nor a file: the app's one screen would show the JSON as bare text.
+    check("the website offers the analysis as JSON", "View as JSON" in browser)
+    check("the app does not", "View as JSON" not in inside and "/api/analyse" not in inside)
 
     run_id = None
     conn = db.connect(DB)
