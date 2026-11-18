@@ -7,8 +7,8 @@
 
 <div class="pagehead">
   <h1>Popular stocks and crypto, checked daily</h1>
-  <p>Buy, wait or avoid, from how often the same setup worked before. Tap one
-    to see the numbers.</p>
+  <p>Buy, wait or avoid, from how often the same setup worked in tests on
+    past prices. Tap one to see the numbers.</p>
 </div>
 
 <ul class="verdicts">
@@ -18,12 +18,12 @@
 </ul>
 
 <section class="card closing" style="margin-top:var(--s4)">
-  <p class="lead">Not on the list? Check any stock or coin.</p>
+  <p class="lead">Not on the list? Analyse any stock or coin.</p>
   <div class="cta">
     {% if not current_user or demo %}
       <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
     {% else %}
-      <a class="btn" href="{{ url_for('index') }}">Check a stock</a>
+      <a class="btn" href="{{ url_for('index') }}">Analyse a stock</a>
     {% endif %}
   </div>
 </section>

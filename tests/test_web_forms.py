@@ -65,6 +65,106 @@ r = c.post("/analyse/image",
            content_type="multipart/form-data")
 check("non-image is rejected", r.status_code == 400 and "could not be read" in
       r.data.decode("utf-8", "replace"), "status %d" % r.status_code)
+
+print("\n--- screenshot upload safety ---")
+import struct
+import threading
+import time
+import zlib
+from bot.vision import ChartRead
+
+
+def claimed_png(width, height):
+    """A file of a few bytes whose header claims a vast image."""
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    return io.BytesIO(b"\x89PNG\r\n\x1a\n"
+                      + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0))
+                      + chunk(b"IDAT", zlib.compress(b"\x00" * 64)) + chunk(b"IEND", b""))
+
+
+def upload(client, image, fmt="PNG"):
+    data = io.BytesIO()
+    image.save(data, format=fmt)
+    data.seek(0)
+    return client.post("/analyse/image", data={"chart": (data, "c." + fmt.lower())},
+                       content_type="multipart/form-data")
+
+
+received = []
+
+
+def fake_read(png):
+    shown = Image.open(png)
+    received.append((isinstance(png, str), shown.size))
+    red, _green, blue = shown.convert("RGB").getpixel((0, 0))
+    time.sleep(0.3)       # long enough for a second upload to land meanwhile
+    return ChartRead(symbol="REDCO" if red > blue else "BLUECO")
+
+
+real_read = web.read_chart
+web.read_chart = fake_read
+try:
+    for width, height, label in ((6000, 5000, "30 million"), (20000, 20000, "400 million")):
+        started = time.time()
+        r = c.post("/analyse/image", data={"chart": (claimed_png(width, height), "b.png")},
+                   content_type="multipart/form-data")
+        check("a file claiming %s pixels is refused before it is decoded" % label,
+              r.status_code == 413 and "too large" in r.data.decode("utf-8", "replace")
+              and time.time() - started < 3, "status %d" % r.status_code)
+    check("and it never reaches the vision model", not received)
+
+    r = upload(c, Image.new("RGB", (3000, 2000), (200, 30, 30)))
+    check("a large real screenshot is read", r.status_code == 302
+          and "symbol=REDCO" in r.headers.get("Location", ""), "status %d" % r.status_code)
+    check("from memory, not from a file on disk", received and not received[-1][0])
+    check("shrunk to what the vision model uses",
+          received and max(received[-1][1]) <= web.MAX_EDGE, str(received[-1:]))
+    r = upload(c, Image.new("P", (2400, 1200), 3), "GIF")
+    check("a palette image is read too", r.status_code == 302,
+          "status %d" % r.status_code)
+    for fmt in ("JPEG", "WEBP", "BMP"):
+        r = upload(c, Image.new("RGB", (640, 360), (200, 30, 30)), fmt)
+        check("a %s screenshot is read" % fmt, r.status_code == 302,
+              "status %d" % r.status_code)
+
+    # Every upload used to go through one shared file, so two at once could
+    # read, or delete, each other's picture.
+    landed = {}
+
+    def send(colour):
+        r = upload(web.app.test_client(), Image.new("RGB", (800, 400), colour))
+        landed[colour] = r.headers.get("Location", "")
+
+    first = threading.Thread(target=send, args=((220, 20, 20),))
+    second = threading.Thread(target=send, args=((20, 20, 220),))
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    first.join()
+    second.join()
+    check("two uploads at once are each read from their own picture",
+          "REDCO" in landed.get((220, 20, 20), "")
+          and "BLUECO" in landed.get((20, 20, 220), ""), str(landed))
+finally:
+    web.read_chart = real_read
+
+from bot import vision  # noqa: E402
+
+try:
+    vision._load_image_bytes(claimed_png(6000, 5000))
+    check("the vision reader refuses an oversized image on its own too", False)
+except vision.VisionError as exc:
+    check("the vision reader refuses an oversized image on its own too",
+          "too large" in str(exc), str(exc))
+shot = io.BytesIO()
+Image.new("RGB", (2000, 1000), (20, 20, 220)).save(shot, format="PNG")
+shot.seek(0)
+data, kind = vision._load_image_bytes(shot)
+check("and reads a picture held in memory, shrunk for the model",
+      kind == "image/png" and max(Image.open(io.BytesIO(data)).size) <= vision.MAX_EDGE)
+
 os.environ.pop("ANTHROPIC_API_KEY", None)
 if had_key:
     os.environ["ANTHROPIC_API_KEY"] = had_key
@@ -131,6 +231,20 @@ if tid:
 r = c.post("/trades/delete", data={"trade_id": 99999})
 check("deleting a missing trade is rejected", r.status_code == 400)
 
+# Every typed field is a ticker, a number or a short note. Half a megabyte a
+# field let a few hundred posts fill the data disk.
+r = c.post("/trades/open", data={"symbol": "AAPL", "direction": "long",
+                                 "entry": "200", "stop": "195", "notes": "x" * 30000})
+body = r.data.decode("utf-8", "replace")
+check("a padded note is refused", r.status_code == 413, "status %d" % r.status_code)
+check("with a message about text, not about an image",
+      "more text than this form takes" in body and "12 MB" not in body)
+conn = db.connect(DB)
+try:
+    check("and nothing is stored", len(db.list_trades(conn)) == 0)
+finally:
+    conn.close()
+
 print("\n--- settings round trip ---")
 r = c.post("/settings", data={"account_size": "5000", "risk_per_trade_pct": "2",
                               "max_position_pct": "30", "cost_bps_equity": "3",
@@ -161,6 +275,234 @@ b = r.data.decode("utf-8", "replace")
 check("a call was made", bool(re.search(r'class="word">(\w+)<', b)))
 r = c.get("/api/analyse?symbol=MSFT&interval=1d")
 check("json api works", r.status_code == 200 and r.mimetype == "application/json")
+
+print("\n--- landmarks and names on every page ---")
+for path in ["/", "/trades", "/strategies", "/settings"]:
+    body = c.get(path).data.decode("utf-8", "replace")
+    check("%s has one main landmark" % path, body.count('<main id="main">') == 1)
+    check("%s starts with a link that skips to it" % path,
+          0 <= body.find('href="#main"') < body.find("<header"))
+    check("%s has one h1" % path, body.count("<h1") == 1, body.count("<h1"))
+body = c.get("/trades").data.decode("utf-8", "replace")
+check("the journal is called the journal in its title and the nav",
+      "<title>Journal · Orenth</title>" in body and ">Journal</a>" in body
+      and ">Trades</a>" not in body)
+
+print("\n--- the analysis page, on made-up prices (no network) ---")
+import numpy as np
+from bot import accounts as accounts_mod
+from bot import catalysts as catalysts_mod
+from bot import config as config_mod
+from bot import engine as engine_mod
+from bot import market as market_mod
+from bot import public as public_mod
+
+
+def made_up_bars(symbol="FAKE", n=500):
+    rng = np.random.RandomState(11)
+    close = 100.0 * np.exp(np.cumsum(rng.normal(0.0006, 0.016, n)))
+    open_ = close * (1 + rng.normal(0, 0.004, n))
+    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.006, n)))
+    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.006, n)))
+    start = 1_700_000_000 - (1_700_000_000 % 86400) + 14 * 3600 + 1800
+    ts = np.array([start + 86400 * i for i in range(n)], dtype=np.int64)
+    return market_mod.Bars(symbol=symbol, name="Made Up Corp", asset_class="equity",
+                           currency="USD", exchange="NMS", interval="1d",
+                           timestamp=ts, open=open_, high=high, low=low, close=close,
+                           volume=rng.randint(800_000, 1_600_000, n).astype(float),
+                           session_id=ts // 86400, prev_close=float(close[-2]),
+                           market_open=False, last_bar_time="2026-11-11")
+
+
+def offline(*_a, **_k):
+    raise RuntimeError("offline")
+
+
+_real = (engine_mod.resolve, engine_mod.fetch_bars, catalysts_mod.fetch,
+         web.cached_analysis, web.portfolio_mod.overlap)
+_bars = made_up_bars()
+engine_mod.resolve = lambda s: {"symbol": "FAKE", "name": "Made Up Corp"}
+engine_mod.fetch_bars = lambda s, iv=None: _bars
+catalysts_mod.fetch = offline
+try:
+    fake = engine_mod.analyse("FAKE", config_mod.load(harness.CFG_PATH), interval="1d",
+                              with_news=False, record=False)
+    web.cached_analysis = lambda *a, **k: fake
+    web.portfolio_mod.overlap = lambda *a, **k: {"warnings": [], "pairs": []}
+    fake.run_id = 4242
+    # Only a call to act now is a trade. A WAIT's entry is a price the market
+    # has not reached, and logging it put a fill that never happened in the
+    # journal.
+    for action, offered in (("BUY", True), ("SHORT", True), ("WAIT", False)):
+        fake.plan.action = action
+        body = c.get("/analyse?symbol=FAKE&interval=1d&news=0").data.decode("utf-8", "replace")
+        check("a %s %s logged as a paper trade" % (action, "can be" if offered else "cannot be"),
+              ('href="/trades/simulate?run_id=4242"' in body) == offered)
+        # The button opens a review first; nothing is written from this page.
+        check("and a %s page never logs one straight away" % action,
+              'action="/trades/take"' not in body)
+    check("and the WAIT says why", "A wait is not a trade yet" in body)
+    check("the trade is drawn on its own candles", 'class="chart trade"' in body
+          and "The plan on the chart" in body)
+    check("with the plan's prices across them",
+          "Short at " in body or "Buy at " in body)
+    check("and when the price was set, in words and for a screen reader",
+          'aria-label="Daily price, as of 2026-11-11, market closed"' in body
+          and ">as of 2026-11-11, market closed</span>" in body
+          and "Daily candles" in body)
+    check("drawn twice, so a phone gets the narrow one",
+          body.count('class="chart trade"') == 2 and ".tradechart .narrow" in body)
+    fake.plan.action = "AVOID"
+    body = c.get("/analyse?symbol=FAKE&interval=1d&news=0").data.decode("utf-8", "replace")
+    check("an AVOID draws the prices with no plan across them",
+          'class="chart trade"' in body and "No plan is drawn" in body
+          and "Stop " not in body.split("The price</h2>")[-1].split("</section>")[0])
+    fake.plan.action = "WAIT"
+    check("the symbol is the page's heading", '<h1 class="sym">FAKE</h1>' in body)
+    check("the plain-words box links to how it is tested",
+          "How the strategies are tested" in body)
+    shown = sorted(fake.signals, key=lambda s: -abs(s.contribution))[:12]
+    check("strategy names are the ones the public pages use",
+          all(public_mod.strategy_label(s.name) in body for s in shown))
+    garbled = [s.name.replace("_", " ").capitalize() for s in shown
+               if s.name.replace("_", " ").capitalize() != public_mod.strategy_label(s.name)]
+    check("with no 'Rsi' or 'Macd' left",
+          garbled and not any(g in body for g in garbled), garbled)
+finally:
+    (engine_mod.resolve, engine_mod.fetch_bars, catalysts_mod.fetch,
+     web.cached_analysis, web.portfolio_mod.overlap) = _real
+
+print("\n--- the error page ---")
+
+
+def no_such_ticker(*_a, **_k):
+    raise web.DataError("No instrument found for 'ZZQQ'.")
+
+
+web.cached_analysis = no_such_ticker
+try:
+    r = c.get("/analyse?symbol=ZZQQ&interval=1d")
+    body = r.data.decode("utf-8", "replace")
+    check("a ticker that is not there gets the advice about tickers",
+          r.status_code == 404 and "ticker does not exist" in body
+          and "Try another ticker" in body)
+finally:
+    web.cached_analysis = _real[3]
+
+
+def turned_away(*_a, **_k):
+    raise web.market_mod.DataThrottled("The market data source limits how often "
+                                       "this site may ask for prices.", 90)
+
+
+# A rate limit at the source was a 404 that told people their ticker might not
+# exist. It is a wait, and says how long: a 503 with Retry-After.
+web.cached_analysis = turned_away
+try:
+    for url in ("/analyse?symbol=AAPL&interval=1d", "/research?symbol=AAPL&interval=1d"):
+        r = c.get(url)
+        body = r.data.decode("utf-8", "replace")
+        check("a rate limit on %s is a 503 that says when to come back" % url.split("?")[0],
+              r.status_code == 503 and r.headers.get("Retry-After") == "90"
+              and "limits how often" in body, (r.status_code, r.headers.get("Retry-After")))
+        check("and gives no advice about tickers that do not exist",
+              "ticker does not exist" not in body)
+    r = c.get("/api/analyse?symbol=AAPL")
+    check("the API says the same in JSON",
+          r.status_code == 503 and r.headers.get("Retry-After") == "90"
+          and (r.get_json() or {}).get("retry_after") == 90,
+          (r.status_code, r.data[:120]))
+finally:
+    web.cached_analysis = _real[3]
+
+
+def timed_out(*_a, **_k):
+    raise web.market_mod.DataUnavailable("could not fetch AAPL: The market data source "
+                                         "could not be used: it took too long to answer.")
+
+
+# A source that does not answer is a wait too, not a missing ticker.
+web.cached_analysis = timed_out
+try:
+    r = c.get("/analyse?symbol=AAPL&interval=1d")
+    body = r.data.decode("utf-8", "replace")
+    check("a source that did not answer is a 503 with a time to come back",
+          r.status_code == 503 and r.headers.get("Retry-After") == "60"
+          and "took too long" in body, (r.status_code, r.headers.get("Retry-After")))
+    check("with no advice about tickers that do not exist",
+          "ticker does not exist" not in body)
+    r = c.get("/api/analyse?symbol=AAPL")
+    check("and the API says so in JSON",
+          r.status_code == 503 and (r.get_json() or {}).get("retry_after") == 60,
+          (r.status_code, r.data[:120]))
+finally:
+    web.cached_analysis = _real[3]
+
+r = c.post("/trades/take", data={"run_id": "999999"},
+           headers={"Referer": "http://localhost/analyse?symbol=FAKE&interval=1d"})
+body = r.data.decode("utf-8", "replace")
+check("any other failure gets no advice about tickers",
+      r.status_code == 400 and "ticker does not exist" not in body)
+check("and a way back to the page it came from",
+      ">Go back</a>" in body and 'href="http://localhost/analyse?symbol=FAKE' in body)
+r = c.post("/trades/take", data={"run_id": "999999"},
+           headers={"Referer": "https://elsewhere.example/page"})
+body = r.data.decode("utf-8", "replace")
+check("but never back to another site",
+      "elsewhere.example" not in body and ">Front page</a>" in body)
+
+# The 500 page used to print the exception. Exceptions carry paths, queries
+# and internal names; the visitor gets a sentence and the log gets the rest.
+_propagate = web.app.config.get("PROPAGATE_EXCEPTIONS")
+_board = web.db_mod.strategy_leaderboard
+
+
+def broken(*_a, **_k):
+    raise RuntimeError("OperationalError: no such table at C:/secret/stockbot.db")
+
+
+web.app.config["PROPAGATE_EXCEPTIONS"] = False
+web.app.logger.disabled = True
+web.db_mod.strategy_leaderboard = broken
+try:
+    r = c.get("/strategies")
+    body = r.data.decode("utf-8", "replace")
+    check("something unexpected is a 500", r.status_code == 500, r.status_code)
+    check("which never shows the exception's text",
+          "secret" not in body and "OperationalError" not in body
+          and "Internal Server Error" not in body)
+    check("and says what happened plainly", "Something broke on our side" in body)
+finally:
+    web.db_mod.strategy_leaderboard = _board
+    web.app.config["PROPAGATE_EXCEPTIONS"] = _propagate
+    web.app.logger.disabled = False
+
+print("\n--- the strategies page and recent analyses ---")
+conn = db.connect(DB)
+try:
+    conn.execute("INSERT OR REPLACE INTO strategy_stats (symbol, interval, strategy, family, "
+                 "regime, n, wins, sum_r, sum_r_gross, sum_bars, updated_ts) VALUES "
+                 "('ZZLOCAL', '1d', 'macd_momentum', 'trend', 'all', 60, 30, 3.0, 6.0, "
+                 "500, 1)")
+    me = accounts_mod.local_user(conn).id
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, "
+                 "expectancy_r, user_id) VALUES (?, 'ZZRUN', '1d', 'WAIT', 10, 9, 12, "
+                 "0.123, ?)", (int(__import__('time').time()), me))
+    conn.commit()
+finally:
+    conn.close()
+body = c.get("/strategies?symbol=ZZLOCAL").data.decode("utf-8", "replace")
+check("strategies use the shared name", "MACD momentum" in body and "Macd momentum" not in body)
+check("both expectancy columns are in R", "+0.050R" in body and "+0.100R" in body)
+check("it points to the daily strategy tests, and says whose record it is",
+      'href="/backtests">Strategy tests</a>' in body[:body.index("</main>")]
+      and "you have analysed" in body)
+body = c.get("/").data.decode("utf-8", "replace")
+check("recent analyses give expectancy in R, like the record above them", "+0.123R" in body)
+body = c.get("/settings").data.decode("utf-8", "replace")
+check("on your own machine, settings say they stay on it",
+      "never leaves this machine" in body and "config.json" in body)
+check("and restoring defaults asks first", "return confirm(" in body)
 
 print("\n--- every link on every page resolves ---")
 seen = set()

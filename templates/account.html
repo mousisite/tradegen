@@ -24,8 +24,14 @@
         {% if current_user.is_local %}
           Signed in as the local account, because this installation has no
           sign-in configured.
+        {% elif methods and methods|length > 1 %}
+          You can sign in with {{ methods[:-1]|join(', ') }} or {{ methods[-1] }}.
         {% else %}
           Signed in with {{ current_user.provider|capitalize }}.
+        {% endif %}
+        {% if current_user.email.endswith(('@privaterelay.appleid.com', '@private.icloud.com')) %}
+          This is a private address from Apple: email sent to it reaches your
+          own inbox.
         {% endif %}
       </div>
     </div>
@@ -43,9 +49,23 @@
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
     {% if plan.pro %}
-      <p class="prose"><b>Pro.</b> No limits.{% if plan.bonus_until and not plan.customer %}
+      <p class="prose"><b>Pro.</b> No limits.{% if apple.pro %} Through
+        Apple{% if apple.pro.test %}, from a test purchase{% endif %},
+        {% if apple.pro.renews %}renewing on{% else %}until{% endif %}
+        {{ apple.pro.until|day }}.{% elif plan.bonus_until and not plan.customer %}
         Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
-      {% if plan.customer %}
+      {% if apple.pro %}
+        <p class="fine">{{ apple_pro_said }}</p>
+        {% if apple.twice %}
+          <p class="notice" style="margin-top:var(--s2)">You are paying for Pro
+            twice: through Apple, and on the {{ 'Orenth website' if in_app
+            else 'website' }}. Cancel one of them.</p>
+        {% endif %}
+        <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage
+           style="margin-top:var(--s2)">Manage subscription</a>
+      {% endif %}
+      {# Stripe's own page, so never inside the iPhone app. #}
+      {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
@@ -75,6 +95,23 @@
       <button class="btn quiet" type="button" data-act="copy">Copy</button>
       <span class="fine" data-said aria-live="polite"></span>
     </div>
+  </div>
+</section>
+{% endif %}
+
+{# Installing Orenth as an app. Hidden until the script below knows how this
+   browser does it, and for good once Orenth is installed. Never sent to the
+   iPhone app at all: App Review reads the page, not just what is shown. #}
+{% if not in_app %}
+<section id="install" hidden>
+  <div class="sechead"><h2>Add Orenth to your home screen</h2></div>
+  <div class="card">
+    <p class="prose">It then opens like an app, in its own window, without the
+      browser's bars around it. Everything stays where it is: the app is this
+      site, signed in as you.</p>
+    <p class="prose" data-install-how hidden style="margin-top:var(--s1)"></p>
+    <button class="btn quiet" type="button" data-install-go hidden
+            style="margin-top:var(--s2)">Install Orenth</button>
   </div>
 </section>
 {% endif %}
@@ -163,13 +200,34 @@
   <div class="sechead"><h2>Leaving</h2></div>
   <div class="card" style="border-color:var(--loss)">
     <span class="eyebrow" style="color:var(--loss)">This cannot be undone</span>
+    {# Apple asks that someone with a subscription billed through Apple hears
+       it before deleting (5.1.1(v)): deleting here cannot stop Apple's
+       billing, so the way to cancel comes first. Deleting stays one step
+       away, straight after it. #}
+    {% if apple.billing %}
+      <div class="notice" data-apple-billing style="margin-top:var(--s2)">
+        {% if apple.billing.renews %}
+          <p class="prose"><b>Your Apple subscription keeps billing through Apple
+            until you cancel it.</b> Deleting your Orenth account does not
+            cancel it. Cancel it first in your iPhone's Settings &gt; Apple
+            Account &gt; Subscriptions, or with the button below.</p>
+        {% else %}
+          <p class="prose"><b>Your Apple subscription is set not to renew,</b>
+            so Apple will not charge you for it again. Deleting your Orenth
+            account does not change that.</p>
+        {% endif %}
+        <a class="btn" href="{{ apple.subscriptions_url }}" data-iap-manage
+           style="margin-top:var(--s2)">Manage subscription</a>
+      </div>
+    {% endif %}
     <p class="prose" style="margin-top:var(--s1)">
       Deleting your account removes your trades, watchlist, alerts, saved theses
       and analysis history immediately and permanently. Download anything you
       want to keep first, using the buttons above. The shared strategy record
       stays, because it was never yours alone.
       {% if plan.on and plan.customer %}It also cancels your Pro subscription
-        straight away, with no further charges.{% endif %}
+        {% if apple.billing %}on the website {% endif %}straight away, with no
+        further charges{% if apple.billing %} from it{% endif %}.{% endif %}
     </p>
     <form method="post" action="{{ url_for('delete_account') }}"
           onsubmit="return confirm('Delete this account and everything in it? This cannot be undone.');"
@@ -177,17 +235,62 @@
       <div class="setfield" style="flex:0 1 240px">
         <label for="confirm">Type <b>delete</b> to confirm</label>
         <input class="field" id="confirm" name="confirm" type="text"
-               autocomplete="off" placeholder="delete" required>
+               autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="delete" required>
       </div>
-      <button class="btn" type="submit"
-              style="background:var(--loss);border-color:var(--loss)">
-        Delete my account</button>
+      <button class="btn danger" type="submit">Delete my account</button>
     </form>
   </div>
 </section>
 {% endif %}
 
 <script>
+{% if not in_app %}
+(function () {
+  var box = document.getElementById('install');
+  var cap = window.Capacitor;
+  if (!box || (cap && cap.isNativePlatform && cap.isNativePlatform())) { return; }
+  var installed = navigator.standalone === true
+    || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  if (installed) { return; }
+  var how = box.querySelector('[data-install-how]');
+  var go = box.querySelector('[data-install-go]');
+  var ua = navigator.userAgent || '';
+  var waiting = null;
+
+  function say(text) {
+    how.textContent = text;
+    how.hidden = false;
+    box.hidden = false;
+  }
+  // Chrome and Edge offer to install a site themselves; held here, the offer
+  // becomes this button instead of a bar across the page.
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    waiting = e;
+    how.hidden = true;
+    go.hidden = false;
+    box.hidden = false;
+  });
+  window.addEventListener('appinstalled', function () { box.hidden = true; });
+  go.addEventListener('click', function () {
+    if (!waiting) { return; }
+    var offer = waiting;
+    waiting = null;
+    go.hidden = true;
+    offer.prompt();
+    offer.userChoice.then(function (choice) {
+      if (choice.outcome === 'accepted') { box.hidden = true; }
+      else { say('Changed your mind? Your browser’s menu has Install Orenth too.'); }
+    }).catch(function () {});
+  });
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) {
+    say('Tap the Share button, then Add to Home Screen.');
+  } else if (/Android/.test(ua)) {
+    say('Open your browser’s menu and choose Install app, or Add to Home screen.');
+  }
+})();
+{% endif %}
+
 (function () {
   var bar = document.querySelector('#invite .sharebar');
   if (!bar) { return; }

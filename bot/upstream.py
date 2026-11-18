@@ -45,10 +45,20 @@ COOLDOWN = 60.0
 # is a message.
 THRESHOLD = 3
 
+# Most answers kept at once. One parsed price history can be over a megabyte,
+# the server has half a gigabyte, and the cache is only here to collapse the
+# repeats of a single page view, which never need more than a few dozen.
+MAX_ENTRIES = 100
+
 _lock = threading.Lock()
 _cache: Dict[str, Tuple[float, object]] = {}
-_inflight: Dict[str, threading.Event] = {}
+# One entry per question being asked right now: an event set when the answer
+# is in, and the error, when asking failed.
+_inflight: Dict[str, Dict] = {}
 _breakers: Dict[str, Dict] = {}
+# The longest reuse any caller has asked for. An entry older than that can
+# never be returned again, so it is let go rather than kept until pushed out.
+_max_ttl = 0.0
 
 
 def _plainly(seconds: int) -> str:
@@ -152,49 +162,76 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
     up early finds the cache still empty and runs the whole fetch itself, which
     is the stampede this exists to prevent, and it does it at the worst moment:
     the defect is invisible until two people ask at once.
+
+    A failure is shared the same way. Those waiting get the error the fetch
+    raised rather than each asking again: eight people waiting on a request
+    the source refused used to send eight more, and on a rate limit every one
+    of them keeps the door shut longer.
     """
+    global _max_ttl
     now = time.time()
 
     with _lock:
+        _max_ttl = max(_max_ttl, float(ttl))
         hit = _cache.get(key)
         if hit and (now - hit[0]) < ttl:
             return hit[1]
 
-        waiting = _inflight.get(key)
-        if waiting is None:
-            # This caller does the work; others will wait on this event.
-            event = threading.Event()
-            _inflight[key] = event
-            mine = True
-        else:
-            event, mine = waiting, False
+        flight = _inflight.get(key)
+        mine = flight is None
+        if mine:
+            # This caller does the work; others will wait for its answer.
+            flight = {"done": threading.Event(), "error": None}
+            _inflight[key] = flight
 
     if not mine:
         # Somebody else is already fetching this. Wait for them rather than
         # asking the source the same question at the same moment.
-        event.wait(timeout=wait)
+        finished = flight["done"].wait(timeout=wait)
         with _lock:
             hit = _cache.get(key)
         if hit:
             return hit[1]
-        # The other caller failed. Fall through and try once, rather than
-        # failing on somebody else's behalf.
-        return fetch()
+        if finished and flight["error"] is not None:
+            raise flight["error"]
+        # Still not answered after `wait`, so the other caller is stuck. Ask
+        # once here, but not past a source that has said stop in the meantime,
+        # and keep what comes back for the next caller.
+        if host:
+            check(host)
+        result = fetch()
+        with _lock:
+            _store(key, result)
+        return result
 
     try:
         if host:
             check(host)
         result = fetch()
         with _lock:
-            _cache[key] = (time.time(), result)
-            if len(_cache) > 400:
-                oldest = min(_cache, key=lambda k: _cache[k][0])
-                _cache.pop(oldest, None)
+            _store(key, result)
         return result
+    except Exception as exc:
+        flight["error"] = exc
+        raise
     finally:
         with _lock:
             _inflight.pop(key, None)
-        event.set()
+        flight["done"].set()
+
+
+def _store(key: str, result: object) -> None:
+    """Keep an answer and let go of what can no longer be served. Lock held."""
+    now = time.time()
+    _cache[key] = (now, result)
+    # Expired entries used to stay until four hundred others pushed them out,
+    # which at a megabyte or more each could outgrow the whole server.
+    for old in [k for k, (at, _) in _cache.items() if now - at >= _max_ttl]:
+        if old != key:
+            del _cache[old]
+    while len(_cache) > MAX_ENTRIES:
+        del _cache[min((k for k in _cache if k != key),
+                       key=lambda k: _cache[k][0])]
 
 
 def stats() -> Dict:
@@ -216,7 +253,9 @@ def stats() -> Dict:
 
 def reset() -> None:
     """Forget everything. For tests, and for a deliberate retry after a pause."""
+    global _max_ttl
     with _lock:
         _cache.clear()
         _inflight.clear()
         _breakers.clear()
+        _max_ttl = 0.0

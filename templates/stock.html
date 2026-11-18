@@ -65,36 +65,50 @@
 
 {% if tested|length >= 6 %}
 <section style="margin-top:var(--s4)">
-  <div class="sechead"><h2>Which strategies worked on {{ short(symbol) }}</h2>
+  <div class="sechead"><h2>Which strategies worked on {{ short(symbol) }}'s past prices</h2>
     <a class="tail" href="{{ url_for('backtests') }}">all strategies &rarr;</a></div>
   <p class="prose">Each one back-tested on {{ short(symbol) }}'s own daily
-    prices, after trading costs.</p>
+    prices, after trading costs. The &plusmn; is each result's margin of error:
+    a result inside it cannot be told apart from luck.</p>
   {% for title, part in [("Did best", tested[:3]), ("Did worst", tested[-3:]|reverse)] %}
     <span class="eyebrow">{{ title }}</span>
     <ul class="list">
       {% for t in part %}
         <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:
           worked {{ t.wins }} of {{ t.n }} times, kept
-          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade</li>
+          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
+          <span class="faint">&plusmn;&thinsp;{{ '%.2f'|format(2 * t.se) }}R{% if t.verdict == 0 %}, within its margin{% endif %}</span>{% endif %}</li>
       {% endfor %}
     </ul>
   {% endfor %}
 </section>
 {% endif %}
 
-{% if history and history.latest %}
+{% if history and (history.latest or history.on_record) %}
 <section style="margin-top:var(--s4)">
   <div class="sechead"><h2>Past calls on {{ short(symbol) }}</h2>
     <a class="tail" href="{{ url_for('record') }}">the whole record &rarr;</a></div>
+  {% if history.on_record %}{% set o = history.on_record %}
+    <p class="prose">The call on record for {{ o.session_at|day }} is
+      <b>{{ o.action }}</b> at {{ '$' if not snap or snap.currency == 'USD' }}{{ o.price|price }},
+      written down at {{ o.written }}.
+      {% if history.coin %}A coin's call is the first check after midnight
+      (UTC) once the day before is filled in, at the price then.{% else %}It is the first check after the
+      market closed, at the closing price. This page is checked through the
+      day and can say something else later; only the call after the close is
+      scored.{% endif %}</p>
+  {% endif %}
+  {% if history.latest %}
   <ul class="list">
     {% for r in history.latest %}
-      <li>{{ r.at|day }}: said <b>{{ r.action }}</b>, the price {{ how_words[r.how] }}
+      <li>{{ r.session_at|day }}: said <b>{{ r.action }}</b>, the price {{ how_words[r.how] }}
         ({{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%).
         <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span></li>
     {% endfor %}
   </ul>
-  {% if history.open %}<p class="prose faint" style="font-size:var(--t-xs)">{{ history.open }} more
-    still waiting for {{ 'its' if history.open == 1 else 'their' }} ten days.</p>{% endif %}
+  {% endif %}
+  {% if history.open %}<p class="prose faint" style="font-size:var(--t-xs)">{{ history.open }}
+    still waiting to be scored.</p>{% endif %}
 </section>
 {% endif %}
 
@@ -104,14 +118,15 @@
 {% endif %}
 
 <section class="card closing" style="margin-top:var(--s4)">
-  <p class="lead">Check any stock or coin, free.</p>
+  <p class="lead">Analyse any stock or coin, free.</p>
   <p class="prose">Orenth back-tests every setup against its own history and
     tells you straight when there is no edge.</p>
   <div class="cta">
     {% if not current_user or demo %}
       <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
     {% endif %}
-    <a class="btn quiet" href="{{ url_for('analyse', symbol=symbol, interval='1d') }}">See the full workings</a>
+    <a class="btn quiet" href="{{ url_for('analyse', symbol=symbol, interval='1d',
+                                         exact=exact_arg(symbol)) }}">See the full workings</a>
   </div>
 </section>
 

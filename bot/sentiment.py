@@ -30,6 +30,8 @@ from typing import List, Optional
 import feedparser
 import requests
 
+from . import upstream
+
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
 
@@ -117,6 +119,11 @@ class Sentiment:
     items: List[Item] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
     fresh_catalyst: bool = False
+    # How whoever runs this copy could score headlines better. Kept out of
+    # `notes`, which become the call's risks: an analysis is shared by every
+    # viewer of the same ticker, and only the owner of the copy can add a key,
+    # so the page decides who is shown this.
+    setup_hint: str = ""
 
     def label(self) -> str:
         s = self.score
@@ -200,6 +207,10 @@ def lexicon_score(text: str) -> float:
     return max(-1.0, min(1.0, avg / 1.6))
 
 
+# The breaker's name for Yahoo, the same one bot/market.py and bot/yahoo.py use.
+_YAHOO_HOST = "Yahoo Finance"
+
+
 def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     """Pull recent headlines from Google News and Yahoo Finance."""
     items: List[Item] = []
@@ -209,7 +220,10 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     try:
         url = "%s?q=%s&hl=en-US&gl=US&ceid=US:en" % (
             _GOOGLE_NEWS, requests.utils.quote('"%s" stock OR crypto' % query))
-        feed = feedparser.parse(url)
+        # Fetched here rather than by feedparser, which waits with no time
+        # limit at all, inside the request of whoever opened the page.
+        r = requests.get(url, headers=_HEADERS, timeout=10)
+        feed = feedparser.parse(r.content if r.status_code == 200 else b"")
         for e in feed.entries[:limit]:
             items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
                               source=(e.get("source", {}) or {}).get("title", "Google News"),
@@ -219,9 +233,15 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
         pass
 
     try:
+        # Yahoo's news search shares the rate limit with its prices. It asks
+        # nothing while the source is refusing, and a refusal here is told to
+        # the shared breaker so the price requests stand back too.
+        upstream.check(_YAHOO_HOST)
         r = requests.get(_YAHOO_SEARCH, params={"q": base, "newsCount": 15, "quotesCount": 0},
                          headers=_HEADERS, timeout=15)
-        if r.status_code == 200:
+        if upstream.is_throttle(r.status_code):
+            upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r))
+        elif r.status_code == 200:
             for n in r.json().get("news", []):
                 pub = n.get("providerPublishTime")
                 age = (time.time() - pub) / 3600.0 if pub else 48.0
@@ -312,7 +332,9 @@ def _score_with_claude(items: List[Item], symbol: str) -> bool:
         "the numbered scores.\n\nItems:\n%s" % (symbol, numbered)
     )
     try:
-        client = anthropic.Anthropic(api_key=key)
+        # The SDK would otherwise wait ten minutes, three times, inside a page
+        # request. A failure here only means the word list scores the items.
+        client = anthropic.Anthropic(api_key=key, timeout=20.0, max_retries=1)
         resp = client.messages.create(
             model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
             max_tokens=1200,
@@ -339,18 +361,26 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     news = gather_news(symbol, name)
     social = gather_social(symbol)
     notes: List[str] = []
+    setup_hint = ""
 
-    scored_by = "finance lexicon"
+    scored_by = "a list of finance words"
     all_items = news + social
     if use_llm and _score_with_claude(all_items, symbol):
         scored_by = "Claude (%s)" % os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
     else:
         for it in all_items:
             it.score = lexicon_score(it.text)
+        # For every reader, in words about the reading rather than about a
+        # setting: only whoever runs the server can add a key (setup_hint).
+        if all_items:
+            notes.append("Headlines were scored with a list of finance words, "
+                         "which can misread financial phrasing, so treat the "
+                         "news reading as rough.")
         if use_llm and not os.environ.get("ANTHROPIC_API_KEY"):
-            notes.append("No ANTHROPIC_API_KEY set, so headlines were scored by "
-                         "keyword lexicon. LLM scoring is materially better on "
-                         "financial phrasing.")
+            setup_hint = ("No ANTHROPIC_API_KEY is set, so headlines were scored "
+                          "with the built-in word list. Claude reads financial "
+                          "phrasing much better: add the key to .env and start "
+                          "Orenth again.")
 
     # StockTwits self-tags are a direct statement of intent. Trust them over
     # inferred text sentiment, but do not let them fully override it.
@@ -381,10 +411,9 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     else:
         combined = news_score if news else social_score
 
+    # Said once, by the plan, which reads fresh_catalyst. A note here as well
+    # put the same warning on the page twice in different words.
     fresh = any(i.age_hours <= 3.0 and abs(i.score) >= 0.5 for i in news)
-    if fresh:
-        notes.append("A high-impact headline landed in the last 3 hours. "
-                     "Technical levels are less reliable right after a catalyst.")
     if not news:
         notes.append("No news retrieved for this symbol.")
     if not social:
@@ -397,5 +426,5 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         bullish_tags=bullish, bearish_tags=bearish,
         method=scored_by,
         items=sorted(all_items, key=lambda i: -abs(i.score) * i.recency_weight)[:12],
-        notes=notes, fresh_catalyst=fresh,
+        notes=notes, fresh_catalyst=fresh, setup_hint=setup_hint,
     )

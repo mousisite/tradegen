@@ -145,6 +145,173 @@ check("empty portfolio handled", ev.cash == 50000 and not ev.warnings)
 print("      %s" % ev.observations[0])
 
 print()
+print("=" * 72)
+print("SCREENER: every name scanned is accounted for (stubbed, no network)")
+print("=" * 72)
+import re as _re
+import html as _html
+from bot import yahoo as _Y
+
+_real = (S.universe_symbols, _Y.quotes, _Y.quote_summary, S.fund.load,
+         S.fund.quality_score)
+
+
+def _quotes_for(symbols):
+    out = []
+    for s in symbols:
+        n = int(s[1:])
+        # The biggest companies sit late in the data source's own order.
+        cap = (1e9 + n * 1e9) if n < 100 else 1e8
+        out.append({"symbol": s, "shortName": s, "regularMarketPrice": 50.0,
+                    "regularMarketChangePercent": 1.0,
+                    "regularMarketVolume": 2_000_000, "marketCap": cap,
+                    "trailingPE": 15.0, "fiftyTwoWeekHigh": 60.0})
+    return out
+
+
+def _good_fund(symbol, with_sec=False):
+    f = S.fund.Fundamentals(symbol=symbol, sector="Tech")
+    for key, value in (("roe", 0.2), ("net_margin", 0.15), ("revenue_growth", 0.1),
+                       ("debt_to_equity", 50.0), ("free_cashflow", 1e9)):
+        S.fund._put(f.metrics, key, key, value)
+    return f
+
+
+def _adds_up(res):
+    return res.scanned == (len(res.passed) + res.rejected + res.not_checked
+                           + len(res.unread) + res.not_shown)
+
+
+S.universe_symbols = lambda name, count=100: ["S%03d" % i for i in range(120)][:count]
+_Y.quotes = _quotes_for
+S.fund.load = _good_fund
+S.fund.quality_score = lambda f: {"score": 0.7, "reliable": True}
+try:
+    r5 = S.run(universe="most_actives", filters={"market_cap_min": 1e9}, limit=40)
+    check("more passing than the page lists: the rest are counted, not lost",
+          len(r5.passed) == 40 and r5.not_shown == 60 and _adds_up(r5)
+          and any("60 more passed" in n for n in r5.notes),
+          "%d passed, %d not shown, notes %s" % (len(r5.passed), r5.not_shown, r5.notes))
+    r6 = S.run(universe="most_actives",
+               filters={"market_cap_min": 1e9, "roe_min": 0.1}, limit=40)
+    check("the slower checks go to the largest names, the ones the list shows",
+          r6.passed and r6.passed[0].symbol == "S099" and r6.passed[0].deep_loaded,
+          str([c.symbol for c in r6.passed[:3]]))
+    check("and the names they never reached are counted and named as such",
+          r6.not_checked == 60 and _adds_up(r6)
+          and any("not checked" in n for n in r6.notes), str(r6.not_checked))
+
+    def _refused(symbol, modules):
+        raise _Y.YahooError("Yahoo is rate limiting this server (HTTP 429).")
+
+    S.fund.load = _real[3]
+    _Y.quote_summary = _refused
+    _Y.quotes = lambda syms: [dict(q, symbol=s) for q, s in
+                              zip(_quotes_for(["S050"] * 3), ["AAA", "BBB", "CCC"])]
+    r7 = S.run(symbols=["AAA", "BBB", "CCC"], filters={"roe_min": 0.1}, limit=40)
+    check("figures the source refused are neither passed nor rejected",
+          not r7.passed and r7.rejected == 0 and r7.unread == ["AAA", "BBB", "CCC"],
+          "rejected %d, unread %s" % (r7.rejected, r7.unread))
+    check("and the notes say they could not be read, not that the filters were tight",
+          any("could not be read just now" in n for n in r7.notes)
+          and not any("too tight" in n for n in r7.notes)
+          and not any("were loaded" in n for n in r7.notes), str(r7.notes))
+    check("so that screen is not one to keep and share", not r7.complete)
+
+    def _slow_fund(symbol, with_sec=False):
+        time.sleep(2.0)
+        return _good_fund(symbol)
+
+    _Y.quote_summary = _real[2]
+    S.fund.load = _slow_fund
+    t0 = time.time()
+    r8 = S.run(symbols=["AAA", "BBB", "CCC"], filters={"roe_min": 0.1}, limit=40,
+               budget=0.5)
+    took = time.time() - t0
+    check("a screen keeps to its time limit when the source is slow",
+          took < 1.5 and r8.unread == ["AAA", "BBB", "CCC"] and r8.rejected == 0,
+          "%.1fs, unread %s" % (took, r8.unread))
+finally:
+    (S.universe_symbols, _Y.quotes, _Y.quote_summary, S.fund.load,
+     S.fund.quality_score) = _real
+
+print()
+print("=" * 72)
+print("SCREENER: the page (stubbed, no network)")
+print("=" * 72)
+import web as _web
+_client, _ = harness.isolated_web("screener-page")
+_web.app.config["AUTH_MODE"] = "off"
+
+
+def _text(body):
+    body = _re.sub(r"<script.*?</script>", "", body, flags=_re.S)
+    return _re.sub(r"\s+", " ", _html.unescape(_re.sub(r"<[^>]+>", " ", body)))
+
+
+def _two_quotes(syms):
+    return [{"symbol": "LOSR", "shortName": "Down 5%", "regularMarketPrice": 10.0,
+             "regularMarketChangePercent": -5.0, "marketCap": 2e9,
+             "regularMarketVolume": 2e6},
+            {"symbol": "FLAT", "shortName": "Unchanged", "regularMarketPrice": 10.0,
+             "regularMarketChangePercent": 0.0, "marketCap": 3e9,
+             "regularMarketVolume": 2e6}]
+
+
+S.universe_symbols = lambda name, count=100: ["LOSR", "FLAT"]
+_Y.quotes = _two_quotes
+try:
+    body = _client.get("/screener?go=1&universe=day_losers&change_max=-3"
+                       ).data.decode("utf-8", "replace")
+    page = _text(body)
+    check("'up at most -3' means down at least 3%, not -300%",
+          "Up at most -3.0%" in page and "-300" not in page
+          and "<td><b>LOSR</b>" in body and "<td><b>FLAT</b>" not in body, page[:0])
+    check("and the box still shows what was typed", 'value="-3"' in body)
+    page = _text(_client.get("/screener?go=1&universe=day_losers&change_min=1"
+                             ).data.decode("utf-8", "replace"))
+    check("'up at least 1' means 1%", "Up at least 1.0%" in page
+          and "100.0%" not in page)
+    page = _text(_client.get("/screener?go=1&universe=day_losers&change_min=0.5"
+                             ).data.decode("utf-8", "replace"))
+    check("and 0.5 means half a percent", "Up at least 0.5%" in page)
+    body = _client.get("/screener?go=1&universe=day_losers"
+                       ).data.decode("utf-8", "replace")
+    flat = body[body.find("<td><b>FLAT</b>"):]
+    flat = flat[:flat.find("</tr>")]
+    today = _re.findall(r'<td class="r fig([^"]*)">\s*0\.0%', flat)
+    check("a move of 0.0% is not coloured as a loss",
+          today and "loss" not in today[0] and "gain" not in today[0], str(today))
+    check("and the page says when the quotes were read",
+          _re.search(r"Quotes read at \d\d:\d\d UTC", _text(body)) is not None)
+
+    # A visitor's ready-made screen is shared, but never a refused one.
+    _web.app.config["AUTH_MODE"] = "google"
+
+    def _refused_quotes(syms):
+        raise _Y.YahooError("Yahoo is rate limiting this server (HTTP 429).")
+
+    S.universe_symbols = lambda name, count=100: ["GAIN"]
+    _Y.quotes = _refused_quotes
+    first = _text(_client.get("/screener?preset=momentum").data.decode("utf-8", "replace"))
+    _Y.quotes = lambda syms: [{"symbol": "GAIN", "shortName": "Gainer",
+                               "regularMarketPrice": 10.0,
+                               "regularMarketChangePercent": 5.0,
+                               "regularMarketVolume": 5e6, "marketCap": 2e9}]
+    second = _text(_client.get("/screener?preset=momentum").data.decode("utf-8", "replace"))
+    check("a visitor whose screen the source refused is told so",
+          "Could not fetch quotes" in first
+          and "Nothing could be screened just now" in first
+          and "Nothing passed these filters" not in first)
+    check("and the next visitor gets a fresh try, not that failure for 15 minutes",
+          "1 passed" in second and "Could not fetch quotes" not in second,
+          second[second.find("Results"):second.find("Results") + 90])
+finally:
+    (S.universe_symbols, _Y.quotes, _Y.quote_summary, S.fund.load,
+     S.fund.quality_score) = _real
+    _web.app.config["AUTH_MODE"] = None
+
+print()
 print("%d failure(s)" % len(fails))
 print("SCREENER AND PORTFOLIO OK" if not fails else "FAILURES: %s" % fails)
 

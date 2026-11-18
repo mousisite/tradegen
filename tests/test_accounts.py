@@ -99,6 +99,24 @@ check("a changed address stays the same account", moved.id == alice.id)
 check("and the new address is stored",
       A.get_user(conn, alice.id).email == "alice.r@example.com")
 
+# The other half of that: once the address is given to someone new, a
+# different Google identity holding it is not the account's owner.
+try:
+    A.upsert_google_user(conn, {"email": "alice.r@example.com", "sub": "g-newcomer",
+                                "name": "Newcomer", "email_verified": True})
+    check("a different Google account with the same address is refused", False,
+          "it was handed Alice's account")
+except ValueError:
+    check("a different Google account with the same address is refused", True)
+check("and the account stays tied to Alice's own Google identity",
+      conn.execute("SELECT provider_id FROM users WHERE id=?",
+                   (alice.id,)).fetchone()[0] == "g-alice")
+by_code = A.upsert_email_user(conn, "carol@example.com")
+check("while an account made with an emailed code still joins Google",
+      A.upsert_google_user(conn, {"email": "carol@example.com", "sub": "g-carol",
+                                  "name": "Carol", "email_verified": True}).id
+      == by_code.id)
+
 try:
     A.upsert_google_user(conn, {"email": "x@example.com", "sub": "z",
                                 "email_verified": False})
@@ -168,6 +186,48 @@ r = c.post("/trades/close", data={"trade_id": alice_trade, "price": "120"})
 check("Bob cannot close Alice's trade", r.status_code == 400, r.status_code)
 r = c.post("/trades/delete", data={"trade_id": alice_trade})
 check("Bob cannot delete Alice's trade", r.status_code == 400, r.status_code)
+
+# An analysis run is Alice's too: its symbol and levels are her plan.
+_conn = db.connect(DB)
+_run = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'AAPL', '1d', 'BUY', 100.0, 95.0, 110.0, ?)", (int(time.time()), alice.id)).lastrowid
+_avoid = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'AVOID', 100.0, 95.0, 110.0, ?)", (int(time.time()), bob.id)).lastrowid
+_wait_short = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'WAIT', 100.0, 105.0, 90.0, ?)", (int(time.time()), bob.id)).lastrowid
+_wait_long = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'WAIT', 95.0, 90.0, 105.0, ?)", (int(time.time()), bob.id)).lastrowid
+_short = _conn.execute(
+    "INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+    "VALUES (?, 'TSLA', '1d', 'SHORT', 100.0, 105.0, 90.0, ?)", (int(time.time()), bob.id)).lastrowid
+_conn.commit()
+_conn.close()
+r = c.post("/trades/take", data={"run_id": _run})
+check("Bob cannot open a paper trade from Alice's analysis", r.status_code == 400, r.status_code)
+r = c.post("/trades/take", data={"run_id": _avoid})
+check("an AVOID has no trade in it to simulate", r.status_code == 400, r.status_code)
+# A WAIT names a price the market has not reached. Logging it opened a trade
+# at that price straight away: a fill that never happened, counted as won or
+# lost, and for a short WAIT an error about where a long's stop goes.
+for _wait in (_wait_long, _wait_short):
+    r = c.post("/trades/take", data={"run_id": _wait})
+    _said = r.data.decode("utf-8", "replace")
+    check("a WAIT is not logged as a filled trade",
+          r.status_code == 400 and "Nothing has filled yet" in _said, r.status_code)
+    check("and is told why, not about stops or mistyped tickers",
+          "the stop must sit" not in _said and "ticker does not exist" not in _said)
+c.post("/trades/take", data={"run_id": _short})
+_conn = db.connect(DB)
+_side = _conn.execute("SELECT direction FROM trades WHERE run_id=?", (_short,)).fetchone()
+_waits = _conn.execute("SELECT COUNT(*) FROM trades WHERE run_id IN (?, ?)",
+                       (_wait_long, _wait_short)).fetchone()[0]
+_conn.close()
+check("no trade was written for either WAIT", _waits == 0, _waits)
+check("a SHORT, whose stop sits above the entry, opens a short", _side and _side[0] == -1, _side)
 r = c.post("/monitor/alert/delete", data={"alert_id": alice_alert})
 check("Bob cannot delete Alice's alert", r.status_code == 400, r.status_code)
 
@@ -205,6 +265,103 @@ check("Alice does not see Bob's", "TSLA" not in page, "TSLA leaked")
 
 print()
 print("=" * 72)
+print("ROUTINES ACT FOR WHOEVER RUNS THEM")
+print("=" * 72)
+
+# No network: prices and the analysis are stand-ins. Carol and Dave hold no
+# trades, so the position check has nothing to price.
+from types import SimpleNamespace as _NS
+from bot import alerts as _alerts
+from bot import workflows as _workflows
+
+
+def _bars(symbol, interval="1d", lookback=None):
+    return _NS(symbol=symbol, interval=interval, last_price=101.0, close=[101.0] * 60,
+               volume=[1.0] * 60, prev_close=100.0, market_open=False,
+               last_bar_time="", meta={})
+
+
+_recorded_for = []
+
+
+def _analyse(symbol, cfg, interval=None, with_news=True, with_learning=True,
+             record=True, db_path=None, user=1, progress=None, source="engine"):
+    run_id = None
+    if record:
+        _cn = db.connect(DB)
+        try:
+            run_id = _cn.execute(
+                "INSERT INTO runs (ts, symbol, interval, action, user_id, source) "
+                "VALUES (?, ?, ?, 'BUY', ?, ?)",
+                (int(time.time()), symbol.upper(), interval, user, source)).lastrowid
+            _cn.commit()
+        finally:
+            _cn.close()
+    _recorded_for.append(user)
+    return _NS(bars=_NS(symbol=symbol.upper(), interval=interval), run_id=run_id,
+               plan=_NS(action="BUY", headline="A stand-in call."))
+
+
+_real = (_alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse)
+_alerts.fetch_bars = _workflows.fetch_bars = _bars
+_workflows.engine.analyse = _analyse
+try:
+    conn = db.connect(DB)
+    carol = A.upsert_google_user(conn, {"email": "carol@example.com", "sub": "g-carol",
+                                        "name": "Carol", "email_verified": True})
+    dave = A.upsert_google_user(conn, {"email": "dave@example.com", "sub": "g-dave",
+                                       "name": "Dave", "email_verified": True})
+    dave_alert = db.alert_add(conn, "ZZDAVE", "price_above", 1.0, user=dave.id)
+    carol_alert = db.alert_add(conn, "ZZCAROL", "price_above", 1.0, user=carol.id)
+    db.watch_add(conn, "ZZCAROL", "1d", user=carol.id)
+    conn.close()
+
+    sign_in_as(c, carol)
+    check("Carol's morning review runs", c.post("/workflow/morning").status_code == 302)
+    conn = db.connect(DB)
+    row = conn.execute("SELECT active, triggered_ts FROM alerts WHERE id=?",
+                       (dave_alert,)).fetchone()
+    check("it leaves Dave's alert alone, still on and never fired",
+          row["active"] == 1 and row["triggered_ts"] is None, dict(row))
+    check("and checks Carol's",
+          conn.execute("SELECT triggered_ts FROM alerts WHERE id=?",
+                       (carol_alert,)).fetchone()[0] is not None)
+    check("nothing of it lands in Dave's history", not db.event_list(conn, dave.id))
+    conn.close()
+    page = visible(c, "/monitor")
+    check("Carol sees her report", "ZZCAROL is 101" in page)
+    fires = c.get("/api/alerts/status").get_json()["new_fires"]
+    check("and the bar on her pages is told of the fire, like one from the loop",
+          [f["symbol"] for f in fires] == ["ZZCAROL"], fires)
+
+    sign_in_as(c, dave)
+    page = visible(c, "/monitor")
+    check("Dave does not see Carol's report", "ZZCAROL" not in page and "needs you" not in page)
+    check("nor does her fire reach Dave's bar",
+          "ZZCAROL" not in str(c.get("/api/alerts/status").get_json()))
+
+    # The watchlist routine: Carol's last own look at ZZCAROL said WAIT.
+    conn = db.connect(DB)
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, user_id) "
+                 "VALUES (?, 'ZZCAROL', '1d', 'WAIT', ?)", (int(time.time()) - 60, carol.id))
+    conn.commit()
+    conn.close()
+    sign_in_as(c, carol)
+    c.post("/workflow/watchlist")
+    page = visible(c, "/monitor")
+    check("the watchlist routine reports Carol's change of call",
+          "went from WAIT to BUY" in page)
+    check("and keeps the new analysis as Carol's",
+          _recorded_for and set(_recorded_for) == {carol.id}, _recorded_for)
+    c.post("/workflow/watchlist")
+    page = visible(c, "/monitor")
+    check("run again, the call is unchanged rather than the same change twice",
+          "BUY, unchanged" in page and "went from WAIT to BUY" not in page)
+finally:
+    _alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse = _real
+
+print()
+print("=" * 72)
 print("SETTINGS ARE EACH PERSON'S OWN")
 print("=" * 72)
 
@@ -230,6 +387,15 @@ check("Bob is not offered the server-wide alert schedule",
       "Background checking" not in page)
 check("and is told his settings are his own",
       "changes nothing for anyone else" in page)
+# The page was written for the desktop install, where nothing leaves the
+# machine. Online, settings live with the account on Orenth's server.
+check("and where they are kept", "Saved to your account on Orenth" in page)
+for desktop in ("never leaves this machine", "nothing phoned home", "config.json",
+                "STOCKBOT_DB", "everything you have looked"):
+    check("and is not told the desktop's '%s'" % desktop, desktop not in page)
+check("Restoring defaults asks first",
+      "return confirm(" in page[page.index('name="reset"') - 200:
+                                page.index("Restore defaults")])
 
 sign_in_as(c, alice)
 c.get("/settings?reset=1")
@@ -251,6 +417,68 @@ A.save_settings(conn, bob.id, {"account_size": 777, "not_a_setting": 1})
 check("only personal settings are stored",
       A.settings_for(conn, bob.id) == {"account_size": 777})
 conn.close()
+
+print()
+print("=" * 72)
+print("ONE SHARED ANALYSIS, A RUN FOR EACH PERSON")
+print("=" * 72)
+
+# The analysis cache is shared, and the run recorded by whoever asked first
+# used to be handed to everyone after them: missing from their history, and
+# refused by "take this trade", which only opens your own runs.
+from types import SimpleNamespace as _NS
+from bot import engine as _engine
+
+
+def _fake_analyse(symbol, cfg, interval=None, with_news=True, source="",
+                  db_path=None, user=1, record=True, **_kw):
+    bars = _NS(symbol="SHRD", name="Shared Co", asset_class="equity",
+               interval="1d", last_price=100.0, market_open=False)
+    plan = _NS(conviction=0.5, action="BUY", headline="Buy", entry=100.0,
+               stop=95.0, target1=110.0, target2=None, reward_risk=2.0,
+               breakeven_rate=0.4, probability=0.5, prob_samples=60,
+               expectancy_r=0.1)
+    regime = _NS(trend="up", volatility="normal", direction=1, adx=20.0)
+    calib, mood = _NS(cost_r=0.01), _NS(score=0.0, items=[])
+    run_id = None
+    if record:
+        rconn = db.connect(DB)
+        run_id = db.record_run(rconn, bars, plan, [], 0.3, regime, calib, mood,
+                               source=source, user=user)
+        rconn.close()
+    return _engine.Analysis(bars=bars, context=None, signals=[], composite=0.3,
+                            regime=regime, levels=[], calibration=calib,
+                            sentiment=mood, plan=plan, run_id=run_id)
+
+
+_real_analyse = web.engine.analyse
+web.engine.analyse = _fake_analyse
+_shared_cfg = _cfgmod.load(web.app.config.get("CFG_PATH"))
+runs_of = {}
+try:
+    for person in (alice, bob, alice):
+        conn = db.connect(DB)
+        with web.app.test_request_context("/"):
+            web.g.user, web.g.demo = A.get_user(conn, person.id), False
+            got = web.cached_analysis("SHRD", "1d", _shared_cfg, False)
+        conn.close()
+        runs_of.setdefault(person.id, []).append(got.run_id)
+    conn = db.connect(DB)
+    owner = {r["id"]: r["user_id"] for r in conn.execute("SELECT id, user_id FROM runs")}
+    conn.close()
+    check("the second person gets a run of their own",
+          runs_of[bob.id][0] and runs_of[bob.id][0] != runs_of[alice.id][0], runs_of)
+    check("recorded against them", owner.get(runs_of[bob.id][0]) == bob.id)
+    check("while the first keeps theirs, without a new one each refresh",
+          runs_of[alice.id][0] == runs_of[alice.id][1]
+          and owner.get(runs_of[alice.id][0]) == alice.id, runs_of)
+    sign_in_as(c, bob)
+    r = c.post("/trades/take", data={"run_id": runs_of[bob.id][0]})
+    check("so 'take this trade' works for the second person too",
+          r.status_code == 302, r.status_code)
+finally:
+    web.engine.analyse = _real_analyse
+    web._CACHE.clear()
 
 print()
 print("=" * 72)
@@ -302,10 +530,21 @@ shared_before = conn.execute("SELECT COUNT(*) FROM strategy_stats").fetchone()[0
 counts = A.owned_counts(conn, bob.id)
 print("   Bob owns %s" % counts)
 check("Bob owns something to delete", counts["trades"] >= 1)
+# Pro he bought in the iPhone app: his App Store token and his subscription.
+from bot import apple_store  # noqa: E402
+apple_store.account_token(conn, bob.id)
+conn.execute("INSERT INTO apple_subs (environment, original_tx_id, user_id, product_id, "
+             "transaction_id, purchase_ms, expires_ms, tx_signed_ms, updated) VALUES "
+             "('Production', 'bob-1', ?, 'app.orenth.ios.pro.monthly', 'bob-1', 1, 2, 1, 1)",
+             (bob.id,))
+conn.commit()
 
 removed = A.delete_user(conn, bob.id)
 print("   removed %s" % removed)
 check("his trades are gone", A.owned_counts(conn, bob.id)["trades"] == 0)
+check("and his App Store token and subscription",
+      conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?", (bob.id,)).fetchone()[0] == 0
+      and conn.execute("SELECT COUNT(*) FROM apple_subs WHERE user_id=?", (bob.id,)).fetchone()[0] == 0)
 check("and so are his settings", A.settings_for(conn, bob.id) == {})
 check("his account is gone", A.get_user(conn, bob.id) is None)
 check("Alice is untouched", len(db.list_trades(conn, user=alice.id)) == 1)
@@ -399,6 +638,37 @@ finally:
 check("removing the credentials restores local mode", web.auth_required() is False)
 
 print()
+print("   A public deployment whose sign-in keys went missing:")
+# Every visitor used to be signed in as the local account, which is the
+# operator and can see every account.
+_os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+try:
+    check("still asks people to sign in", web.auth_required() is True)
+    nobody = web.app.test_client()
+    r = nobody.get("/account")
+    check("so a visitor is not handed the operator's account",
+          r.status_code == 302 and "/signin" in r.headers.get("Location", ""),
+          r.status_code)
+    check("nor the page about everyone's use", nobody.get("/usage").status_code == 302)
+    # Which keys are missing is for whoever runs it, in the start-up log; a
+    # visitor is told only that signing in is off.
+    door = nobody.get("/signin").data.decode("utf-8", "replace")
+    check("and the sign-in page says signing in is off, naming no setting",
+          "Signing in is off for now" in door and "GOOGLE_CLIENT_ID" not in door)
+    web.app.config["AUTH_MODE"] = "off"
+    check("unless sign-in is switched off on purpose", web.auth_required() is False)
+finally:
+    web.app.config["AUTH_MODE"] = None
+    del _os.environ["STOCKBOT_PUBLIC_URL"]
+_os.environ["STOCKBOT_BEHIND_PROXY"] = "1"
+try:
+    check("behind the host's proxy it asks too", web.auth_required() is True)
+finally:
+    del _os.environ["STOCKBOT_BEHIND_PROXY"]
+check("while on your own machine it still needs no sign-in",
+      web.auth_required() is False and c.get("/trades").status_code == 200)
+
+print()
 print("=" * 72)
 print("THE COOKIE KEY")
 print("=" * 72)
@@ -477,6 +747,34 @@ try:
     # Real people's data never appears in the example.
     seen = stranger.get("/trades").data.decode("utf-8", "replace")
     check("Alice's trade is not in the example journal", "987654" not in seen)
+    seen = stranger.get("/monitor").data.decode("utf-8", "replace")
+    check("nor anyone's routine report in the example's Monitor page",
+          "ZZCAROL" not in seen and "needs you" not in seen)
+
+    # The strategy record is shared, but which instruments it covers says what
+    # people here have looked up. A visitor's list holds only popular names.
+    conn = db.connect(DB)
+    for _sym in ("ZZPRIVATE", "NVDA"):
+        conn.execute("INSERT OR REPLACE INTO strategy_stats (symbol, interval, strategy, "
+                     "family, regime, n, wins, sum_r, sum_r_gross, sum_bars, updated_ts) "
+                     "VALUES (?, '1d', 'rsi_reversion', 'mean_reversion', 'all', 50, 25, "
+                     "2.0, 3.0, 400, ?)", (_sym, int(time.time())))
+    conn.commit()
+    conn.close()
+    seen = stranger.get("/strategies").data.decode("utf-8", "replace")
+    check("a visitor's instrument list leaves out what people looked up",
+          "ZZPRIVATE" not in seen and '<option value="NVDA"' in seen)
+    seen = stranger.get("/strategies?symbol=ZZPRIVATE").data.decode("utf-8", "replace")
+    check("and asking for one by name shows nothing about it", "ZZPRIVATE" not in seen)
+    seen = stranger.get("/strategies").data.decode("utf-8", "replace")
+    check("the strategies page says the record is everyone's",
+          "anyone on Orenth has analysed" in seen
+          and "you have run" not in seen and "you have analysed" not in seen)
+
+    seen = stranger.get("/settings").data.decode("utf-8", "replace")
+    check("the example's settings do not claim to be the visitor's own",
+          "changes nothing for anyone else" not in seen
+          and "never leaves this machine" not in seen and "config.json" not in seen)
 
     # Nothing a visitor posts is written: every form sends them to sign up,
     # and back to the page they were on rather than to a URL that only POSTs.
@@ -506,6 +804,21 @@ try:
     check("and recorded no analyses for the example",
           conn.execute("SELECT COUNT(*) FROM runs WHERE user_id=?",
                        (demo_user.id,)).fetchone()[0] == 0)
+    # An example book priced weeks ago drifts past its stops. It is refilled
+    # at today's prices once a week, and only its own rows are touched.
+    _others = conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
+                           (demo_user.id,)).fetchone()[0]
+    conn.execute("UPDATE trades SET ts_opened=ts_opened-? WHERE user_id=?",
+                 (_demo.RESEED_AFTER + 86400, demo_user.id))
+    conn.commit()
+    _demo.user(conn)
+    _newest = conn.execute("SELECT MAX(ts_opened) FROM trades WHERE user_id=?",
+                           (demo_user.id,)).fetchone()[0]
+    check("a stale example account is refilled at today's prices",
+          _newest is not None and time.time() - _newest < 600)
+    check("and nobody else's trades are touched",
+          conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
+                       (demo_user.id,)).fetchone()[0] == _others)
     conn.close()
 
     # Each of these would make the server analyse or scan something it has
@@ -591,13 +904,23 @@ _STDLIB = set(_sys.stdlib_module_names)
 _LOCAL = {"bot", "web", "analyze", "paper", "menu", "serve", "harness", "setup",
           "backup", "preflight"}
 _ALIAS = {"pil": "pillow", "dotenv": "python_dotenv"}
+# Modules a pinned package installs as its own dependency, so they are not
+# pinned themselves. httpx2 is the HTTP client the anthropic SDK requires;
+# bot/push.py uses it for HTTP/2 to Apple, and treats it being absent as the
+# iPhone app's notifications being off. Checked below against what the pinned
+# package actually requires, so this fails if it ever stops bringing it.
+_COMES_WITH = {"httpx2": "anthropic"}
 
 # Anything that is a .py file or a package in this repository is local by
 # definition. A hand-kept list meant every new script read as a missing
 # third-party package until somebody remembered to add it here: the helper
 # scripts in tools/ importing each other was the case that exposed it.
+# Folders are judged by their path inside this checkout, not the whole path
+# on disk: a checkout that is itself a worktree under .claude would otherwise
+# skip every folder, find no imports at all, and check nothing.
 for _folder, _dirs, _files in _os.walk(ROOT):
-    if any(skip in _folder for skip in (".runtime", "__pycache__", ".git")):
+    if any(skip in _os.path.relpath(_folder, ROOT)
+           for skip in (".runtime", "__pycache__", ".git")):
         continue
     _LOCAL.update(f[:-3] for f in _files if f.endswith(".py"))
     if "__init__.py" in _files:
@@ -605,7 +928,15 @@ for _folder, _dirs, _files in _os.walk(ROOT):
 
 imported = {}
 for folder, _dirs, files in _os.walk(ROOT):
-    if any(skip in folder for skip in (".runtime", "__pycache__", ".git", "tests")):
+    # .claude holds editor settings and, while parallel work is going on,
+    # other branches' worktrees, whose imports are not this checkout's.
+    if any(skip in _os.path.relpath(folder, ROOT)
+           for skip in (".runtime", "__pycache__", ".git", "tests",
+                        ".claude", "node_modules", "mobile")):
+        continue
+    # The iPhone app's build tools (mobile/scripts: screenshots, icons) run on
+    # a developer's machine, never in the server's container.
+    if _os.path.relpath(folder, ROOT).split(_os.sep)[0] == "mobile":
         continue
     for fname in files:
         if not fname.endswith(".py"):
@@ -627,6 +958,15 @@ third_party = {n: w for n, w in imported.items()
                if n not in _STDLIB and n not in _LOCAL}
 check("the scan found the imports at all", len(third_party) >= 5)
 for name, where in sorted(third_party.items()):
+    host = _COMES_WITH.get(name.lower())
+    if host:
+        brought = {r.split(";")[0].replace(" ", "").split("<")[0].split(">")[0]
+                   .split("=")[0].split("!")[0].split("~")[0].lower()
+                   for r in (_md.requires(host) or [])}
+        check("%s comes with %s, which is in requirements.txt" % (name, host),
+              host in req_names and name.lower() in brought,
+              "imported by %s" % ", ".join(sorted(where)[:3]))
+        continue
     check("%s is in requirements.txt" % name,
           _ALIAS.get(name.lower(), name.lower()) in req_names,
           "imported by %s" % ", ".join(sorted(where)[:3]))

@@ -15,7 +15,9 @@ service to deliver anything:
 
 Sending is limited per address and per network address. A code request
 costs real money for a text message, and an open form that sends texts on
-demand is exactly what SMS-pumping fraud looks for.
+demand is exactly what SMS-pumping fraud looks for. Wrong guesses are capped
+per address per day, across all the codes it was sent, and the record of a
+request is deleted after a month.
 """
 from __future__ import annotations
 
@@ -33,6 +35,12 @@ from typing import Dict, Optional, Tuple
 
 CODE_TTL = 10 * 60
 MAX_ATTEMPTS = 5
+# Wrong codes one address may have typed in a day, across every code sent to
+# it. Five tries a code and a fresh code every few minutes otherwise add up to
+# more than a thousand guesses a day at one inbox.
+WRONG_PER_DAY = 20
+# Code requests are kept this long for the limits here, then deleted.
+KEEP_DAYS = 30
 # Per address: enough to cover a code that went to spam and a retry.
 PER_TARGET = (3, 15 * 60)
 # Per network address: enough for a household, too few to farm.
@@ -90,6 +98,29 @@ def clean_email(raw: str) -> str:
     return email
 
 
+# Providers that deliver an address with dots in its name to the same inbox
+# as the one without them, mapped to their main domain.
+_DOTLESS = {"gmail.com": "gmail.com", "googlemail.com": "gmail.com"}
+
+
+def inbox_of(email: str) -> str:
+    """The inbox an address delivers to, for telling one person's aliases apart.
+
+    Most providers deliver name+anything@ to name@, and Gmail also ignores
+    dots, so me+1@gmail.com and m.e@gmail.com reach the inbox of me@gmail.com.
+    The address itself is still what an account is known by.
+    """
+    email = (email or "").strip().lower()
+    local, _, domain = email.rpartition("@")
+    if not local:
+        return email
+    local = local.split("+", 1)[0]
+    if domain in _DOTLESS:
+        domain = _DOTLESS[domain]
+        local = local.replace(".", "")
+    return "%s@%s" % (local, domain)
+
+
 def clean_phone(raw: str) -> str:
     """To E.164: a plus, a country code, and the number, nothing else."""
     digits = re.sub(r"[\s().-]", "", raw or "")
@@ -127,6 +158,27 @@ def _check_limits(conn, target: str, ip: str) -> None:
                         "Try again in an hour.")
 
 
+def _check_guesses(conn, channel: str, target: str) -> None:
+    """Refuse an address once it has had too many wrong codes in a day.
+
+    Counted across codes, because a limit on each code alone is reset by
+    asking for a new one.
+    """
+    since = int(time.time()) - 24 * 60 * 60
+    wrong = conn.execute(
+        "SELECT COALESCE(SUM(attempts), 0) FROM login_codes WHERE channel=? "
+        "AND target=? AND created_ts>=?", (channel, target, since)).fetchone()[0]
+    if wrong >= WRONG_PER_DAY:
+        raise CodeError("Too many wrong codes have been typed for this sign-in "
+                        "today. Try again tomorrow, or use Google.")
+
+
+def _forget_old(conn) -> None:
+    """Delete code requests once no limit needs them any more."""
+    conn.execute("DELETE FROM login_codes WHERE created_ts < ?",
+                 (int(time.time()) - KEEP_DAYS * 24 * 60 * 60,))
+
+
 # --- email ---------------------------------------------------------------------
 
 def _hash(secret: bytes, target: str, code: str) -> str:
@@ -139,6 +191,8 @@ def send_email_code(conn, email: str, ip: str, secret: bytes,
     """Make a code, store its hash, and email it. Raises CodeError."""
     ensure_schema(conn)
     _check_limits(conn, email, ip)
+    _check_guesses(conn, "email", email)
+    _forget_old(conn)
     code = "%06d" % secrets.randbelow(10 ** 6)
     now = int(time.time())
     conn.execute(
@@ -186,6 +240,7 @@ def send_mail(to: str, subject: str, body: str,
 def check_email_code(conn, email: str, code: str, secret: bytes) -> None:
     """Accept or refuse a code. Raises CodeError; returns nothing on success."""
     ensure_schema(conn)
+    _check_guesses(conn, "email", email)
     code = re.sub(r"\D", "", code or "")
     row = conn.execute(
         "SELECT * FROM login_codes WHERE channel='email' AND target=? AND used=0 "
@@ -228,6 +283,8 @@ def _twilio(path: str, data: dict) -> dict:
 def send_phone_code(conn, phone: str, ip: str, poster=None) -> None:
     ensure_schema(conn)
     _check_limits(conn, phone, ip)
+    _check_guesses(conn, "phone", phone)
+    _forget_old(conn)
     if _recent(conn, "channel", "phone", 60 * 60) >= PHONE_PER_HOUR:
         raise CodeError("Sign-in by text is busy right now. Use email or "
                         "Google, or try again later.")
@@ -242,6 +299,7 @@ def send_phone_code(conn, phone: str, ip: str, poster=None) -> None:
 
 def check_phone_code(conn, phone: str, code: str, poster=None) -> None:
     ensure_schema(conn)
+    _check_guesses(conn, "phone", phone)
     code = re.sub(r"\D", "", code or "")
     row = conn.execute(
         "SELECT * FROM login_codes WHERE channel='phone' AND target=? AND used=0 "

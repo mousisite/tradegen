@@ -11,6 +11,7 @@ says nothing about that.
 from __future__ import annotations
 
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -19,7 +20,274 @@ import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
-from .market import DataError, fetch_bars
+from .market import DataError, fetch_bars, split_factor_since, split_words
+
+
+@dataclass
+class Trail:
+    """A trailing stop: how far behind the best price since opening it sits.
+
+    Either a share of that price (pct, 0.05 for 5%) or a fixed distance in the
+    trade's own shares (distance). An ATR trail is a distance: the multiple of
+    the ATR measured when the trail was set, kept as it was then, so a jump in
+    volatility later cannot widen it and loosen the stop. since is when it was
+    set: the trailed level counts on bars that started after that. best and
+    best_at are the best price seen since opening as last stored, so a reader
+    whose bars start later than the trade still trails from it. hit_at,
+    hit_price and hit_stop are the first crossing of the stop any reader saw,
+    as stored, so a crossing seen live still counts once that bar is done.
+    """
+    pct: Optional[float] = None
+    distance: Optional[float] = None
+    atr: Optional[float] = None          # the ATR multiple a distance came from
+    since: int = 0
+    best: Optional[float] = None
+    best_at: Optional[int] = None
+    hit_at: Optional[int] = None
+    hit_price: Optional[float] = None
+    hit_stop: Optional[float] = None
+
+    def level(self, direction: int, best: float) -> float:
+        """Where the trail puts the stop, given the best price so far."""
+        if self.pct is not None:
+            return best * (1.0 - self.pct) if direction > 0 else best * (1.0 + self.pct)
+        return best - self.distance if direction > 0 else best + self.distance
+
+    def words(self) -> str:
+        """The trail as people say it: "5%" or "2 ATR (3.10)"."""
+        if self.pct is not None:
+            return "%g%%" % round(self.pct * 100, 4)
+        if self.atr:
+            return "%g ATR (%s)" % (round(self.atr, 4), _px(self.distance))
+        return _px(self.distance)
+
+
+def trail_of(row) -> Optional[Trail]:
+    """The trail kept on a journal row, or None when it has none.
+
+    A row from before trails existed, or a stand-in in a test, has no such
+    columns, and reads as a trade that does not trail.
+    """
+    def get(key):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return None
+
+    pct, distance = get("trail_pct"), get("trail_dist")
+    if not pct and not distance:
+        return None
+    best = get("trail_best")
+    hit, hit_price, hit_stop = get("trail_hit_ts"), get("trail_hit_price"), get("trail_hit_stop")
+    if hit_price is None or hit_stop is None:
+        hit = None
+    return Trail(pct=float(pct) if pct else None,
+                 distance=None if pct else float(distance),
+                 atr=float(get("trail_atr")) if get("trail_atr") else None,
+                 since=int(get("trail_ts") or get("ts_opened") or 0),
+                 best=float(best) if best is not None else None,
+                 best_at=int(get("trail_best_ts")) if get("trail_best_ts") is not None else None,
+                 hit_at=int(hit) if hit is not None else None,
+                 hit_price=float(hit_price) if hit is not None else None,
+                 hit_stop=float(hit_stop) if hit is not None else None)
+
+
+@dataclass
+class StopRead:
+    """A position's stop as the journal reads it: where it is, and whether it was hit.
+
+    Every price is in the shares the trade was opened with.
+    """
+    stop: float                          # the stop in force now
+    initial: float                       # the stop the trade was opened with
+    price: float                         # today's price
+    best: float                          # best price since opening: the high of a long, the low of a short
+    best_at: Optional[int] = None
+    trail: Optional[Trail] = None
+    touched_at: Optional[int] = None     # the first bar that reached the stop in force then
+    touched: Optional[float] = None      # the price that reached it
+    touched_stop: Optional[float] = None
+    past: bool = False                   # today's price is at or past the stop in force now
+
+    @property
+    def hit(self) -> bool:
+        """Past the stop now, or traded through it since opening: the plan said get out."""
+        return self.past or self.touched_at is not None
+
+    @property
+    def moved(self) -> bool:
+        """Whether the trail has tightened the stop from where it started."""
+        return abs(self.stop - self.initial) > 1e-12 * max(1.0, abs(self.initial))
+
+    def crossing(self, now: float):
+        """The crossing this read saw, as (when, price, stop) to keep, or None.
+
+        The first bar that reached the stop, or else today's price past it,
+        at now. A reader of a trailing stop keeps it (database.trail_crossed).
+        """
+        if self.touched_at is not None:
+            return self.touched_at, self.touched, self.touched_stop
+        if self.past:
+            return int(now), self.price, self.stop
+        return None
+
+
+def _tighter(direction: int, a: float, b: float) -> float:
+    """Of two stops, the one nearer the price: the higher for a long."""
+    return max(a, b) if direction > 0 else min(a, b)
+
+
+def _walk(bars, direction: int, entry: float, stop: float, opened: int,
+          split: float = 1.0, trail: Optional[Trail] = None):
+    """Read the bars since opening by the stop rule. Prices in the trade's shares.
+
+    Returns (touched_at, touched, touched_stop, best, best_at). The bar the
+    position opened in is left out: part of its range may have traded before
+    the entry, and a low from before you bought is not your stop being hit,
+    nor a high you could have trailed from. Each bar is held to the stop in
+    force when it started, from the best price of the bars before it, because
+    a bar's high and low do not say which came first. The forming bar is not
+    in the bars at all, so today's touch shows up through the live price.
+    """
+    times = getattr(bars, "timestamp", None)
+    best, best_at = float(entry), int(opened)
+    if times is None:
+        return None, None, None, best, best_at
+    kept = trail.best if trail is not None else None
+    for k in range(len(times)):
+        start = int(times[k])
+        if start <= opened:
+            continue
+        if (kept is not None and trail.best_at is not None and trail.best_at < start
+                and (kept - best) * direction > 0):
+            best, best_at = kept, int(trail.best_at)
+        level = stop
+        if trail is not None and start > trail.since:
+            level = _tighter(direction, stop, trail.level(direction, best))
+        low, high = float(bars.low[k]) * split, float(bars.high[k]) * split
+        if direction > 0 and low <= level:
+            return start, low, level, best, best_at
+        if direction < 0 and high >= level:
+            return start, high, level, best, best_at
+        far = high if direction > 0 else low
+        if far == far and (far - best) * direction > 0:
+            best, best_at = far, start
+    return None, None, None, best, best_at
+
+
+def read_stop(bars, direction: int, entry: float, stop: float, opened: int,
+              split: float = 1.0, trail: Optional[Trail] = None,
+              now: Optional[int] = None) -> StopRead:
+    """The one stop rule. The portfolio, the journal, paper.py and the
+    background stop notice all read a position through this, so they agree.
+
+    entry, stop and the result are in the shares the trade was opened with;
+    the bars are in today's, and split (shares today per share then) turns
+    them back. Without a trail the stop is the one logged. With one, the stop
+    in force is the tighter of that and the trail behind the best price since
+    opening: for a long, max(stop, best high - trail); for a short, the
+    mirror. The best only ever improves, so the stop only ever tightens. A
+    trail set after opening trails from the best since opening too, but a
+    bar from before it was set is held only to the logged stop. A crossing
+    of a trailing stop that a reader saw and kept (Trail.hit_at) counts as
+    one: seen live, it is not in that bar's own reading once the bar is done.
+    """
+    direction = 1 if direction > 0 else -1
+    touched_at, touched, touched_stop, best, best_at = _walk(
+        bars, direction, entry, stop, opened, split, trail)
+    if (trail is not None and trail.hit_at is not None
+            and (touched_at is None or trail.hit_at < touched_at)):
+        touched_at, touched, touched_stop = trail.hit_at, trail.hit_price, trail.hit_stop
+    price = float(bars.last_price) * split
+    if trail is not None and trail.best is not None and (trail.best - best) * direction > 0:
+        best = trail.best
+        best_at = trail.best_at if trail.best_at is not None else best_at
+    if (price - best) * direction > 0:
+        best, best_at = price, int(now if now is not None else time.time())
+    held = stop if trail is None else _tighter(direction, stop, trail.level(direction, best))
+    return StopRead(stop=held, initial=float(stop), price=price, best=best,
+                    best_at=best_at, trail=trail, touched_at=touched_at,
+                    touched=touched, touched_stop=touched_stop,
+                    past=(price - held) * direction <= 0)
+
+
+def read_trade_stop(row, bars, split: float = 1.0) -> StopRead:
+    """read_stop for a journal row, with whatever trail is kept on it."""
+    return read_stop(bars, int(row["direction"]), float(row["entry"]), float(row["stop"]),
+                     int(row["ts_opened"]), split, trail_of(row))
+
+
+def trade_interval(row) -> str:
+    """The bars a journal trade is read on: its own bar size, daily when it has none.
+
+    Every reader of its stop reads the same bars, so a stop crossed and
+    recovered inside an hourly trade's day is a crossing to all of them.
+    """
+    try:
+        return row["interval"] or "1d"
+    except (KeyError, IndexError):
+        return "1d"
+
+
+def atr_of(bars, n: int = 14) -> Optional[float]:
+    """The bars' latest ATR, in their own prices, or None when it cannot be measured."""
+    from .indicators import atr
+    try:
+        values = atr(np.asarray(bars.high, dtype=float), np.asarray(bars.low, dtype=float),
+                     np.asarray(bars.close, dtype=float), n)
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
+    finite = values[np.isfinite(values)]
+    return float(finite[-1]) if len(finite) and finite[-1] > 0 else None
+
+
+def trail_from(row, bars, split: float = 1.0, pct: Optional[float] = None,
+               atr: Optional[float] = None, now: Optional[int] = None):
+    """A trail for a journal row as it would be set now: (trail, before, after).
+
+    pct is a share of the best price (0.05 for 5%); atr a multiple of the ATR
+    of the trade's own bars, measured now and kept as a distance in the
+    trade's own shares. before reads the position as it stands and after
+    with the new trail, for trail_problem. Raises ValueError, in words, when
+    the ATR cannot be measured.
+    """
+    now = int(now if now is not None else time.time())
+    before = read_trade_stop(row, bars, split)
+    distance = None
+    if atr is not None:
+        unit = atr_of(bars)
+        if unit is None:
+            raise ValueError("There is not enough price history to measure %s's ATR "
+                             "just now. Trail it by a percentage instead." % row["symbol"])
+        distance = float(atr) * unit * split
+    trail = Trail(pct=pct, distance=distance, atr=atr if distance else None, since=now,
+                  best=before.best, best_at=before.best_at)
+    after = read_stop(bars, int(row["direction"]), float(row["entry"]), float(row["stop"]),
+                      int(row["ts_opened"]), split, trail, now=now)
+    return trail, before, after
+
+
+def trail_problem(symbol: str, direction: int, before: StopRead,
+                  after: StopRead) -> Optional[str]:
+    """Why a new trail cannot be set, or None. A stop only ever tightens.
+
+    before is the position read as it stands, after with the new trail. A
+    position already past its stop is not given a new one: the journal counts
+    the stop as hit, and moving it would hide that. A trail that would put
+    the stop past today's price, or loosen one already trailing, is refused.
+    """
+    if before.hit:
+        return ("%s is already past its stop, so the journal counts the stop as hit. "
+                "Close it rather than move the stop." % symbol)
+    if after.past:
+        return ("That trail would put the stop at %s, past today's price of %s, so the "
+                "position would be stopped at once. Choose a wider trail."
+                % (_px(after.stop), _px(after.price)))
+    if _tighter(direction, before.stop, after.stop) != after.stop:
+        return ("That trail would move the stop from %s back to %s. A trailing stop only "
+                "tightens: choose a narrower trail, or keep the one it has."
+                % (_px(before.stop), _px(after.stop)))
+    return None
 
 
 @dataclass
@@ -40,13 +308,39 @@ class Position:
     open_pnl: float = 0.0
     open_r: Optional[float] = None
     risk_remaining: float = 0.0
+    planned_risk: float = 0.0
+    exit_cost: float = 0.0
+    breached: bool = False
+    touched: Optional[float] = None       # the price that crossed the stop since opening
+    touched_at: Optional[int] = None
+    touched_stop: Optional[float] = None  # the stop in force when it was crossed
+    beta_assumed: bool = False
     status: str = "open"
     beta: Optional[float] = None
     volatility: Optional[float] = None
+    # Shares today per share the day it opened: 10.0 after a ten-for-one.
+    split: float = 1.0
+    # The stop it was opened with. stop above is the one in force, which a
+    # trail moves; R is always measured from this one, the plan's.
+    initial_stop: Optional[float] = None
+    trail: Optional[Trail] = None
+    # The trade's own bar size, which its stop is read on (trade_interval).
+    interval: str = "1d"
 
     @property
     def risk_per_unit(self) -> float:
-        return abs(self.entry - self.stop)
+        return abs(self.entry - (self.initial_stop if self.initial_stop is not None
+                                 else self.stop))
+
+    @property
+    def stop_valid(self) -> bool:
+        """A stop at the entry measures nothing, so R cannot be worked out."""
+        return self.risk_per_unit > 0
+
+    @property
+    def sized(self) -> bool:
+        """Whether a size was logged. Without one, cash figures are unknown."""
+        return self.quantity > 0
 
 
 @dataclass
@@ -57,6 +351,10 @@ class PortfolioView:
     cash: float = 0.0
     open_pnl: float = 0.0
     total_risk: float = 0.0
+    planned_risk: float = 0.0
+    exit_costs: float = 0.0
+    breached: List[Position] = field(default_factory=list)
+    breached_pnl: float = 0.0
     gross_exposure: float = 0.0
     net_exposure: float = 0.0
     by_sector: Dict[str, float] = field(default_factory=dict)
@@ -69,8 +367,64 @@ class PortfolioView:
     failed: List[str] = field(default_factory=list)
 
 
-def build(rows, account: float, with_correlation: bool = True) -> PortfolioView:
-    """Mark open positions to market and describe the resulting exposure."""
+def stop_touched(bars, opened: int, stop: float, direction: int):
+    """The first bar after opening whose range reached the stop: (time, price).
+
+    read_stop's rule for a stop that does not trail, in the bars' own prices.
+    The bar the position opened in is left out: part of its range may have
+    traded before the entry, and a low from before you bought is not your
+    stop being hit. The forming bar is not in the bars at all, so today's
+    touch shows up through the live price instead.
+    """
+    touched_at, touched, _stop, _best, _at = _walk(bars, 1 if direction > 0 else -1,
+                                                   stop, stop, opened)
+    return touched_at, touched
+
+
+def mark(p: Position, cost_bps: float = 0.0) -> None:
+    """Mark one priced position: P&L, R, and what is still at risk.
+
+    Three risk figures, because they answer different questions:
+      planned_risk    what the plan put at risk on day one, entry to stop.
+      risk_remaining  what a stop hit from today's price would still cost,
+                      at the stop in force now, which a trail may have moved.
+      breached        the price is already past the stop. A stop in the
+                      journal is a plan, not an order: unless one was placed
+                      with a broker, the position is still open and the loss
+                      is whatever the price says, not "nothing left at risk".
+    exit_cost is the trading cost of getting out, from the cost settings, so a
+    stop hit costs what it would really cost. quantity is what is still held,
+    so a position closed in part counts only the part still open.
+    """
+    p.notional = p.price * p.quantity
+    p.open_pnl = (p.price - p.entry) * p.direction * p.quantity
+    p.open_r = ((p.price - p.entry) * p.direction / p.risk_per_unit
+                if p.stop_valid else None)
+    # Positive when the stop sits below a long's entry (or above a short's).
+    # Zero when it has been moved past the entry to lock in a profit.
+    planned = p.initial_stop if p.initial_stop is not None else p.stop
+    p.planned_risk = max(0.0, (p.entry - planned) * p.direction) * p.quantity
+    p.exit_cost = abs(p.notional) * cost_bps / 10000.0 / 2.0
+    p.breached = (p.price - p.stop) * p.direction <= 0 or p.touched is not None
+    if p.breached:
+        p.status = "stop_breached"
+        p.risk_remaining = 0.0
+    else:
+        # Distance from here to the stop, not from the entry: a position in
+        # profit with a trailed stop risks less than it did on day one.
+        p.risk_remaining = (p.price - p.stop) * p.direction * p.quantity
+
+
+def build(rows, account: float, with_correlation: bool = True,
+          cost_bps: Optional[Dict[str, float]] = None) -> PortfolioView:
+    """Mark open positions to market and describe the resulting exposure.
+
+    rows are open journal trades with quantity set to what is still held
+    (database.open_positions), so a position closed in part counts only the
+    part still open. cost_bps maps an asset class ("equity", "crypto", other)
+    to its round-trip cost in basis points; half of it is charged to get out
+    of each position.
+    """
     view = PortfolioView(account=account)
     if not rows:
         view.cash = account
@@ -82,55 +436,61 @@ def build(rows, account: float, with_correlation: bool = True) -> PortfolioView:
                  direction=int(r["direction"]), quantity=float(r["quantity"] or 0),
                  entry=float(r["entry"]), stop=float(r["stop"]),
                  target=float(r["target1"]) if r["target1"] else None,
-                 opened=int(r["ts_opened"]))
+                 opened=int(r["ts_opened"]), initial_stop=float(r["stop"]),
+                 trail=trail_of(r), interval=trade_interval(r))
         for r in rows
     ]
 
     _enrich(positions, view)
+    for p in positions:
+        if p.split != 1.0:
+            view.observations.append(
+                "%s split %s since it was opened. Its prices here are in the "
+                "shares you opened with: today's quote times %g."
+                % (p.symbol, split_words(p.split), p.split))
 
+    costs = cost_bps or {}
     for p in positions:
         if p.price is None:
             continue
-        p.notional = p.price * p.quantity
-        p.open_pnl = (p.price - p.entry) * p.direction * p.quantity
-        if p.risk_per_unit > 0:
-            p.open_r = (p.price - p.entry) * p.direction / p.risk_per_unit
-        # Risk still on the table: distance from here to the stop, not from
-        # the entry. A position in profit with a stop below entry risks less
-        # than it did on day one, and a naive sum would overstate the danger.
-        if p.direction > 0:
-            remaining = max(0.0, p.price - p.stop)
-        else:
-            remaining = max(0.0, p.stop - p.price)
-        p.risk_remaining = remaining * p.quantity
+        mark(p, costs.get(p.asset_class, costs.get("other", 0.0)))
 
+    # Positions with no price are left out of every sum, and so are positions
+    # logged without a size, whose cash figures cannot be known.
     priced = [p for p in positions if p.price is not None]
+    sized = [p for p in priced if p.sized]
     view.positions = positions
-    view.invested = sum(p.notional for p in priced)
-    view.open_pnl = sum(p.open_pnl for p in priced)
-    view.total_risk = sum(p.risk_remaining for p in priced)
-    view.gross_exposure = sum(abs(p.notional) for p in priced)
-    view.net_exposure = sum(p.notional * p.direction for p in priced)
-    view.cash = max(0.0, account - view.invested)
+    view.invested = sum(p.notional for p in sized)
+    view.open_pnl = sum(p.open_pnl for p in sized)
+    view.breached = [p for p in priced if p.breached]
+    view.breached_pnl = sum(p.open_pnl for p in view.breached if p.sized)
+    view.total_risk = sum(p.risk_remaining + p.exit_cost
+                          for p in sized if not p.breached)
+    view.planned_risk = sum(p.planned_risk for p in sized)
+    view.exit_costs = sum(p.exit_cost for p in sized)
+    view.gross_exposure = sum(abs(p.notional) for p in sized)
+    view.net_exposure = sum(p.notional * p.direction for p in sized)
+    # An unpriced holding still holds money: its entry cost stays out of cash.
+    unpriced_cost = sum(p.entry * p.quantity for p in positions
+                        if p.price is None and p.sized)
+    view.cash = max(0.0, account - view.invested - unpriced_cost)
 
-    for p in priced:
+    for p in sized:
         key = p.sector or ("Crypto" if p.asset_class == "crypto" else "Unclassified")
         view.by_sector[key] = view.by_sector.get(key, 0.0) + abs(p.notional)
         view.by_asset[p.asset_class or "unknown"] = \
             view.by_asset.get(p.asset_class or "unknown", 0.0) + abs(p.notional)
 
     if view.gross_exposure > 0:
-        # Herfindahl index: the sum of squared weights. 1.0 is everything in
-        # one name; 1/n is perfectly even. A far better concentration measure
-        # than "number of positions", which treats a 90% holding and a 1%
-        # holding as equals.
-        weights = [abs(p.notional) / view.gross_exposure for p in priced]
-        view.concentration = sum(w * w for w in weights)
+        # Herfindahl index over names, not journal rows: three entries in one
+        # stock are one position. 1.0 is everything in one name; 1/n is
+        # perfectly even.
+        view.concentration = sum(w * w for w in _name_weights(sized, view.gross_exposure).values())
 
-        betas = [(p.beta, abs(p.notional)) for p in priced if p.beta is not None]
+        # Signed: a short adds negative market exposure, not more of it.
+        betas = [(p.beta, p.notional * p.direction) for p in sized if p.beta is not None]
         if betas:
-            total = sum(w for _, w in betas)
-            view.portfolio_beta = sum(b * w for b, w in betas) / total if total else None
+            view.portfolio_beta = sum(b * w for b, w in betas) / view.gross_exposure
 
     if with_correlation and len({p.symbol for p in priced}) >= 2:
         try:
@@ -147,9 +507,24 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
     """Attach live price, sector and risk stats to each holding, concurrently."""
     def grab(p: Position):
         try:
-            bars = fetch_bars(p.symbol, "1d")
-            p.price = bars.last_price
+            # The trade's own bars, which the journal, paper.py and the stop
+            # notice read it on: on daily bars a whole day is held to the stop
+            # from before it, and an hourly trade's crossing inside it would
+            # not show. Beta and volatility below stay daily.
+            bars = fetch_bars(p.symbol, p.interval or "1d")
+            # The journal's prices are in the shares of the day it opened.
+            # After a split Yahoo quotes today's, ten times fewer dollars a
+            # share after a ten-for-one: read as is, a long looked 90% down and
+            # past its stop. The quote is turned back into those shares.
+            p.split = split_factor_since(p.symbol, p.opened, bars)
             p.asset_class = bars.asset_class
+            # The stop by the journal's own rule, trail and split included.
+            read = read_stop(bars, p.direction, p.entry,
+                             p.initial_stop if p.initial_stop is not None else p.stop,
+                             p.opened, p.split, p.trail)
+            p.price, p.stop = read.price, read.stop
+            p.touched_at, p.touched = read.touched_at, read.touched
+            p.touched_stop = read.touched_stop
         except (DataError, Exception):
             view.failed.append(p.symbol)
             return
@@ -161,7 +536,9 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
         except Exception:
             pass
         try:
-            prof = risk_mod.profile(p.symbol, "1d", benchmark="")
+            # Measured against SPY on shared trading days, so coins and ETFs,
+            # which Yahoo gives no beta for, get a real one instead of 1.0.
+            prof = risk_mod.profile(p.symbol, "1d")
             p.volatility = prof.volatility
             if p.beta is None:
                 p.beta = prof.beta
@@ -172,6 +549,14 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
         list(pool.map(grab, positions))
 
 
+def _name_weights(positions: List[Position], gross: float) -> Dict[str, float]:
+    """Each symbol's share of the gross exposure, adding up its journal rows."""
+    out: Dict[str, float] = {}
+    for p in positions:
+        out[p.symbol] = out.get(p.symbol, 0.0) + abs(p.notional) / gross
+    return out
+
+
 def _assess(view: PortfolioView, priced: List[Position]) -> None:
     """Say plainly what the exposure means."""
     if not priced:
@@ -179,17 +564,66 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         return
 
     account = view.account or 1.0
+    sized = [p for p in priced if p.sized]
 
     exposure_pct = view.gross_exposure / account * 100
+    count = len({p.symbol for p in priced})
     view.observations.append(
         "%.0f%% of the account is deployed across %d position%s, leaving %s in cash."
-        % (exposure_pct, len(priced), "" if len(priced) == 1 else "s",
+        % (exposure_pct, count, "" if count == 1 else "s",
            "{:,.0f}".format(view.cash)))
 
+    # Said first and loudest: a breached stop is the one thing on this page
+    # that needs doing today, and "nothing at risk" would hide it.
+    for p in view.breached:
+        kind = "trailing stop" if p.trail is not None else "stop"
+        if (p.price - p.stop) * p.direction > 0 and p.touched is not None:
+            crossed = p.touched_stop if p.touched_stop is not None else p.stop
+            where = ("traded through its %s of %s on %s (at %s) and is back at %s"
+                     % (kind, _px(crossed), _day(p.touched_at), _px(p.touched),
+                        _px(p.price)))
+        else:
+            where = "is at %s against a %s of %s" % (_px(p.price), kind, _px(p.stop))
+        if not p.sized:
+            result = "size not logged"
+        elif p.open_pnl < 0:
+            result = "open loss %s" % "{:,.0f}".format(-p.open_pnl)
+        else:
+            result = "open gain %s" % "{:,.0f}".format(p.open_pnl)
+        view.warnings.append(
+            "Stop breached on %s: it %s (%s, %s). The stop in the journal is a "
+            "plan, not an order, so unless you placed a stop order with your "
+            "broker this position is still open. Close it or set a new stop."
+            % (p.symbol, where, result,
+               "%.2fR" % p.open_r if p.open_r is not None else "R unknown"))
+        if p.open_r is not None and p.open_r < -1.05:
+            view.warnings.append(
+                "%s has lost more than its planned risk (%.2fR against 1R): the "
+                "stop was gapped through or not acted on." % (p.symbol, p.open_r))
+    for p in priced:
+        if not p.sized:
+            view.warnings.append(
+                "No size is logged for %s, so its cash risk and value are unknown "
+                "and it is left out of the totals." % p.symbol)
+
+    unbreached = [p for p in priced if not p.breached and p.sized]
     risk_pct = view.total_risk / account * 100
-    view.observations.append(
-        "If every stop were hit from here, the loss would be %s, or %.1f%% of the account."
-        % ("{:,.0f}".format(view.total_risk), risk_pct))
+    if unbreached:
+        view.observations.append(
+            "If every stop still ahead were hit from here, the positions above "
+            "their stops would lose a further %s, or %.1f%% of the account, "
+            "including about %s in trading costs to get out."
+            % ("{:,.0f}".format(view.total_risk), risk_pct,
+               "{:,.0f}".format(sum(p.exit_cost for p in unbreached))))
+    if view.planned_risk:
+        view.observations.append(
+            "The plans put %s at risk on what is still open, entry to the stop "
+            "each position was opened with." % "{:,.0f}".format(view.planned_risk))
+    for p in priced:
+        if not p.stop_valid:
+            view.warnings.append(
+                "%s has its stop at the entry price, so its risk cannot be "
+                "measured. Set a real stop in the journal." % p.symbol)
     if risk_pct > 6:
         view.warnings.append(
             "Total open risk is %.1f%% of the account. A correlated bad week "
@@ -201,16 +635,16 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
             "Concentration is equivalent to %.1f equally sized positions."
             % effective)
         if view.concentration > 0.5:
-            biggest = max(priced, key=lambda p: abs(p.notional))
+            weights = _name_weights(sized, view.gross_exposure)
+            biggest = max(weights, key=weights.get)
             view.warnings.append(
                 "This is effectively a single-position portfolio. %s alone is "
-                "%.0f%% of the exposure." % (
-                    biggest.symbol, abs(biggest.notional) / view.gross_exposure * 100))
+                "%.0f%% of the exposure." % (biggest, weights[biggest] * 100))
 
     if view.by_sector:
         top_sector, amount = max(view.by_sector.items(), key=lambda kv: kv[1])
         share = amount / view.gross_exposure * 100 if view.gross_exposure else 0
-        if share > 50 and len(view.by_sector) > 1:
+        if share > 50 and top_sector != "Unclassified":
             view.warnings.append(
                 "%.0f%% of the exposure is in %s. A sector-wide move decides "
                 "the whole result." % (share, top_sector))
@@ -237,20 +671,29 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     if view.net_exposure < 0 and view.gross_exposure > 0:
         view.observations.append("Net exposure is short.")
 
-    for p in priced:
-        if abs(p.notional) / account > 0.35:
+    names: Dict[str, float] = {}
+    for p in sized:
+        names[p.symbol] = names.get(p.symbol, 0.0) + abs(p.notional)
+    for symbol, amount in names.items():
+        if amount / account > 0.35:
             view.warnings.append(
                 "%s is %.0f%% of the account on its own."
-                % (p.symbol, abs(p.notional) / account * 100))
-        if p.open_r is not None and p.open_r < -0.9:
-            view.warnings.append(
-                "%s is at or past its stop, showing %.2fR. It should already "
-                "be closed." % (p.symbol, p.open_r))
+                % (symbol, amount / account * 100))
 
     if view.failed:
         view.warnings.append(
             "No price available for %s, so those holdings are excluded from "
             "every figure above." % ", ".join(sorted(set(view.failed))))
+
+
+def _px(value: float) -> str:
+    from .market import format_price
+    return format_price(value)
+
+
+def _day(ts: Optional[int]) -> str:
+    import time
+    return time.strftime("%d %b", time.gmtime(int(ts))).lstrip("0") if ts else "a recent day"
 
 
 def what_if(view: PortfolioView, shock_pct: float) -> Dict:
@@ -262,14 +705,16 @@ def what_if(view: PortfolioView, shock_pct: float) -> Dict:
     total = 0.0
     rows = []
     for p in view.positions:
-        if p.price is None:
+        if p.price is None or not p.sized:
             continue
+        # Without a measured beta the market's own move is assumed, and the
+        # row says so rather than presenting 1.0 as a measurement.
         beta = p.beta if p.beta is not None else 1.0
         move = shock_pct * beta
         change = p.notional * move * (1 if p.direction > 0 else -1)
         total += change
         rows.append({"symbol": p.symbol, "beta": beta, "change": change,
-                     "move_pct": move})
+                     "move_pct": move, "assumed": p.beta is None})
     rows.sort(key=lambda r: r["change"])
     return {
         "shock_pct": shock_pct,

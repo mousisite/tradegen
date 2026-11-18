@@ -1,6 +1,20 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
+{# A "?" beside each figure a newcomer may not know, worded in plain.HELP. #}
+{% from "_help.html" import help, help_list with context %}
 {% block title %}{{ r.bars.symbol }} · Orenth{% endblock %}
+{# The trade chart comes drawn twice. Shrunk to a phone, the wide drawing's
+   labels would be a few pixels tall, so a phone gets the narrow one: fewer
+   candles, drawn larger. #}
+{% block head_extra %}{% if chart and chart.wide %}<style>
+  .tradechart .chart { max-height: 380px; }
+  .tradechart .narrow { display: none; }
+  @media (max-width: 600px) {
+    .tradechart .wide { display: none; }
+    .tradechart .narrow { display: block; }
+    .tradechart .chart { max-height: none; }
+  }
+</style>{% endif %}{% endblock %}
 
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
@@ -24,7 +38,7 @@
 <div class="card" style="margin-bottom:var(--s3)">
   <div class="instrument">
     <div class="who">
-      <span class="sym">{{ r.bars.symbol }}</span>
+      <h1 class="sym">{{ r.bars.symbol }}</h1>
       <span class="name">{{ r.bars.name }}</span>
     </div>
     <div class="price">
@@ -40,16 +54,25 @@
     <span>last <b>{{ r.bars.last_bar_time }}</b></span>
     <span>{% if r.bars.market_open %}<b class="gain">market open</b>
           {% else %}market closed{% endif %}</span>
-    <span><b>{{ r.regime.describe() }}</b></span>
+    <div><b>{{ r.regime.describe() }}</b>{{ help('regime') }}</div>
     <span>{{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
+  {# A coin day the source left blank, rebuilt from the days either side
+     (market.py): its open and close are known, its range and volume are not. #}
+  {% set blank = blank_day(r.bars) %}
+  {% if blank %}
+    <p class="fine" style="margin:var(--s1) 0 0">The price source has not filled in
+      {{ blank|day }} yet. Its open and close are known, but its high, low and
+      volume are not, so readings that use volume can be off until it does,
+      usually within two hours.</p>
+  {% endif %}
 </div>
 
 {% set a = plan.action %}
 <div class="call {{ 'buy' if a == 'BUY' else 'sell' if a == 'SHORT'
                     else 'wait' if a == 'WAIT' else 'skip' }}">
   <span class="word">{{ a|capitalize }}</span>
-  <span class="line">{{ plan.headline }}</span>
+  <div class="line">{{ plan.headline }}{{ help('call') }}</div>
 </div>
 
 {% if plain %}
@@ -64,6 +87,8 @@
   {% if plain.hold %}<p class="prose">{{ plain.hold }}</p>{% endif %}
   <p class="prose faint" style="font-size:var(--t-xs)">
     Everything below this box is the same answer with the workings shown.
+    <a href="{{ url_for('backtests') }}#how-we-tested">How the strategies are tested</a> ·
+    <a href="{{ url_for('record') }}">How past calls turned out</a>
   </p>
 </div>
 {% endif %}
@@ -76,6 +101,7 @@
         data-working-note="Freezing this call with today's date and drawing its picture.">
     <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
     <input type="hidden" name="interval" value="{{ r.bars.interval }}">
+    {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
     <button class="btn quiet" type="submit">Share this call</button>
   </form>
 {% elif popular_url %}
@@ -89,28 +115,36 @@
     <dl class="pairs">
       <dt>Entry</dt>
       <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
-          <span class="faint">{{ plan.entry_type }}</span></dd>
-      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}</dd>
-      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}</dd>
-      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}</dd>
+          <span class="faint">{{ plan.entry_type }}</span>{{ help('entry') }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}{{ help('stop') }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}{{ help('target') }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}{{ help('runner') }}</dd>
       <dt>Reward to risk</dt>
+      {# The break-even belongs to the trade the odds were measured on. When
+         this plan's own levels give a different reward, pairing the two
+         would quote one trade's odds for another. #}
+      {% set tested_rr = plan.tested_reward_risk %}
       <dd><span class="fig">{{ "%.2f"|format(plan.reward_risk or 0) }}&thinsp;:&thinsp;1</span>
-          <span class="faint">needs {{ plan.breakeven_rate|pct }}</span></dd>
+          {% if tested_rr and plan.reward_risk and ((plan.reward_risk / tested_rr) - 1)|abs > 0.1 %}
+          <span class="faint">odds below measured at {{ "%.2f"|format(tested_rr) }}&thinsp;:&thinsp;1</span>
+          {% else %}
+          <span class="faint">needs {{ plan.breakeven_rate|pct }}</span>
+          {% endif %}{{ help('reward_risk') }}</dd>
       {% if plan.position and not plan.position.error %}
       <dt>Size</dt>
       <dd><span class="fig">{{ plan.position.quantity }}</span> units
-          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span></dd>
+          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span>{{ help('size') }}</dd>
       <dt>You risk</dt>
       <dd><span class="fig">{{ plan.position.risk_amount|money }}</span>
-          <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span></dd>
+          <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span>{{ help('risk') }}</dd>
       {% if plan.position.gap_loss %}
       <dt>If it gaps</dt>
       <dd><span class="fig {{ 'loss' if (plan.position.gap_multiple or 0) > 2 else '' }}">{{ plan.position.gap_loss|money }}</span>
           <span class="faint">{{ "%.2f"|format(plan.position.gap_pct_of_account) }}% of account,
-            {{ "%.1f"|format(plan.position.gap_multiple) }}&times; the budget</span></dd>
+            {{ "%.1f"|format(plan.position.gap_multiple) }}&times; the budget</span>{{ help('gap') }}</dd>
       {% endif %}
       {% elif plan.position.error %}
-      <dt>Size</dt><dd class="loss">{{ plan.position.error }}</dd>
+      <dt>Size</dt><dd class="loss">{{ plan.position.error }}{{ help('size') }}</dd>
       {% endif %}
     </dl>
   </div>
@@ -129,43 +163,88 @@
         {{ plan.position.risk_amount|money }} budgeted. Position sizing that
         only counts the stop understates what a bad morning does.</p>
     {% endif %}
-    {% if r.run_id %}
-      <form action="{{ url_for('take_trade') }}" method="post" style="margin-top:var(--s3)">
-        <input type="hidden" name="run_id" value="{{ r.run_id }}">
-        <button class="btn quiet sm" type="submit">Log this as a paper trade</button>
-      </form>
+    {# Only a call to act now is a trade. A wait has not filled, and logging it
+       would put a price the market never reached into the journal. The button
+       opens a review of the trade first; nothing is written until it is
+       confirmed there. #}
+    {% if r.run_id and a in ('BUY', 'SHORT') %}
+      <div style="margin-top:var(--s3)">
+        <a class="btn quiet sm" href="{{ url_for('simulate_trade', run_id=r.run_id) }}">Log this as a paper trade</a>
+      </div>
+    {% elif r.run_id and a == 'WAIT' %}
+      <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
+        A wait is not a trade yet, so there is nothing to log. To hear when the
+        price reaches {{ plan.entry|price }}, set the entry alert further down.</p>
     {% endif %}
   </div>
 </div>
 {% endif %}
 
-<section>
+{% if chart and chart.wide %}
+<section class="tradechart" style="margin-top:var(--s4)">
   <div class="sechead">
-    <h2>The odds, measured</h2>
-    <span class="tail">from this instrument's own history</span>
+    <h2>{{ 'The plan on the chart' if chart.levels else 'The price' }}</h2>
+    <span class="tail">as of {{ chart.as_of or 'an unknown time' }}</span>
   </div>
   <div class="card">
+    <div class="wide">{{ chart.wide|safe }}</div>
+    <div class="narrow">{{ chart.narrow|safe }}</div>
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+      {{ chart.words|capitalize }} candles, the newest on the right, with the
+      volume traded underneath. The dot is the latest price.
+      {% if chart.levels and a == 'WAIT' %}The dashed lines are this plan's
+        entry, a price not reached yet, and its stop and target.
+      {% elif chart.levels %}The dashed lines are this plan's entry, stop and
+        target.{% else %}No plan is drawn: the call is to stand aside.{% endif %}
+      {% if chart.intraday %}Times are UTC.{% endif %}
+      Point at a candle to see its prices.</p>
+  </div>
+</section>
+{% endif %}
+
+<section>
+  {% set odds_side = plan.odds_direction or calib.direction or 0 %}
+  {% set side_word = 'long' if odds_side > 0 else 'short' if odds_side < 0 else '' %}
+  <div class="sechead">
+    <h2>The odds, measured</h2>
+    <span class="tail">from this instrument's own history{% if side_word %}, {{ side_word }} trades only{% endif %}</span>
+  </div>
+  <div class="card">
+    {# A call takes one side, so its odds are that side's record. When the
+       signals lean down and the call is not a short, that record is of
+       betting on a fall, and has to say so where the numbers are. #}
+    {% if odds_side < 0 and a != 'SHORT' and not (a == 'WAIT' and plan.direction < 0) %}
+      <p class="prose"><b>These odds are for the price falling.</b> The signals
+        lean down, so the record below is of past bets on a fall here, not of
+        buying.</p>
+    {% endif %}
     {% if plan.probability is not none %}
     <div class="figs" style="margin-bottom:var(--s3)">
-      <div class="f"><div class="k">Reached target first</div>
+      <div class="f"><div class="k">Reached target first{{ help('hit_rate') }}</div>
         <div class="v fig">{{ plan.probability|pct }}</div>
-        <div class="n">95% range {{ plan.prob_low|pct }}–{{ plan.prob_high|pct }}</div></div>
-      <div class="f"><div class="k">Expectancy</div>
+        <div class="n">95% range {{ plan.prob_low|pct }}–{{ plan.prob_high|pct }}{{ help('range') }}</div></div>
+      <div class="f"><div class="k">Expectancy{{ help('expectancy') }}</div>
         <div class="v fig {{ 'gain' if (plan.expectancy_r or 0) > 0 else 'loss' }}">
           {{ plan.expectancy_r|signed(3) }}R</div>
         <div class="n">per trade, after costs</div></div>
-      <div class="f"><div class="k">Needs</div>
+      {% if plan.baseline_expectancy is not none %}
+      <div class="f"><div class="k">{{ 'Shorting' if odds_side < 0 else 'Buying' }} any day{{ help('baseline') }}</div>
+        <div class="v fig {{ 'gain' if plan.baseline_expectancy > 0 else 'loss' }}">
+          {{ plan.baseline_expectancy|signed(3) }}R</div>
+        <div class="n">same trade, no signal</div></div>
+      {% endif %}
+      <div class="f"><div class="k">Needs{{ help('breakeven') }}</div>
         <div class="v fig">{{ (plan.breakeven_rate or calib.breakeven)|pct }}</div>
         <div class="n">to break even</div></div>
-      <div class="f"><div class="k">Sample</div>
+      <div class="f"><div class="k">Sample{{ help('sample') }}</div>
         <div class="v fig">{{ plan.prob_samples }}</div>
         <div class="n">{{ 'similar setups' if plan.prob_reliable else 'too few to trust' }}</div></div>
-      <div class="f"><div class="k">Typical hold</div>
+      <div class="f"><div class="k">Typical hold{{ help('hold') }}</div>
         <div class="v fig">{{ "%.0f"|format(calib.avg_bars_held or 0) }}</div>
         <div class="n">bars, about
           {{ hold_text }}</div></div>
       {% if calib.holdout_hit_rate is not none %}
-      <div class="f"><div class="k">Most recent third</div>
+      <div class="f"><div class="k">Most recent third{{ help('holdout') }}</div>
         <div class="v fig {{ 'gain' if (calib.holdout_expectancy or 0) > 0 else 'loss' }}">
           {{ calib.holdout_expectancy|signed(3) }}R</div>
         <div class="n">{{ calib.holdout_samples }} of them</div></div>
@@ -173,11 +252,32 @@
     </div>
     {% endif %}
     <p class="prose">{{ plan.edge_verdict }}</p>
+    {% if calib.effective_samples and plan.prob_samples and calib.effective_samples < plan.prob_samples * 0.9 %}
+      <p class="prose">These {{ plan.prob_samples }} trades overlap in time, so
+        they are worth about {{ "%.0f"|format(calib.effective_samples) }}
+        separate ones. The 95% range is that wide to allow for it.</p>
+    {% endif %}
+    {% if plan.baseline_expectancy is not none %}
+      <p class="prose">A setup shows skill only if it beats taking the same
+        side on every day of the same history, which is what the market's own
+        drift paid. Beating zero is not enough on a stock that rose.</p>
+    {% endif %}
+    {% if calib.score is not none %}
+      {# A div, not a p: the "?" inside is a details element, which a p
+         cannot hold. #}
+      <div class="prose faint" style="font-size:var(--t-xs)">Setups are matched
+        on the score the standard weights give today ({{ calib.score|signed }}),
+        because that is the model the history was replayed with. The weights
+        learned below were fitted to this same history, so they cannot be
+        tested on it. Every trade was entered at the close with the stop
+        {{ cfg.stop_atr_multiple }} ATR and the target {{ cfg.target_atr_multiple }} ATR
+        away; a price that opened past the stop is counted at the open.{{ help('atr') }}</div>
+    {% endif %}
     {% if calib.cost_r >= 0.25 %}
-      <p class="prose"><b class="loss">Costs are the problem here.</b>
+      <div class="prose"><b class="loss">Costs are the problem here.</b>
         {{ "%.2f"|format(calib.cost_r) }}R per round trip at
         {{ "%.0f"|format(calib.cost_bps) }} basis points. Fees alone eat most of
-        the risk budget on this instrument and interval.</p>
+        the risk budget on this instrument and interval.{{ help('costs') }}</div>
     {% endif %}
   </div>
 </section>
@@ -187,7 +287,7 @@
     {% if calib.curve %}
     <div class="card pad0">
       <div class="cardhead">
-        <span class="eyebrow">Does conviction predict the outcome?</span>
+        <span class="eyebrow">Does conviction predict the outcome?</span>{{ help('curve') }}
       </div>
       <div class="tablewrap">
         <table>
@@ -246,6 +346,8 @@
         Agreement inside one family is discounted. Ten trend strategies nodding
         along is one observation about trend, not ten.
       </p>
+      <div class="helpfoot">{{ help_list(['family', 'lean', 'active', 'combined', 'with_news'],
+                                         'What the rows and columns mean') }}</div>
     </div>
   </div>
 </section>
@@ -263,18 +365,21 @@
         <tbody>
         {% for s in ranked[:12] %}
           <tr>
-            <td>{{ s.name.replace('_',' ')|capitalize }}</td>
+            <td>{{ s.name|strategy }}</td>
             <td class="soft">{{ s.family.replace('_',' ') }}</td>
             <td>{{ lean(s.score) }}</td>
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
               {{ s.score|signed }}</td>
             <td class="r fig soft">{{ "%.2f"|format(s.weight) }}</td>
-            <td class="soft">{{ s.reason }}</td>
+            <td class="soft say">{{ s.reason }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
+    <div class="helpfoot" style="padding-top:var(--s2)">{{ help_list(
+      ['score', 'weight', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
+      'What the columns and words mean') }}</div>
   </div>
 </section>
 
@@ -296,22 +401,28 @@
         <tbody>
         {% for st in best + worst %}
           <tr>
-            <td>{{ st.name.replace('_',' ')|capitalize }}</td>
+            <td>{{ st.name|strategy }}</td>
             <td class="soft">{{ st.family.replace('_',' ') }}</td>
             <td class="r fig soft">{{ st.n }}</td>
             <td class="r fig">{{ st.hit_rate|pct }}</td>
             <td class="r fig {{ 'gain' if st.expectancy > 0 else 'loss' }}">
               {{ st.expectancy|signed(3) }}</td>
-            <td class="r fig">{{ "%.2f"|format(st.multiplier()) }}</td>
+            {# The multiplier the call actually used: the all-conditions record
+               blended with this market state's own, not the first alone. #}
+            <td class="r fig">{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}</td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      These weights were applied to the call above. A strategy that lost money
-      on this instrument is trusted less here, whatever its reputation elsewhere.
+      These weights were applied to the call above, blending each strategy's
+      record in all conditions with its record in a {{ r.regime.trend }} market
+      like today's. A strategy that lost money on this instrument is trusted
+      less here, whatever its reputation elsewhere.
     </p>
+    <div class="helpfoot">{{ help_list(['setups', 'strategy_hit', 'net_r', 'weight_given'],
+                                       'What the columns mean') }}</div>
   </div>
 </section>
 {% endif %}
@@ -323,7 +434,7 @@
       <div class="cardhead"><span class="eyebrow">News and chatter</span></div>
       <div style="padding:0 var(--s3)">
         <div class="figs" style="margin-bottom:var(--s2)">
-          <div class="f"><div class="k">Overall</div>
+          <div class="f"><div class="k">Overall{{ help('news') }}</div>
             <div class="v fig {{ 'gain' if r.sentiment.score > 0.1 else 'loss' if r.sentiment.score < -0.1 else '' }}">
               {{ r.sentiment.score|signed }}</div>
             <div class="n">{{ r.sentiment.label() }}</div></div>
@@ -351,12 +462,23 @@
             </tbody>
           </table>
         </div>
+      {% elif r.sentiment.method == 'skipped' %}
+        <div class="blank">The news was not read for this analysis.</div>
       {% else %}
         <div class="blank">No news retrieved for this instrument.</div>
       {% endif %}
+      {% if r.sentiment.method != 'skipped' %}
       <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-        Scored by {{ r.sentiment.method }}.
+        Scored {{ 'with a built-in list of finance words'
+                  if r.sentiment.method in ('finance lexicon', 'a list of finance words')
+                  else 'by ' ~ r.sentiment.method }}.
+        {# The analysis is shared by everyone who opens this ticker, so the
+           hint travels with it and the page decides who sees it: only the
+           owner of a copy on their own machine can add a key. #}
+        {% if r.sentiment.setup_hint and current_user and current_user.is_local %}
+          {{ r.sentiment.setup_hint }}{% endif %}
       </p>
+      {% endif %}
     </div>
 
     <div>
@@ -430,7 +552,7 @@
 {% if request.args.get('alert_set') %}
   <div class="saved" style="margin-top:var(--s3)">
     Alert set. It is listed on the <a href="{{ url_for('monitor') }}">Monitor</a>
-    page, which is where it gets checked.
+    page, with when it was last checked.
   </div>
 {% endif %}
 
@@ -438,22 +560,23 @@
 <section>
   <div class="sechead">
     <h2>Worth being told about</h2>
-    <span class="tail">set one and the Monitor page checks it</span>
+    <span class="tail">checked every few minutes once set, while the price can move</span>
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
-        <thead><tr><th>Condition</th><th>Why this one</th><th></th></tr></thead>
+      <table class="stack one">
+        <thead><tr><th>Condition</th><th>Why this one</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for sg in suggestions %}
           <tr>
             <td>{{ sg.label }}</td>
-            <td class="soft">{{ sg.why }}</td>
+            <td class="soft" data-label="Why this one">{{ sg.why }}</td>
             <td class="r">
               <form method="post" action="{{ url_for('add_alert') }}">
                 <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+                {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
                 <input type="hidden" name="kind" value="{{ sg.kind }}">
-                <input type="hidden" name="threshold" value="{{ sg.threshold }}">
+                <input type="hidden" name="threshold" value="{{ sg.form_value }}">
                 <input type="hidden" name="interval" value="{{ r.bars.interval }}">
                 <input type="hidden" name="note" value="{{ sg.why }}">
                 <input type="hidden" name="back" value="{{ request.full_path }}">
@@ -466,8 +589,17 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      Nothing runs while this window is closed. These are checked when you open
-      the Monitor page or run a routine, and each one says when it last looked.
+      {% if current_user and current_user.is_local %}
+      Alerts are checked every few minutes while Orenth is running on this
+      computer. Nothing is checked while it is closed.
+      {% else %}
+      Alerts are checked on Orenth's server every few minutes, whether or not
+      you have a page open.
+      {% endif %}
+      A stock waits while its market is closed, from an hour after the close
+      until it opens again; coins are checked every time.
+      When one fires you see it on the Monitor page, and in a bar on any Orenth
+      page you have open. Each alert says when it was last checked.
     </p>
   </div>
 </section>
@@ -475,10 +607,12 @@
 
 <div style="display:flex;gap:var(--s1);margin-top:var(--s4);flex-wrap:wrap">
   <a class="btn" data-working
-     href="{{ url_for('research', symbol=r.bars.symbol, interval=r.bars.interval) }}">
+     href="{{ url_for('research', symbol=r.bars.symbol, interval=r.bars.interval,
+                      exact=exact_arg(r.bars.symbol)) }}">
     Research the business</a>
   <form method="post" action="{{ url_for('watch', action='add') }}">
     <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">
+    {% if exact_arg(r.bars.symbol) %}<input type="hidden" name="exact" value="1">{% endif %}
     <input type="hidden" name="interval" value="{{ r.bars.interval }}">
     <input type="hidden" name="back" value="{{ request.full_path }}">
     <button class="btn quiet" type="submit">Add to watchlist</button>
@@ -486,8 +620,11 @@
 </div>
 
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
-  <a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval) }}">View as JSON</a>
-  · Data from Yahoo Finance, Google News and StockTwits
+  {# The JSON is for an account's own use: for a visitor looking around the
+     example it answered only "Not signed in." #}
+  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
+                                       exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
+  · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
 </p>
 

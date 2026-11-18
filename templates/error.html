@@ -2,6 +2,17 @@
 {% block title %}Something went wrong · Orenth{% endblock %}
 {% block content %}
 
+{# Every failure lands here, so the advice about tickers is kept for the two
+   pages where one was typed in and may not exist. A share, a saved thesis or
+   a paper trade starts from an analysis that already worked. #}
+{# A rate limit at the source says so in the message, and the ticker was fine. #}
+{% set about_ticker = symbol and not throttled
+     and request.endpoint in ('analyse', 'research') %}
+{# Back to the page they came from, when that is a page on this site. #}
+{% set back = request.referrer if request.referrer
+     and request.referrer.startswith(request.host_url)
+     and request.referrer != request.url else '' %}
+
 <div class="pagehead">
   <h1>That didn't work</h1>
   {% if symbol %}
@@ -20,9 +31,9 @@
     <p class="prose">Then stop the server and start it again. Typing a ticker in
       by hand needs no key and works exactly the same from there on.</p>
   {% elif no_key %}
-    <p class="prose">Reading charts from a picture is not switched on here.
-      Type the ticker in instead; everything after that is identical.</p>
-  {% else %}
+    <p class="prose">Type the ticker in instead; everything after that is
+      identical.</p>
+  {% elif about_ticker %}
     <p class="prose">
       Usually this means one of three things: the ticker does not exist, a
       crypto symbol is missing its <b>-USD</b> ending, or the interval you
@@ -30,7 +41,13 @@
     </p>
   {% endif %}
   <p style="margin:var(--s3) 0 0">
-    <a class="btn quiet" href="{{ url_for('index') }}">Back to analysis</a>
+    {% if about_ticker %}
+      <a class="btn quiet" href="{{ url_for('index') }}">Try another ticker</a>
+    {% elif back %}
+      <a class="btn quiet" href="{{ back }}">Go back</a>
+    {% else %}
+      <a class="btn quiet" href="{{ url_for('index') }}">Front page</a>
+    {% endif %}
   </p>
 </div>
 

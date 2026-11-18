@@ -96,7 +96,119 @@ for row in db.recent_runs(conn, limit=5):
 
 print("\nfinal stats:", db.stats(conn))
 conn.close()
-print("\nDATABASE OK")
+
+print("\n--- opening a connection, and migrating ---")
+import sqlite3
+import threading
+import time
+
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+
+# Every request opens a connection. Doing the migrations each time needed the
+# write lock, so a long write made every page, and the health check, wait.
+holder = sqlite3.connect(tmp, isolation_level=None, check_same_thread=False)
+holder.execute("BEGIN IMMEDIATE")
+holder.execute("INSERT INTO meta(key, value) VALUES('held', 'x')")
+threading.Timer(1.5, lambda: holder.execute("ROLLBACK")).start()
+began = time.time()
+reader = db.connect(tmp)
+reader.execute("SELECT COUNT(*) FROM runs").fetchone()
+reader.close()
+waited = time.time() - began
+time.sleep(1.6)
+holder.close()
+check("a connection does not wait for someone else's write", waited < 0.5,
+      "%.2fs" % waited)
+
+
+def old_file(path):
+    """A database as an older version left it, missing newer columns."""
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            os.remove(path + suffix)
+    db.connect(path).close()
+    raw = sqlite3.connect(path)
+    for table, column in (("users", "digest_week"), ("users", "weekly_email"),
+                          ("strategy_stats", "sum_r_gross"), ("alerts", "state"),
+                          ("trades", "breach_noticed"), ("calls", "excluded")):
+        raw.execute("ALTER TABLE %s DROP COLUMN %s" % (table, column))
+    raw.commit()
+    raw.close()
+
+
+def columns(path, table):
+    raw = sqlite3.connect(path)
+    try:
+        return {r[1] for r in raw.execute("PRAGMA table_info(%s)" % table)}
+    finally:
+        raw.close()
+
+
+old = os.path.join(tempfile.gettempdir(), "t_stockbot_old.db")
+old_file(old)
+db.migrate(old)
+check("migrating an older file adds what it lacks",
+      {"digest_week", "weekly_email"} <= columns(old, "users")
+      and "sum_r_gross" in columns(old, "strategy_stats")
+      and "state" in columns(old, "alerts")
+      and "excluded" in columns(old, "calls"))
+try:
+    db.migrate(old)
+    check("migrating twice changes nothing", True)
+except Exception as exc:
+    check("migrating twice changes nothing", False, exc)
+
+# Several processes starting at once all migrate the same file. Each thread
+# here has its own connection and skips this process's lock, which is what
+# separate processes amount to. Looking first and then adding used to fail
+# with "duplicate column name" for whoever came second.
+errors = []
+for trial in range(5):
+    old_file(old)
+    gate = threading.Barrier(8)
+
+    def starts():
+        own = sqlite3.connect(old, timeout=15.0)
+        own.row_factory = sqlite3.Row
+        try:
+            gate.wait()
+            db._prepare(own)
+        except Exception as exc:
+            errors.append("%s: %s" % (type(exc).__name__, exc))
+        finally:
+            own.close()
+
+    racers = [threading.Thread(target=starts) for _ in range(8)]
+    for t in racers:
+        t.start()
+    for t in racers:
+        t.join()
+check("eight at once all succeed", not errors, errors[:2])
+check("and the columns are there once",
+      "digest_week" in columns(old, "users") and "excluded" in columns(old, "calls"))
+
+# A file deleted while the process runs is new again, whatever was remembered.
+for suffix in ("", "-wal", "-shm"):
+    if os.path.exists(old + suffix):
+        os.remove(old + suffix)
+again = db.connect(old)
+try:
+    again.execute("SELECT COUNT(*) FROM runs").fetchone()
+    check("a file deleted and opened again gets its schema", True)
+except sqlite3.OperationalError as exc:
+    check("a file deleted and opened again gets its schema", False, exc)
+finally:
+    again.close()
+
+print("\nDATABASE OK" if not fails else "\nFAILURES: %s" % fails)
 
 
 # --- exit code so a runner can tell pass from fail -------------------------

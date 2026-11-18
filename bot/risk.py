@@ -57,6 +57,39 @@ def daily_returns(bars: Bars) -> np.ndarray:
     return rets[np.isfinite(rets)]
 
 
+def _closes_by_day(bars) -> Dict[int, float]:
+    """The last close of each trading day, keyed by the bar's own day number."""
+    out: Dict[int, float] = {}
+    for day, close in zip(bars.session_id, bars.close):
+        if np.isfinite(close):
+            out[int(day)] = float(close)
+    return out
+
+
+def aligned_returns(bar_sets: List[Bars]) -> np.ndarray:
+    """Returns for several instruments over the days they all traded.
+
+    A row per instrument, a column per shared day. Trimming two series to the
+    same length from the end pairs a coin's Sunday with a stock's Friday,
+    which is how Bitcoin and NVIDIA came out uncorrelated: each return here is
+    from one shared trading day's close to the next, so a weekend's crypto
+    move lands on the Monday the stock market reopened.
+    """
+    maps = [_closes_by_day(b) for b in bar_sets]
+    days = sorted(set.intersection(*[set(m) for m in maps])) if maps else []
+    if len(days) < 3:
+        return np.empty((len(maps), 0))
+    closes = np.array([[m[d] for d in days] for m in maps], dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rets = np.diff(closes, axis=1) / closes[:, :-1]
+    return rets[:, np.all(np.isfinite(rets), axis=0)]
+
+
+def _has_days(bars) -> bool:
+    ids = getattr(bars, "session_id", None)
+    return ids is not None and len(ids) == len(bars.close)
+
+
 def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskProfile:
     """Measure an instrument's risk against its own history and the market."""
     bars = fetch_bars(symbol, interval)
@@ -114,8 +147,10 @@ def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskPr
     if benchmark and bars.symbol.upper() != benchmark.upper():
         try:
             bench = fetch_bars(benchmark, interval)
-            b_rets = daily_returns(bench)
-            a, b = _align(rets, b_rets)
+            if _has_days(bars) and _has_days(bench):
+                a, b = aligned_returns([bars, bench])
+            else:
+                a, b = _align(rets, daily_returns(bench))
             if len(a) >= 30:
                 var_b = float(np.var(b, ddof=1))
                 if var_b > 0:
@@ -248,12 +283,12 @@ def correlation_matrix(symbols: List[str], interval: str = "1d") -> Dict:
     at 0.9 are one position held eight times, and will fall together on the day
     it matters.
     """
-    series, kept, failed = {}, [], []
+    loaded, kept, failed = {}, [], []
     for sym in symbols:
         try:
-            r = daily_returns(fetch_bars(sym, interval))
-            if len(r) >= 30:
-                series[sym] = r
+            bars = fetch_bars(sym, interval)
+            if len(daily_returns(bars)) >= 30:
+                loaded[sym] = bars
                 kept.append(sym)
             else:
                 failed.append(sym)
@@ -264,8 +299,17 @@ def correlation_matrix(symbols: List[str], interval: str = "1d") -> Dict:
         return {"usable": False, "symbols": kept, "failed": failed,
                 "reason": "Need at least two instruments with enough history."}
 
-    n = min(len(series[s]) for s in kept)
-    matrix = np.corrcoef(np.vstack([series[s][-n:] for s in kept]))
+    if all(_has_days(loaded[s]) for s in kept):
+        returns = aligned_returns([loaded[s] for s in kept])
+    else:
+        series = [daily_returns(loaded[s]) for s in kept]
+        n = min(len(r) for r in series)
+        returns = np.vstack([r[-n:] for r in series])
+    n = returns.shape[1]
+    if n < 30:
+        return {"usable": False, "symbols": kept, "failed": failed,
+                "reason": "Fewer than 30 trading days in common."}
+    matrix = np.corrcoef(returns)
 
     pairs = []
     for i in range(len(kept)):

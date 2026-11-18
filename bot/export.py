@@ -47,16 +47,34 @@ def _rows_to_csv(rows: Iterable[Dict], columns: List[str]) -> str:
 
 TRADE_COLUMNS = [
     "id", "symbol", "interval", "side", "status", "opened", "closed",
-    "entry", "stop", "target", "quantity", "exit_price", "exit_reason",
-    "r_multiple", "pnl", "risk_amount", "account", "note",
+    "entry", "stop", "target", "quantity", "quantity_open", "exits",
+    "exit_price", "exit_reason", "r_multiple", "pnl", "risk_amount",
+    "trail", "account", "note",
 ]
+
+
+def _trail_said(row) -> str:
+    """A trade's trailing stop in words, or empty when it has none."""
+    from .portfolio import trail_of
+    trail = trail_of(row)
+    return "" if trail is None else "%s behind the best price" % trail.words()
 
 
 def trades(conn: sqlite3.Connection, status: Optional[str] = None,
            user: Optional[int] = None) -> List[Dict]:
-    """The journal as flat rows, with the codes turned into words."""
+    """The journal as flat rows, with the codes turned into words.
+
+    quantity is the size the trade was opened with and quantity_open what is
+    still open of it. For a trade closed in parts, exit_price is the average
+    of its exits, and r_multiple and pnl are the whole position's; for one
+    still open, they are what its exits have taken so far. The exits
+    dataset lists each one, with its own date and price.
+    """
+    rows = db.list_trades(conn, status=status, limit=100000, user=user)
+    exits = db.exits_for(conn, [row["id"] for row in rows])
     out = []
-    for row in db.list_trades(conn, status=status, limit=100000, user=user):
+    for row in rows:
+        parts = db.trade_parts(row, exits.get(row["id"], []))
         out.append({
             "id": row["id"],
             "symbol": row["symbol"],
@@ -69,14 +87,70 @@ def trades(conn: sqlite3.Connection, status: Optional[str] = None,
             "stop": row["stop"],
             "target": row["target1"],
             "quantity": row["quantity"],
-            "exit_price": row["exit_price"],
+            "quantity_open": parts["left"],
+            "exits": len(parts["exits"]),
+            "exit_price": parts["avg_exit"],
             "exit_reason": row["exit_reason"] or "",
-            "r_multiple": row["r_multiple"],
-            "pnl": row["pnl"],
+            "r_multiple": parts["r"],
+            "pnl": parts["pnl"] if parts["exits"] else row["pnl"],
             "risk_amount": row["risk_amount"],
+            "trail": _trail_said(row),
             "account": row["account"],
             "note": (row["notes"] or "") or (row["strategy_note"] or ""),
         })
+    return out
+
+
+# --- every exit, a part or the whole ------------------------------------------
+
+EXIT_COLUMNS = [
+    "trade_id", "symbol", "side", "when", "quantity", "price", "reason",
+    "r_multiple", "pnl", "part", "entry", "stop", "split", "quantity_traded",
+    "price_traded",
+]
+
+
+def exits(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
+    """Every exit from every trade, oldest first: what was sold, when, at what price.
+
+    A trade closed in one go is one row; one closed in parts is a row per
+    part, each with its own date and price, which is what a tax return asks
+    for. quantity and price are in the shares the trade was opened with, as
+    the journal keeps them. A broker lists a sale after a split in that
+    day's shares: split is the shares then per share opened with, kept when
+    the exit was written, and quantity_traded and price_traded the sale in
+    them. The three are empty where the split was not known.
+    """
+    rows = db.list_trades(conn, limit=100000, user=user)
+    held = db.exits_for(conn, [row["id"] for row in rows])
+    out = []
+    for row in rows:
+        for part in db.trade_parts(row, held.get(row["id"], []))["exits"]:
+            split = part["split"]
+            out.append({
+                "trade_id": row["id"],
+                "symbol": row["symbol"],
+                "side": "long" if row["direction"] > 0 else "short",
+                "when": _when(part["ts"]),
+                "quantity": part["quantity"],
+                "price": part["price"],
+                "reason": part["reason"] or "",
+                "r_multiple": part["r"],
+                "pnl": part["pnl"],
+                "part": "yes" if part["partial"] else "no",
+                "entry": row["entry"],
+                "stop": row["stop"],
+                "split": split,
+                # Rounded only to drop the dust of turning shares back and
+                # forth: 7 of today's shares are 7.000000000000001 otherwise.
+                "quantity_traded": (round(part["quantity"] * split, 8)
+                                    if split and part["quantity"] is not None else None),
+                "price_traded": round(part["price"] / split, 8) if split else None,
+                "_ts": int(part["ts"] or 0),
+            })
+    out.sort(key=lambda r: (r["_ts"], r["trade_id"]))
+    for r in out:
+        del r["_ts"]
     return out
 
 
@@ -191,9 +265,19 @@ DATASETS = {
     "trades": {
         "label": "Trade journal",
         "why": "Every position opened and closed, with its R multiple. This is "
-               "the one you need at tax time.",
+               "the one you need at tax time. Its prices and sizes are in the "
+               "shares each trade was opened with.",
         "rows": trades,
         "columns": TRADE_COLUMNS,
+    },
+    "exits": {
+        "label": "Trade exits",
+        "why": "Each sale or cover with its own date, size and price, parts of "
+               "a position included. A tax return asks for each one. After a "
+               "share split, quantity_traded and price_traded give it in the "
+               "shares of that day, as your broker lists it.",
+        "rows": exits,
+        "columns": EXIT_COLUMNS,
     },
     "theses": {
         "label": "Saved theses",

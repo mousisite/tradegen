@@ -61,6 +61,20 @@ class Plan:
     invalidation: str = ""
     risks: List[str] = field(default_factory=list)
     confirmations: List[str] = field(default_factory=list)
+    # Why an AVOID is an AVOID, because the plain words differ: "no_signal"
+    # (nothing to go on), "bearish_no_shorts" (the signals point down and
+    # shorting is off) or "negative_record" (this setup has lost money here).
+    avoid_reason: str = ""
+    # The side the odds above were measured on: +1 longs, -1 shorts. On an
+    # AVOID that leans down they are the record of betting on a fall, which a
+    # reader must not take for a reason to buy.
+    odds_direction: int = 0
+    # What the market's own drift paid: the same side taken at every bar.
+    baseline_expectancy: Optional[float] = None
+    # The reward to risk of the trade the odds were measured on, which can
+    # differ from this plan's own once its stop sits behind structure or its
+    # target is trimmed to a level in the way.
+    tested_reward_risk: Optional[float] = None
 
 
 def _round_price(value: float, reference: float) -> float:
@@ -91,12 +105,20 @@ def blend_conviction(composite: float, sentiment: Sentiment,
     return max(-1.0, min(1.0, blended)), conflict
 
 
+def vwap_label(ctx: Context) -> str:
+    """What the VWAP in use is. On daily bars a session is one bar, so the
+    context falls back to a 20-bar VWAP, and calling that the session's would
+    send someone to look for a line their chart does not draw."""
+    return "session VWAP" if getattr(ctx, "vwap_is_session", True) else "20-bar VWAP"
+
+
 def choose_pullback_entry(ctx: Context, bars: Bars, levels: List[Level],
                           direction: int, atr_value: float):
     """Pick the price to wait for when the thesis is right but price is not.
 
-    Candidate levels are the places intraday buyers actually defend: the
-    nearest structural support, session VWAP, and the 21-EMA. The nearest
+    Candidate levels are the places buyers actually defend: the nearest
+    structural support, VWAP (the session's intraday, a 20-bar one on daily
+    bars, where a session is a single bar), and the 21-EMA. The nearest
     candidate that sits a meaningful distance away wins, because the closest
     valid level is the one price is most likely to reach.
 
@@ -109,6 +131,7 @@ def choose_pullback_entry(ctx: Context, bars: Bars, levels: List[Level],
     i = len(bars) - 1
     min_gap = 0.30 * atr_value          # ignore levels that are basically here
     candidates = []
+    vwap_name = vwap_label(ctx)
 
     if direction > 0:
         support = nearest_support(levels, price)
@@ -116,7 +139,7 @@ def choose_pullback_entry(ctx: Context, bars: Bars, levels: List[Level],
             candidates.append((support.price, support.label()))
         vwap = ctx.vwap[i]
         if np.isfinite(vwap) and price - vwap >= min_gap:
-            candidates.append((float(vwap), "session VWAP"))
+            candidates.append((float(vwap), vwap_name))
         ema21 = ctx.ema21[i]
         if np.isfinite(ema21) and price - ema21 >= min_gap:
             candidates.append((float(ema21), "21-EMA"))
@@ -129,7 +152,7 @@ def choose_pullback_entry(ctx: Context, bars: Bars, levels: List[Level],
             candidates.append((resistance.price, resistance.label()))
         vwap = ctx.vwap[i]
         if np.isfinite(vwap) and vwap - price >= min_gap:
-            candidates.append((float(vwap), "session VWAP"))
+            candidates.append((float(vwap), vwap_name))
         ema21 = ctx.ema21[i]
         if np.isfinite(ema21) and ema21 - price >= min_gap:
             candidates.append((float(ema21), "21-EMA"))
@@ -271,9 +294,10 @@ def _gap_risk(entry: float, stop: float, qty: float, account: float,
     if adverse <= 0:
         return {}
 
-    gap_fill = entry * (1 - adverse) if long_side else entry * (1 + adverse)
-    # If such a move would not even reach the stop, the stop fills normally and
-    # the loss stays what was budgeted.
+    # The bad morning that matters starts with the price resting just above
+    # the stop, not at the entry: from there the worst day opens straight
+    # through it. Measured from the entry it came out about 1R too small.
+    gap_fill = stop * (1 - adverse) if long_side else stop * (1 + adverse)
     gap_loss = max(at_risk, abs(entry - gap_fill) * qty)
     return {
         "gap_move": adverse,
@@ -320,35 +344,51 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
 
     direction = 1 if conviction > 0 else (-1 if conviction < 0 else 0)
 
+    # The odds have to be for the trade this call would take. The engine
+    # measures them on the call's own side; a calibration from the other side
+    # (or pooled across both) neither promotes a call nor vetoes one.
+    calib_side = int(getattr(calib, "direction", 0) or 0)
+    matched = direction != 0 and calib_side == direction
+    # Whether the record shows an edge at all, rather than a positive guess:
+    # the hit rate clears break-even at the bottom of its range, the recent
+    # third agrees, and it beats taking the same side every day.
+    edge = matched and bool(getattr(calib, "demonstrated", False))
+    baseline = getattr(calib, "baseline_expectancy", None)
+    tested_rr = calib.reward_risk or None
+
+    def odds(**kw) -> Dict:
+        """The measured figures every plan carries, whatever it decides."""
+        out = dict(probability=calib.hit_rate, prob_low=calib.ci_low,
+                   prob_high=calib.ci_high, prob_samples=calib.bucket_samples,
+                   prob_reliable=calib.reliable, expectancy_r=calib.expectancy_r,
+                   breakeven_rate=calib.breakeven,
+                   avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
+                   odds_direction=calib_side, baseline_expectancy=baseline,
+                   tested_reward_risk=tested_rr)
+        out.update(kw)
+        return out
+
     # --- gate 1: is there any directional opinion at all? -----------------
     #
-    # A positive measured record buys a hearing. Conviction below the floor
+    # A demonstrated record buys a hearing. Conviction below the floor
     # normally ends the analysis here, which is right when there is nothing
     # else to go on. But conviction does not predict expectancy -- 0.010 across
-    # 149 instruments -- and of the instruments this gate discarded, 28 had a
-    # positive expectancy over a reliable sample. Throwing those out on a score
-    # that does not predict, before the score that does is ever consulted, is
-    # the wrong order. They go through to the real gates below instead, which
-    # can still refuse them on their own evidence.
-    heard_out = (calib.reliable
-                 and calib.expectancy_r is not None
-                 and calib.expectancy_r > 0
-                 and conviction != 0)
-    if abs(conviction) < float(cfg["min_conviction"]) and not heard_out:
+    # 149 instruments -- so a setup whose record clearly pays is sent on to the
+    # real gates below, which can still refuse it on its own evidence. A merely
+    # positive average is not that: on random prices it let through setups
+    # with conviction as low as 0.006.
+    if abs(conviction) < float(cfg["min_conviction"]) and not edge:
         return Plan(
             action="AVOID", direction=0,
             headline="No setup. Conviction %.3f is below the %.3f threshold." % (
                 abs(conviction), cfg["min_conviction"]),
             conviction=conviction,
             edge_verdict="Signals are mixed. Sitting out is the correct trade.",
-            probability=calib.hit_rate, prob_low=calib.ci_low,
-            prob_high=calib.ci_high, prob_samples=calib.bucket_samples,
-            prob_reliable=calib.reliable, expectancy_r=calib.expectancy_r,
-            breakeven_rate=calib.breakeven,
-            avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
+            avoid_reason="no_signal",
             risks=risks,
             confirmations=["Re-run when price breaks the session range or a "
-                           "catalyst lands."])
+                           "catalyst lands."],
+            **odds())
 
     # --- gate 2: shorts disabled ------------------------------------------
     if direction < 0 and not cfg.get("allow_shorts", False):
@@ -358,17 +398,17 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
             action="AVOID", direction=0,
             headline="Bearish lean, and shorting is disabled. Do not buy here.",
             conviction=conviction,
-            edge_verdict="Evidence points down. A long entry would be fighting it.",
-            probability=calib.hit_rate, prob_low=calib.ci_low,
-            prob_high=calib.ci_high, prob_samples=calib.bucket_samples,
-            prob_reliable=calib.reliable, expectancy_r=calib.expectancy_r,
-            breakeven_rate=calib.breakeven,
-            avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
+            edge_verdict=("Evidence points down. A long entry would be fighting "
+                          "it. The odds shown are for a bet on the price "
+                          "falling, the side these signals take, not for a buy."),
+            avoid_reason="bearish_no_shorts",
             invalidation="Reconsider a long only if price reclaims %s and "
                          "holds it on a closing basis." % fp(ctx.vwap[i] if np.isfinite(ctx.vwap[i]) else price),
             risks=risks,
-            confirmations=["Watch %s for a bounce and a reclaim of VWAP before "
-                           "any long is worth considering." % where])
+            confirmations=["Watch %s for a bounce and a reclaim of the %s before "
+                           "any long is worth considering."
+                           % (where, vwap_label(ctx))],
+            **odds())
 
     # --- construct the trade ---------------------------------------------
     extension = (price - float(ctx.vwap[i])) / atr_value if (
@@ -382,24 +422,18 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
 
     strong = abs(conviction) >= float(cfg["strong_conviction"])
 
-    # The measured record is allowed to promote a call, not only to veto one.
+    # The measured record is allowed to promote a call, not only to veto one,
+    # and it is the only thing that can.
     #
-    # Before this, the only route to a market entry was the conviction score.
-    # Measured across 149 instruments on daily bars, conviction's correlation
-    # with expectancy after costs is 0.010 -- on crypto, -0.349. It does not
-    # predict whether a setup makes money. It also never reached the 0.45
-    # threshold: the highest observed was 0.43, so a market entry was
-    # unreachable by construction and every call came back WAIT or AVOID.
-    #
-    # Gate 3 below could already downgrade to AVOID on a negative measured
-    # expectancy. Evidence could make a call worse and never better, which is
-    # not scepticism, just a one-way ratchet. A positive expectancy over a
-    # sample large enough to be called reliable is the same class of evidence,
-    # pointing the other way, and it is treated the same.
-    measured = (calib.reliable
-                and calib.expectancy_r is not None
-                and calib.expectancy_r > 0)
-
+    # Conviction's correlation with expectancy after costs is 0.010 across 149
+    # instruments on daily bars, -0.349 on crypto: it does not predict whether
+    # a setup makes money, so on its own it never makes a market entry. Gate 3
+    # below downgrades to AVOID on a negative record; a record that clearly
+    # pays is the same class of evidence pointing the other way. "Clearly" is
+    # the point. A positive average over enough cases was promoted once, and
+    # on random prices with no edge in them it called about one in fourteen a
+    # buy, most of them under a verdict saying no edge was proven.
+    side_word = "long" if direction > 0 else "short"
     if over_extended:
         mode = "WAIT"
         why = "Price is %.1f ATR from VWAP, too extended to chase." % abs(extension)
@@ -407,24 +441,27 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         mode = "WAIT"
         why = "Price is sitting into %s, only %.2f away." % (
             blocker.label(), abs(blocker.price - price))
-    elif strong or measured:
+    elif edge:
         # Direction decides the label. Calling a short "BUY" while building a
         # trade whose target sits below the entry is how someone clicks the
         # wrong button, so the two are kept in lockstep.
         mode = "BUY" if direction > 0 else "SHORT"
-        if strong:
-            why = ("Conviction %.2f clears the %.2f market-entry threshold and "
-                   "price is not extended." % (abs(conviction),
-                                               cfg["strong_conviction"]))
-        else:
-            why = ("This setup has made %+.2fR per trade after costs across %d "
-                   "cases on this instrument, which is a large enough sample to "
-                   "act on. Price is not extended and nothing is in the way."
-                   % (calib.expectancy_r, calib.bucket_samples))
+        why = ("Past %s setups scoring like this one made %+.2fR a trade after "
+               "costs across %d cases here, enough that the bottom of the range "
+               "still clears break-even, and more than taking the same side on "
+               "every day did. Price is not extended and nothing is in the way."
+               % (side_word, calib.expectancy_r, calib.bucket_samples))
     else:
         mode = "WAIT"
-        why = "Conviction %.2f is directional, and the measured record for this setup is not positive enough for a market entry." % (
-            abs(conviction),)
+        if strong:
+            why = ("Conviction %.2f clears the %.2f market-entry threshold, but "
+                   "%s, so this waits for a better price."
+                   % (abs(conviction), cfg["strong_conviction"],
+                      _no_edge_reason(calib, matched)))
+        else:
+            why = ("Conviction %.2f is directional, but %s, so this waits for a "
+                   "better price rather than entering now."
+                   % (abs(conviction), _no_edge_reason(calib, matched)))
 
     if mode in ("BUY", "SHORT"):
         entry, entry_rationale, entry_type = price, "current price", "market"
@@ -463,8 +500,15 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # Assuming the full stop roughly doubles the hit rate a setup looks like it
     # needs, and printed a positive expectancy beside a break-even line it
     # appeared to fail -- the page arguing with itself where a reader checks.
+    #
+    # It is the break-even of the trade that was measured, the house stop and
+    # target entered at the close, because that is the trade the hit rate it
+    # is compared with belongs to. This plan's own levels can differ; the
+    # verdict says so rather than pairing one trade's odds with another's.
     if calib.avg_win_r is not None and calib.avg_loss_r is not None             and calib.avg_loss_r < 0 < calib.avg_win_r - calib.avg_loss_r:
         breakeven = -calib.avg_loss_r / (calib.avg_win_r - calib.avg_loss_r)
+    elif calib.hit_rate is not None:
+        breakeven = calib.breakeven
     else:
         breakeven = ((1.0 + cost_r) / (1.0 + rr)) if rr > 0 else 1.0
     position = size_position(entry, stop, bars, cfg)
@@ -485,21 +529,36 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # --- gate 3: does the measured evidence support taking it? ------------
     verdict_bits = []
     action = mode
+    avoid_reason = ""
     if calib.hit_rate is None:
         verdict_bits.append("No historical sample was available to measure this "
                             "setup, so the odds are unverified.")
     else:
         verdict_bits.append(
-            "Setups scoring like this one reached target before stop %.0f%% of the "
+            "%s scoring like this one reached target before stop %.0f%% of the "
             "time across %d comparable cases (95%% CI %.0f-%.0f%%)." % (
+                "Past %s setups" % ("long" if calib_side > 0 else "short")
+                if calib_side else "Setups",
                 calib.hit_rate * 100, calib.bucket_samples,
                 (calib.ci_low or 0) * 100, (calib.ci_high or 0) * 100))
-        verdict_bits.append("This plan needs %.0f%% to break even at %.2fR." % (
-            breakeven * 100, rr))
+        # The odds belong to the house trade: entered at the close, stop and
+        # target a fixed number of ATR away. Pairing its break-even with this
+        # plan's own reward printed "needs 22% at 1.12R" when the 22% was
+        # measured at 1.50R.
+        verdict_bits.append(
+            "That trade, entered at the close with its stop %.4g ATR and its "
+            "target %.4g ATR away (%.2fR), needs %.0f%% to break even." % (
+                cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
+                calib.reward_risk, breakeven * 100))
+        if calib.reward_risk and rr and abs(rr / calib.reward_risk - 1.0) > 0.10:
+            verdict_bits.append(
+                "This plan's own stop and target give %.2fR, so its odds are not "
+                "exactly the ones measured." % rr)
 
-        if calib.reliable and calib.expectancy_r is not None and \
+        if matched and calib.reliable and calib.expectancy_r is not None and \
                 calib.expectancy_r <= 0 and cfg.get("require_positive_expectancy", True):
             action = "AVOID"
+            avoid_reason = "negative_record"
             verdict_bits.append(
                 "Measured expectancy is %+.2fR per trade, so this setup has lost "
                 "money historically on this instrument. The technical picture does "
@@ -509,6 +568,20 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
                                 "no edge is proven. Treat this as a small or paper trade.")
         elif calib.hit_rate > breakeven:
             verdict_bits.append("Measured hit rate clears the break-even line.")
+
+        if matched and baseline is not None and calib.expectancy_r is not None:
+            if calib.expectancy_r > baseline:
+                verdict_bits.append(
+                    "%s on every day of the same history made %+.2fR a trade, so "
+                    "this setup did %+.2fR better than the market's own drift."
+                    % ("Buying" if direction > 0 else "Shorting", baseline,
+                       calib.expectancy_r - baseline))
+            else:
+                verdict_bits.append(
+                    "%s on every day of the same history made %+.2fR a trade, at "
+                    "least as much as this setup, so the signals add nothing over "
+                    "the market's own drift."
+                    % ("Buying" if direction > 0 else "Shorting", baseline))
 
     if calib.stable is False:
         verdict_bits.append("The most recent third of samples disagrees with the "
@@ -527,7 +600,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
 
     confirmations.extend([
         "Volume on the entry bar at or above 1.2x the 20-bar average.",
-        "Price on the correct side of session VWAP (%s)." % fp(ctx.vwap[i] if np.isfinite(ctx.vwap[i]) else price),
+        "Price on the correct side of the %s (%s)." % (
+            vwap_label(ctx), fp(ctx.vwap[i] if np.isfinite(ctx.vwap[i]) else price)),
         "No scheduled news for this instrument inside your holding window.",
     ])
     if regime.trend == TRENDING:
@@ -547,12 +621,29 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         stop=_round_price(stop, price), stop_rationale=stop_rationale,
         target1=_round_price(target1, price), target2=_round_price(target2, price),
         target_rationale=target_rationale,
-        reward_risk=rr, breakeven_rate=breakeven,
-        avg_win_r=calib.avg_win_r, avg_loss_r=calib.avg_loss_r,
-        probability=calib.hit_rate, prob_low=calib.ci_low, prob_high=calib.ci_high,
-        prob_samples=calib.bucket_samples, prob_reliable=calib.reliable,
-        expectancy_r=calib.expectancy_r,
+        reward_risk=rr,
         edge_verdict=" ".join(verdict_bits),
+        avoid_reason=avoid_reason,
         position=position, invalidation=invalidation,
         risks=risks, confirmations=confirmations,
+        **odds(breakeven_rate=breakeven),
     )
+
+
+def _no_edge_reason(calib: Calibration, matched: bool) -> str:
+    """Why the record does not support entering now, in a clause."""
+    if not matched:
+        return "no record was measured for this side"
+    if not calib.reliable or calib.expectancy_r is None:
+        return "the measured record for this setup is too thin to act on"
+    if calib.expectancy_r <= 0:
+        return "the measured record for this setup is not positive"
+    if calib.ci_low is None or calib.ci_low <= calib.breakeven:
+        return "its record is positive but not clear of chance"
+    if calib.stable is False:
+        return "the most recent third of its record disagrees with the rest"
+    base = getattr(calib, "baseline_expectancy", None)
+    if base is not None and calib.expectancy_r <= base:
+        return ("it has not beaten taking the same side on every day, which "
+                "made %+.2fR a trade" % base)
+    return "the measured record for this setup is not strong enough to act on"

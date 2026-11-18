@@ -4,7 +4,7 @@
 {% block content %}
 
 <div class="pagehead">
-  <h1>Find something worth analysing</h1>
+  <h1>Screen companies by their numbers</h1>
   <p>Start from a ready-made screen, or set your own filters. Every result shows
     the numbers that got it through, so you can check rather than trust.</p>
 </div>
@@ -47,7 +47,8 @@
           <label for="symbols">Or your own list</label>
           <input class="field fig" id="symbols" name="symbols" type="text"
                  value="{{ symbols_raw }}" placeholder="AAPL MSFT NVDA"
-                 autocomplete="off" spellcheck="false">
+                 autocomplete="off" autocapitalize="characters" autocorrect="off"
+                 spellcheck="false" enterkeyhint="go">
           <div class="hint">Separated by spaces or commas.</div>
         </div>
       </div>
@@ -58,7 +59,7 @@
             <label for="f-{{ key }}">{{ spec.label }}
               {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
             <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
-                   step="any" value="{{ filters.get(key, '') if not filters.get(key) is none else '' }}"
+                   step="any" value="{{ typed.get(key, '') }}"
                    placeholder="{{ 'percent' if spec.unit == 'pct' else
                                    'dollars' if spec.unit == 'usd' else
                                    'multiple' if spec.unit == 'x' else 'any' }}">
@@ -70,7 +71,8 @@
     <p class="prose" style="margin-top:var(--s3)">
       Filters marked slower need full company fundamentals, which is one request
       per candidate. Those run only on names that already passed everything else.
-      Percentages can be typed either way: 15 and 0.15 both mean fifteen percent.
+      Type percentages as whole numbers: 15 for 15%, 0.5 for half a percent,
+      -3 for down 3%.
     </p>
   </div>
 </section>
@@ -81,7 +83,11 @@
     <h2>Results</h2>
     <span class="count">{{ result.passed|length }} passed</span>
     <span class="tail">{{ result.scanned }} scanned from {{ result.universe }},
-      {{ result.rejected }} rejected</span>
+      {{ result.rejected }} rejected{% if result.not_checked %},
+      {{ result.not_checked }} not checked{% endif %}{% if result.unread %},
+      {{ result.unread|length }} could not be read{% endif %}{% if result.not_shown %},
+      {{ result.not_shown }} more not listed{% endif %}{% if checked_at and result.scanned %}.
+      Quotes read at {{ checked_at }}{% endif %}</span>
   </div>
 
   {% if result.filters %}
@@ -98,43 +104,49 @@
   <div class="card pad0">
     {% if result.passed %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th class="r">Price</th><th class="r">Today</th>
           <th class="r">Market cap</th><th class="r">P/E</th>
           {% if result.deep %}<th class="r">ROE</th><th class="r">Margin</th>
           <th class="r">Growth</th><th class="r">Quality</th>{% endif %}
-          <th class="r">Off high</th><th></th>
+          <th class="r">Off high</th><th><span class="sr">Actions</span></th>
         </tr></thead>
         <tbody>
         {% for c in result.passed %}
           <tr>
             <td><b>{{ c.symbol }}</b>
               <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
-            <td class="r fig">{{ c.price|price }}</td>
-            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' }}">
+            <td class="r fig" data-label="Price">{{ c.price|price }}</td>
+            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}" data-label="Today">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
-            <td class="r fig">{{ "%.1fB"|format(c.market_cap/1000000000)
+            <td class="r fig" data-label="Market cap">{{ "%.1fB"|format(c.market_cap/1000000000)
                 if c.market_cap else '—' }}</td>
-            <td class="r fig">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
+            <td class="r fig" data-label="P/E">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
             {% if result.deep %}
-              <td class="r fig">{{ c.roe|pct if c.roe is not none else '—' }}</td>
-              <td class="r fig">{{ c.net_margin|pct if c.net_margin is not none else '—' }}</td>
-              <td class="r fig {{ 'gain' if (c.revenue_growth or 0) > 0 else '' }}">
+              <td class="r fig" data-label="ROE">{{ c.roe|pct if c.roe is not none else '—' }}</td>
+              <td class="r fig" data-label="Margin">{{ c.net_margin|pct if c.net_margin is not none else '—' }}</td>
+              <td class="r fig {{ 'gain' if (c.revenue_growth or 0) > 0 else '' }}" data-label="Growth">
                 {{ c.revenue_growth|pct if c.revenue_growth is not none else '—' }}</td>
-              <td class="r fig">{{ c.quality|pct if c.quality is not none else '—' }}</td>
+              <td class="r fig" data-label="Quality">{{ c.quality|pct if c.quality is not none else '—' }}</td>
             {% endif %}
-            <td class="r fig soft">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
+            <td class="r fig soft" data-label="Off high">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
             <td class="r">
-              <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d') }}">Analyse</a>
+              <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d',
+                                               exact=exact_arg(c.symbol)) }}">Analyse</a>
               ·
-              <a data-working href="{{ url_for('research', symbol=c.symbol, interval='1d') }}">Research</a>
+              <a data-working href="{{ url_for('research', symbol=c.symbol, interval='1d',
+                                               exact=exact_arg(c.symbol)) }}">Research</a>
             </td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
+    {% elif not result.scanned %}
+      <div class="blank">Nothing could be screened just now.</div>
+    {% elif result.unread and not result.rejected %}
+      <div class="blank">Nothing could be judged: the figures could not be read just now.</div>
     {% else %}
       <div class="blank">Nothing passed these filters.</div>
     {% endif %}

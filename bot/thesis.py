@@ -83,6 +83,11 @@ def _money(v):
     return "%.2f" % v
 
 
+def _items(n: int, word: str) -> str:
+    """"1 post", "2 posts": a count the way a person writes it."""
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
 def build(symbol: str, price: float, fundamentals=None, quality=None,
           valuation=None, risk_profile=None, technical=None, sentiment=None,
           filings=None, options_stats=None, sec_history=None) -> Thesis:
@@ -153,8 +158,9 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
     if sentiment is not None and (sentiment.n_news or sentiment.n_social):
         _sentiment_points(sentiment, bull, bear, stamp)
         sources.append({"name": "News and social sentiment",
-                        "url": "", "detail": "%d headlines, %d posts, scored by %s"
-                        % (sentiment.n_news, sentiment.n_social, sentiment.method)})
+                        "url": "", "detail": "%s, %s, scored by %s"
+                        % (_items(sentiment.n_news, "headline"),
+                           _items(sentiment.n_social, "post"), sentiment.method)})
 
     if filings:
         _filing_points(filings, bull, bear, stamp)
@@ -416,24 +422,53 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
 
     if composite is None:
         return
-    detail = "Composite signal of %+.2f across 34 strategies in a %s market." % (
-        composite, regime or "mixed")
+    # Counted from the registry: a typed-in number said 34 on one page and 33
+    # on the next.
+    from .strategies import REGISTRY
+    count = len(REGISTRY)
+    # The odds are measured on the side the call takes, which follows the
+    # composite. A bearish setup's record is of betting on a fall: one that
+    # paid is evidence for the bear case, not the bull case, and one that lost
+    # says the signals' calls for a fall have not worked here.
+    side = t.get("side")
+    if side is None:
+        side = 1 if composite > 0 else (-1 if composite < 0 else 0)
+    kind = "Short setups" if side < 0 else "Setups"
+    detail = "Composite signal of %+.2f across %d strategies in a %s market." % (
+        composite, count, regime or "mixed")
     if expectancy is not None and samples:
-        detail += (" Setups scoring like this have returned %+.3fR on %d "
-                   "comparable historical cases." % (expectancy, samples))
+        detail += (" %s scoring like this have returned %+.3fR on %d "
+                   "comparable historical cases." % (kind, expectancy, samples))
 
     if composite > 0.25:
         bull.points.append(Point("Price action is constructive", detail,
                                  [Evidence("Technical composite", "%+.2f" % composite,
-                                           "34-strategy back-test", "", stamp,
+                                           "%d-strategy back-test" % count, "", stamp,
                                            "medium" if samples else "weak")], 0.9))
     elif composite < -0.25:
         bear.points.append(Point("Price action is weak", detail,
                                  [Evidence("Technical composite", "%+.2f" % composite,
-                                           "34-strategy back-test", "", stamp,
+                                           "%d-strategy back-test" % count, "", stamp,
                                            "medium" if samples else "weak")], 0.9))
 
-    if expectancy is not None and samples and samples > 100:
+    if expectancy is not None and samples and samples > 100 and side < 0:
+        if expectancy > 0.05:
+            bear.points.append(Point(
+                "Bets on a fall have paid here",
+                "Shorting setups scored like this one returned %+.3fR per trade "
+                "across %d comparable cases on this instrument, after costs."
+                % (expectancy, samples),
+                [Evidence("Measured expectancy, short side", "%+.3fR" % expectancy,
+                          "back-test on this instrument", "", stamp, "strong")], 1.2))
+        elif expectancy < -0.10:
+            bull.points.append(Point(
+                "Calls for a fall have not paid here",
+                "Shorting setups scored like this one returned %+.3fR per trade "
+                "across %d comparable cases on this instrument, after costs."
+                % (expectancy, samples),
+                [Evidence("Measured expectancy, short side", "%+.3fR" % expectancy,
+                          "back-test on this instrument", "", stamp, "strong")], 0.8))
+    elif expectancy is not None and samples and samples > 100:
         if expectancy < -0.10:
             bear.points.append(Point(
                 "This setup has lost money here",
@@ -454,15 +489,15 @@ def _sentiment_points(s, bull: Case, bear: Case, stamp: str) -> None:
     if s.score > 0.30:
         bull.points.append(Point(
             "Coverage is positive",
-            "Sentiment of %+.2f across %d headlines and %d posts." % (
-                s.score, s.n_news, s.n_social),
+            "Sentiment of %+.2f across %s and %s." % (
+                s.score, _items(s.n_news, "headline"), _items(s.n_social, "post")),
             [Evidence("News and social sentiment", "%+.2f" % s.score,
                       s.method, "", stamp, "weak")], 0.5))
     elif s.score < -0.30:
         bear.points.append(Point(
             "Coverage is negative",
-            "Sentiment of %+.2f across %d headlines and %d posts." % (
-                s.score, s.n_news, s.n_social),
+            "Sentiment of %+.2f across %s and %s." % (
+                s.score, _items(s.n_news, "headline"), _items(s.n_social, "post")),
             [Evidence("News and social sentiment", "%+.2f" % s.score,
                       s.method, "", stamp, "weak")], 0.5))
     if getattr(s, "fresh_catalyst", False):
@@ -556,10 +591,14 @@ def _summarise(case: Case, phrase: str) -> str:
     if not case.points:
         return "Nothing in the available evidence %s." % phrase
     strong = [p for p in case.points if any(e.strength == "strong" for e in p.evidence)]
-    lead = case.points[0].headline.lower()
-    return "%d point%s %s, %d of them on strong evidence. The clearest is that it %s." % (
+    # Headlines are phrases of every shape ("Highly profitable", "A catalyst
+    # just landed"), so the lead follows a colon rather than being fitted
+    # into a sentence: "the clearest is that it coverage is positive" was on
+    # the page.
+    lead = case.points[0].headline
+    return "%d point%s %s, %d of them on strong evidence. The clearest: %s." % (
         len(case.points), "" if len(case.points) == 1 else "s", phrase,
-        len(strong), lead)
+        len(strong), lead[:1].lower() + lead[1:])
 
 
 def _verdict(balance: float, bull: Case, bear: Case, evidence_count: int) -> str:

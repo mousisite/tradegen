@@ -1,73 +1,118 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
-{% set a = rec.all %}
-{% if a.decided %}
-  {% set page_blurb = "Orenth makes a call on " ~ popular_count ~ " popular stocks and coins every day, then scores it " ~ method.days ~ " trading days later. So far: right " ~ a.right ~ " times, wrong " ~ a.wrong ~ ". Every call is listed. Not financial advice." %}
+{% if rec.scored %}
+  {% set page_blurb = "A forward test, scored in public: each trading day Orenth makes a call on " ~ popular_count ~ " popular stocks and coins, and scores it when the price reaches its stop or target, or after " ~ method.days ~ " trading days. " ~ rec.scored ~ " calls scored so far, each kind against what chance would score. Not financial advice." %}
 {% endif %}
 {% block title %}Orenth's track record: how its calls turned out · Orenth{% endblock %}
 {% block og_title %}How Orenth's calls turned out · Orenth{% endblock %}
-{% block head_extra %}{% if not a.decided %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
+{% block head_extra %}{% if not rec.scored and not rec.latest %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
-  <span class="eyebrow">Scored every day</span>
+  <span class="eyebrow">Forward test · scored every day</span>
   <h1>How Orenth's calls turned out</h1>
-  <p>Every day Orenth makes a call on {{ popular_count }} popular stocks and
-    coins. {{ method.days }} trading days later it checks what the price did
-    and writes the result here, right or wrong. Nothing is left out.</p>
+  <p>Each trading day Orenth makes a call on {{ popular_count }} popular stocks
+    and coins and writes it down. Each call is scored when the price reaches
+    its stop or its target, or after {{ method.days }} trading days if it
+    reaches neither. These are real calls made at the time, scored with a
+    pretend trade: no real money was traded.</p>
 </div>
 
 {% macro times(n) %}{{ n }} time{{ '' if n == 1 else 's' }}{% endmacro %}
 {% macro result(r) %}
   <span class="fig {{ 'gain' if r.outcome == 'right' else 'loss' if r.outcome == 'wrong' else 'soft' }}">{{ r.outcome|capitalize }}</span>
 {% endmacro %}
+{% macro move(x) %}{% if x is not none %}<span class="fig {{ 'gain' if x > 0 else 'loss' if x < 0 else '' }}">{{ (x * 100)|signed(1) }}%</span>{% else %}—{% endif %}{% endmacro %}
 
 {% if not rec.total %}
   <div class="plainbox">
     <span class="eyebrow">Starting</span>
     <p class="prose">The first calls are written down with the next daily
-      check. Results appear {{ method.days }} trading days after that.</p>
+      check. The scores start {{ rec.mature_days }} days after that.</p>
   </div>
-{% elif not a.decided %}
+{% elif not rec.scored %}
   <div class="plainbox">
     <span class="eyebrow">Collecting</span>
     <p class="lead">{{ rec.total }} calls written down since {{ rec.first_at|day }}.</p>
-    <p class="prose">The first results appear {{ method.days }} trading days
-      after a call is made.</p>
+    <p class="prose">The scores start on {{ rec.counts_from|day }}, once the
+      first calls are {{ rec.mature_days }} days old and every one of them has
+      had its full {{ method.days }} trading days.{% if rec.early %}
+      {{ rec.early }} newer calls have settled already, and are listed below.
+      They are not scored yet: the first to settle are mostly the ones whose
+      stop came quickly, so counting them now would favour calls that said
+      not to buy.{% endif %}</p>
   </div>
 {% else %}
   <div class="plainbox">
-    <span class="eyebrow">All calls so far</span>
-    <p class="lead">It was right {{ times(a.right) }} and wrong {{ times(a.wrong) }}:
-      {{ a.rate|pct(0) }} right.</p>
-    <p class="prose">{{ a.flat }} went nowhere and {{ a.open }} {{ 'is' if a.open == 1 else 'are' }}
-      still waiting for {{ 'its' if a.open == 1 else 'their' }} {{ method.days }} days.
-      {{ rec.total }} calls since {{ rec.first_at|day }}.</p>
+    <span class="eyebrow">So far</span>
+    <p class="lead">{{ rec.scored }} calls scored, {{ rec.all.open }} still waiting.</p>
+    <p class="prose">{{ rec.total }} calls since {{ rec.first_at|day }}. The
+      scores count calls made at least {{ rec.mature_days }} days ago, every
+      one of which has had its full {{ method.days }} trading days.{% if rec.early %}
+      {{ rec.early }} newer calls have settled already. They join the scores
+      once they are {{ rec.mature_days }} days old: the first to settle are
+      mostly the ones whose stop came quickly, so counting them now would
+      favour calls that said not to buy.{% endif %}
+      Each kind of call is scored on its own below, because they are not the
+      same bet.
+      {% if rec.buy_worked is not none %}Over the same calls, a buy at the
+      call's price worked {{ rec.buy_worked|pct(0) }} of the time and lost
+      {{ (1 - rec.buy_worked)|pct(0) }}: that is what calling BUY, or calling
+      AVOID, on every one of them would have scored. A kind of call shows skill
+      only if it clearly beats that.{% endif %}</p>
+    {% if rec.classes|selectattr('together')|list %}
+    <p class="prose">The 95% ranges allow for calls on different stocks
+      settling alike, as they do on a day the whole market moves, which makes
+      them wider than the number of calls alone would.</p>
+    {% endif %}
   </div>
 
   <div class="plans" style="margin-top:var(--s3)">
-    {% for label, t in [("When it said BUY", rec.buy), ("When it said WAIT or AVOID", rec.hold)] %}
+    {% for c in rec.classes %}
       <div class="card">
-        <span class="eyebrow">{{ label }}</span>
-        {% if t.decided %}
-          <p class="lead" style="margin:0">{{ t.rate|pct(0) }} right</p>
-          <p class="prose">Right {{ times(t.right) }}, wrong {{ times(t.wrong) }}{% if t.flat %},
-            {{ t.flat }} went nowhere{% endif %}.</p>
+        <span class="eyebrow">{{ c.label }}</span>
+        {% if c.decided %}
+          <p class="lead" style="margin:0">Right {{ c.rate|pct(0) }}
+            <span class="soft" style="font-size:var(--t-sm)">{% if c.together %}(95% range {{ c.lo|pct(0) }}–{{ c.hi|pct(0) }}){% else %}(too early for a 95% range){% endif %}</span></p>
+          <p class="prose" style="margin:0">Right {{ times(c.right) }}, wrong
+            {{ times(c.wrong) }}{% if c.flat %}, {{ c.flat }} went nowhere{% endif %}.
+            {{ c.decided }} decided call{{ '' if c.decided == 1 else 's' }}, about
+            {{ c.separate }} separate test{{ '' if c.separate == 1 else 's' }}.
+            {% if c.waiting %}{{ c.waiting }} more still to count.{% endif %}</p>
+          {% if c.chance is not none %}
+            <p class="prose" style="margin:0">Chance level: {{ c.chance|pct(0) }}.
+              {% if not c.together %}Not yet distinguishable from chance: these
+              calls cover too few weeks of the market to tell.
+              {% elif c.lo > c.chance %}Above it, beyond the margin of error.
+              {% elif c.hi < c.chance %}Below it, beyond the margin of error.
+              {% else %}Not yet distinguishable from chance.{% endif %}</p>
+          {% endif %}
+          <p class="prose faint" style="margin:0;font-size:var(--t-xs)">A buy after
+            these calls moved {{ move(c.mean_move) }} on average{% if c.move_lo is not none %}
+            (95% range {{ (c.move_lo * 100)|signed(1) }}% to {{ (c.move_hi * 100)|signed(1) }}%){% endif %},
+            median {{ move(c.median_move) }}, after costs{% if c.mean_r is not none %}:
+            {{ c.mean_r|signed(2) }}R a trade{% endif %}.</p>
         {% else %}
-          <p class="prose">Nothing decided yet{% if t.open %}: {{ t.open }} waiting{% endif %}.</p>
+          <p class="prose">Nothing scored yet{% if c.waiting %}: {{ c.waiting }} still to count{% endif %}.</p>
         {% endif %}
       </div>
     {% endfor %}
   </div>
+{% endif %}
 
+{% if rec.latest %}
   <section style="margin-top:var(--s4)">
-    <div class="sechead"><h2>The latest results</h2></div>
+    <div class="sechead"><h2>The latest results</h2>
+      <a class="tail" href="{{ url_for('record_csv') }}">every call, as a file &rarr;</a></div>
+    <p class="prose">The {{ rec.latest|length }} calls settled most recently,
+      including newer ones not yet in the scores. Each is dated by the trading
+      day of the price it was made at.</p>
     <div class="card pad0">
       <div class="tablewrap">
         <table>
           <thead><tr>
             <th>Stock</th><th>It said</th><th>Result</th><th>What the price did</th>
-            <th class="r">Move</th><th>Day</th>
+            <th class="r">Move</th><th>Called</th>
           </tr></thead>
           <tbody>
           {% for r in rec.latest %}
@@ -78,7 +123,7 @@
               <td>{{ result(r) }}</td>
               <td style="white-space:nowrap">{{ how_words[r.how] }}</td>
               <td class="r fig {{ 'gain' if r.exit_price > r.price else 'loss' if r.exit_price < r.price else '' }}">{{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%</td>
-              <td class="soft" style="white-space:nowrap">{{ r.at|day }}</td>
+              <td class="soft" style="white-space:nowrap">{{ r.session_at|day }}</td>
             </tr>
           {% endfor %}
           </tbody>
@@ -88,29 +133,135 @@
   </section>
 {% endif %}
 
+{% if prints %}
+  <section id="fingerprints" style="margin-top:var(--s4)">
+    <div class="sechead"><h2>A fingerprint of each day's calls</h2>
+      <a class="tail" href="{{ url_for('record_fingerprints') }}">every day's, as a file &rarr;</a></div>
+    <p class="prose">Once a day is over, the calls written down that day get a
+      fingerprint: a SHA-256 hash of each call's stock, what it said, its
+      price, stop and target, how many days it runs and when it was written.
+      Change any of those by any amount, or add or remove a call, and the
+      fingerprint changes. Save a copy, and you can check later that none of
+      that day's calls was edited.{% if prints|selectattr('late')|list %}
+      A day fingerprinted more than a day after it ended, as the days before
+      fingerprints began were, says so: its fingerprint vouches for its calls
+      only from the day it was taken.{% endif %}</p>
+    <div class="card" style="margin-top:var(--s2)">
+      <ul style="list-style:none;margin:0;padding:0">
+      {% for f in prints %}
+        <li style="padding:var(--s1) 0{% if not loop.first %};border-top:1px solid var(--rule){% endif %}">
+          <span style="font-size:var(--t-sm)"><b>{{ f.start|day }}</b></span>
+          <span class="soft" style="font-size:var(--t-sm)">· {{ f.count }} call{{ '' if f.count == 1 else 's' }} written</span>{% if f.late %}
+          <span class="faint" style="font-size:var(--t-xs)">· fingerprinted on {{ f.created_ts|day }}, after the fact</span>{% endif %}
+          <div class="fig soft" style="font-size:var(--t-xs);overflow-wrap:anywhere">{{ f.sha256 }}</div>
+        </li>
+      {% endfor %}
+      </ul>
+    </div>
+    <details class="card" style="margin-top:var(--s2)">
+      <summary><b>How to check one yourself</b></summary>
+      <p class="prose" style="margin-top:var(--s2)">Download
+        <a href="{{ url_for('record_csv') }}">every call</a>. Take that day's
+        rows, the ones whose <b>written_utc</b> starts with its date, in the
+        order the file lists them. Keep each row's first seven columns,
+        <b>symbol</b> to <b>horizon_days</b>, exactly as the file has them,
+        joined by commas, with a line break after each row. The SHA-256 of
+        that text is the day's fingerprint. A call's score, and any reason it
+        is left out, come in the columns after those, so scoring a call never
+        changes its day's fingerprint. On a Mac or Linux, for {{ prints[0].start|day }}:</p>
+      <p class="fig" style="font-size:var(--t-xs);overflow-wrap:anywhere;margin:var(--s1) 0 0">grep '^[^,]*,{{ prints[0].day }} ' orenth-record.csv | cut -d, -f1-7 | shasum -a 256</p>
+    </details>
+  </section>
+{% endif %}
+
 <div class="card" style="margin-top:var(--s3)">
   <span class="eyebrow">How it is scored</span>
   <ul class="list">
-    <li>Each stock's call is written down once a day, with the price at the time.</li>
-    <li>Then we pretend to buy at that price, with the same stop and target
-      the app uses everywhere: {{ method.stop }} ATR below and {{ method.target }} ATR
-      above. ATR is how much the price usually moves in a day.</li>
+    <li>A stock's call is the first check after its market closes, at the
+      closing price, and it is scored from the next trading day. A weekend or
+      a holiday has no new close, so it has no new call. The page for each
+      stock is checked through the day and can say something else in the
+      afternoon; only the call after the close is scored.</li>
+    <li>A coin trades all day. Its call is the first check after midnight
+      (UTC), at the price then, and it is scored from the next day's prices,
+      so the rest of the day it was made is not counted. While the price source
+      has not filled in the day before, checks write no call; the first check
+      after it does writes it, at the price then. If the day is never filled
+      in, that day has no call, and calls whose ten days hold it are left out,
+      with the reason.</li>
+    <li>Then we pretend to buy at that price, with fixed levels: a stop
+      {{ method.stop }} ATR below and a target {{ method.target }} ATR above,
+      the rule the strategy tests use. ATR is how much the price usually moves
+      in a day. A BUY's own plan can set its stop further away, below support,
+      or its target nearer, at resistance; the record uses the fixed levels for
+      every call, so every kind of call is scored by the same trade.</li>
     <li>If it said <b>BUY</b>, it was right when the price reached the target
-      before the stop, or ended at least half a day's move higher after
-      {{ method.days }} trading days. It was wrong when the stop was hit first,
-      or the price ended lower.</li>
+      before the stop, or after {{ method.days }} trading days had risen by at
+      least half the distance to the stop. It was wrong when the stop was hit
+      first, or the price had fallen by that much.</li>
     <li>If it said <b>WAIT</b> or <b>AVOID</b>, the same pretend buy is scored the
       other way round: right when that buy would have lost, wrong when it
-      would have made money.</li>
+      would have made money. Because the stop is nearer than the target, a
+      buy loses more often than it wins, so these are compared with chance,
+      not with 50%.</li>
     <li>A price that ended about where it started counts as neither.</li>
-    <li>Calls are never edited or removed.</li>
+    <li>A call counts in the scores once it is {{ rec.mature_days }} days old,
+      when every call made that day has had its full {{ method.days }} trading
+      days. The calls that settle first are mostly the ones whose stop came
+      quickly, so counting them sooner would favour calls that said not to
+      buy.</li>
+    <li>The 95% range is how far the right rate could be from its true value.
+      It allows for calls that are not separate tests, in two ways. The next
+      day's call on a stock shares most of its {{ method.days }} days, so per
+      stock a call counts as a new test only once the last one's days are
+      over, and SPY and VOO, which hold the same companies, count as one. And
+      on a day the whole market moves, calls on different stocks settle
+      alike, so any two calls whose days overlap are counted as moving
+      together, by as much as they actually did. The range given is the
+      wider of the two. The second needs calls spread over about
+      {{ rec.range_weeks }} weeks of the market; until then, no range is
+      given. The average move after a kind of call has its range worked out
+      the second way.</li>
+    <li>Moves are after trading costs: {{ method.equity }}% a round trip for
+      stocks, {{ method.crypto }}% for crypto.</li>
+    {% if splits %}<li>When a stock splits, a call made before the split is
+      scored on its prices divided by the split, to match the history after
+      it.</li>{% endif %}
+    <li>Calls are never edited or removed. One left out of the scores stays
+      listed below, with the reason. Every call, left-out ones included, is in
+      <a href="{{ url_for('record_csv') }}">one file</a> anyone can
+      check{% if prints %}, and each day's calls have a
+      <a href="#fingerprints">fingerprint</a> that an edit would change{% endif %}.</li>
   </ul>
-  <p class="prose faint" style="font-size:var(--t-xs)">Past results do not promise
-    future ones. This is software output, not financial advice.</p>
+  <p class="prose faint" style="font-size:var(--t-xs)">This is a forward test
+    of software calls, not a record of real trades or money. Past results do
+    not promise future ones. This is software output, not financial advice.</p>
 </div>
 
+{% if rec.excluded %}
+<details class="card" style="margin-top:var(--s3)">
+  <summary><b>{{ rec.excluded|length }} call{{ '' if rec.excluded|length == 1 else 's' }}
+    left out of the scores</b>, and why</summary>
+  <div class="tablewrap" style="margin-top:var(--s2)">
+    <table>
+      <thead><tr><th>Stock</th><th>Written down</th><th>It said</th><th>Why it is left out</th></tr></thead>
+      <tbody>
+      {% for r in rec.excluded %}
+        <tr>
+          <td><b>{{ short(r.symbol) }}</b></td>
+          <td class="soft" style="white-space:nowrap">{{ r.at|day }}</td>
+          <td>{{ r.action }}</td>
+          <td class="soft">{{ r.excluded }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
 <section class="card closing" style="margin-top:var(--s4)">
-  <p class="lead">Check any stock or coin, free.</p>
+  <p class="lead">Analyse any stock or coin, free.</p>
   <p class="prose">The same check that made every call on this page, on
     whatever you are looking at.</p>
   <div class="cta">

@@ -103,9 +103,9 @@ try:
     check("and uses the familiar name", snap["name"] == "NVIDIA")
     said = public.snapshot(fake_result("NVDA", "AVOID", 83, 22), {
         "headline": "h",
-        "sure": "The app looked at 83 times this same setup happened before. "
-                "It worked 22 of those times. When it worked it made about 2.0 "
-                "times what you put at risk."})
+        "sure": "In tests on past prices, this same setup came up 83 times and "
+                "worked 22 of them, reaching its target before its stop. When "
+                "it worked it made about 2.0 times what you put at risk."})
     check("the counts are not said twice on the page",
           said["sure"].startswith("When it worked"), said["sure"])
 
@@ -139,7 +139,8 @@ try:
     r = c.get("/stock/nvda")
     page = r.data.decode("utf-8", "replace")
     check("the page shows the call", r.status_code == 200 and "Avoid" in page
-          and "It worked 22 of them" in page, r.status_code)
+          and "In tests on past prices, this same setup came up 83 times and "
+              "worked 22 of them" in page, r.status_code)
     check("titled the way people search", "NVIDIA (NVDA): buy, wait or avoid?" in page)
     check("open to search engines", "noindex" not in page)
     check("its link preview is its own card", "/stock/nvda/card.png" in page)
@@ -195,6 +196,11 @@ try:
     page = c.get("/backtests").data.decode("utf-8", "replace")
     check("the list ranks tested strategies, leaving out too few trades",
           "RSI reversion" in page and "Trend stack" not in page)
+    from bot import strategies as _strats
+    _all, _daily = len(_strats.REGISTRY), len(_strats.daily_strategy_names())
+    check("every count of the strategies comes from the registry",
+          _daily == _all - 1 and ("of Orenth's %d" % _all) in page
+          and ("running %d strategies" % _all) in page, (_all, _daily))
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
     check("a stock page says which strategies worked there",
           "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)
@@ -278,16 +284,30 @@ try:
     rec = public.record(conn)
     check("the record adds up", (rec["all"]["right"], rec["all"]["wrong"], rec["all"]["flat"],
                                  rec["all"]["open"]) == (2, 1, 1, 1), rec["all"])
-    check("and splits buys from the rest",
-          rec["buy"]["right"] == 1 and rec["hold"]["right"] == 1 and rec["hold"]["wrong"] == 1)
+    kinds = {c["action"]: c for c in rec["classes"]}
+    check("and scores each kind of call on its own",
+          (kinds["BUY"]["right"], kinds["BUY"]["flat"], kinds["AVOID"]["wrong"],
+           kinds["WAIT"]["right"]) == (1, 1, 1, 1), kinds.keys())
+    # Buys after these calls: NVDA target (worked), AMD target (worked),
+    # TSLA stop (lost), AAPL flat. Two of three decided buys worked.
+    check("against chance: what calling it every time would have scored",
+          abs(kinds["BUY"]["chance"] - 2 / 3) < 1e-9
+          and abs(kinds["AVOID"]["chance"] - 1 / 3) < 1e-9, kinds["BUY"]["chance"])
+    check("with a 95% range on the right rate",
+          kinds["BUY"]["lo"] is not None and kinds["BUY"]["lo"] < 1.0 <= kinds["BUY"]["hi"] + 1e-9)
+    check("and what a buy after the calls did, after costs",
+          kinds["BUY"]["mean_move"] is not None and kinds["BUY"]["mean_move"] > 0)
     mine = public.symbol_record(conn, "NVDA")
     check("one stock's own record is there too",
           len(mine["latest"]) == 1 and mine["latest"][0]["how"] == "target")
     conn.close()
 
     page = c.get("/record").data.decode("utf-8", "replace")
-    check("the record page says the score in plain words",
-          "right 2 times and wrong 1 time" in page and "67% right" in page)
+    check("the record page has no pooled headline score",
+          "4 calls scored" in page and "% right" not in page.split("When it said")[0])
+    check("each kind is set against chance",
+          "When it said BUY" in page and "Chance level" in page
+          and "Not yet distinguishable from chance" in page)
     check("lists every settled call with what the price did",
           "rose to the target" in page and "fell to the stop" in page
           and "went nowhere" in page and "/stock/amd" in page)
@@ -299,6 +319,51 @@ try:
     check("the sitemap lists the record", "/record</loc>" in sitemap)
 
     conn = db.connect(DB)
+    fri = call("VOO", "AVOID", 500.0, 5.0)
+    fri.update(price_day=20000)
+    check("a quote is written down once", public.record_call(conn, fri))
+    sat = dict(fri, at=fri["at"] + DAY)
+    check("the same Friday quote seen on Saturday is not a new call",
+          not public.record_call(conn, sat))
+    mon = dict(fri, at=fri["at"] + 3 * DAY, price=505.0, price_day=20003)
+    check("Monday's new quote is", public.record_call(conn, mon))
+    # Repeats written by the old rule, before price_day existed: the first
+    # check of each UTC day, before the open, so Saturday, Sunday and Monday
+    # all carried Friday's close, stored once as the bar's float and once as
+    # the two-decimal quote. Daily bars only on weekdays, stamped at the open.
+    fri9 = calendar.timegm((2026, 1, 9, 3, 0, 0, 0, 0, 0))
+    for k, price in enumerate((399.5, 400.0899963378906, 400.09, 400.09)):
+        conn.execute("INSERT INTO calls (symbol, day, action, price, stop, target, "
+                     "horizon, at) VALUES ('QQQ', ?, 'AVOID', ?, 394.0, 409.0, 10, ?)",
+                     ("2026-01-%02d" % (9 + k), price, fri9 + k * DAY))
+    conn.commit()
+    opens = [calendar.timegm((2026, 1, d, 14, 30, 0, 0, 0, 0)) for d in (8, 9, 12, 13)]
+    weekdays = SimpleNamespace(timestamp=opens, high=[401.0] * 4, low=[399.0] * 4,
+                               close=[400.0] * 4, gmt_offset=-18000)
+    check("old repeats are marked by the bars they are scored on, not by price",
+          public.mark_calls(conn, "QQQ", weekdays) == 2)
+    check("and marking twice changes nothing", public.mark_calls(conn, "QQQ", weekdays) == 0)
+    kept = conn.execute("SELECT day, price_day FROM calls WHERE symbol='QQQ' "
+                        "AND excluded IS NULL ORDER BY at").fetchall()
+    check("the earliest call of a repeat run is the one kept",
+          [r[0] for r in kept] == ["2026-01-09", "2026-01-10"], [r[0] for r in kept])
+    check("and each kept call is dated by the session its price came from",
+          [time.strftime("%a", time.gmtime(r[1] * DAY)) for r in kept] == ["Thu", "Fri"],
+          [r[1] for r in kept])
+    check("nothing was deleted",
+          conn.execute("SELECT COUNT(*) FROM calls WHERE symbol='QQQ'").fetchone()[0] == 4)
+    rec = public.record(conn)
+    check("left-out calls are counted apart, with their reason",
+          len(rec["excluded"]) == 2
+          and "no market session between them" in rec["excluded"][0]["excluded"])
+    conn.close()
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("and listed on the page", "left out of the scores" in page
+          and "Scored on the same bars as the call written down on 10 Jan 2026" in page)
+    check("the scoring rule on the page matches the code: half the stop distance",
+          "half the distance to the stop" in page and "half a day" not in page)
+
+    conn = db.connect(DB)
     fetched = []
 
     def rising(symbol):
@@ -306,8 +371,10 @@ try:
         return path([310, 320, 330, 340])
 
     def analyse_with_levels(symbol):
+        # The next day's session, closing at the price of the day before on
+        # MSFT: a new session, so a new call, however alike the two prices.
         s = call(symbol, "BUY", 300.0, 3.0)
-        s["at"] = T + DAY                                  # the next day's call
+        s["at"] = T + DAY
         return s
 
     public.refresh(conn, analyse_with_levels, now=time.time() + public.MAX_AGE + 1,
@@ -354,6 +421,47 @@ try:
     finally:
         web.app.config["SESSION_COOKIE_SECURE"] = False
     check("a popular page is checked a few times a day", public.MAX_AGE == 6 * 3600)
+
+    print()
+    print("=" * 72)
+    print("THE FRONT DOOR SAYS ONLY WHAT IS TRUE")
+    print("=" * 72)
+    sign_out()
+    # A recent example, so the page shows one without starting a real analysis.
+    _was = dict(web._example_state)
+    with web._example_lock:
+        web._example_state.update(at=time.time(), data={
+            "symbol": "NVDA", "samples": 80, "worked": 30, "action": "WAIT",
+            "headline": "Wait for a better price.", "sure": "", "price": 166.19,
+            "at": time.time() - 20 * 60})
+    try:
+        page = c.get("/").data.decode("utf-8", "replace")
+    finally:
+        with web._example_lock:
+            web._example_state.update(_was)
+    check("an example from twenty minutes ago is not called live",
+          "Live right now" not in page and "Latest check" in page and "20 min ago" in page)
+    check("someone with an account is offered a way back in",
+          ">Sign in</a>" in page and ">Sign up</a>" not in page)
+    check("the screener is not said to read filings",
+          "numbers in their filings" not in page
+          and "price, size and reported fundamentals" in page)
+    check("nor is every company figure said to cite one",
+          "Every company figure cites" not in page and "on the research page cite" in page)
+    check("the Monitor page has one name", "<b>Monitor</b>" in page and "<b>Alerts</b>" not in page)
+    check("and nothing promises to tell anyone anything", "get told" not in page)
+    check("how it is tested, and how its calls turned out, are one tap away",
+          'href="/backtests#how-we-tested">how the strategies are tested' in page
+          and 'href="/record">how past calls turned out' in page)
+    check("every page has a skip link and one main landmark",
+          page.count('<main id="main">') == 1 and 'href="#main">Skip to content' in page)
+    page = c.get("/signin").data.decode("utf-8", "replace")
+    check("the sign-in page says it signs in too",
+          "<title>Sign in or create your free account" in page
+          and "<h1>Sign in or create your free account</h1>" in page)
+    page = c.get("/stocks").data.decode("utf-8", "replace")
+    check("asking someone to analyse a stock says analyse, like the button",
+          "Analyse any stock or coin" in page and "Check any stock" not in page)
 
     print()
     print("=" * 72)
@@ -544,7 +652,7 @@ try:
           [m[0] for m in outbox] == ["reader@example.com"], [m[0] for m in outbox])
     to, subject, body, headers = outbox[0]
     check("it covers their watchlist", "NVDA" in body and "AVOID" in body
-          and "It worked 22 of them" in body)
+          and "came up 83 times and worked 22 of them" in body)
     check("and says plainly what could not be checked", "ZZZZ   could not be checked" in body)
     check("the subject names the calls", "NVDA avoid" in subject, subject)
     stop = "https://orenth.app/email/stop?u=%d&t=%s" % (
@@ -590,8 +698,9 @@ try:
     print("BACKGROUND JOBS")
     print("=" * 72)
     jobs = web.start_background_jobs()
-    check("the server starts the daily checks and the weekly email",
-          set(jobs) == {"popular", "weekly"} and all(j.running for j in jobs.values()))
+    check("the server starts the daily checks, the weekly email and the plan rechecks",
+          set(jobs) == {"popular", "weekly", "plans"}
+          and all(j.running for j in jobs.values()))
     check("and only once", web.start_background_jobs() is jobs)
     for job in jobs.values():
         job.stop()

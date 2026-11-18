@@ -112,8 +112,16 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
         t.add_row("Target 1", "[green]%s[/]  %s" % (format_price(plan.target1),
                                                      plan.target_rationale))
         t.add_row("Target 2", "[green]%s[/]  runner" % format_price(plan.target2))
-        t.add_row("Reward:risk", "%.2f to 1   ·   needs %.0f%% win rate to break even" % (
-            plan.reward_risk or 0, (plan.breakeven_rate or 0) * 100))
+        # The break-even belongs to the trade the odds were measured on; when
+        # this plan's own levels give a different reward, say so rather than
+        # pairing one trade's break-even with another's reward.
+        tested = getattr(plan, "tested_reward_risk", None)
+        if tested and plan.reward_risk and abs(plan.reward_risk / tested - 1.0) > 0.10:
+            t.add_row("Reward:risk", "%.2f to 1   ·   the odds below were measured "
+                                     "at %.2f to 1" % (plan.reward_risk, tested))
+        else:
+            t.add_row("Reward:risk", "%.2f to 1   ·   needs %.0f%% win rate to break even" % (
+                plan.reward_risk or 0, (plan.breakeven_rate or 0) * 100))
 
         pos = plan.position
         if pos.get("error"):
@@ -138,6 +146,10 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
     if plan.probability is None:
         odds.add_row("Measured", "[yellow]no comparable history available[/]")
     else:
+        side = getattr(calib, "direction", 0)
+        if side:
+            odds.add_row("Side", "long trades only" if side > 0 else
+                         "short trades only: a bet on the price falling")
         flag = "" if plan.prob_reliable else "  [yellow](small sample)[/]"
         odds.add_row("Hit rate", "[bold]%.0f%%[/]  95%% CI %.0f-%.0f%%   on %d comparable setups%s" % (
             plan.probability * 100, (plan.prob_low or 0) * 100,
@@ -145,6 +157,10 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
         odds.add_row("Expectancy", "%s%+.3fR[/] per trade, net of costs, over %d bars held on average" % (
             "[green]" if (plan.expectancy_r or 0) > 0 else "[red]",
             plan.expectancy_r or 0, int(calib.avg_bars_held or 0)))
+        base = getattr(calib, "baseline_expectancy", None)
+        if base is not None:
+            odds.add_row("Any day", "%+.3fR per trade taking the same side on every "
+                                    "sampled bar, with no signal" % base)
         cost_style = "red" if calib.cost_r >= 0.25 else "dim"
         # When no trade was constructed the plan has no break-even of its own,
         # so fall back to the calibrator's figure rather than printing 0%.
@@ -275,6 +291,10 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
                 colour, it.score, it.age_hours, it.kind,
                 it.text[:78].replace("\n", " ")))
         sent.add_row("Top items", "\n".join(lines))
+    # The terminal is only ever its owner's, so the setup hint the web pages
+    # keep to the owner is always said here.
+    if getattr(sentiment, "setup_hint", ""):
+        sent.add_row("Note", "[dim]%s[/]" % sentiment.setup_hint)
     console.print(Panel(sent, title="News and social", border_style="magenta"))
 
     # --- risks and confirmations -----------------------------------------
@@ -320,6 +340,9 @@ def to_json(bars: Bars, plan: Plan, signals: List[Signal], composite: float,
             "ci_high": plan.prob_high, "samples": plan.prob_samples,
             "reliable": plan.prob_reliable, "expectancy_r": plan.expectancy_r,
             "total_backtest_samples": calib.samples,
+            "side": getattr(calib, "direction", 0),
+            "effective_samples": getattr(calib, "effective_samples", None),
+            "same_side_any_day_r": getattr(calib, "baseline_expectancy", None),
             "cost_r": calib.cost_r, "cost_bps": calib.cost_bps,
             "holdout_hit_rate": calib.holdout_hit_rate,
             "holdout_expectancy": calib.holdout_expectancy,

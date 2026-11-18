@@ -19,15 +19,21 @@ itself smarter rather than merely larger.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import re
 import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Tables that belong to one person. Everything else is shared or derived.
-OWNED_TABLES = ("runs", "trades", "watchlist", "alerts", "theses")
+# In the order they can be deleted: a trade opened from an analysis points at
+# its run, so trades go before runs or the database refuses the delete.
+OWNED_TABLES = ("trades", "runs", "watchlist", "alerts", "theses")
 
 # The account the app uses when nobody has signed in, which is how it behaves
 # on your own machine with no credentials configured.
@@ -64,6 +70,59 @@ CREATE TABLE IF NOT EXISTS user_settings (
     data      TEXT NOT NULL,
     updated   INTEGER NOT NULL
 );
+
+-- A way into an account besides the one it was made with, so far only Apple.
+-- users.provider and provider_id keep naming how the account was made, as
+-- older versions of the app read them. The refresh token is only kept so that
+-- deleting the account can ask Apple to end it, and it is useless without
+-- this site's .p8 key, which is never in the database.
+-- When a person agreed to their chart screenshots being sent to Anthropic
+-- to be read. Asked once, before the first picture leaves, because the App
+-- Store and plain fairness both want an explicit yes before anything a
+-- person uploads goes to another company's AI. Withdrawn by deleting the row.
+CREATE TABLE IF NOT EXISTS ai_consents (
+    user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    ts       INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS identities (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider          TEXT NOT NULL,
+    subject           TEXT NOT NULL,
+    email             TEXT NOT NULL DEFAULT '',
+    is_private_email  INTEGER NOT NULL DEFAULT 0,
+    refresh_token     TEXT NOT NULL DEFAULT '',
+    client_id         TEXT NOT NULL DEFAULT '',
+    created_ts        INTEGER NOT NULL,
+    last_used_ts      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (provider, subject)
+);
+
+CREATE INDEX IF NOT EXISTS idx_identities_user ON identities(user_id);
+
+-- A way in that was taken off an account, as when someone stops using Sign
+-- in with Apple here: only which account and which id. An address joins an
+-- account only if no other id from that provider was ever tied to it, and
+-- this is what remembers "ever" once the link itself is gone.
+CREATE TABLE IF NOT EXISTS former_identities (
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider    TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    ended_ts    INTEGER NOT NULL,
+    PRIMARY KEY (user_id, provider, subject)
+);
+
+-- A sign-in finished in the iPhone app's browser sheet, waiting for the app's
+-- own web view to collect it. Only the code's hash is kept.
+CREATE TABLE IF NOT EXISTS app_handoffs (
+    code_hash   TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    challenge   TEXT NOT NULL,
+    next_url    TEXT NOT NULL DEFAULT '',
+    created_ts  INTEGER NOT NULL,
+    used_ts     INTEGER NOT NULL DEFAULT 0
+);
 """
 
 # The settings that are a person's own: their account, their risk, their costs
@@ -89,8 +148,11 @@ class User:
     is_local: bool = False
     plan: str = "free"
     plan_status: str = ""
+    plan_until: int = 0           # when the paid period ends, 0 if not known
     bonus_until: int = 0          # free Pro from invites, until this time
+    apple_until: int = 0          # Pro bought through Apple, until this time
     weekly_email: bool = False
+    alert_email: bool = False
     created_ts: int = 0
 
     @property
@@ -113,7 +175,11 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 is_local=bool(row["is_local"]),
                 plan=row["plan"] if "plan" in keys else "free",
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
+                plan_until=row["plan_until"] if "plan_until" in keys else 0,
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
+                apple_until=row["apple_until"] if "apple_until" in keys else 0,
+                alert_email=bool(row["alert_email"]) if "alert_email" in keys
+                else False,
                 weekly_email=bool(row["weekly_email"]) if "weekly_email" in keys
                 else False,
                 created_ts=row["created_ts"] if "created_ts" in keys else 0)
@@ -140,7 +206,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                         ("invited_by", "INTEGER NOT NULL DEFAULT 0"),
                         ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),
                         ("weekly_email", "INTEGER NOT NULL DEFAULT 0"),
-                        ("digest_week", "TEXT NOT NULL DEFAULT ''")):
+                        ("alert_email", "INTEGER NOT NULL DEFAULT 0"),
+                        ("digest_week", "TEXT NOT NULL DEFAULT ''"),
+                        # Pro bought in the iPhone app, worked out by
+                        # bot/apple_store.py from Apple's signed data.
+                        ("apple_until", "INTEGER NOT NULL DEFAULT 0")):
         if column not in have:
             conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite ON "
@@ -185,6 +255,8 @@ def _rebuild_watchlist_if_needed(conn: sqlite3.Connection, local_id: int) -> Non
     if already:
         return
 
+    # exact is the column database._migrate has just added, before this runs:
+    # left out here, the rebuilt table would lack it until the next start.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS watchlist_rekeyed (
             symbol     TEXT NOT NULL,
@@ -193,6 +265,7 @@ def _rebuild_watchlist_if_needed(conn: sqlite3.Connection, local_id: int) -> Non
             note       TEXT,
             last_run   INTEGER,
             user_id    INTEGER NOT NULL DEFAULT 1,
+            exact      INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, symbol)
         )""")
     owner = "user_id" if "user_id" in by_name else str(int(local_id))
@@ -255,6 +328,14 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
                            "provider_id=?", (sub,)).fetchone()
     if row is None:
         row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        # Matching by address is how an account made with an emailed code is
+        # joined to Google. An account already tied to another Google
+        # identity is different: its address has been given to someone new,
+        # and the old owner's journal is not theirs to take over.
+        if row is not None and sub and row["provider"] == "google" \
+                and row["provider_id"] and row["provider_id"] != sub:
+            raise ValueError("That email address belongs to a different Google "
+                             "account here. Sign in with that one instead.")
 
     if row is None:
         cur = conn.execute(
@@ -327,6 +408,127 @@ def upsert_phone_user(conn: sqlite3.Connection, phone: str) -> User:
     return get_user(conn, user_id)
 
 
+# Apple's Hide My Email addresses: real, and forwarded to the person's own
+# inbox, but made for this site alone, so never a reason to join two accounts.
+# Apple also hands out relay addresses at icloud.com, which only the token's
+# is_private_email marks as such.
+APPLE_RELAY = ("@privaterelay.appleid.com", "@private.icloud.com")
+
+
+def upsert_apple_user(conn: sqlite3.Connection, identity: Dict, name: str = "",
+                      refresh_token: str = "", client_id: str = "") -> User:
+    """The account behind a verified Apple identity, made if there is none.
+
+    Apple's subject id is the identity: it stays the same for one person on
+    this site, whatever their address. It is looked for in three places, in
+    order: the link made last time; the account Apple itself made here, which
+    remembers the subject, so someone who took their consent back and signs in
+    again reaches it; and, only when Apple says the address is verified and it
+    is not a private relay address, an account already using that address,
+    unless another Apple ID was ever tied to that account. A local or example
+    account is never joined. Anything else is a new account.
+
+    The name comes from Apple only on a person's very first sign-in here, so
+    it is kept then, and never written over a name already there.
+    """
+    sub = str(identity.get("sub") or "")
+    if not sub:
+        raise ValueError("Apple did not say who signed in.")
+    email = (identity.get("email") or "").strip().lower()
+    verified = bool(identity.get("email_verified"))
+    private = bool(identity.get("is_private_email")) or email.endswith(APPLE_RELAY)
+    now = int(time.time())
+
+    if conn.in_transaction:
+        conn.commit()
+    # One write transaction, so two sign-ins arriving together for someone
+    # new make one account between them, not two.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        link = conn.execute("SELECT * FROM identities WHERE provider='apple' AND "
+                            "subject=?", (sub,)).fetchone()
+        user_id = int(link["user_id"]) if link is not None else None
+        if user_id is None:
+            made = conn.execute("SELECT id FROM users WHERE provider='apple' AND "
+                                "provider_id=?", (sub,)).fetchone()
+            user_id = int(made["id"]) if made is not None else None
+        if user_id is None and email and verified and not private:
+            row = conn.execute("SELECT * FROM users WHERE email=?",
+                               (email,)).fetchone()
+            if row is not None and not row["is_local"] and row["provider"] != "demo":
+                # Ever tied to another Apple ID: the address has since been
+                # given to someone new, as with Google above.
+                if _tied_to_another(conn, row, "apple", sub):
+                    raise ValueError("That email address belongs to a different "
+                                     "Apple account here. Sign in with that one "
+                                     "instead.")
+                user_id = int(row["id"])
+
+        if user_id is None:
+            address = email if email and verified else ""
+            taken = address and conn.execute("SELECT 1 FROM users WHERE email=?",
+                                              (address,)).fetchone()
+            if not address or taken:
+                # Nothing Apple vouched for, or an address this account may
+                # not share. Under .invalid, like a phone account's, so it is
+                # never mistaken for an inbox.
+                address = "apple-%s@users.invalid" % hashlib.sha256(
+                    sub.encode("utf-8")).hexdigest()[:16]
+            try:
+                cur = conn.execute(
+                    "INSERT INTO users (email, name, picture, provider, "
+                    "provider_id, created_ts, last_seen_ts, is_local) "
+                    "VALUES (?,?,?,?,?,?,?,0)",
+                    (address, name, "", "apple", sub, now, now))
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("That Apple account could not be given an "
+                                 "account here. Try another way in.") from exc
+            user_id = int(cur.lastrowid)
+        else:
+            if name:
+                conn.execute("UPDATE users SET name=? WHERE id=? AND name=''",
+                             (name, user_id))
+            conn.execute("UPDATE users SET last_seen_ts=? WHERE id=?",
+                         (now, user_id))
+
+        if link is None:
+            conn.execute(
+                "INSERT INTO identities (user_id, provider, subject, email, "
+                "is_private_email, refresh_token, client_id, created_ts, "
+                "last_used_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                (user_id, "apple", sub, email, 1 if private else 0,
+                 refresh_token or "", client_id if refresh_token else "", now, now))
+        else:
+            conn.execute("UPDATE identities SET email=?, is_private_email=?, "
+                         "last_used_ts=? WHERE id=?",
+                         (email or link["email"], 1 if private else 0, now,
+                          link["id"]))
+            if refresh_token:
+                conn.execute("UPDATE identities SET refresh_token=?, client_id=? "
+                             "WHERE id=?", (refresh_token, client_id, link["id"]))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_user(conn, user_id)
+
+
+def _tied_to_another(conn: sqlite3.Connection, row: sqlite3.Row, provider: str,
+                     subject: str) -> bool:
+    """Whether an account was ever tied to an id from this provider other
+    than this one: the one that made it, one linked to it now, or one taken
+    off it since. Only "never" lets an address bring a new id in: a person
+    who signed up with Google still reaches their account with Apple."""
+    if row["provider"] == provider and row["provider_id"] not in ("", subject):
+        return True
+    for table in ("identities", "former_identities"):
+        if conn.execute("SELECT 1 FROM %s WHERE user_id=? AND provider=? AND "
+                        "subject<>?" % table,
+                        (row["id"], provider, subject)).fetchone() is not None:
+            return True
+    return False
+
+
 def get_user(conn: sqlite3.Connection, user_id: int) -> Optional[User]:
     row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     return _row_to_user(row) if row else None
@@ -335,6 +537,110 @@ def get_user(conn: sqlite3.Connection, user_id: int) -> Optional[User]:
 def list_users(conn: sqlite3.Connection) -> List[User]:
     return [_row_to_user(r) for r in
             conn.execute("SELECT * FROM users ORDER BY created_ts")]
+
+
+# --- more than one way in ---------------------------------------------------
+
+_METHOD_NAMES = {"google": "Google", "apple": "Apple", "email": "Email",
+                 "phone": "Phone"}
+
+
+def sign_in_methods(conn: sqlite3.Connection, user: User) -> List[str]:
+    """The ways into this account, as names to show: how it was made first."""
+    names = []
+    first = _METHOD_NAMES.get(user.provider)
+    if first:
+        names.append(first)
+    for row in conn.execute("SELECT provider FROM identities WHERE user_id=? "
+                            "ORDER BY id", (user.id,)):
+        label = _METHOD_NAMES.get(row["provider"], row["provider"].capitalize())
+        if label not in names:
+            names.append(label)
+    return names
+
+
+def apple_tokens(conn: sqlite3.Connection, user_id: int) -> List[Tuple[int, str, str]]:
+    """(identity id, refresh token, client id) for each Apple sign-in to end."""
+    return [(int(r["id"]), r["refresh_token"], r["client_id"]) for r in conn.execute(
+        "SELECT id, refresh_token, client_id FROM identities WHERE user_id=? AND "
+        "provider='apple' AND refresh_token<>''", (user_id,))]
+
+
+def identity_owner(conn: sqlite3.Connection, provider: str,
+                   subject: str) -> Optional[sqlite3.Row]:
+    """The account a sign-in method belongs to, and when it was last used."""
+    return conn.execute("SELECT user_id, last_used_ts FROM identities WHERE "
+                        "provider=? AND subject=?", (provider, subject)).fetchone()
+
+
+def made_by(conn: sqlite3.Connection, provider: str,
+            subject: str) -> Optional[sqlite3.Row]:
+    """The account a sign-in method made, in identity_owner's shape, for a
+    method no longer linked to it. When the account was last signed in to
+    stands in for when the method was last used."""
+    return conn.execute("SELECT id AS user_id, last_seen_ts AS last_used_ts "
+                        "FROM users WHERE provider=? AND provider_id=?",
+                        (provider, subject)).fetchone()
+
+
+def can_still_sign_in(conn: sqlite3.Connection, user_id: int, provider: str,
+                      subject: str) -> bool:
+    """Whether an account keeps a way in once this one sign-in method is gone.
+
+    It does when something else made it or took it over (Google, an emailed
+    code, a text), when another method is linked, or when its address is a
+    real inbox an emailed code or Google could still reach. A private relay
+    address stops working with the Apple Account behind it.
+    """
+    row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if row is None:
+        return False
+    if row["is_local"] or row["provider"] == "demo":
+        return True
+    if not (row["provider"] == provider and row["provider_id"] == subject):
+        return True
+    other = conn.execute("SELECT 1 FROM identities WHERE user_id=? AND NOT "
+                         "(provider=? AND subject=?)",
+                         (user_id, provider, subject)).fetchone()
+    if other is not None:
+        return True
+    email = (row["email"] or "").lower()
+    if email.endswith(".invalid") or email.endswith(APPLE_RELAY):
+        return False
+    # A relay address at icloud.com looks like a real one; Apple said which.
+    link = conn.execute("SELECT email, is_private_email FROM identities WHERE "
+                        "provider=? AND subject=?", (provider, subject)).fetchone()
+    return not (link is not None and link["is_private_email"]
+                and (link["email"] or "").lower() == email)
+
+
+def unlink_identity(conn: sqlite3.Connection, provider: str, subject: str,
+                    ending: Optional[Callable[[str], None]] = None) -> Optional[int]:
+    """Take a sign-in method off its account, and sign that account out.
+
+    Its stored token goes with it. Which account it was tied to is kept, so
+    that the address cannot later bring another id from that provider in.
+    Every session ends, because the method being withdrawn is to be treated
+    as the person signing out, and nothing records which method opened which
+    session. ending, when given, is called with each of those sessions'
+    tokens first, for what that sign-in switched on elsewhere. Returns the
+    account's id.
+    """
+    row = identity_owner(conn, provider, subject)
+    if row is None:
+        return None
+    if ending is not None:
+        for (token,) in conn.execute("SELECT token FROM sessions WHERE user_id=?",
+                                     (row["user_id"],)).fetchall():
+            ending(token)
+    conn.execute("INSERT OR REPLACE INTO former_identities (user_id, provider, "
+                 "subject, ended_ts) VALUES (?,?,?,?)",
+                 (row["user_id"], provider, subject, int(time.time())))
+    conn.execute("DELETE FROM identities WHERE provider=? AND subject=?",
+                 (provider, subject))
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (row["user_id"],))
+    conn.commit()
+    return int(row["user_id"])
 
 
 # --- sessions ---------------------------------------------------------------
@@ -369,6 +675,15 @@ def user_for_session(conn: sqlite3.Connection, token: str) -> Optional[User]:
     return _row_to_user(row) if row else None
 
 
+def session_age(conn: sqlite3.Connection, token: str) -> Optional[int]:
+    """Seconds since this session began, or None for a token that is not one."""
+    if not token:
+        return None
+    row = conn.execute("SELECT created_ts FROM sessions WHERE token=?",
+                       (token,)).fetchone()
+    return int(time.time()) - int(row[0]) if row else None
+
+
 def end_session(conn: sqlite3.Connection, token: str) -> None:
     if token:
         conn.execute("DELETE FROM sessions WHERE token=?", (token,))
@@ -386,6 +701,112 @@ def purge_expired(conn: sqlite3.Connection) -> int:
                        (int(time.time()),))
     conn.commit()
     return cur.rowcount
+
+
+# --- handing a sign-in to the app -------------------------------------------
+#
+# Google refuses to sign anyone in inside an app's web view, so the iPhone app
+# signs in in the system browser sheet, which keeps cookies of its own. The
+# sheet is not signed in; it is handed a one-time code for the app instead,
+# through the app's own address. The app started all this with the SHA-256 of
+# a secret it kept, the verifier, and only that secret makes the code work:
+# another app that registered the same address and caught the code has
+# nothing to use it with. The PKCE idea, applied to the last step.
+#
+# What it cannot do is tell which app started a sign-in. An app that opens
+# the start address in a sheet of its own, with a secret of its own, is
+# handed a code that its secret redeems, if the person signs in there. Only
+# a return address the Orenth app alone can claim, an https Universal Link,
+# closes that; DEPLOY.md lists it as a known limitation.
+
+HANDOFF_SECONDS = 120
+_CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_VERIFIER = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+
+
+def valid_challenge(challenge: str) -> bool:
+    """A base64url SHA-256, as the app sends it: 43 characters."""
+    return bool(_CHALLENGE.match(challenge or ""))
+
+
+def challenge_of(verifier_secret: str) -> str:
+    """base64url(SHA-256(verifier)), without padding, as the app computes it."""
+    digest = hashlib.sha256(verifier_secret.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _handoff_key(handoff_token: str) -> str:
+    return hashlib.sha256(handoff_token.encode("utf-8")).hexdigest()
+
+
+def new_handoff(conn: sqlite3.Connection, user_id: int, challenge: str,
+                next_url: str = "") -> str:
+    """A one-time code for the app, good for two minutes. Only its hash is kept."""
+    if not valid_challenge(challenge):
+        raise ValueError("That sign-in was started without the app's check.")
+    now = int(time.time())
+    handoff_token = secrets.token_urlsafe(32)
+    # Codes past their two minutes, used or not, have nothing left to do.
+    conn.execute("DELETE FROM app_handoffs WHERE created_ts < ?",
+                 (now - HANDOFF_SECONDS,))
+    conn.execute("INSERT INTO app_handoffs (code_hash, user_id, challenge, "
+                 "next_url, created_ts) VALUES (?,?,?,?,?)",
+                 (_handoff_key(handoff_token), int(user_id), challenge,
+                  next_url or "", now))
+    conn.commit()
+    return handoff_token
+
+
+def redeem_handoff(conn: sqlite3.Connection, handoff_token: str,
+                   verifier_secret: str) -> Optional[Tuple[int, str]]:
+    """(user id, next) for a code that is real, unused, in time and comes with
+    the right verifier; otherwise None.
+
+    Any attempt uses the code up, right or wrong, so a code someone else
+    caught cannot be tried against guesses, and two attempts at once cannot
+    both get in: only one of them marks it used.
+    """
+    if not handoff_token or len(handoff_token) > 128:
+        return None
+    key = _handoff_key(handoff_token)
+    now = int(time.time())
+    row = conn.execute("SELECT * FROM app_handoffs WHERE code_hash=?",
+                       (key,)).fetchone()
+    if row is None:
+        return None
+    cur = conn.execute("UPDATE app_handoffs SET used_ts=? WHERE code_hash=? AND "
+                       "used_ts=0", (now, key))
+    conn.commit()
+    if cur.rowcount != 1 or row["created_ts"] < now - HANDOFF_SECONDS:
+        return None
+    if not _VERIFIER.match(verifier_secret or ""):
+        return None
+    if not hmac.compare_digest(challenge_of(verifier_secret).encode("ascii"),
+                               row["challenge"].encode("ascii")):
+        return None
+    return int(row["user_id"]), row["next_url"]
+
+
+# --- sending a screenshot to Anthropic ----------------------------------------
+
+def ai_consent(conn: sqlite3.Connection, user_id: int) -> int:
+    """When this person agreed to screenshots going to Anthropic, or 0."""
+    row = conn.execute("SELECT ts FROM ai_consents WHERE user_id=?",
+                       (int(user_id),)).fetchone()
+    return int(row["ts"]) if row else 0
+
+
+def give_ai_consent(conn: sqlite3.Connection, user_id: int) -> None:
+    """Record the yes, keeping the first time it was given."""
+    conn.execute("INSERT OR IGNORE INTO ai_consents (user_id, ts) VALUES (?, ?)",
+                 (int(user_id), int(time.time())))
+    conn.commit()
+
+
+def withdraw_ai_consent(conn: sqlite3.Connection, user_id: int) -> None:
+    """Take the yes back: the next screenshot asks again."""
+    conn.execute("DELETE FROM ai_consents WHERE user_id=?", (int(user_id),))
+    conn.commit()
 
 
 # --- deleting an account ----------------------------------------------------
@@ -411,19 +832,65 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
             cur = conn.execute("DELETE FROM %s WHERE run_id IN (%s)"
                                % (child, marks), run_ids)
             removed[child] = cur.rowcount
+    # Parts of trades closed in parts point at their trade, so they go first.
+    cur = conn.execute("DELETE FROM trade_exits WHERE trade_id IN "
+                       "(SELECT id FROM trades WHERE user_id=?)", (user_id,))
+    removed["trade_exits"] = cur.rowcount
     for table in OWNED_TABLES:
         cur = conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
-    from . import billing, public
+    conn.execute("DELETE FROM ai_consents WHERE user_id=?", (user_id,))
+    from . import billing, codes, public
     billing.ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM plan_events WHERE user_id=?", (user_id,))
+    # Sign-in codes are filed under the address or number they went to, with
+    # the network address that asked for them, so they go with the account.
+    codes.ensure_schema(conn)
+    targets = [user.email]
+    if user.provider == "phone":
+        number = conn.execute("SELECT provider_id FROM users WHERE id=?",
+                              (user_id,)).fetchone()[0]
+        if number:
+            targets.append(number)
+    cur = conn.execute("DELETE FROM login_codes WHERE target IN (%s)"
+                       % ",".join("?" * len(targets)), targets)
+    removed["login_codes"] = cur.rowcount
     public.ensure_schema(conn)
     conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
+    from .database import _EVENTS
+    conn.executescript(_EVENTS)
+    cur = conn.execute("DELETE FROM alert_events WHERE user_id=?", (user_id,))
+    removed["alert_events"] = cur.rowcount
+    # Other ways in, with any token kept for them, and codes still waiting
+    # for the app. Both point at the account, so they go before it.
+    cur = conn.execute("DELETE FROM identities WHERE user_id=?", (user_id,))
+    removed["identities"] = cur.rowcount
+    conn.execute("DELETE FROM former_identities WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM app_handoffs WHERE user_id=?", (user_id,))
+    # The phones and browsers notifications went to. Before the users row,
+    # which they point at.
+    from . import push
+    push.ensure_schema(conn)
+    cur = conn.execute("DELETE FROM push_devices WHERE user_id=?", (user_id,))
+    removed["push_devices"] = cur.rowcount
+    # Pro bought through Apple: the account's token and its subscriptions.
+    # Apple keeps billing until the person cancels with Apple, which the
+    # Account page says before this runs; renewals then arrive unowned.
+    from . import apple_store
+    apple_store.forget_user(conn, user_id)
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()
     return removed
+
+
+def set_alert_email(conn: sqlite3.Connection, user_id: int, on: bool) -> None:
+    """Whether fired alerts and crossed stops are also emailed to this person."""
+    ensure_schema(conn)
+    conn.execute("UPDATE users SET alert_email=? WHERE id=?", (1 if on else 0, user_id))
+    conn.commit()
 
 
 def settings_for(conn: sqlite3.Connection, user_id: int) -> Dict:

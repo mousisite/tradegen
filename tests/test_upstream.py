@@ -230,6 +230,237 @@ check("the in-flight marker was released", upstream.stats()["in_flight"] == 0)
 
 print()
 print("=" * 72)
+print("A FAILURE IS SHARED WITH THOSE WAITING, NOT REPEATED BY EACH")
+print("=" * 72)
+
+# Callers waiting on a fetch that failed used to run it again themselves,
+# past the breaker and without keeping the answer: eight people waiting on a
+# request the source refused sent eight more.
+upstream.reset()
+sent = {"n": 0}
+
+
+class Refused(RuntimeError):
+    pass
+
+
+def refusing():
+    sent["n"] += 1
+    time.sleep(0.4)
+    raise Refused("the source said no")
+
+
+told = []
+gate = threading.Barrier(9)
+
+
+def waits_on_refusal():
+    gate.wait(timeout=5)
+    try:
+        upstream.cached("refused", refusing, host=HOST)
+        told.append("answered")
+    except Refused as exc:
+        told.append(exc)
+
+
+threads = [threading.Thread(target=waits_on_refusal) for _ in range(8)]
+for t in threads:
+    t.start()
+gate.wait(timeout=5)
+for t in threads:
+    t.join(timeout=15)
+check("eight callers waiting on a failed fetch cost one fetch", sent["n"] == 1, sent["n"])
+check("and every one of them is told why it failed",
+      len(told) == 8 and all(isinstance(e, Refused) for e in told), told)
+check("nothing is left in flight", upstream.stats()["in_flight"] == 0)
+check("and the failure is not kept for whoever asks next",
+      upstream.cached("refused", lambda: "fine", host=HOST) == "fine")
+
+# A waiter whose wait runs out while the fetch is still going asks for itself,
+# which is the guard against a stuck fetch. It must not do so past a source
+# that has said stop in the meantime.
+upstream.reset()
+sent["n"] = 0
+
+
+def stuck():
+    sent["n"] += 1
+    for _ in range(upstream.THRESHOLD):
+        upstream.note_throttled(HOST)
+    time.sleep(0.6)
+    return "late"
+
+
+first = threading.Thread(target=lambda: upstream.cached("stuck", stuck, host=HOST, wait=0.1))
+first.start()
+time.sleep(0.1)
+try:
+    upstream.cached("stuck", stuck, host=HOST, wait=0.1)
+    check("a waiter that gives up does not ask a source that has said stop", False,
+          "it asked")
+except upstream.Throttled:
+    check("a waiter that gives up does not ask a source that has said stop",
+          sent["n"] == 1, sent["n"])
+first.join()
+
+print()
+print("=" * 72)
+print("OLD ANSWERS ARE LET GO")
+print("=" * 72)
+
+# Each answer can be a megabyte of price history. Expired ones used to stay
+# until four hundred others pushed them out.
+upstream.reset()
+upstream.cached("old", lambda: "x", ttl=0.2)
+time.sleep(0.3)
+upstream.cached("new", lambda: "y", ttl=0.2)
+check("an answer nobody can reuse is dropped when the next is stored",
+      "old" not in upstream._cache, sorted(upstream._cache))
+check("and the new one is kept", "new" in upstream._cache)
+
+upstream.reset()
+upstream.cached("long", lambda: 1, ttl=60)
+upstream.cached("short", lambda: 2, ttl=0.1)
+time.sleep(0.2)
+upstream.cached("later", lambda: 3, ttl=0.1)
+check("an answer some caller may still reuse is kept",
+      "long" in upstream._cache and "short" in upstream._cache, sorted(upstream._cache))
+
+upstream.reset()
+total = upstream.MAX_ENTRIES + 50
+for n in range(total):
+    upstream.cached("k%d" % n, lambda: n, ttl=60)
+check("the cache never holds more than its limit",
+      upstream.stats()["cached_keys"] == upstream.MAX_ENTRIES,
+      upstream.stats()["cached_keys"])
+check("and what it lets go is the oldest",
+      "k0" not in upstream._cache and "k%d" % (total - 1) in upstream._cache)
+
+print()
+print("=" * 72)
+print("A FAILING YAHOO HANDSHAKE IS TRIED ONCE, NOT ONCE PER CALLER")
+print("=" * 72)
+
+from bot import yahoo
+
+
+class HandshakeAnswer:
+    def __init__(self, status, text):
+        self.status_code, self.text, self.headers = status, text, {}
+
+
+class FakeSession:
+    """Stands in for requests.Session, so nothing here touches the network."""
+    calls = []
+    answer = (200, "<html>a consent page, not a crumb</html>")
+    delay = 0.3
+
+    def __init__(self):
+        self.headers = {}
+
+    def get(self, url, timeout=None, **_):
+        FakeSession.calls.append((url, timeout))
+        time.sleep(FakeSession.delay)
+        return HandshakeAnswer(*FakeSession.answer)
+
+
+def fresh_handshake():
+    yahoo._SESSION, yahoo._CRUMB = None, None
+    yahoo._OBTAINED_AT = yahoo._FAILED_AT = 0.0
+    FakeSession.calls = []
+
+
+real_session = yahoo.requests.Session
+yahoo.requests.Session = FakeSession
+try:
+    one = len(yahoo._SEED_URLS) + len(yahoo._CRUMB_URLS)
+    fresh_handshake()
+    told = []
+
+    def asks():
+        try:
+            yahoo._ensure()
+            told.append("ok")
+        except yahoo.YahooError:
+            told.append("refused")
+
+    threads = [threading.Thread(target=asks) for _ in range(4)]
+    begin = time.time()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    elapsed = time.time() - begin
+    print("   4 callers, %d requests, %.2fs" % (len(FakeSession.calls), elapsed))
+    check("four callers cost one handshake", len(FakeSession.calls) == one,
+          len(FakeSession.calls))
+    check("and all four are told it failed", told == ["refused"] * 4, told)
+    check("none of them waited for a handshake of its own",
+          elapsed < 2 * one * FakeSession.delay, "%.2fs" % elapsed)
+    check("each handshake request gives up after a few seconds",
+          all(t is not None and t <= 5 for _, t in FakeSession.calls),
+          FakeSession.calls)
+
+    FakeSession.calls = []
+    begin = time.time()
+    try:
+        yahoo._ensure()
+        check("asking again at once is refused", False, "it was allowed")
+    except yahoo.YahooError:
+        check("asking again at once is refused without a request",
+              not FakeSession.calls and time.time() - begin < 0.1)
+
+    # A crumb past its half hour usually still works, so a failed refresh
+    # keeps using it instead of failing every page for a minute.
+    fresh_handshake()
+    yahoo._SESSION, yahoo._CRUMB = FakeSession(), "old-crumb"
+    yahoo._OBTAINED_AT = time.time() - yahoo._TTL - 10
+    try:
+        yahoo._ensure()
+        kept = yahoo._CRUMB == "old-crumb"
+    except yahoo.YahooError:
+        kept = False
+    check("a failed refresh keeps the crumb it had", kept)
+    check("after really trying to refresh it", len(FakeSession.calls) == one,
+          len(FakeSession.calls))
+
+    # Refused for rate limiting while getting the token: the same limit the
+    # data requests would hit, so it counts towards the breaker.
+    fresh_handshake()
+    upstream.reset()
+    FakeSession.answer, FakeSession.delay = (429, ""), 0.0
+    for _ in range(upstream.THRESHOLD):
+        yahoo._FAILED_AT = 0.0
+        try:
+            yahoo._ensure()
+        except yahoo.YahooError:
+            pass
+    try:
+        upstream.check(yahoo._HOST)
+        check("rate limiting during the handshake closes the breaker", False)
+    except upstream.Throttled:
+        check("rate limiting during the handshake closes the breaker", True)
+    check("and the second address is not tried after a refusal",
+          len(FakeSession.calls) == upstream.THRESHOLD * (len(yahoo._SEED_URLS) + 1),
+          len(FakeSession.calls))
+
+    # Two callers refused with the same expired crumb: the second finds it
+    # already replaced and does not shake hands again.
+    fresh_handshake()
+    upstream.reset()
+    yahoo._SESSION, yahoo._CRUMB = FakeSession(), "renewed"
+    yahoo._OBTAINED_AT = time.time()
+    yahoo._ensure(force=True, seen="expired")
+    check("a crumb another caller already renewed is not renewed again",
+          not FakeSession.calls and yahoo._CRUMB == "renewed")
+finally:
+    yahoo.requests.Session = real_session
+    yahoo._SESSION, yahoo._CRUMB = None, None
+    yahoo._OBTAINED_AT = yahoo._FAILED_AT = 0.0
+    upstream.reset()
+
+print()
+print("=" * 72)
 print("AGAINST THE REAL SOURCE")
 print("=" * 72)
 
@@ -307,6 +538,46 @@ for t in threads:
     t.join()
 check("a waiter that gives up early does refetch, which is why wait matters",
       len(impatient) == 2, len(impatient))
+
+print()
+print("=" * 72)
+print("THE NEWS SEARCH SHARES YAHOO'S DOOR")
+print("=" * 72)
+# Yahoo's news search went round the breaker: a refusal there was not told to
+# it, and it kept asking while the price requests stood back.
+from types import SimpleNamespace  # noqa: E402
+from bot import sentiment  # noqa: E402
+
+real_get = sentiment.requests.get
+asked = []
+
+
+def fake_get(url, params=None, headers=None, timeout=None):
+    asked.append(url)
+    if url == sentiment._YAHOO_SEARCH:
+        return SimpleNamespace(status_code=429, headers={"Retry-After": "120"},
+                               content=b"", json=lambda: {})
+    return SimpleNamespace(status_code=404, headers={}, content=b"", json=lambda: {})
+
+
+sentiment.requests.get = fake_get
+try:
+    upstream.reset()
+    for _ in range(3):
+        sentiment.gather_news("AAPL", "Apple")
+    try:
+        upstream.check(sentiment._YAHOO_HOST)
+        closed = False
+    except upstream.Throttled:
+        closed = True
+    check("refusals on the news search close the door for Yahoo's prices too", closed)
+    del asked[:]
+    sentiment.gather_news("AAPL", "Apple")
+    check("and while it is closed the news search asks nothing",
+          sentiment._YAHOO_SEARCH not in asked, asked)
+finally:
+    sentiment.requests.get = real_get
+    upstream.reset()
 
 print("UPSTREAM OK" if not fails else "FAILURES: %s" % fails)
 

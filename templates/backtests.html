@@ -1,15 +1,30 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
-{% set page_blurb = (table|length or 34) ~ " trading strategies (RSI, MACD, Bollinger, breakouts and more) back-tested on popular stocks and coins, after trading costs. See which ones actually kept money. Not financial advice." %}
-{% block title %}Which trading strategies work? {{ table|length or 34 }} back-tested on stocks and crypto · Orenth{% endblock %}
+{% set shown = tested or daily_strategy_count %}
+{% set page_blurb = shown ~ " trading strategies (RSI, MACD, Bollinger, breakouts and more) back-tested on popular stocks and coins, after trading costs, each with its margin of error and set beside simply buying or shorting every day. Not financial advice." %}
+{% block title %}Which trading strategies work? {{ shown }} back-tested on stocks and crypto · Orenth{% endblock %}
 {% block og_title %}Which trading strategies work? · Orenth{% endblock %}
 {% block head_extra %}{% if not table %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
   <h1>Which trading strategies actually work?</h1>
-  <p>{{ table|length or 34 }} strategies, back-tested every day on popular stocks and coins,
-    after trading costs. Best first. Tap one to see every stock.</p>
+  <p>{{ shown }} strategies, back-tested every day on popular stocks and coins,
+    after trading costs. Best first. Tap one to see every stock.
+    {% if strategy_count > daily_strategy_count %}The other {{ strategy_count - daily_strategy_count }}
+    of Orenth's {{ strategy_count }} read the inside of a trading day, so they only
+    fire on hourly or shorter bars and are not in this daily test.{% endif %}</p>
+  <p>These are today's popular names, picked after the years they were tested
+    on. Where a name rose over those years, buying it on any day kept money
+    too, so a strategy that mostly bought can look skilled without being so,
+    and one that mostly shorted can look worse than it was. The shaded rows
+    are exactly that: a buy, and a short, on every tested day. Set each
+    strategy beside the one on its side.</p>
+  <p>How the same strategies did across the analyses people run on this site,
+    under their own settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
+  <p>Each result has a margin of error after it. It is green only when the
+    whole margin is above zero, and red only when it is all below. With
+    {{ shown }} strategies tested, one or two can look this good by luck alone.</p>
 </div>
 
 <div class="card pad0">
@@ -19,17 +34,19 @@
       <thead><tr>
         <th>Strategy</th><th class="r">Kept a trade</th>
         <th class="r">Kept money on</th><th class="r">Hit rate</th>
-        <th class="r">Signals</th><th>Family</th>
+        <th class="r">Days tested</th><th>Family</th>
       </tr></thead>
       <tbody>
       {% for t in table %}
-        <tr>
-          <td><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a></td>
-          <td class="r fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</td>
+        <tr{% if t.baseline %} style="background:var(--sunken)"{% endif %}>
+          <td>{% if t.baseline %}<b>{{ 'Shorting' if t.baseline == 'short' else 'Buying' }} on every tested day</b>{% else %}<a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>{% if t.side == 'short' %}
+            <span class="soft" style="font-size:var(--t-xs);white-space:nowrap">mostly shorts</span>{% endif %}{% endif %}</td>
+          <td class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if t.verdict == 1 else 'loss' if t.verdict == -1 }}">{{ t.kept|signed(2) }}R</span>{% if t.se is not none %}
+            <span class="soft">±{{ '%.2f'|format(2 * t.se) }}</span>{% endif %}</td>
           <td class="r fig">{{ t.paid }} of {{ t.tested }}</td>
           <td class="r fig">{{ (t.wins / t.n)|pct(0) }}</td>
           <td class="r fig soft">{{ "{:,}".format(t.n) }}</td>
-          <td class="soft">{{ t.family.replace('_', ' ') }}</td>
+          <td class="soft">{% if t.baseline %}no strategy{% else %}{{ t.family.replace('_', ' ') }}{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>
@@ -43,8 +60,8 @@
 {% include "_method.html" %}
 
 <section class="card closing" style="margin-top:var(--s4)">
-  <p class="lead">Check any stock or coin, free.</p>
-  <p class="prose">Orenth runs all 34 on whatever you are looking at, and says
+  <p class="lead">Analyse any stock or coin, free.</p>
+  <p class="prose">Orenth runs all {{ strategy_count }} on whatever you are looking at, and says
     so when none of them has an edge.</p>
   <div class="cta">
     {% if not current_user or demo %}

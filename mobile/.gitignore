@@ -1,0 +1,8 @@
+# Installed by "npm ci" from package-lock.json; never committed.
+node_modules/
+
+# Mac and Xcode leftovers.
+.DS_Store
+*.xcuserstate
+xcuserdata/
+DerivedData/

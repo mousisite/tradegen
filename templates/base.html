@@ -1,13 +1,17 @@
 <!doctype html>
-<html lang="en">
+{# "app" inside the iPhone app. There the page is on a phone at any width,
+   landscape included, so style.css keeps the tab bar for it up to 1000. #}
+<html lang="en"{% if in_app %} class="app"{% endif %}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{# viewport-fit=cover lets the page draw under a phone's notch and home bar;
+   style.css keeps the bars and the loading screen clear of them. #}
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Every company figure cites the SEC filing it came from." %}
+{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
@@ -71,7 +75,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
 {# Real files, not a data: URI. Google fetches an icon to put beside a search
    result and ignores anything inline, so the inline version got a generic
    globe. The .ico covers browsers that ask for /favicon.ico unprompted. #}
@@ -82,17 +86,32 @@
       href="{{ url_for('static', filename='icon-192.png') }}">
 <link rel="apple-touch-icon" sizes="180x180"
       href="{{ url_for('static', filename='icon-180.png') }}">
+{# Installing it as an app. The bar above the page takes the page's own
+   ground in each theme. On an iPhone the status bar keeps its default
+   style: black-translucent would set its white clock over the light
+   theme's cream bar, where it cannot be read. #}
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f3ee">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#191817">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Orenth">
 {# Counts visits for Metricool. Their tag loads a script that sends the full
    address, query string and all, and /email/stop carries a token there. This
    sends their same counter request with the path only, so no third-party
-   script runs and no cookie is set. Signed-in pages are never counted. #}
-{% if not current_user or demo %}
+   script runs and no cookie is set. Signed-in pages are never counted, and
+   nothing is counted inside the iPhone app, which declares no tracking. #}
+{% if (not current_user or demo) and not in_app %}
 <script>new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
   + encodeURIComponent(location.origin + location.pathname) + "&bw=" + innerWidth + "&bh=" + innerHeight
   + (document.referrer ? "&ref=" + encodeURIComponent(document.referrer.split("?")[0]) : "");</script>
 {% endif %}
 </head>
 <body>
+{# The first stop for a keyboard, so the ten links in the bar are one press
+   rather than ten on every page. Off screen until it has focus. #}
+<a class="skip" href="#main">Skip to content</a>
 
 {# One list, drawn twice: as a row of links on a wide screen and as a menu on
    a phone. Eight links and an avatar are 720 pixels wide, and on a 390 pixel
@@ -103,7 +122,7 @@
   (url_for('ideas'), 'ideas', 'Find'),
   (url_for('screener'), 'screener', 'Screener'),
   (url_for('portfolio'), 'portfolio', 'Portfolio'),
-  (url_for('trades'), 'trades', 'Trades'),
+  (url_for('trades'), 'trades', 'Journal'),
   (url_for('monitor'), 'monitor', 'Monitor'),
   (url_for('strategies'), 'strategies', 'Strategies'),
   (url_for('settings'), 'settings', 'Settings'),
@@ -123,8 +142,11 @@
       {% endfor %}
     </nav>
     <div class="tools">
+      {# Sign in, because the front page and the example's own banner already
+         ask newcomers to create an account; this is the way back in for
+         someone who has one. The page it opens does both. #}
       {% if auth_on and (demo or not current_user) and active != 'signin' %}
-        <a class="btn sm" href="{{ url_for('signin') }}">Sign up</a>
+        <a class="btn sm" href="{{ url_for('signin') }}">Sign in</a>
       {% endif %}
       {% if go_pro and active != 'pricing' %}
         <a class="btn sm" href="{{ url_for('pricing') }}">Go Pro</a>
@@ -165,6 +187,20 @@
   </div>
 </header>
 
+{# Alerts that fired while you were on another page. The server checks on a
+   timer; this is only how the result reaches you. Straight after the header,
+   where its sticky offset keeps it under the nav: at the end of the page it
+   sat below the footer, out of sight. #}
+{% if current_user and not demo %}
+<div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
+  <div class="inner">
+    <span class="what" id="firetext"></span>
+    <a href="{{ url_for('monitor') }}">Open Monitor</a>
+    <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
+  </div>
+</div>
+{% endif %}
+
 {% if demo %}
   {# Said on every page of the example, so nobody mistakes it for their own
      account or wonders where these trades came from. #}
@@ -178,8 +214,13 @@
 {% endif %}
 
 <div class="wrap">
+{# The page's own content is the main landmark, so a screen reader can jump
+   straight to it; the disclaimer and the footer links sit after it. #}
+<main id="main">
 {% block content %}{% endblock %}
+</main>
 
+<footer>
 <p class="legal">
   <b>Analysis software, not financial advice.</b>
   Every figure here is measured from historical price data and can stop
@@ -194,14 +235,69 @@
   <a href="{{ url_for('record') }}">Track record</a>{% if billing_on %} ·
   <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
 </p>
+</footer>
 </div>
+
+{# The way round on a phone, as a phone app does it: the four places used
+   most along the bottom, in reach of a thumb, and More for the rest, which
+   opens the same menu the top bar has on a tablet. Shown on a phone, in the
+   installed app and in the iPhone app, where the row of links at the top
+   is not; style.css decides, and pads the page so nothing ends up under
+   it. The icons are the front page's for the same places. #}
+{% set more_keys = ['screener', 'portfolio', 'strategies', 'settings', 'account', 'legal'] %}
+<nav class="tabbar" aria-label="Sections">
+  <a href="{{ url_for('index') }}" {% if active == 'home' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    Analyse</a>
+  <a href="{{ url_for('ideas') }}" {% if active == 'ideas' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/>
+      <circle cx="12" cy="12" r="1"/></svg>
+    Find</a>
+  <a href="{{ url_for('trades') }}" {% if active == 'trades' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="5" y="3" width="14" height="18" rx="2"/>
+      <path d="M9 7h6M9 11h6M9 15h4"/></svg>
+    Journal</a>
+  <a href="{{ url_for('monitor') }}" {% if active == 'monitor' %}aria-current="page"{% endif %}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+    Monitor</a>
+  <details class="more">
+    <summary{% if active in more_keys %} class="on"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/>
+        <circle cx="19" cy="12" r="1.9"/></svg>
+      More
+    </summary>
+    <div class="menu-panel">
+      {% for href, key, label in nav_items if key in more_keys %}
+        <a href="{{ href }}"
+           {% if active == key %}aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+      {% if current_user and not demo %}
+        <a href="{{ url_for('account') }}"
+           {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
+      {% endif %}
+      <p class="fine">
+        <a href="{{ url_for('terms') }}">Terms</a>
+        <a href="{{ url_for('privacy') }}">Privacy</a>
+      </p>
+    </div>
+  </details>
+</nav>
 
 {# An analysis back-tests 34 strategies over tens of thousands of bars. Without
    feedback the page reads as frozen and people submit a second time. #}
-<div class="overlay" id="working" role="status" aria-live="polite">
+<div class="overlay" id="working">
   <div class="spin" aria-hidden="true"></div>
   <div class="a" id="workhead">Analysing</div>
-  <div class="b" id="worknote">Fetching data, running 34 strategies, and
+  <div class="b" id="worknote">Fetching data, running {{ strategy_count }} strategies, and
     back-testing each one against this instrument's own history.</div>
   {# A counter rather than a progress bar. The work happens inside one blocking
      request, so the page has nothing to measure and a bar would be invented.
@@ -209,31 +305,32 @@
      the page is alive rather than hung. #}
   <div class="c" id="worktime" aria-hidden="true"></div>
 </div>
-
-{# Alerts that fired while you were on another page. The server checks on a
-   timer; this is only how the result reaches you. #}
-{% if current_user and not demo %}
-<div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
-  <div class="inner">
-    <span class="what" id="firetext"></span>
-    <a href="{{ url_for('monitor') }}">Open Monitor</a>
-    <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
-  </div>
-</div>
-{% endif %}
+{# What the overlay says, read aloud when it appears. A live region speaks
+   only when its text changes, and the overlay's text sat there hidden all
+   along, so screen readers said nothing. This one is filled on the spot. #}
+<div class="sr" id="worksaid" role="status" aria-live="polite"></div>
 
 <script>
-  // The phone menu closes when you tap anywhere else, or press Escape.
-  (function () {
-    var menu = document.querySelector('details.menu');
-    if (!menu) { return; }
+  // The menus (the top bar's on a tablet, the tab bar's More on a phone)
+  // close when you tap anywhere else, press Escape, or tab out of them.
+  document.querySelectorAll('details.menu, details.more').forEach(function (menu) {
     document.addEventListener('click', function (e) {
       if (menu.open && !menu.contains(e.target)) { menu.open = false; }
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { menu.open = false; }
+      if (e.key !== 'Escape' || !menu.open) { return; }
+      var inside = menu.contains(document.activeElement);
+      menu.open = false;
+      // A link in the panel vanishes with it, and focus would fall back to
+      // the top of the page. Hand it to the button that opened the menu.
+      if (inside) { menu.querySelector('summary').focus(); }
     });
-  })();
+    menu.addEventListener('focusout', function (e) {
+      if (menu.open && e.relatedTarget && !menu.contains(e.relatedTarget)) {
+        menu.open = false;
+      }
+    });
+  });
 
   // Suggestions under a ticker box as you type. Built here rather than with
   // a <datalist>, which filters on what was typed before the answers arrive
@@ -267,8 +364,27 @@
         if (i >= 0) { input.setAttribute('aria-activedescendant', list.id + '-' + i); }
         else { input.removeAttribute('aria-activedescendant'); }
       }
+      // A pick whose ticker the site would read as something else (the fund
+      // listed as BTC, Interlink Electronics as LINK) goes with exact=1, so it
+      // is analysed, watched or alerted as picked. Typing again drops it.
+      function markExact(on) {
+        var form = input.form;
+        if (!form) { return; }
+        var mark = form.querySelector('input[name="exact"][data-picked]');
+        if (on && !mark) {
+          mark = document.createElement('input');
+          mark.type = 'hidden';
+          mark.name = 'exact';
+          mark.value = '1';
+          mark.setAttribute('data-picked', '');
+          form.appendChild(mark);
+        } else if (!on && mark) {
+          form.removeChild(mark);
+        }
+      }
       function choose(i) {
         input.value = items[i].symbol;
+        markExact(items[i].exact);
         close();
         var form = input.form;
         if (input.getAttribute('data-suggest') === 'submit' && form) {
@@ -306,6 +422,7 @@
       }
       input.addEventListener('input', function () {
         clearTimeout(timer);
+        markExact(false);
         var q = input.value.trim();
         if (!q) { close(); return; }
         timer = setTimeout(function () {
@@ -341,16 +458,48 @@
     var head = document.getElementById('workhead');
     var note = document.getElementById('worknote');
     var time = document.getElementById('worktime');
+    var said = document.getElementById('worksaid');
     var tick = null;
+    // The overlay's own words are for an analysis, which is most of what it
+    // covers. Anything else that does not bring its own words is named by
+    // where it leads, so a screen or a routine never claims to be running
+    // the strategies.
+    var HEAD = head.textContent, NOTE = note.textContent.replace(/\s+/g, ' ');
+    var KINDS = [
+      [/\/research$/, 'Researching the business',
+       'Reading its filings, its valuation and its price history.'],
+      [/\/screener$/, 'Screening',
+       'Fetching each company\'s numbers and checking them against the filters.'],
+      [/\/workflow\/[^\/]+$/, 'Running the routine',
+       'Doing each step in turn. The results are listed when it is done.']
+    ];
+
+    function words(src) {
+      var where = '';
+      if (src) {
+        try {
+          where = new URL(src.getAttribute(src.tagName === 'FORM' ? 'action' : 'href')
+                          || '', location.href).pathname;
+        } catch (e) {}
+      }
+      for (var i = 0; i < KINDS.length; i++) {
+        if (KINDS[i][0].test(where)) { return KINDS[i]; }
+      }
+      return [null, HEAD, NOTE];
+    }
 
     function show(ev) {
+      // Ctrl, Cmd, Shift or a middle click opens the link somewhere else and
+      // leaves this page where it is, under an overlay nothing would remove.
+      if (ev && ev.type === 'click' && (ev.button !== 0 || ev.ctrlKey ||
+          ev.metaKey || ev.shiftKey || ev.altKey)) { return; }
       var src = ev && ev.currentTarget;
-      if (src && src.getAttribute('data-working-title')) {
-        head.textContent = src.getAttribute('data-working-title');
-      }
-      if (src && src.getAttribute('data-working-note')) {
-        note.textContent = src.getAttribute('data-working-note');
-      }
+      var kind = words(src);
+      // Set every time, so the words of an earlier trigger, or of a page
+      // come back to with the back button, are not left on this one.
+      head.textContent = (src && src.getAttribute('data-working-title')) || kind[1];
+      note.textContent = (src && src.getAttribute('data-working-note')) || kind[2];
+      said.textContent = head.textContent + '. ' + note.textContent;
       var started = Date.now();
       var patience = src && src.getAttribute('data-working-slow');
       time.textContent = '';
@@ -360,7 +509,10 @@
         time.textContent = secs + 's';
         // Said once, at the point where a wait starts to feel like a failure.
         // It is also true: the result is shared, so the next person waits none.
-        if (patience && secs === 12) { note.textContent = patience; }
+        if (patience && secs === 12) {
+          note.textContent = patience;
+          said.textContent = patience;
+        }
       }, 1000);
       el.classList.add('on');
     }
@@ -372,50 +524,69 @@
     window.addEventListener('pageshow', function () {
       clearInterval(tick);
       el.classList.remove('on');
+      said.textContent = '';
     });
   })();
 
-  // Alerts fire on the server's timer. This asks what has fired since this tab
-  // last looked, so the same alert is announced once rather than every poll.
+  // Alerts are checked on the server, and every fire is kept in your alert
+  // history. This asks what has fired since this browser last looked, so each
+  // one is announced once, with how long ago it was, whether it came from the
+  // timer, from "Check them all now" or from a routine.
   (function () {
     var bar = document.getElementById('firebar');
     var text = document.getElementById('firetext');
     var dismiss = document.getElementById('firedismiss');
     if (!bar || !window.fetch) { return; }
 
-    var KEY = 'orenth-alerts-seen';
-    var since = 0;
-    try { since = parseFloat(window.localStorage.getItem(KEY)) || 0; } catch (e) {}
+    // The id of the last fire this browser was shown, for this account. Ids
+    // only grow, so two fires in the same second cannot hide each other.
+    var KEY = 'orenth-alerts-after-{{ current_user.id if current_user else 0 }}';
+    var after = '';
+    try { after = window.localStorage.getItem(KEY) || ''; } catch (e) {}
 
     dismiss.addEventListener('click', function () { bar.hidden = true; });
 
-    function announce(fires) {
+    function age(secs) {
+      if (secs < 90) { return 'just now'; }
+      if (secs < 5400) { return Math.round(secs / 60) + ' minutes ago'; }
+      if (secs < 129600) { return Math.round(secs / 3600) + ' hours ago'; }
+      return Math.round(secs / 86400) + ' days ago';
+    }
+
+    function announce(fires, now) {
       if (!fires.length) { return; }
-      var first = fires[0];
-      text.textContent = fires.length === 1
+      var first = fires[0];                  // the newest
+      var line = fires.length === 1
         ? (first.message || (first.symbol + ' triggered an alert'))
-        : (fires.length + ' alerts triggered, including ' + first.symbol);
+        : (fires.length + ' alerts fired. The latest: '
+           + (first.message || first.symbol));
+      line += ' (' + age(Math.max(0, now - first.at))
+        + (first.as_of ? '; price as of ' + first.as_of : '') + ')';
+      text.textContent = line;
       bar.hidden = false;
-      if (window.Notification && Notification.permission === 'granted') {
+      // A notice on the screen as well, for a browser that allowed them
+      // before notifications came from the server. Where they are on for
+      // this account (static/notify.js), the server's own notification has
+      // already said it, and a second would only repeat it.
+      if (window.Notification && Notification.permission === 'granted'
+          && !(window.OrenthNotify && window.OrenthNotify.mine())) {
         try {
-          new Notification('Orenth', { body: text.textContent });
+          new Notification('Orenth', { body: line });
         } catch (e) {}
       }
     }
 
     var failures = 0;
     function poll() {
-      fetch('/api/alerts/status?since=' + encodeURIComponent(since), {
-        headers: { 'Accept': 'application/json' }
+      fetch('/api/alerts/status?after=' + encodeURIComponent(after), {
+        headers: { 'Accept': 'application/json' }, credentials: 'same-origin'
       }).then(function (r) { return r.ok ? r.json() : null; }).then(function (data) {
         if (!data) { return; }
         failures = 0;
-        if (data.enabled === false) { return; }          // switched off: stop asking
-        var fires = data.new_fires || [];
-        if (fires.length) {
-          announce(fires);
-          since = data.now || (Date.now() / 1000);
-          try { window.localStorage.setItem(KEY, String(since)); } catch (e) {}
+        announce(data.new_fires || [], data.now || (Date.now() / 1000));
+        if (data.cursor != null) {             // missing or null alike
+          after = String(data.cursor);
+          try { window.localStorage.setItem(KEY, after); } catch (e) {}
         }
       }).catch(function () {
         // The server going away is the normal end of a session, not an error
@@ -429,6 +600,35 @@
     window.setTimeout(poll, 4000);
     window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
   })();
+
+  // The service worker: keeps the public files and the offline page, and
+  // shows notifications. Registered once the page has loaded, so it never
+  // competes with the page itself, and not inside the iPhone app, which shows
+  // notifications its own way and has no use for an offline page.
+  if ('serviceWorker' in navigator && !window.Capacitor) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('{{ url_for("service_worker") }}', { scope: '/' })
+        .catch(function () {});
+    });
+  }
 </script>
+{# The iPhone app's bridge to the phone: share sheet, status bar, sign-in
+   sheets, deep links. On every page, because the app forgets its listeners
+   each time a page loads. Never sent to a browser. #}
+{% if in_app %}
+<script src="{{ url_for('static', filename='native.js', v=asset_version) }}"></script>
+{# Pro bought through Apple: on every page, because StoreKit's transactions
+   are listened for and finished from whatever page is open; the subscribe
+   screen itself is on Pricing. Only for someone signed in, whom a purchase
+   can belong to, and only while the server sells Pro in the app. #}
+{% if iap_on and current_user and not demo %}
+<script src="{{ url_for('static', filename='app-purchase.js', v=asset_version) }}"></script>
+{% endif %}
+{% endif %}
+{# Notifications on this device: the switch on the Monitor and Settings pages,
+   and, inside the iPhone app, what a tapped notification opens. #}
+<script src="{{ url_for('static', filename='notify.js', v=asset_version) }}" defer
+        data-user="{{ current_user.id if current_user and not demo else '' }}"
+        data-mark="{{ push_mark }}"></script>
 </body>
 </html>

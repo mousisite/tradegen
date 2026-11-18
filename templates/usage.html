@@ -5,8 +5,9 @@
 
 <div class="pagehead">
   <h1>What people actually do</h1>
-  <p>Read from the analyses this app already recorded, not from tracking. There
-    is no analytics script on any page and nothing leaves this server.</p>
+  <p>Read from what the app already records, and from a daily count of a few
+    things people do here, which holds no account, address or ticker. These
+    counts never leave this server.</p>
 </div>
 
 <div class="card">
@@ -45,6 +46,49 @@
 </section>
 {% endif %}
 
+{# From arriving to paying, day by day. Each figure is a count and nothing
+   else: no account, address or ticker is stored with it. #}
+<section>
+  <div class="sechead"><h2>From visit to Pro</h2>
+    <span class="tail">counts per day, UTC, last {{ days }} days</span></div>
+  <div class="card pad0">
+    {% if counts.days %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Day</th>
+          {% for key, label in counts.names %}<th class="r">{{ label }}</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td><b>All {{ days }} days</b></td>
+            {% for key, label in counts.names %}
+              <td class="r fig"><b>{{ "{:,}".format(counts.total[key]) }}</b></td>
+            {% endfor %}
+          </tr>
+          {% for d in counts.days %}
+          <tr>
+            <td class="fig soft" style="white-space:nowrap">{{ d.day }}</td>
+            {% for key, label in counts.names %}
+              <td class="r fig {{ '' if d.counts.get(key) else 'faint' }}">{{ "{:,}".format(d.counts.get(key, 0)) }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <div class="blank">Nothing counted in the last {{ days }} days.</div>
+    {% endif %}
+    <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      Front page views are by people not signed in, with robots that say what
+      they are left out; a robot posing as a browser is still counted. A first
+      analysis is someone's first on the site, counted once. Turned Pro is a
+      change of plan from Free, not a renewal. Days with nothing counted are
+      left out.
+    </p>
+  </div>
+</section>
+
 <section>
   <div class="cols b">
     <div class="card pad0">
@@ -56,7 +100,8 @@
           <tbody>
           {% for s in data.symbols %}
             <tr>
-              <td><a href="{{ url_for('research', symbol=s.symbol) }}">{{ s.symbol }}</a></td>
+              <td><a href="{{ url_for('research', symbol=s.symbol,
+                                      exact=exact_arg(s.symbol)) }}">{{ s.symbol }}</a></td>
               <td class="r fig">{{ s.runs }}</td>
               <td class="r fig soft">{{ s.people }}</td>
             </tr>
@@ -115,6 +160,9 @@
         <div class="f"><div class="k">Alert checks</div>
           <div class="v fig">{{ scheduler.runs }}</div>
           <div class="n">{{ scheduler.failures }} failed</div></div>
+        <div class="f"><div class="k">Skipped, market closed</div>
+          <div class="v fig">{{ "{:,}".format(counts.total.get('closed_skips', 0)) }}</div>
+          <div class="n">alert and stop checks, {{ days }} days</div></div>
         <div class="f"><div class="k">Last looked</div>
           <div class="v fig">{{ scheduler.last_run|ago if scheduler.last_run else 'not yet' }}</div></div>
       {% endif %}
@@ -139,7 +187,7 @@
     <span class="tail">whether a deploy keeps it or deletes it</span></div>
   <div class="card">
     <p class="prose">
-      The database is at <span class="fig">{{ storage.path }}</span>,
+      The database is at <span class="fig" style="overflow-wrap:anywhere">{{ storage.path }}</span>,
       currently {{ "%.1f"|format(storage.size / 1048576.0) }} MB.
     </p>
     {% if storage.on_disk %}
@@ -156,10 +204,81 @@
   </div>
 </section>
 
+{# Copies of the backups in a storage bucket. Read from the settings and the
+   last result written down, never from the storage itself. #}
+<section>
+  <div class="sechead"><h2>Copies kept elsewhere</h2>
+    <span class="tail">whether losing the disk loses the backups too</span></div>
+  <div class="card">
+    {% set last = offsite.last %}
+    {% set good = offsite.last_good %}
+    {% if offsite.state == 'off' %}
+      <p class="prose loss"><b>The backups are not copied anywhere else.</b>
+        They sit on the same disk as the database, so losing that disk loses
+        both. "Copies of the backups somewhere else" in DEPLOY.md has the
+        steps to copy each one to a private storage bucket.</p>
+    {% else %}
+      {% if offsite.state == 'broken' %}
+        <p class="prose loss"><b>Off-site copies are not running.</b>
+          {{ offsite.problem }}</p>
+      {% endif %}
+      {% if last %}
+        <div class="figs">
+          <div class="f"><div class="k">Last try</div>
+            <div class="v fig">{{ last.at|ago }}</div>
+            <div class="n">{{ last.at|day }}</div></div>
+          {% if last.size %}
+          <div class="f"><div class="k">Size</div>
+            <div class="v fig">{{ "%.1f"|format(last.size / 1048576.0) }} MB</div></div>
+          {% endif %}
+          <div class="f"><div class="k">Result</div>
+            <div class="v fig {{ 'gain' if last.ok else 'loss' }}">
+              {{ 'Checked' if last.ok else 'Failed' }}</div></div>
+          {% if last.ok and last.kept is not none %}
+          <div class="f"><div class="k">Kept there</div>
+            <div class="v fig">{{ last.kept }}</div>
+            <div class="n">{{ 'copy' if last.kept == 1 else 'copies' }}</div></div>
+          {% endif %}
+        </div>
+      {% endif %}
+      {% if offsite.state == 'on' %}
+        <p class="prose"{% if last %} style="margin-top:var(--s2)"{% endif %}>
+        {% if not last %}
+          Nothing has been copied yet.
+          {% if offsite.backup_hours %}Each backup is copied to
+            <span class="fig">{{ offsite.bucket }}</span> at {{ offsite.host }}
+            as soon as it is taken, every {{ "%g"|format(offsite.backup_hours) }} hours.
+          {% else %}Automatic backups are off, so there is nothing to copy.{% endif %}
+        {% elif last.ok %}
+          <span class="fig" style="overflow-wrap:anywhere">{{ last.name }}</span>
+          was stored in <span class="fig">{{ offsite.bucket }}</span> at
+          {{ offsite.host }} and checked there: the same size{% if last.fingerprint %}
+          and the same fingerprint{% endif %} as the backup.
+        {% else %}
+          <b>The last try failed.</b> {{ last.detail }}
+          {% if good %}The last good copy is
+            <span class="fig" style="overflow-wrap:anywhere">{{ good.name }}</span>,
+            {{ good.at|ago }}.{% else %}No copy has worked yet.{% endif %}
+          The next backup tries again.
+        {% endif %}
+        </p>
+        {% if last and last.note %}<p class="prose">{{ last.note }}</p>{% endif %}
+        <p class="prose">Kept there: the newest {{ offsite.keep_newest }} copies, the
+          newest of each of the last {{ offsite.keep_days }} days, and the oldest
+          of each of the last {{ offsite.keep_months }} months. Nothing else in
+          the bucket is touched.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>
+
 <p class="legal">
-  Everything here comes from rows this app already wrote in the course of doing
-  its job. No analytics script runs on any page, nothing is sent to a third
-  party, and this view is limited to whoever runs the installation.
+  Most of this comes from rows the app already wrote in the course of doing its
+  job. The day-by-day counts are kept for this page alone, as a day, what
+  happened and how many times, and none of them is sent to a third party.
+  Separately, pages seen by people not signed in send Metricool a visit
+  counter with no cookie, as the privacy page says. This view is limited to
+  whoever runs the installation.
 </p>
 
 {% endblock %}

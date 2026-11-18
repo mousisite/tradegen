@@ -109,6 +109,92 @@ for sym in ["BTC-USD", "SPY"]:
     check("%s refuses a fake score" % sym, q["score"] is None or not q["reliable"] or sym == "SPY")
 
 print()
+print("=" * 72)
+print("SEC years that end in the first days of January")
+print("=" * 72)
+import time as _time
+
+# A 52/53-week company ending on the Saturday nearest 31 December, growing 10%
+# a year. Two of its years end on 2 January and 1 January. Labelled by the
+# calendar year they ended in, those collided with their neighbours: one year
+# vanished, the next was labelled a year late, and growth came out at 12.7%.
+periods = [("2017-12-31", "2018-12-29", "2019-02-15"),
+           ("2018-12-30", "2019-12-28", "2020-02-14"),
+           ("2019-12-29", "2021-01-02", "2021-02-19"),
+           ("2021-01-03", "2022-01-01", "2022-02-18"),
+           ("2022-01-02", "2022-12-31", "2023-02-17"),
+           ("2023-01-01", "2023-12-30", "2024-02-16")]
+filed_rows, value = [], 100.0
+for n, (start, end, filed) in enumerate(periods):
+    filed_rows.append({"start": start, "end": end, "val": value, "form": "10-K",
+                       "fy": int(filed[:4]), "fp": "FY", "filed": filed,
+                       "accn": "0000000001-%02d-000001" % n})
+    value *= 1.10
+
+
+def synthetic(rows):
+    return {"entityName": "Fifty Three Weeks Inc",
+            "facts": {"us-gaap": {"Revenues": {"units": {"USD": rows}}}}}
+
+
+real_get, real_cik = sec._get, sec.cik_for
+fetched = []
+answer = {"data": synthetic(filed_rows)}
+
+
+def fake_get(url, params=None, tries=3):
+    fetched.append(url)
+    return answer["data"]
+
+
+sec._get, sec.cik_for = fake_get, (lambda symbol: int(symbol))
+try:
+    sec._FACTS_CACHE.pop(990001, None)
+    facts = sec.company_facts("990001")
+    series = facts.series("revenue", 10)
+    years = [r["fy"] for r in series]
+    print("   years %s" % years)
+    check("every fiscal year is kept, under its own label",
+          years == [2018, 2019, 2020, 2021, 2022, 2023], str(years))
+    check("and each keeps its own figure",
+          [round(r["value"], 2) for r in series]
+          == [100.0, 110.0, 121.0, 133.1, 146.41, 161.05],
+          str([r["value"] for r in series]))
+    growth = facts.cagr("revenue", 5)
+    check("five-year growth is the true 10%",
+          growth is not None and abs(growth - 0.10) < 0.002, str(growth))
+
+    # A year missing from the filings must not squeeze six years' growth into
+    # five: the rate is per year of time, not per row.
+    answer["data"] = synthetic([r for i, r in enumerate(filed_rows) if i != 2])
+    sec._FACTS_CACHE.pop(990002, None)
+    gappy = sec.company_facts("990002").cagr("revenue", 5)
+    check("a missing year does not inflate growth",
+          gappy is not None and abs(gappy - 0.10) < 0.002, str(gappy))
+
+    # Kept for a day and for so many companies, not for ever and for all.
+    answer["data"] = synthetic(filed_rows)
+    for n in range(sec._FACTS_MAX + 10):
+        sec.company_facts(str(991000 + n))
+    check("the filings cache stays within its limit",
+          len(sec._FACTS_CACHE) <= sec._FACTS_MAX, str(len(sec._FACTS_CACHE)))
+    check("and lets go of the least recently used",
+          991000 not in sec._FACTS_CACHE
+          and 991000 + sec._FACTS_MAX + 9 in sec._FACTS_CACHE)
+    recent = 991000 + sec._FACTS_MAX + 9
+    fetched.clear()
+    sec.company_facts(str(recent))
+    check("a company read today is not fetched again", not fetched)
+    stamp, kept = sec._FACTS_CACHE[recent]
+    sec._FACTS_CACHE[recent] = (stamp - sec._FACTS_TTL - 1, kept)
+    sec.company_facts(str(recent))
+    check("a day later it is", len(fetched) == 1, str(fetched))
+finally:
+    sec._get, sec.cik_for = real_get, real_cik
+    for key in [k for k in sec._FACTS_CACHE if k >= 990000]:
+        sec._FACTS_CACHE.pop(key, None)
+
+print()
 print("%d failure(s)" % len(fails))
 print("FUNDAMENTALS OK" if not fails else "FAILURES: %s" % fails)
 

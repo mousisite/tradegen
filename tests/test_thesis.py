@@ -179,9 +179,11 @@ check("it says that it worked", "alert_set=1" in location, location)
 conn = db.connect(DB)
 stored = db.alert_list(conn)[0]
 conn.close()
-check("the suggested value is stored unchanged",
-      abs(stored["threshold"] - float(threshold)) < 1e-9,
-      "%s vs %s" % (stored["threshold"], threshold))
+# The form sends a percent as the whole number a person types, 5 for 5%.
+meant = float(threshold) / (100.0 if web.alerts_mod.KINDS[kind]["unit"] == "percent" else 1.0)
+check("the suggested value is stored as what it means",
+      abs(stored["threshold"] - meant) < 1e-9,
+      "%s vs %s" % (stored["threshold"], meant))
 
 confirmed = c.get("/analyse?symbol=AAPL&interval=1d&alert_set=1")
 check("the confirmation renders",
@@ -214,6 +216,22 @@ r = c.post("/thesis/delete", data={"thesis_id": ids[1],
                                    "back": "//evil.example.com"})
 location = r.headers.get("Location") or ""
 check("the same guard covers thesis delete", "evil" not in location, location)
+
+# The Location header drops tabs and newlines, so "/<tab>/host" left the
+# server as "//host"; browsers read a backslash as a slash.
+for hostile in ("/\t/evil.example.com", "/\n/evil.example.com", "/\r/evil.example.com",
+                "/\\evil.example.com", "/\\/evil.example.com", "/\x00/evil.example.com",
+                "/\x7f/evil.example.com"):
+    check("refuses %r" % hostile, web._safe_back(hostile, "/home") == "/home")
+    r = c.post("/monitor/alert/add",
+               data={"symbol": "AAPL", "kind": "price_above", "threshold": "1",
+                     "back": hostile})
+    location = r.headers.get("Location") or ""
+    check("and its redirect stays here for %r" % hostile,
+          "evil" not in location and not location.startswith("//"), location)
+check("an ordinary page with a query still passes",
+      web._safe_back("/analyse?symbol=AAPL&interval=1d", "/home")
+      == "/analyse?symbol=AAPL&interval=1d")
 
 print()
 print("%d failure(s)" % len(fails))

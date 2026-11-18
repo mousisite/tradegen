@@ -180,7 +180,9 @@ class Chain:
 def risk_free_rate(default: float = 0.042) -> float:
     """Short-term rate from the 13-week Treasury bill, with a sane fallback."""
     try:
-        bars = fetch_bars("^IRX", "1d", "1mo")
+        # Three months: one month is about 21 daily bars, under fetch_bars'
+        # 30-bar floor, so the rate always fell back to the default.
+        bars = fetch_bars("^IRX", "1d", "3mo")
         value = float(bars.close[-1]) / 100.0
         if 0.0 <= value < 0.25:
             return value

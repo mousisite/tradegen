@@ -83,6 +83,17 @@ check("one bar per year", bars.count("<rect") == 4, bars.count("<rect"))
 check("each bar names its value", bars.count("<title>") == 4)
 check("the first and last year are labelled", "2020" in bars and "2023" in bars)
 
+# The operator's analyses-per-day chart: days as epoch seconds, counts.
+import time  # noqa: E402
+days = charts.bar_chart([1794355200, 1794441600, 1794528000], [3.0, 12.0, 7.0],
+                        title="Analyses per day",
+                        label=lambda ts: time.strftime("%d %b", time.gmtime(ts)).lstrip("0"),
+                        fmt=lambda v: "%d" % round(v))
+check("a chart of days names them as dates, not seconds",
+      "1794355200" not in days and ">%s</text>" % time.strftime(
+          "%d %b", time.gmtime(1794355200)).lstrip("0") in days, days[:200])
+check("and says counts as counts, not percents", "%" not in days and ": 12</title>" in days)
+
 negative = charts.bar_chart([2020, 2021], [-50.0, 80.0])
 check("a loss year is drawn in the loss colour", "var(--loss)" in negative)
 check("one year alone draws nothing", charts.bar_chart([2020], [10.0]) == "")
@@ -212,6 +223,95 @@ kept_after = len([f for f in _os.listdir(folder)
                   if f.endswith(".db") and f.startswith("stockbot-")])
 print("   %d backups before pruning, %d after" % (kept_before, kept_after))
 check("pruning keeps only the newest few", kept_after == 2, kept_after)
+
+# The CSVs hold the same people's data as the copy. They used to be kept for
+# ever, slowly filling the disk the database is on.
+import time as _time
+
+sets = tempfile.mkdtemp(prefix="stockbot-backup-sets-")
+taken = []
+for index in range(3):
+    taken.append(_os.path.basename(backup_mod.take(sets, with_csv=True)))
+    _time.sleep(0.05)
+per_copy = len([f for f in _os.listdir(sets) if f.endswith(".csv")]) // 3
+backup_mod.prune(sets, 1)
+left = sorted(_os.listdir(sets))
+newest = taken[-1][len("stockbot-"):-len(".db")]
+print("   left after pruning to one: %s" % left)
+check("each backup writes its own CSVs", per_copy >= 4, per_copy)
+check("pruning removes a backup's CSVs with its database copy",
+      len([f for f in left if f.endswith(".csv")]) == per_copy, left)
+check("what is left all belongs to the newest backup",
+      all(newest in f for f in left), left)
+
+age = backup_mod.newest_age(sets)
+check("the newest backup's age is known", age is not None and age < 60, age)
+check("with a recent backup the next one waits until it is due",
+      backup_mod.first_run_in(sets, 3600.0) > 3000)
+check("with none, the first runs soon after start",
+      backup_mod.first_run_in(tempfile.mkdtemp(), 3600.0) == 300.0)
+check("with only an old one, the first runs soon after start",
+      backup_mod.first_run_in(sets, 30.0) == 300.0)
+
+real_free = backup_mod._free_bytes
+backup_mod._free_bytes = lambda path: 1024
+try:
+    before = sorted(_os.listdir(sets))
+    backup_mod.take(sets, with_csv=True)
+    check("a backup that would fill the disk is refused", False, "it was taken")
+except OSError as exc:
+    check("a backup that would fill the disk is refused", True)
+    check("and says so plainly", "disk space" in str(exc), exc)
+    check("and writes nothing", sorted(_os.listdir(sets)) == before)
+finally:
+    backup_mod._free_bytes = real_free
+
+print()
+print("=" * 72)
+print("THE HEALTH CHECK")
+print("=" * 72)
+
+import shutil as _shutil
+import sqlite3 as _sqlite3
+import types as _types
+
+healthy = c.get("/healthz")
+check("a healthy server answers 200", healthy.status_code == 200)
+check("and says so, and nothing else",
+      healthy.get_json() == {"ok": True, "service": "stockbot"}, healthy.get_json())
+
+real_connect = web.db_mod.connect
+
+
+def unreadable(path=None):
+    # Only the health check's own read fails; signing the request in works.
+    if _sys._getframe(1).f_code.co_name == "healthcheck":
+        raise _sqlite3.OperationalError("database is locked: /data/stockbot.db")
+    return real_connect(path)
+
+
+web.db_mod.connect = unreadable
+try:
+    broken = c.get("/healthz")
+finally:
+    web.db_mod.connect = real_connect
+check("a database it cannot read is a 503", broken.status_code == 503)
+check("which says only that it is not ok", broken.get_json() == {"ok": False},
+      broken.get_json())
+check("never the error itself", b"locked" not in broken.data
+      and b"/data" not in broken.data)
+
+real_usage = _shutil.disk_usage
+_shutil.disk_usage = lambda path: _types.SimpleNamespace(
+    total=1 << 30, used=(1 << 30) - (1 << 20), free=1 << 20)
+try:
+    short = c.get("/healthz")
+finally:
+    _shutil.disk_usage = real_usage
+check("a nearly full disk is reported",
+      "disk" in short.get_json().get("detail", ""), short.get_json())
+check("without failing the check: a restart frees no space",
+      short.status_code == 200 and short.get_json().get("ok") is True)
 
 print()
 print("=" * 72)
@@ -423,7 +523,7 @@ check("the get-out price is named", "95" in " ".join(said["points"]))
 
 # The whole point of the plain version: turn a rate into counted events.
 check("the odds are given as counts, not a percentage",
-      "103 times" in said["sure"] and "34 of those" in said["sure"], said["sure"])
+      "103 times" in said["sure"] and "worked 34 of them" in said["sure"], said["sure"])
 check("and it says the bar was not cleared",
       "not been shown to make money" in said["sure"], said["sure"])
 check("gap risk is spelled out in cash", "160" in said["risk"], said["risk"])
@@ -481,6 +581,46 @@ for symbol in ("AAPL", "DOGE-USD"):
         body = c.get("/%s?symbol=%s&interval=1d" % (page, symbol))             .data.decode("utf-8", "replace")
         check("%s %s shows the plain box" % (symbol, page),
               'class="plainbox"' in body)
+
+print()
+print("=" * 72)
+print("RESEARCH IS KEPT PER SET OF SETTINGS")
+print("=" * 72)
+
+# The thesis and the reasoning quote the plan's own stop and target, so
+# research cached by ticker alone showed one person's plan to the next.
+from bot import config as _config
+
+_real_research = web.engine.research
+built = []
+
+
+def _counting(symbol, price, cfg, **kw):
+    built.append((cfg.get("stop_atr_multiple"), kw.get("with_options")))
+    if not hasattr(_counting, "found"):
+        _counting.found = _real_research(symbol, price, cfg, **kw)
+    return _counting.found
+
+
+_kept_cfg = _config.load(harness.CFG_PATH)
+web.engine.research = _counting
+web._RESEARCH_CACHE.clear()
+try:
+    c.get("/research?symbol=AAPL&interval=1d")
+    c.get("/research?symbol=AAPL&interval=1d")
+    check("opening it twice with the same settings builds it once", len(built) == 1,
+          built)
+    _wider = dict(_kept_cfg, stop_atr_multiple=_kept_cfg["stop_atr_multiple"] * 2)
+    _config.save(_wider, harness.CFG_PATH)
+    c.get("/research?symbol=AAPL&interval=1d")
+    check("other settings get research built from their own plan",
+          len(built) == 2 and built[-1][0] == _wider["stop_atr_multiple"], built)
+    c.get("/research?symbol=AAPL&interval=1d&options=0")
+    check("and asking without options is not handed the copy with them",
+          len(built) == 3 and built[-1][1] is False, built)
+finally:
+    web.engine.research = _real_research
+    _config.save(_kept_cfg, harness.CFG_PATH)
 
 print()
 print("%d failure(s)" % len(fails))

@@ -10,6 +10,7 @@ lies about when it last looked is worse than no tool.
 """
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from . import database as db
 from . import engine
 from . import portfolio as portfolio_mod
 from . import screener as screener_mod
-from .market import DataError, fetch_bars, format_price
+from .market import DataError, fetch_bars, format_price, needs_exact
 
 
 @dataclass
@@ -74,8 +75,13 @@ WORKFLOWS: Dict[str, Dict] = {
 
 def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
         progress: Optional[Callable[[str], None]] = None,
-        user: int = 1) -> RunReport:
-    """Run a named workflow on one person's watchlist, positions and alerts."""
+        user: int = 1, check_alerts: Optional[Callable] = None) -> RunReport:
+    """Run a named workflow on one person's watchlist, positions and alerts.
+
+    check_alerts(conn, user) checks that person's alerts and returns what
+    alerts.check returns. The web app passes its own, which can also work out
+    a call and send the alert emails; without one, alerts.check is used.
+    """
     cfg = cfg or config_mod.load()
     started = int(time.time())
     report = RunReport(name=WORKFLOWS.get(name, {}).get("label", name),
@@ -96,7 +102,7 @@ def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
 
     conn = db.connect(db_path)
     try:
-        handler(conn, cfg, report, step, db_path, user)
+        handler(conn, cfg, report, step, db_path, user, check_alerts)
     finally:
         conn.close()
 
@@ -111,14 +117,100 @@ def run(name: str, cfg: Optional[Dict] = None, db_path: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
+# The free allowance
+# ---------------------------------------------------------------------------
+
+class _Looks:
+    """A free account's looks for the day, spent the way the site spends them.
+
+    A routine's analysis is an analysis like any other, so on a free account
+    each different instrument it opens takes one of the day's looks, and one
+    already opened today costs nothing more. Without this, the watchlist and
+    hunt routines were a way round the allowance. Pro, the operator, the
+    local account and an installation without billing have no limit.
+    """
+
+    def __init__(self, conn, user):
+        self.conn, self.user = conn, int(user)
+        self.limited = self._free(conn, user)
+        self.refused: List[str] = []
+
+    @staticmethod
+    def _free(conn, user) -> bool:
+        from . import accounts as accounts_mod
+        from . import billing as billing_mod
+        if not billing_mod.ready():
+            return False
+        person = accounts_mod.get_user(conn, int(user))
+        if person is None:
+            return False
+        # The operator is named the same way the site names them.
+        admins = {e.strip().lower()
+                  for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
+                  if e.strip()}
+        return not billing_mod.is_pro(person, (person.email or "").lower() in admins)
+
+    @staticmethod
+    def _item(symbol: str, interval: str, exact: bool = False) -> str:
+        # The same item the site counts (web._look_item), so a look taken
+        # here and on a page is one look.
+        return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+
+    def take(self, symbol: str, interval: str, exact: bool = False) -> str:
+        """"new" or "seen" when the analysis may run, "free" when no limit
+        applies, and "" when today's looks are used up."""
+        if not self.limited:
+            return "free"
+        from . import billing as billing_mod
+        taken = billing_mod.reserve_view(self.conn, self.user,
+                                         self._item(symbol, interval, exact))
+        if not taken:
+            self.refused.append(symbol)
+        return taken
+
+    def give_back(self, symbol: str, interval: str, taken: str,
+                  exact: bool = False) -> None:
+        """Return a look taken for an analysis that failed, as the site does."""
+        if taken == "new":
+            from . import billing as billing_mod
+            billing_mod.release_view(self.conn, self.user,
+                                     self._item(symbol, interval, exact))
+
+    def report(self, report: RunReport) -> None:
+        """One step naming what was not analysed for want of a look."""
+        if not self.refused:
+            return
+        from . import billing as billing_mod
+        limit = billing_mod.free_limits()["analyses_per_day"]
+        report.steps.append(Step(
+            "Free allowance",
+            "Not analysed: %s. A free account opens %d different instrument%s a "
+            "day, and today's are used up. They come back at midnight UTC, or "
+            "Pro has no limit." % (", ".join(self.refused), limit,
+                                   "" if limit == 1 else "s"),
+            "attention"))
+
+
+# ---------------------------------------------------------------------------
 # The routines
 # ---------------------------------------------------------------------------
 
-def _check_alerts(conn, report: RunReport, step, user=1) -> None:
+def _exactly(exact: bool) -> Dict:
+    """engine.analyse's exact argument, given only when it is set, so a
+    stand-in for engine.analyse that predates it still works."""
+    return {"exact": True} if exact else {}
+
+
+def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> None:
     step("Checking alerts")
-    result = alerts_mod.check(conn)
+    # Only the person running the routine: their alerts, their report. Firing
+    # someone else's would switch it off without its owner ever being told.
+    if check_alerts is not None:
+        result = check_alerts(conn, user)
+    else:
+        result = alerts_mod.check(conn, user=user)
     if not result["checked"]:
-        report.steps.append(Step("Alerts", "No alerts are set.", "ok"))
+        report.steps.append(Step("Alerts", "No alerts are switched on.", "ok"))
         return
     if result["fired"]:
         for hit in result["fired"]:
@@ -135,27 +227,38 @@ def _check_alerts(conn, report: RunReport, step, user=1) -> None:
 
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     step("Marking positions to market")
-    rows = db.list_trades(conn, status="open", user=user)
+    # What is held: a position closed in part counts only what is left.
+    rows = db.open_positions(conn, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return
 
-    view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True)
+    from . import config as config_mod
+    view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True,
+                               cost_bps={kind: config_mod.cost_bps_for(kind, cfg)
+                                         for kind in ("equity", "crypto", "other")})
     for p in view.positions:
         if p.price is None:
             report.steps.append(Step("Position: %s" % p.symbol,
                                      "No price available.", "failed"))
             continue
-        at_stop = ((p.price <= p.stop) if p.direction > 0
-                   else (p.price >= p.stop))
         at_target = (p.target is not None and
                      ((p.price >= p.target) if p.direction > 0
                       else (p.price <= p.target)))
-        if at_stop:
+        if p.breached:
+            # Said once, here, as a step pointing at the trade; the portfolio
+            # warnings below skip it rather than saying it twice. A trailing
+            # stop traded through and come back is named at the level it was
+            # crossed at, not where it has trailed to since.
+            crossed = p.stop
+            if p.touched_stop is not None and (p.price - p.stop) * p.direction > 0:
+                crossed = p.touched_stop
             report.steps.append(Step(
                 "Position: %s" % p.symbol,
-                "%s is at %s, past its stop of %s. It should be closed."
-                % (p.symbol, format_price(p.price), format_price(p.stop)),
+                "%s is at %s and has crossed its %sstop of %s. Close it, or set a "
+                "new stop on purpose." % (p.symbol, format_price(p.price),
+                                          "trailing " if p.trail is not None else "",
+                                          format_price(crossed)),
                 "attention", {"trade_id": p.trade_id}))
         elif at_target:
             report.steps.append(Step(
@@ -165,16 +268,19 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
                 "attention", {"trade_id": p.trade_id}))
 
     for warning in view.warnings:
+        if warning.startswith("Stop breached on "):
+            continue
         report.steps.append(Step("Portfolio", warning, "attention"))
     for note in view.observations[:3]:
         report.steps.append(Step("Portfolio", note, "ok"))
 
 
-def _positions(conn, cfg, report, step, db_path, user=1) -> None:
+def _positions(conn, cfg, report, step, db_path, user=1, check_alerts=None) -> None:
     _check_positions(conn, cfg, report, step, user)
 
 
-def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
+def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
+               check_alerts=None) -> None:
     rows = db.watchlist(conn, user=user)
     if not rows:
         report.steps.append(Step(
@@ -182,28 +288,39 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
             "re-analysed automatically.", "ok"))
         return
 
-    # What the bot said last time, so only genuine changes get reported.
-    previous = {}
-    for row in rows:
-        last = db.recent_runs(conn, symbol=row["symbol"], limit=1, user=user)
-        if last:
-            previous[row["symbol"]] = last[0]["action"]
-
     changed = 0
+    looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
+        # Saved as Yahoo's own symbol (LINK for Interlink Electronics, not the
+        # Chainlink coin a bare LINK means), and analysed as saved.
+        exact = bool(row["exact"])
+        taken = looks.take(symbol, interval, exact)
+        if not taken:
+            continue
         step("Analysing %s" % symbol)
         try:
+            # Recorded as this person's, so it is the "before" next time.
             result = engine.analyse(symbol, cfg, interval=interval,
                                     with_news=False, record=True,
-                                    db_path=db_path, source="workflow")
+                                    db_path=db_path, user=user, source="workflow",
+                                    **_exactly(exact))
         except (DataError, Exception) as exc:
+            looks.give_back(symbol, interval, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
             continue
 
         db.watch_touch(conn, symbol, user=user)
-        was = previous.get(symbol)
+        # What this person was told before this run, for the same instrument
+        # and bar size, so only genuine changes get reported. An hourly look
+        # is not the daily call, and the run just recorded is not "before".
+        last = conn.execute(
+            "SELECT action FROM runs WHERE symbol=? AND interval=? AND user_id=? "
+            "AND id<>? ORDER BY ts DESC, id DESC LIMIT 1",
+            (result.bars.symbol.upper(), result.bars.interval, int(user),
+             result.run_id or -1)).fetchone()
+        was = last["action"] if last else None
         now = result.plan.action
         if was and was != now:
             changed += 1
@@ -211,20 +328,32 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
                 "Changed: %s" % symbol,
                 "%s went from %s to %s. %s" % (symbol, was, now,
                                                result.plan.headline),
-                "attention", {"symbol": symbol, "interval": interval}))
+                "attention", {"symbol": symbol, "interval": interval,
+                              "exact": exact}))
         else:
             report.steps.append(Step(
                 "Watchlist: %s" % symbol,
                 "%s, unchanged. %s" % (now, result.plan.headline), "ok",
-                {"symbol": symbol, "interval": interval}))
+                {"symbol": symbol, "interval": interval, "exact": exact}))
 
+    looks.report(report)
+    looked = len(rows) - len(looks.refused)
+    if not looked:
+        report.headline = ("Nothing on the watchlist was analysed: today's free "
+                           "looks are used up.")
+        return
     report.headline = ("%d of %d watched instruments changed their call."
-                       % (changed, len(rows)) if changed
-                       else "None of the %d watched instruments changed." % len(rows))
+                       % (changed, looked) if changed
+                       else "None of the %d watched instruments changed." % looked)
+    if looks.refused:
+        report.headline += (" %d more %s not analysed, for want of a free look."
+                            % (len(looks.refused),
+                               "was" if len(looks.refused) == 1 else "were"))
 
 
-def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
-    _check_alerts(conn, report, step, user)
+def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
+             check_alerts=None) -> None:
+    _check_alerts(conn, report, step, user, check_alerts)
     _check_positions(conn, cfg, report, step, user)
 
     rows = db.watchlist(conn, user=user)
@@ -234,14 +363,15 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
         # morning check take minutes, so the deeper pass is its own routine.
         def grab(row):
             try:
-                return row["symbol"], fetch_bars(row["symbol"], row["interval"] or "1d")
+                return row, fetch_bars(row["symbol"], row["interval"] or "1d")
             except Exception:
-                return row["symbol"], None
+                return row, None
 
         with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
-            for symbol, bars in pool.map(grab, rows):
+            for row, bars in pool.map(grab, rows):
                 if bars is None:
                     continue
+                symbol = row["symbol"]
                 if bars.prev_close:
                     move = (bars.last_price - bars.prev_close) / bars.prev_close
                     if abs(move) >= 0.04:
@@ -249,7 +379,8 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
                             "Watchlist: %s" % symbol,
                             "%s moved %.1f%% to %s since the previous close."
                             % (symbol, move * 100, format_price(bars.last_price)),
-                            "attention", {"symbol": symbol}))
+                            "attention", {"symbol": symbol,
+                                          "exact": bool(row["exact"])}))
 
     counts = db.stats(conn, user=user)
     report.steps.append(Step(
@@ -259,7 +390,8 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
         "ok"))
 
 
-def _hunt(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
+def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
+          check_alerts=None) -> None:
     preset = screener_mod.PRESETS["quality_value"]
     step("Screening for quality at a reasonable price")
     try:
@@ -277,13 +409,22 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
             report.steps.append(Step("Screen", note, "ok"))
         return
 
-    for candidate in found.passed[:4]:
+    looks = _Looks(conn, user)
+    best = found.passed[:4]
+    for candidate in best:
+        # The screen lists Yahoo's own symbols, all of them companies: LINK
+        # there is Interlink Electronics, never the coin.
+        exact = needs_exact(candidate.symbol)
+        taken = looks.take(candidate.symbol, cfg["interval"], exact)
+        if not taken:
+            continue
         step("Analysing %s" % candidate.symbol)
         try:
             result = engine.analyse(candidate.symbol, cfg, interval=cfg["interval"],
                                     with_news=False, record=True, db_path=db_path,
-                                    source="workflow")
+                                    user=user, source="workflow", **_exactly(exact))
         except Exception as exc:
+            looks.give_back(candidate.symbol, cfg["interval"], taken, exact)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))
             continue
@@ -291,7 +432,13 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1) -> None:
         report.steps.append(Step(
             "Candidate: %s" % candidate.symbol,
             "%s. %s" % (result.plan.action, result.plan.headline), status,
-            {"symbol": candidate.symbol, "interval": cfg["interval"]}))
+            {"symbol": candidate.symbol, "interval": cfg["interval"],
+             "exact": exact}))
 
+    looks.report(report)
+    if len(looks.refused) == len(best):
+        report.headline = ("%d candidates passed the screen, but today's free looks "
+                           "are used up, so none was analysed." % len(found.passed))
+        return
     report.headline = "%d candidates passed the screen; the best few were analysed." \
                       % len(found.passed)

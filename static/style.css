@@ -14,6 +14,11 @@
  * its own lightness ramp until it cleared 4.5:1, so the palette keeps its
  * character and still reads. Interactive borders clear 3:1 per WCAG 1.4.11.
  *
+ * The ratios in the comments are WCAG contrast on paper, then on the tinted
+ * wash the colour also sits on: a chip, the active nav item, the plain-words
+ * box. Solving against the lighter card surface alone left several of those
+ * short of 4.5:1. Surface always scores higher than paper.
+ *
  * Semantic colours are warm on purpose. A neon green on cream would look
  * wrong, so gains are olive and losses are rust: they belong to this palette
  * instead of being borrowed from a dark terminal.
@@ -28,10 +33,10 @@
   --surface:     #faf9f5;
   --sunken:      #eeede6;
 
-  /* Ink — all AA on both paper and surface */
-  --ink:         #191817;   /* 15.96 on paper */
-  --ink-2:       #5a554e;   /*  6.65 */
-  --ink-3:       #726d64;   /*  4.62 */
+  /* Ink — AA on every ground in the palette */
+  --ink:         #191817;   /* 15.96 on paper, 14.92 on accent-wash */
+  --ink-2:       #5a554e;   /*  6.65, 6.21 */
+  --ink-3:       #6e6960;   /*  4.91, 4.59 */
 
   /* Lines. Hairlines are decorative; strong is for controls, at 3:1. */
   --hairline:    #e3dfd4;
@@ -40,19 +45,22 @@
 
   /* One accent. Terracotta never competes with itself. */
   --accent:      #c96442;   /* large display and decorative use */
-  --accent-text: #b05232;   /*  4.61 — small text and links */
+  --accent-text: #aa4f30;   /*  4.88, 4.57 on accent-wash — small text and links */
   --accent-btn:  #bc5736;   /*  4.61 with a white label */
   --accent-wash: #f6e9e2;
 
-  /* Semantics, warm */
-  --gain:        #68773b;   /*  4.65 */
-  --loss:        #a53e2a;   /*  6.00 */
-  --hold:        #98652b;   /*  4.71 */
+  /* Semantics, warm. Second figure: on the colour's own wash. */
+  --gain:        #616f37;   /*  4.93, 4.70 */
+  --loss:        #a53e2a;   /*  5.69, 5.26 */
+  --hold:        #916029;   /*  4.84, 4.59 */
   --gain-wash:   #edefe2;
   --loss-wash:   #f7e7e2;
   --hold-wash:   #f6ecdd;
 
-  --focus:       #b05232;
+  --focus:       #aa4f30;
+  /* What a phone flashes behind a tapped link or button: the accent, faint,
+     instead of the browser's own grey-blue. */
+  --tap:         rgba(201, 100, 66, .14);
 
   /* Type: serif display, humanist sans body, mono for every figure. */
   --serif: 'Source Serif 4', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
@@ -77,36 +85,45 @@
 }
 
 /* Warm dark. Same palette inverted deliberately, not naively: the ground
-   becomes the ink colour and every accent is lifted so it still reads. */
+   becomes the ink colour and every accent is lifted so it still reads.
+   Here the card surface is lighter than the page, so the second figure is
+   the lowest of surface and the wash the colour sits on. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --paper:       #191817;
     --surface:     #22201e;
     --sunken:      #141312;
-    --ink:         #f4f3ee;
-    --ink-2:       #a8a199;
-    --ink-3:       #8c877d;
+    --ink:         #f4f3ee;   /* 15.96 on paper, 13.34 on accent-wash */
+    --ink-2:       #a8a199;   /*  6.94, 5.81 */
+    --ink-3:       #938e85;   /*  5.44, 4.55 on accent-wash */
     --hairline:    #302d2a;
     --rule:        #3a3733;
     --line-strong: #706a63;
     --accent:      #e89268;
-    --accent-text: #e89268;
-    --accent-btn:  #c96442;
+    --accent-text: #e89268;   /*  7.38, 6.17 */
+    /* Not lifted like the other accents: a button carries a white label, and
+       white on the lighter #c96442 is 3.90:1. */
+    --accent-btn:  #bc5736;   /*  4.61 with a white label */
     --accent-wash: #2e2622;
-    --gain:        #9aad63;
-    --loss:        #e0715a;
-    --hold:        #dda85e;
+    --gain:        #9aad63;   /*  7.20, 6.11 */
+    --loss:        #e0715a;   /*  5.64, 4.97 */
+    --hold:        #dda85e;   /*  8.31, 7.08 */
     --gain-wash:   #24281c;
     --loss-wash:   #2f201d;
     --hold-wash:   #2d2519;
     --focus:       #e89268;
+    --tap:         rgba(232, 146, 104, .2);
   }
 }
 
 * { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: var(--tap); }
+
+/* Two quick taps on a control are two taps, not a double-tap zoom, and no
+   tap waits to find out which it was. Pinch zoom is untouched. */
+a, button, input, select, textarea, summary, label { touch-action: manipulation; }
 
 body {
   margin: 0;
@@ -115,6 +132,11 @@ body {
   font: 400 var(--t-sm)/1.6 var(--sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* A word too long for its line (a note typed without spaces, a long
+     email address) breaks at the edge of its box instead of running past
+     it: on a phone it ran off a card. A table's columns still size to
+     their longest word, so a figure is never split to fit a column. */
+  overflow-wrap: break-word;
 }
 
 a { color: var(--accent-text); text-decoration: none; }
@@ -240,7 +262,10 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plans { display: grid; gap: var(--s3); max-width: 760px; margin: 0 auto;
          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .plan { display: flex; flex-direction: column; gap: var(--s2); }
-.plans .card + .card { margin-top: 0; }     /* the grid's gap spaces them */
+/* In a grid the gap spaces the cards. A card's own margin on top of it put
+   48 pixels between the routines on a phone and set the second card of each
+   row lower than the first on a wide screen. */
+.plans .card + .card, .cols > .card + .card { margin-top: 0; }
 
 /* Sharing, and the list of popular checks. */
 .sharebar { display: flex; flex-wrap: wrap; align-items: center;
@@ -268,12 +293,36 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plan form .field { flex: none; font-family: var(--mono); letter-spacing: .04em; }
 .coderow { display: flex; gap: var(--s1); }
 .plan form .coderow .field { flex: 1 1 0; min-width: 0; text-transform: uppercase; }
+/* The code is shown as it is typed, in capitals; the hint in the empty box
+   is a sentence. In spaced capitals it was cut off at "HAVE A CODE? TY". */
+.plan form .coderow .field::placeholder { text-transform: none; letter-spacing: normal;
+                                          font-family: var(--sans); }
 .plan form .coderow .btn { width: auto; }
 .codeslot { display: contents; }   /* its message spaces like the form's rows */
 .codesaid { margin: 0; padding: 10px 12px; border-radius: var(--r-sm);
             font-size: var(--t-sm); line-height: 1.5; }
 .codesaid.ok { color: var(--gain); background: var(--gain-wash); }
 .codesaid.bad { color: var(--loss); background: var(--loss-wash); }
+
+/* Pro in the iPhone app, sold through Apple (static/app-purchase.js fills in
+   each plan as the App Store describes it). The price a plan bills is its
+   largest text, as Apple asks. */
+.iap { display: flex; flex-direction: column; gap: var(--s2); }
+.iap .prose { margin: 0; }
+.iapgrid { display: grid; gap: var(--s2); }
+.iapitem { display: flex; flex-direction: column; gap: 4px; padding: var(--s2);
+           border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+           background: var(--surface); }
+.iapname { font-weight: 600; }
+.iaplength { font-size: var(--t-xs); color: var(--ink-2); }
+.iapprice { margin: 2px 0 var(--s1); }
+.iapamount { font-family: var(--serif); font-size: var(--t-xl); color: var(--ink); }
+.iapper { font-size: var(--t-sm); color: var(--ink-2); }
+.iap .btn { width: 100%; }
+.iap .notice .btn { margin-top: var(--s1); }
+.iapsaid { margin: 0; font-size: var(--t-sm); color: var(--ink); }
+.iapsaid:empty { display: none; }
+.iaplinks a { white-space: nowrap; }
 
 /* The phone menu. Hidden on wide screens, where the row of links fits. */
 .menu { display: none; position: relative; }
@@ -319,6 +368,9 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .cols.c { grid-template-columns: 7fr 5fr; }
 
 section + section { margin-top: var(--s5); }
+/* The journal's figures, then "Log a trade by hand": a section straight
+   after a card sat on it with no space between. */
+.card + section { margin-top: var(--s5); }
 
 .sechead {
   display: flex; align-items: baseline; gap: var(--s2);
@@ -371,6 +423,21 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 }
 .btn.quiet:hover { background: var(--sunken); border-color: var(--ink-3); }
 .btn.sm { min-height: 36px; padding: 0 14px; font-size: var(--t-xs); }
+/* Deleting an account. One red in both themes: the dark theme's --loss is
+   lifted for text, and a white label on it is only 3.14:1. This is 6.32. */
+.btn.danger { background: #a53e2a; border-color: #a53e2a; }
+.btn.danger:hover { background: #8e3423; border-color: #8e3423; }
+/* A button a script hides stays hidden: .btn's own display would otherwise
+   win over the browser's rule for [hidden], and the button would show. */
+.btn[hidden] { display: none; }
+
+/* Off screen until a keyboard reaches it, then over the top bar. */
+.skip {
+  position: absolute; left: var(--s2); top: -100px; z-index: 100;
+  padding: 10px var(--s2); border-radius: var(--r-sm);
+  background: var(--accent-btn); color: #fff; font-weight: 500;
+}
+.skip:focus { top: var(--s1); text-decoration: none; }
 
 .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--s2); }
 .pills a {
@@ -425,14 +492,22 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 .call.wait  .word { color: var(--hold); }
 .call.skip  { background: var(--sunken); border-color: var(--rule); }
 .call.skip  .word { color: var(--ink-2); }
+/* "skip" is also the skip link's class, which lifts it off the top of the
+   page. Without this an AVOID call sat over the header on every page. */
+.call.skip  { position: static; color: inherit; font-weight: inherit; }
 
 /* ---------- figures row ---------- */
 
 .figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
         gap: var(--s3); }
+/* A grid item is at least as wide as its longest word, and a figure is one
+   long word: with -2,551,934,343,331.83 in its first figure the portfolio
+   page was 433 pixels wide on a 360 pixel phone. Allowed to shrink, a
+   figure that cannot fit its column wraps inside it instead. */
+.figs .f { min-width: 0; }
 .figs .f .k { font-size: var(--t-xs); color: var(--ink-3); margin-bottom: 5px; }
 .figs .f .v { font-family: var(--mono); font-size: var(--t-md); font-weight: 500;
-              line-height: 1.2; letter-spacing: -.02em; }
+              line-height: 1.2; letter-spacing: -.02em; overflow-wrap: anywhere; }
 .figs .f .n { font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
 
 /* ---------- label / value list ---------- */
@@ -445,6 +520,53 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 .pairs dt { color: var(--ink-3); padding-right: var(--s3); white-space: nowrap; }
 .pairs dd { text-align: right; }
 .pairs dt:last-of-type, .pairs dd:last-of-type { border-bottom: 0; }
+
+/* ---------- help beside a figure ---------- */
+
+/* A small "?" at the end of a label or value that opens a sentence or two
+   about it, in the words of plain.HELP. A details element, so it opens and
+   closes with no script and its summary is a real button with a name.
+   Inline, so the words open on the line below what they explain. */
+.help { display: inline; }
+.help > summary {
+  display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: middle; margin-left: 5px; cursor: pointer; list-style: none;
+  border-radius: 999px;
+}
+.help > summary::-webkit-details-marker { display: none; }
+.help .q {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; background: var(--surface);
+  border: 1px solid var(--line-strong); color: var(--ink-2);
+  font: 600 11px/1 var(--sans); letter-spacing: 0; text-transform: none;
+}
+.help > summary:hover .q, .help[open] > summary .q {
+  border-color: var(--accent-text); color: var(--accent-text);
+}
+.help .lbl { margin-left: 7px; font: 500 var(--t-xs)/1.4 var(--sans);
+             color: var(--accent-text); letter-spacing: normal; text-transform: none; }
+.help > .say {
+  display: block; max-width: 46ch; margin: 8px 0 10px; padding: 10px 12px;
+  border-radius: var(--r-sm); background: var(--sunken); color: var(--ink-2);
+  font: 400 var(--t-xs)/1.6 var(--sans); letter-spacing: normal;
+  text-transform: none; text-align: left; white-space: normal;
+}
+.help.list > .say { display: grid; grid-template-columns: auto 1fr;
+                    gap: 6px var(--s2); max-width: 76ch; }
+.help.list dt { color: var(--ink); font-weight: 600; }
+.help.list dd { margin: 0; }
+.helpfoot { padding: 0 var(--s3) var(--s3); }
+/* A finger needs 44 pixels. The ring stays small; the space round it is the
+   target, and negative margins keep that space from pushing lines apart. */
+@media (pointer: coarse) {
+  .help > summary { min-width: 44px; min-height: 44px;
+                    margin: -13px -12px -13px -7px; }
+  .help.list > summary { margin: 0; justify-content: flex-start; }
+}
+@media (max-width: 420px) {
+  .help.list > .say { grid-template-columns: 1fr; gap: 2px; }
+  .help.list dd + dt { margin-top: 6px; }
+}
 
 /* ---------- tables ---------- */
 
@@ -472,6 +594,65 @@ tbody tr:hover { background: var(--paper); }
 th.r, td.r { text-align: right; }
 .card.pad0 thead th:first-child, .card.pad0 tbody td:first-child { padding-left: var(--s3); }
 .card.pad0 thead th:last-child,  .card.pad0 tbody td:last-child  { padding-right: var(--s3); }
+/* A row's buttons, side by side at the end of the row. */
+.acts { display: flex; gap: 5px; justify-content: flex-end; align-items: center;
+        flex-wrap: wrap; }
+
+/* A row of things to act on (a trade, an alert, a result) is a card of its
+   own on a phone: what it is about across the top, each figure under its
+   column's name two to a line, and its buttons across the bottom. As a
+   table it scrolled sideways, and the journal's Close and Monitor's Pause
+   sat a screen to the right of the trade or alert they belong to. The
+   names are written on each cell as data-label; a cell without one spans
+   the card, and .lead puts a cell first. */
+@media (max-width: 760px) {
+  table.stack, table.stack > tbody { display: block; }
+  table.stack > thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  table.stack > tbody > tr {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px var(--s2); padding: var(--s2) 0; border-bottom: 1px solid var(--hairline);
+  }
+  .card.pad0 table.stack > tbody > tr { padding: var(--s2) var(--s3); }
+  table.stack > tbody > tr:last-child { border-bottom: 0; }
+  /* One to a line, for cells of sentences rather than figures, under the
+     row's name in bold. */
+  table.stack.one > tbody > tr { grid-template-columns: minmax(0, 1fr); }
+  table.stack.one > tbody > tr > td:first-child { font-weight: 600; }
+  .card.pad0 table.stack > tbody > tr > td, table.stack > tbody > tr > td {
+    display: block; min-width: 0; padding: 0; border: 0; text-align: left;
+  }
+  table.stack > tbody > tr > td:not([data-label]),
+  table.stack > tbody > tr > td.wide { grid-column: 1 / -1; }
+  table.stack > tbody > tr > td.lead { order: -1; }
+  table.stack > tbody > tr > td[data-label]::before { content: attr(data-label); }
+  /* A table of sentences can instead name its columns once, on the table,
+     as --col2 and --col3, and then a row added later is named as well. A
+     cell's own data-label still wins; an unnamed column stays unnamed. */
+  table.stack.one > tbody > tr > td:nth-child(2):not([data-label])::before {
+    content: var(--col2);
+  }
+  table.stack.one > tbody > tr > td:nth-child(3):not([data-label])::before {
+    content: var(--col3);
+  }
+  table.stack > tbody > tr > td::before {
+    display: block; margin-bottom: 2px;
+    font: 500 var(--t-xs)/1.4 var(--sans); letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  table.stack .acts, table.stack .inline-form { justify-content: flex-start; }
+  /* The close form's size and price share a line, the price the wider: it
+     is filled in to the last digit. The reason and Close go under them. */
+  table.stack .inline-form .field { flex: 1 1 92px; }
+  table.stack .inline-form input[name="price"] { flex-basis: 130px; }
+}
+/* A long sentence in a table that still scrolls sideways: wide enough to
+   read in a few lines, not one word to a line down a narrow column. */
+@media (max-width: 760px) {
+  .tablewrap td.say { min-width: 15em; }
+}
 
 /* ---------- meters ---------- */
 
@@ -545,8 +726,13 @@ ul.list.ok li::marker { color: var(--gain); }
 /* ---------- forms in tables ---------- */
 
 .inline-form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
-.inline-form .field { min-height: 36px; font-size: var(--t-xs); padding: 0 10px; }
+/* .field.sm is the same small field anywhere else: a stop to trail, an
+   alert to edit, a thesis to close out. */
+.inline-form .field, .field.sm { min-height: 36px; font-size: var(--t-xs); padding: 0 10px; }
 .inline-form input.field { flex: 0 0 92px; }
+/* Room for the arrow, which the padding above otherwise lets sit on the text. */
+.inline-form select.field, select.field.sm { padding-right: 28px;
+                                             background-position: right 9px center; }
 
 .sr {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -556,6 +742,7 @@ ul.list.ok li::marker { color: var(--gain); }
 /* ---------- screenshot drop zone ---------- */
 
 .drop {
+  position: relative;
   margin-top: var(--s2);
   border: 1px dashed var(--line-strong); border-radius: var(--r-md);
   background: var(--paper);
@@ -568,10 +755,26 @@ ul.list.ok li::marker { color: var(--gain); }
 .drop:hover .icon, .drop.over .icon { color: var(--accent); }
 .drop .head { font-size: var(--t-sm); font-weight: 500; color: var(--ink); }
 .drop .sub { font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
-.drop input[type=file] { display: none; }
+/* Hidden the way .sr hides things rather than with display:none, which took
+   the file box out of the tab order and left the zone mouse-only. The ring
+   goes round the whole zone, since the box itself is a pixel. */
+.drop input[type=file] {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
 .drop.locked { cursor: default; border-style: dashed; opacity: .75; }
 .drop.locked:hover { border-color: var(--line-strong); background: var(--paper); }
 .drop.locked:hover .icon { color: var(--ink-3); }
+
+/* The yes asked for before a screenshot first goes to Anthropic. A whole row
+   to tap, so the small box is not the only target on a phone. */
+.consent { display: flex; align-items: flex-start; gap: 10px; margin-top: var(--s2);
+           padding: 10px 2px; min-height: 44px; cursor: pointer;
+           font-size: var(--t-sm); color: var(--ink-2); line-height: 1.5; }
+.consent input { width: 20px; height: 20px; margin: 1px 0 0; flex: none;
+                 accent-color: var(--accent); }
+#ai_say { margin-top: 4px; color: var(--loss); }
 
 .thumb { max-height: 120px; max-width: 100%; border-radius: var(--r-sm);
          border: 1px solid var(--rule); margin-bottom: 10px; }
@@ -598,11 +801,35 @@ ul.list.ok li::marker { color: var(--gain); }
 
 /* ---------- touch ---------- */
 
+/* A finger needs 44 by 44 pixels: every button, field, menu and tab here is
+   at least that on a touch screen. */
 @media (pointer: coarse) {
   .btn.sm { min-height: 44px; padding: 0 16px; }
   .pills a { min-height: 44px; display: inline-flex; align-items: center; }
-  .inline-form .field { min-height: 44px; }
+  .inline-form .field, .field.sm { min-height: 44px; }
   tbody td { padding-top: 14px; padding-bottom: 14px; }
+  /* An iPhone zooms the whole page in on a field whose text is under 16
+     pixels as soon as it is tapped, and leaves it zoomed. Selects were 15,
+     and the small fields in tables 13. */
+  select.field, .inline-form .field, .field.sm { font-size: 16px; }
+  .wordmark, .me, .menu > summary { min-height: 44px; }
+  .me { min-width: 44px; justify-content: center; }
+  .jump a { min-height: 44px; display: inline-flex; align-items: center; }
+  .firebar button { min-height: 44px; }
+  /* The "Edit" and "Trail the stop" openers were 21 pixels tall. */
+  details:not(.help):not(.menu):not(.more) > summary { padding-block: 12px; }
+  /* A link standing on its own, as a table's action or a line of its own:
+     the words stay where they are, and the padding round them is what the
+     finger hits. Inline, so the padding moves nothing. */
+  td a:not(.btn), .tail a, .firebar a, ul.list li > a:only-child,
+  .prose > a:only-child, .fine > a:only-child { padding: 14px 9px; margin: 0 -9px; }
+  a.tail { padding-block: 14px; margin-block: -14px; }
+}
+
+/* Only where there is a pointer to hover with. A tap counts as a hover on
+   a phone, and the row stayed lit after its button was tapped. */
+@media (hover: none) {
+  tbody tr:hover { background: transparent; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -646,17 +873,65 @@ ul.list.ok li::marker { color: var(--gain); }
   .wrap { padding: var(--s3) var(--s2) var(--s5); }
   .topbar .inner { padding: 0 var(--s2); gap: var(--s2); height: 56px; }
   .pagehead h1 { font-size: var(--t-lg); }
+  /* What a heading counts or notes goes on its own line underneath. Beside
+     it, squeezed into what was left, it broke 17 headings in two, "Log a
+     trade / by hand" among them. */
+  .sechead { flex-wrap: wrap; row-gap: 2px; }
+  .sechead .tail { flex-basis: 100%; margin-left: 0; }
   .instrument .price { margin-left: 0; text-align: left; width: 100%; }
   .instrument .sym { font-size: var(--t-xl); }
   .call .word { font-size: var(--t-lg); }
   .wordmark { font-size: var(--t-base); }
 }
 @media (max-width: 420px) {
-  .figs { grid-template-columns: 1fr 1fr; }
+  /* Two to a row, each column as wide as its figures need where they fit:
+     two equal halves of a 360 pixel phone hold ten characters of a figure,
+     and -100,000.00 is eleven. */
+  .figs { grid-template-columns: repeat(2, minmax(0, auto)); }
   .pairs { grid-template-columns: 1fr; }
   .pairs dt { border-bottom: 0; padding-bottom: 0; }
   .pairs dd { text-align: left; padding-top: 2px; }
 }
+
+/* ---------- a phone's notch and home bar ---------- */
+
+/* viewport-fit=cover lets the page draw edge to edge, under a notch, a
+   rounded corner and the home bar, so whatever is pinned to an edge keeps
+   its own content clear of them. On a screen with none of those every
+   env() is zero and nothing moves. Only the bars and the loading screen are
+   handled here; the rest of the phone layout is its own piece of work. The
+   two bars pinned under the top one follow it, after their own rules below. */
+.topbar { padding-top: env(safe-area-inset-top, 0px); }
+.topbar .inner, .demobar .inner {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+}
+.wrap {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+  padding-bottom: calc(var(--s6) + env(safe-area-inset-bottom, 0px));
+}
+.overlay {
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+           env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+.skip:focus { top: calc(var(--s1) + env(safe-area-inset-top, 0px)); }
+@media (max-width: 760px) {
+  .topbar .inner, .demobar .inner {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+  }
+  .wrap {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+    padding-bottom: calc(var(--s5) + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ---------- a stop that has been crossed ---------- */
+
+.card.breach { border-color: var(--loss); background: var(--loss-wash); }
+.card.breach .eyebrow { color: var(--loss); font-weight: 600; }
 
 /* ---------- section jump bar ---------- */
 
@@ -705,6 +980,42 @@ ul.list.ok li::marker { color: var(--gain); }
   .firebar .inner { padding: 10px var(--s2); }
 }
 
+/* Under a notch the top bar is taller by the notch, and the bars pinned
+   beneath it move down with it. Here, after their own rules, to win. */
+.firebar, .jump { top: calc(60px + env(safe-area-inset-top, 0px)); }
+.firebar .inner {
+  padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
+}
+[id^="s-"] { scroll-margin-top: calc(120px + env(safe-area-inset-top, 0px)); }
+/* The section bar is taller on a touch screen, by its 44 pixel links. */
+@media (pointer: coarse) {
+  [id^="s-"] { scroll-margin-top: calc(136px + env(safe-area-inset-top, 0px)); }
+}
+@media (max-width: 760px) {
+  .firebar, .jump { top: calc(56px + env(safe-area-inset-top, 0px)); }
+  .firebar .inner {
+    padding-left: max(var(--s2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
+  }
+}
+/* Both stuck in the same place under the top bar, an alert's bar covered
+   the research page's bar of sections. While an alert's bar is up, the
+   sections' bar stays where it is in the page; once the alert is
+   dismissed, it sticks again. */
+body:has(#firebar:not([hidden])) .jump { position: static; }
+
+/* ---------- notifications on this device ---------- */
+
+.notify-head { display: flex; align-items: center; gap: var(--s1);
+               flex-wrap: wrap; margin-bottom: var(--s1); }
+.notify-head h3 { font-size: var(--t-base); }
+/* Always laid out, empty or not: a status region a screen reader is to
+   announce has to be on the page before its words change. */
+.notify-said { margin-top: var(--s1); color: var(--ink); }
+.notify-acts { display: flex; gap: var(--s1); flex-wrap: wrap; margin: var(--s2) 0; }
+.notify-acts:not(:has(button:not([hidden]))) { display: none; }
+
 /* ---------- accounts ---------- */
 
 /* The avatar is the only image in the interface, so it earns a circle. */
@@ -722,6 +1033,10 @@ ul.list.ok li::marker { color: var(--gain); }
 
 
 .whoami { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+/* The name and address beside the picture. A flex item is at least as wide
+   as its longest word, and a long address widened the page on a phone (449
+   pixels at 360); allowed to shrink, the address wraps instead. */
+.whoami > div { flex: 1 1 12em; min-width: 0; }
 
 /* ---------- sign in ---------- */
 
@@ -736,12 +1051,7 @@ ul.list.ok li::marker { color: var(--gain); }
 .signin h1 { font-size: var(--t-xl); line-height: 1.1; }
 .signin .lede { margin: var(--s2) 0 var(--s4); color: var(--ink-2);
                 font-size: var(--t-base); text-align: left; }
-.signin .notice {
-  background: var(--hold-wash); border: 1px solid var(--hold);
-  color: var(--ink); border-radius: var(--r-sm);
-  padding: 11px var(--s2); font-size: var(--t-sm);
-  margin-bottom: var(--s3); text-align: left;
-}
+.signin .notice { margin-bottom: var(--s3); text-align: left; }
 .fine { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.7; }
 .signin .fine { margin-top: var(--s3); text-align: left; }
 
@@ -756,6 +1066,21 @@ ul.list.ok li::marker { color: var(--gain); }
 }
 .gbtn:hover { background: #f7f7f7; text-decoration: none; border-color: var(--ink-3); }
 .gbtn svg { flex: none; }
+/* Apple's button, as its guidelines have it: black on a light page and white
+   on a dark one, in the system font, the same size as Google's. */
+.abtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+  width: 100%; min-height: 48px; padding: 0 var(--s3);
+  background: #000; color: #fff; border: 1px solid #000; border-radius: var(--r-sm);
+  font: 500 var(--t-sm) -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  cursor: pointer;
+}
+.abtn:hover { background: #262626; color: #fff; text-decoration: none; }
+.abtn svg { flex: none; margin-top: -2px; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .abtn { background: #fff; color: #000; border-color: #fff; }
+  :root:not([data-theme="light"]) .abtn:hover { background: #ececec; color: #000; }
+}
 
 /* ---------- legal pages ---------- */
 
@@ -792,14 +1117,19 @@ ul.list.ok li::marker { color: var(--gain); }
   .chart .clab { font-size: 11px; }
 }
 
-/* The grounding warning reuses the sign-in notice styling, which needs to be
-   available outside that page now. */
-.card > .notice {
+/* A note that has to be read before anything else here: an invitation, a
+   limit reached, an unchecked claim. Once scoped to the sign-in page and to
+   cards, which left the same note elsewhere as plain body text. */
+.notice {
   background: var(--hold-wash); border: 1px solid var(--hold);
   color: var(--ink); border-radius: var(--r-sm);
   padding: 11px var(--s2); font-size: var(--t-sm); line-height: 1.6;
 }
-.card > .notice b { font-weight: 600; }
+.notice b { font-weight: 600; }
+
+/* How many rows a section holds, beside its heading. */
+.count { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3);
+         font-variant-numeric: tabular-nums; }
 
 /* ---------- plain-English box ---------- */
 
@@ -825,3 +1155,69 @@ ul.list.ok li::marker { color: var(--gain); }
 /* A safety net for any image added later. The one image on the site already
    constrains itself; this makes that true by default rather than by memory. */
 img { max-width: 100%; height: auto; }
+
+/* ---------- the tab bar ---------- */
+
+/* Five places along the bottom of a phone, as a phone app has them: the
+   four used most, and More for the rest. Within reach of a thumb, which the
+   menu in the top corner is not. On a phone, and in the installed app and
+   the iPhone app up to tablet width; wherever it shows, the top bar's Menu
+   goes, since More holds the same links. Here, at the end, so its padding of
+   the page wins over the notch section's. */
+.tabbar {
+  display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 45;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+           env(safe-area-inset-left, 0px);
+  background: var(--paper); border-top: 1px solid var(--rule);
+}
+.tabbar > a, .tabbar .more > summary {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; min-height: 56px; padding: 6px 2px 5px;
+  color: var(--ink-2); font: 500 var(--t-xs)/1.2 var(--sans);
+  list-style: none; cursor: pointer; user-select: none;
+}
+.tabbar svg { width: 24px; height: 24px; flex: none; }
+.tabbar > a:hover { text-decoration: none; color: var(--ink); }
+.tabbar > a[aria-current="page"], .tabbar .more > summary.on { color: var(--accent-text); }
+.tabbar .more > summary::-webkit-details-marker { display: none; }
+.tabbar .more[open] > summary { color: var(--ink); background: var(--sunken); }
+/* The keyboard's ring inside the tab, not cut off by the screen's edge. */
+.tabbar > a:focus-visible, .tabbar .more > summary:focus-visible { outline-offset: -4px; }
+/* More's panel is the top menu's, opening upwards from the bar's right. */
+.tabbar .menu-panel {
+  top: auto; bottom: calc(100% + 8px);
+  right: max(8px, env(safe-area-inset-right, 0px));
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, .14);
+}
+.tabbar .menu-panel .fine {
+  grid-column: 1 / -1; display: flex; gap: var(--s1); margin: 4px 0 0;
+  padding: 2px 10px 0; border-top: 1px solid var(--hairline);
+}
+.tabbar .menu-panel .fine a {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px;
+  color: var(--accent-text); font-weight: 400;
+}
+
+/* The page ends 48 pixels above the bar, whatever the bar covers. */
+@media (max-width: 760px), (display-mode: standalone) and (max-width: 1000px) {
+  .tabbar { display: grid; }
+  .topbar .menu { display: none; }
+  .wrap { padding-bottom: calc(var(--s5) + 57px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (max-width: 1000px) {
+  .app .tabbar { display: grid; }
+  .app .topbar .menu { display: none; }
+  .app .wrap { padding-bottom: calc(var(--s5) + 57px + env(safe-area-inset-bottom, 0px)); }
+}
+/* While a field is being typed in, the keyboard has the bottom of the
+   screen, and a bar pinned there would ride up over the page with it. It
+   comes back a moment after the field is left, not at once: tapping a
+   button where the bar would be (Apply, under the code box) moves the focus
+   first, and a bar back in place before the tap ended took the tap. */
+@media (pointer: coarse) {
+  .tabbar { transition: visibility 0s linear .3s; }
+  body:has(:is(input:not([type=hidden]):not([type=file]), textarea):focus) .tabbar {
+    visibility: hidden; transition-delay: 0s;
+  }
+}

@@ -14,10 +14,18 @@ from this file.
 from __future__ import annotations
 
 import dataclasses
+import logging
+import re
 import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Dict, List, Optional
+
+log = logging.getLogger(__name__)
+
+# A job's error text can quote an address it failed to send to. The log is
+# for finding faults, not for keeping people's addresses.
+_ADDRESS = re.compile(r"[^\s@<>\"'(),;:]+@[^\s@<>\"'(),;:]+")
 
 
 class Scheduler:
@@ -39,6 +47,9 @@ class Scheduler:
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Guards the two lists below. The loop's thread writes them while page
+        # requests read them, and reading a deque while it changes raises.
+        self._record = threading.Lock()
 
         self.started_at: Optional[float] = None
         self.last_run: Optional[float] = None
@@ -57,6 +68,9 @@ class Scheduler:
             if self._thread is not None and self._thread.is_alive():
                 return False
             self._stop.clear()
+            # stop() and set_interval() leave this set. Cleared, so a loop
+            # started again waits an interval like a new one does.
+            self._wake.clear()
             self.started_at = time.time()
             self._thread = threading.Thread(target=self._loop, name=self._name,
                                             daemon=True)
@@ -124,26 +138,40 @@ class Scheduler:
             self.runs += 1
             self.last_run = time.time()
             self.last_error = ""
-            for entry in fired:
-                entry["at"] = self.last_run
-                self.recent_fires.appendleft(entry)
-            self.history.appendleft({
-                "at": started,
-                "ok": True,
-                "seconds": self.last_run - started,
-                "checked": result.get("checked", 0),
-                "fired": len(fired),
-                "errors": len(result.get("errors") or []),
-                "triggered": triggered,
-            })
+            with self._record:
+                for entry in fired:
+                    entry["at"] = self.last_run
+                    self.recent_fires.appendleft(entry)
+                self.history.appendleft({
+                    "at": started,
+                    "ok": True,
+                    "seconds": self.last_run - started,
+                    "checked": result.get("checked", 0),
+                    # Left because their market was closed, so a run that
+                    # checked nothing on a Sunday reads as what it is.
+                    "skipped": result.get("skipped", 0),
+                    "fired": len(fired),
+                    "errors": len(result.get("errors") or []),
+                    "triggered": triggered,
+                })
+            self._log_errors(result.get("errors"))
         except BaseException as exc:               # a loop must not die
             self.failures += 1
             self.last_error = "%s: %s" % (type(exc).__name__, exc)
             try:
-                self.history.appendleft({"at": started, "ok": False,
-                                         "seconds": time.time() - started,
-                                         "detail": self.last_error,
-                                         "triggered": triggered})
+                with self._record:
+                    self.history.appendleft({"at": started, "ok": False,
+                                             "seconds": time.time() - started,
+                                             "detail": self.last_error,
+                                             "triggered": triggered})
+            except Exception:
+                pass
+            # A background job has no page to show its failure on, so the log
+            # is where it is seen, with the traceback that explains it. Error
+            # reporting, when it is on, picks up anything logged as an error.
+            try:
+                log.error("%s failed", self._name,
+                          exc_info=(type(exc), exc, exc.__traceback__))
             except Exception:
                 pass
             if self._on_error is not None:
@@ -152,9 +180,29 @@ class Scheduler:
                 except Exception:
                     pass
 
+    def _log_errors(self, errors) -> None:
+        """Write down the items a run could not do, which it otherwise drops.
+
+        A job that skips a bad symbol or an unsendable email still succeeds, and
+        before this the only trace of what it skipped was a count.
+        """
+        if not errors:
+            return
+        try:
+            shown = "; ".join(_ADDRESS.sub("[address]", str(e))[:200]
+                              for e in list(errors)[:5])
+            log.warning("%s: %d item%s failed: %s%s", self._name, len(errors),
+                        "" if len(errors) == 1 else "s", shown,
+                        " ..." if len(errors) > 5 else "")
+        except Exception:
+            pass                        # writing it down must not fail the run
+
     # -- what the page needs to say ----------------------------------------
 
     def status(self) -> Dict:
+        with self._record:
+            history = list(self.history)[:10]
+            fires = list(self.recent_fires)[:10]
         return {
             "running": self.running,
             "interval": self._interval,
@@ -166,10 +214,17 @@ class Scheduler:
             "runs": self.runs,
             "failures": self.failures,
             "last_error": self.last_error,
-            "history": list(self.history)[:10],
-            "recent_fires": list(self.recent_fires)[:10],
+            "history": history,
+            "recent_fires": fires,
         }
 
     def unseen_fires(self, since: float) -> List[Dict]:
-        """Alerts that fired after a given moment, newest first."""
-        return [f for f in self.recent_fires if f.get("at", 0) > since]
+        """Alerts that fired after a given moment, newest first.
+
+        Only what this process has seen since it started. What people are
+        told is read from the alert history in the database instead, which a
+        restart does not empty.
+        """
+        with self._record:
+            fires = list(self.recent_fires)
+        return [f for f in fires if f.get("at", 0) > since]

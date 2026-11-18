@@ -34,6 +34,18 @@ _CRUMB: Optional[str] = None
 _OBTAINED_AT: float = 0.0
 _TTL = 30 * 60          # refresh the handshake every half hour
 
+# After a handshake fails, how long to answer without trying again. Every
+# caller used to repeat the whole handshake in turn behind the lock, so a page
+# that needed fundamentals, options and the calendar waited for each of them.
+_FAILED_AT: float = 0.0
+_RETRY_AFTER_FAILURE = 60.0
+# Per request in the handshake. These only fetch a cookie and a short token;
+# a source that has not answered in this long is not going to.
+_HANDSHAKE_TIMEOUT = 5
+
+_NO_SESSION = ("Could not obtain a Yahoo session token. This usually means no "
+               "internet connection, or Yahoo is blocking this network.")
+
 
 class YahooError(RuntimeError):
     """Raised when Yahoo cannot be reached or refuses the request."""
@@ -52,16 +64,22 @@ def _handshake() -> None:
 
     for url in _SEED_URLS:
         try:
-            session.get(url, timeout=20, allow_redirects=True)
+            session.get(url, timeout=_HANDSHAKE_TIMEOUT, allow_redirects=True)
         except requests.RequestException:
             continue      # fc.yahoo.com answers 404 but still sets the cookie
 
     crumb = None
     for url in _CRUMB_URLS:
         try:
-            r = session.get(url, timeout=20)
+            r = session.get(url, timeout=_HANDSHAKE_TIMEOUT)
         except requests.RequestException:
             continue
+        if upstream.is_throttle(r.status_code):
+            # The same refusal the data requests would get, so it counts
+            # towards closing the door on them too, and the other address is
+            # not tried: asking again is what turns a limit into a block.
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+            break
         text = (r.text or "").strip()
         # A crumb is a short opaque token. An HTML body means we were bounced
         # to a consent page instead, so it is not usable.
@@ -70,19 +88,39 @@ def _handshake() -> None:
             break
 
     if not crumb:
-        raise YahooError(
-            "Could not obtain a Yahoo session token. This usually means no "
-            "internet connection, or Yahoo is blocking this network.")
+        raise YahooError(_NO_SESSION)
 
     _SESSION, _CRUMB, _OBTAINED_AT = session, crumb, time.time()
 
 
-def _ensure(force: bool = False) -> None:
-    global _OBTAINED_AT
+def _ensure(force: bool = False, seen: Optional[str] = None) -> None:
+    """Make sure there is a session and crumb, doing the handshake if needed.
+
+    One caller does the handshake while the rest wait on the lock, and then
+    use its result: a new crumb, or, if it failed, an immediate answer rather
+    than a handshake of their own. `seen` is the crumb a caller was refused
+    with; if it has been replaced meanwhile, there is nothing to redo.
+    """
+    global _FAILED_AT
     with _LOCK:
-        stale = (time.time() - _OBTAINED_AT) > _TTL
-        if force or _SESSION is None or _CRUMB is None or stale:
+        have = _SESSION is not None and _CRUMB is not None
+        if force and have and seen is not None and _CRUMB != seen:
+            return
+        if have and not force and (time.time() - _OBTAINED_AT) <= _TTL:
+            return
+        if time.time() - _FAILED_AT < _RETRY_AFTER_FAILURE:
+            # It failed moments ago. A crumb past its half hour usually still
+            # works, so keep using it; with none, say so straight away.
+            if have and not force:
+                return
+            raise YahooError(_NO_SESSION)
+        try:
             _handshake()
+        except YahooError:
+            _FAILED_AT = time.time()
+            if have and not force:
+                return
+            raise
 
 
 _HOST = "Yahoo Finance"
@@ -96,20 +134,27 @@ def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
     """
     key = "yahoo|%s|%s" % (url, sorted((params or {}).items()))
     try:
+        # The wait outlasts the fetch at its slowest (three tries of fifteen
+        # seconds and a handshake), so callers asking the same thing wait
+        # for this answer instead of each asking again.
         return upstream.cached(key, lambda: _get_once(url, params, tries),
-                               host=_HOST)
+                               host=_HOST, wait=60.0)
     except upstream.Throttled as exc:
         raise YahooError(str(exc))
 
 
 def _get_once(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
-    last = None
+    last, used = None, None
     for attempt in range(tries):
-        _ensure(force=(attempt > 0 and last == 401))
+        _ensure(force=(attempt > 0 and last == 401), seen=used)
+        session, used = _SESSION, _CRUMB
         query = dict(params or {})
-        query["crumb"] = _CRUMB
+        query["crumb"] = used
         try:
-            r = _SESSION.get(url, params=query, timeout=25)
+            # Five seconds to connect, ten to answer: it answers in well
+            # under one when it answers at all, and 25 a try let three tries
+            # outlast the time other callers wait for this one.
+            r = session.get(url, params=query, timeout=(5, 10))
         except requests.RequestException as exc:
             last = str(exc)
             time.sleep(0.5 * (attempt + 1))

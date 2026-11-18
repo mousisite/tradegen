@@ -1,8 +1,10 @@
 """The strategy library.
 
-Roughly thirty independent strategies, grouped into families. Each reads the
-same precomputed indicator context and returns a directional score in
-[-1, +1] plus a plain-language reading.
+Independent strategies, grouped into families. REGISTRY below holds every one;
+anything that says how many there are counts it rather than typing a number,
+which goes stale the day one is added. Each reads the same precomputed
+indicator context and returns a directional score in [-1, +1] plus a
+plain-language reading.
 
 Two design rules run through the whole module:
 
@@ -231,9 +233,10 @@ def build_context(bars: Bars) -> Context:
     s["rvol"] = ind.relative_volume(v, 20)
     s["obv"] = ind.obv(c, v)
     s["obv_slope"] = ind.slope_pct(s["obv"], 10)
+    s["obv_flow"] = ind.flow_share(s["obv"], v, 20)
     s["mfi"] = ind.money_flow_index(h, l, c, v, 14)
     s["ad"] = ind.accum_dist(h, l, c, v)
-    s["ad_slope"] = ind.slope_pct(s["ad"], 10)
+    s["ad_flow"] = ind.flow_share(s["ad"], v, 10)
 
     body, upper_wick, lower_wick = ind.body_and_wicks(o, h, l, c)
     s["body"], s["upper_wick"], s["lower_wick"] = body, upper_wick, lower_wick
@@ -752,21 +755,24 @@ def obv_divergence(ctx: Context, i: int) -> Signal:
         return _idle("obv_divergence", VOLUME)
     price_now = float(ctx.bars.close[i])
     price_then = float(ctx.bars.close[i - 20])
-    obv_now, obv_then = ctx.at("obv", i), ctx.at("obv", i - 20)
-    if not _ok(obv_now, obv_then) or price_then == 0:
+    # The 20-bar OBV change as a share of the volume traded over those bars.
+    # It used to be divided by the OBV level, a running total from wherever
+    # the download began, so the same bar read as a divergence on one day and
+    # as agreement the next, when the window slid. The 0.03 threshold fires
+    # about as often as the old 0.02 did on five years of daily bars.
+    flow = ctx.at("obv_flow", i)
+    if not _ok(flow) or price_then == 0:
         return _idle("obv_divergence", VOLUME)
 
     price_chg = (price_now - price_then) / abs(price_then)
-    scale = max(abs(obv_then), 1.0)
-    obv_chg = (obv_now - obv_then) / scale
 
-    if price_chg > 0.001 and obv_chg < -0.02:
+    if price_chg > 0.001 and flow < -0.03:
         return Signal("obv_divergence", -0.65, 1.0,
                       "price up %.2f%% but volume flow is negative" % (price_chg * 100), VOLUME)
-    if price_chg < -0.001 and obv_chg > 0.02:
+    if price_chg < -0.001 and flow > 0.03:
         return Signal("obv_divergence", 0.65, 1.0,
                       "price down %.2f%% but volume flow is positive" % (price_chg * 100), VOLUME)
-    return Signal("obv_divergence", _clamp(obv_chg * 2.0) * 0.4, 0.5,
+    return Signal("obv_divergence", _clamp(flow * 1.5) * 0.4, 0.5,
                   "volume flow broadly agrees with price", VOLUME)
 
 
@@ -785,13 +791,20 @@ def mfi_extremes(ctx: Context, i: int) -> Signal:
 
 
 def accumulation_trend(ctx: Context, i: int) -> Signal:
-    """Slope of the Accumulation/Distribution line: quiet buying or selling."""
-    slope = ctx.at("ad_slope", i)
-    if not _ok(slope):
+    """Slope of the Accumulation/Distribution line: quiet buying or selling.
+
+    Read as the line's 10-bar change over the volume traded in those bars, so
+    it does not depend on where the history starts. The old reading, a percent
+    change of the running total, hit its limit on most days; a net quarter of
+    the volume either way now gives the full score.
+    """
+    flow = ctx.at("ad_flow", i)
+    if not _ok(flow):
         return _idle("accumulation_trend", VOLUME)
-    return Signal("accumulation_trend", _clamp(slope / 3.0), 1.0,
-                  "A/D line %s (%+.2f%% over 10 bars)" % (
-                      "accumulating" if slope > 0 else "distributing", slope), VOLUME)
+    return Signal("accumulation_trend", _clamp(flow * 4.0), 1.0,
+                  "A/D line %s (a net %+.0f%% of 10 bars' volume)" % (
+                      "accumulating" if flow > 0 else "distributing", flow * 100),
+                  VOLUME)
 
 
 # ---------------------------------------------------------------------------
@@ -1089,8 +1102,20 @@ FAMILIES: Tuple[str, ...] = (TREND, REVERSION, BREAKOUT, VOLUME, STRUCTURE, PATT
 BASE_WEIGHTS: Dict[str, float] = {s.name: s.base_weight for s in REGISTRY}
 
 
+# Strategies that read the inside of a trading session, so they can never
+# fire on daily bars, where a session is one bar. Every page that counts the
+# strategies takes the number from here and REGISTRY, never from a typed-in
+# figure, so "34" and "33" cannot drift apart again.
+INTRADAY_ONLY: Tuple[str, ...] = ("opening_range_break",)
+
+
 def strategy_names() -> List[str]:
     return [s.name for s in REGISTRY]
+
+
+def daily_strategy_names() -> List[str]:
+    """The strategies that can fire on daily bars."""
+    return [s.name for s in REGISTRY if s.name not in INTRADAY_ONLY]
 
 
 # ---------------------------------------------------------------------------

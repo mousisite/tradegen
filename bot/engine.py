@@ -10,6 +10,7 @@ else's job.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -17,12 +18,20 @@ from typing import Callable, Dict, List, Optional
 from . import config as config_mod
 from . import database as db_mod
 from .calibrate import Calibration, calibrate
-from .decision import Plan, decide
+from .decision import Plan, blend_conviction, decide
 from .learning import StrategyReport, learned_weights, measure_strategies
 from .levels import Level, build_levels
-from .market import Bars, DataError, fetch_bars, resolve
+from .market import Bars, DataError, SymbolNotFound, fetch_bars, resolve
 from .sentiment import Sentiment, analyse as analyse_sentiment
 from .strategies import Context, Regime, Signal, build_context, evaluate
+
+log = logging.getLogger(__name__)
+
+# What each piece of research is called where it is listed as left out.
+_PIECES = {"fundamentals": "Company figures", "sec_history": "Filed accounts",
+           "filings": "Recent filings", "risk": "Risk measures",
+           "options": "Options prices", "options analysis": "Options analysis",
+           "valuation": "Valuation"}
 
 
 @dataclass
@@ -46,7 +55,16 @@ class Research:
     thesis: Optional[object] = None
     reasoning: Optional[object] = None
     elapsed: float = 0.0
+    # The pieces that could not be had, by name. Why goes to `problems`, in
+    # the error's own words, for whoever runs this copy: those name hosts,
+    # addresses and library internals, which tell anyone else nothing.
     unavailable: List[str] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+
+    def left_out(self, piece: str, exc: Exception) -> None:
+        log.warning("Research on %s: %s failed: %s", self.symbol, piece, exc)
+        self.unavailable.append(_PIECES.get(piece, piece.capitalize()))
+        self.problems.append("%s: %s" % (piece, str(exc)[:160]))
 
 
 @dataclass
@@ -79,12 +97,21 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             record: bool = True, db_path: Optional[str] = None,
             user: int = 1,
             progress: Optional[Callable[[str], None]] = None,
-            source: str = "engine") -> Analysis:
+            source: str = "engine", resolve_symbol: bool = True,
+            with_calendar: bool = True, exact: bool = False) -> Analysis:
     """Run the full pipeline for one instrument.
 
     `progress` is called with a short status string at each stage, so a caller
     can show something while the user waits. It is optional and ignored when
     absent.
+
+    `resolve_symbol` and `with_calendar` are for a caller that already holds
+    an exact ticker and never reads the earnings calendar, such as the Find
+    scan: each is one more request to the data source per instrument.
+
+    `exact` says the symbol is Yahoo's own, as picked from the suggestions:
+    LINK is then Interlink Electronics, not the Chainlink coin a bare LINK
+    means. Its name is still looked up, for the news search.
     """
     started = time.time()
 
@@ -94,17 +121,39 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
 
     interval = interval or cfg["interval"]
 
-    step("Resolving %s" % symbol)
-    info = resolve(symbol)
-    resolved, name = info["symbol"], info.get("name") or info["symbol"]
+    info: Dict = {}
+    if resolve_symbol:
+        step("Resolving %s" % symbol)
+        # exact is passed only when set, so a stand-in for resolve() that
+        # takes the symbol alone, as the tests use, still works.
+        info = resolve(symbol, exact=True) if exact else resolve(symbol)
+        resolved, name = info["symbol"], info.get("name") or info["symbol"]
+    else:
+        # Used exactly as given. The search behind resolve() falls back to a
+        # fuzzy match, which helps a person who mistyped and is wrong for a
+        # ticker read off the data source's own list.
+        resolved = name = (symbol or "").strip().upper()
 
     step("Fetching market data")
-    bars = fetch_bars(resolved, interval)
+    try:
+        bars = fetch_bars(resolved, interval)
+    except SymbolNotFound:
+        # With the search down, a company name was guessed as a ticker. That
+        # it is not one says nothing about what was typed: the source did
+        # not answer, and the page says so instead of "check the ticker".
+        if info.get("search_down") is not None:
+            raise info["search_down"]
+        raise
 
     step("Computing indicators")
     ctx = build_context(bars)
     last = len(bars) - 1
     signals, composite, regime = evaluate(ctx, last, cfg["strategy_weights"])
+    # The replay that measures the odds scores history with these standard
+    # weights, so today's setup is looked up by the same model's score. The
+    # learned weights below were fitted on that same history, so replaying
+    # with them would mark the model's own homework.
+    standard_score = composite
     levels = build_levels(bars, float(ctx.atr[last]))
     cost_bps = config_mod.cost_bps_for(bars.asset_class, cfg)
     # Scaled to the interval, so a "day trade" on 5-minute bars does not quietly
@@ -125,23 +174,13 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         signals, composite, regime = evaluate(
             ctx, last, cfg["strategy_weights"], learned=learned, regime=regime)
 
-    step("Back-testing this setup")
-    calib = calibrate(ctx, composite,
-                      stop_atr=cfg["stop_atr_multiple"],
-                      target_atr=cfg["target_atr_multiple"],
-                      horizon=horizon,
-                      stride=cfg["calibration_stride"],
-                      weights=cfg["strategy_weights"],
-                      min_bucket=cfg["min_bucket_samples"],
-                      cost_bps=cost_bps)
-
     # The calendar is its own round trip and nothing above depends on it, so it
     # runs while the news is being read rather than after.
     from concurrent.futures import ThreadPoolExecutor
     from . import catalysts as catalysts_mod
 
-    pool = ThreadPoolExecutor(max_workers=2)
-    calendar_job = pool.submit(catalysts_mod.fetch, bars.symbol)
+    pool = ThreadPoolExecutor(max_workers=2) if with_calendar else None
+    calendar_job = pool.submit(catalysts_mod.fetch, bars.symbol) if pool else None
 
     if with_news:
         step("Reading news and social")
@@ -151,12 +190,34 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         sentiment = Sentiment(0.0, 0.0, 0.0, 0, 0, 0, 0, "skipped",
                               notes=["Sentiment analysis was skipped."])
 
-    try:
-        calendar = calendar_job.result(timeout=12)
-    except Exception:
-        calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
-    finally:
-        pool.shutdown(wait=False)
+    # The odds are for the side the call will take, which the news can still
+    # tip, so they are measured once the news is in. Longs and shorts are
+    # never pooled: a bearish call was being quoted odds earned by buying.
+    step("Back-testing this setup")
+    conviction, _ = blend_conviction(composite, sentiment,
+                                     float(cfg["sentiment_weight"]))
+    calib = calibrate(ctx, standard_score,
+                      stop_atr=cfg["stop_atr_multiple"],
+                      target_atr=cfg["target_atr_multiple"],
+                      horizon=horizon,
+                      stride=cfg["calibration_stride"],
+                      weights=cfg["strategy_weights"],
+                      min_bucket=cfg["min_bucket_samples"],
+                      cost_bps=cost_bps,
+                      direction=(1 if conviction > 0 else
+                                 -1 if conviction < 0 else 0))
+
+    if calendar_job is None:
+        calendar = catalysts_mod.Calendar(
+            symbol=bars.symbol, available=False,
+            notes=["The calendar was not read for this analysis."])
+    else:
+        try:
+            calendar = calendar_job.result(timeout=12)
+        except Exception:
+            calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
+        finally:
+            pool.shutdown(wait=False)
 
     step("Deciding")
     plan = decide(ctx, bars, signals, composite, regime, calib, sentiment,
@@ -238,7 +299,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
                 results[name] = future.result()
             except Exception as exc:
                 results[name] = None
-                out.unavailable.append("%s: %s" % (name, str(exc)[:110]))
+                out.left_out(name, exc)
 
     out.fundamentals = results.get("fundamentals")
     out.sec_history = results.get("sec_history")
@@ -250,7 +311,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
         try:
             out.options = options_mod.analyse(chain)
         except Exception as exc:
-            out.unavailable.append("options analysis: %s" % str(exc)[:110])
+            out.left_out("options analysis", exc)
 
     if out.fundamentals is not None:
         step("Valuing the business")
@@ -266,15 +327,17 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
                 out.fundamentals.get("market_cap") if out.fundamentals else None,
                 getattr(out.fundamentals, "sector", "") if out.fundamentals else "")
         except Exception as exc:
+            log.warning("Research on %s: the scored models failed: %s", out.symbol, exc)
             out.scores = {"available": False,
-                          "reason": "The scored models could not be run: %s" % exc}
+                          "reason": "The scored models could not be run on these "
+                                    "filings."}
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),
                       val_mod.multiples(out.fundamentals, price)]
             out.valuation = val_mod.combine(models, price)
         except Exception as exc:
-            out.unavailable.append("valuation: %s" % str(exc)[:110])
+            out.left_out("valuation", exc)
 
     technical = None
     if analysis is not None:
@@ -315,10 +378,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             options_stats=out.options, thesis=out.thesis)
         out.reasoning = reasoning_mod.analyse(payload)
     elif with_reasoning:
-        out.reasoning = reasoning_mod.Reasoning(
-            False, reason_unavailable=(
-                "No Anthropic API key is set, so the reasoning step is "
-                "unavailable. Every measured figure on this page is unaffected."))
+        out.reasoning = reasoning_mod.switched_off()
 
     out.elapsed = time.time() - started
     return out

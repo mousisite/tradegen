@@ -14,7 +14,8 @@ rather than something misleading.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+import time
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 def _nice_step(span: float, target_ticks: int = 4) -> float:
@@ -137,17 +138,181 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
 
 
 # ---------------------------------------------------------------------------
+# The trade, drawn on its own prices
+# ---------------------------------------------------------------------------
+
+# What one bar of each interval is called, for the trade chart's title.
+_BAR_WORDS = {"1d": "daily", "1h": "hourly", "60m": "hourly", "30m": "30-minute",
+              "15m": "15-minute", "5m": "5-minute", "2m": "2-minute",
+              "1m": "1-minute"}
+
+
+def bar_words(interval: str) -> str:
+    """"daily", "hourly" or "15-minute": what a bar of this interval covers."""
+    return _BAR_WORDS.get((interval or "1d").lower(), interval or "")
+
+
+def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[float],
+                lows: Sequence[float], closes: Sequence[float],
+                volumes: Sequence[float] = (), levels: Optional[Dict[str, float]] = None,
+                last: Optional[float] = None, as_of: str = "", day_label=None,
+                width: int = 720, height: int = 300, bars: int = 90,
+                interval: str = "1d") -> str:
+    """Candles with the plan's prices drawn across them.
+
+    For the analysis page, where the question is where today's price sits
+    against the entry, the stop and the target. Candles here, unlike the
+    research page's year-long line, because the last few months at this width
+    leave each one wide enough to read, and the stop only means something
+    against the size of a normal bar's range.
+
+    levels maps a label ("Buy at", "Stop", "Target") to a price. A level far
+    outside the drawn range is kept, and the range is widened to show it,
+    because a target nobody can see on the chart reads as no target. Each
+    candle carries its date and prices as a tooltip; on bars shorter than a
+    day that is the date and time, in UTC unless day_label says otherwise.
+    as_of is when the latest price was set, said in the title and on the dot
+    that marks it. Nothing is drawn for a series too short or too broken to
+    draw honestly.
+    """
+    n = min(len(times), len(opens), len(highs), len(lows), len(closes))
+    rows = []
+    for k in range(max(0, n - bars), n):
+        o, h, l, c = (float(opens[k]), float(highs[k]), float(lows[k]), float(closes[k]))
+        if all(math.isfinite(x) for x in (o, h, l, c)) and h >= l:
+            v = float(volumes[k]) if k < len(volumes) and math.isfinite(float(volumes[k])) else 0.0
+            rows.append((int(times[k]), o, h, l, c, v))
+    if len(rows) < 10:
+        return ""
+
+    levels = {name: float(price) for name, price in (levels or {}).items()
+              if price is not None and math.isfinite(float(price)) and float(price) > 0}
+    low = min(min(r[3] for r in rows), *(levels.values() or [math.inf]))
+    high = max(max(r[2] for r in rows), *(levels.values() or [-math.inf]))
+    if last is not None and math.isfinite(last):
+        low, high = min(low, last), max(high, last)
+    if high <= low:
+        high, low = high * 1.01 + 0.01, low * 0.99 - 0.01
+
+    pad_left, pad_right, pad_top = 60, 86, 14
+    vol_h = 44 if any(r[5] > 0 for r in rows) else 0
+    gap = 10 if vol_h else 0
+    pad_bottom = 24
+    plot_w = width - pad_left - pad_right
+    price_h = height - pad_top - pad_bottom - vol_h - gap
+
+    step = _nice_step(high - low)
+    axis_low = math.floor(low / step) * step
+    axis_high = math.ceil(high / step) * step
+    span = axis_high - axis_low or 1.0
+    slot = plot_w / len(rows)
+    body = max(1.0, slot * 0.62)
+
+    def x_at(i):
+        return pad_left + slot * (i + 0.5)
+
+    def y_at(v):
+        return pad_top + price_h * (1 - (v - axis_low) / span)
+
+    title = "%s price%s" % (bar_words(interval).capitalize(),
+                            ", as of " + as_of if as_of else "")
+    parts = ['<svg class="chart trade" viewBox="0 0 %d %d" role="img" aria-label="%s">'
+             % (width, height, _escape(title))]
+
+    tick = axis_low
+    while tick <= axis_high + step * 0.001:
+        y = y_at(tick)
+        parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="var(--hairline)" '
+                     'stroke-width="1"/>' % (pad_left, y, width - pad_right, y))
+        parts.append('<text x="%d" y="%.1f" text-anchor="end" class="clab">%s</text>'
+                     % (pad_left - 8, y + 4, _escape(_price(tick))))
+        tick += step
+
+    # A daily candle is named by its date; a shorter one needs the time too,
+    # or a day's worth of hourly candles all carry the same name.
+    zone = ""
+    day = day_label
+    if day is None:
+        intraday = bar_words(interval) != "daily"
+        stamp = "%d %b %H:%M" if intraday else "%d %b"
+        zone = " UTC" if intraday else ""
+
+        def day(ts):
+            return time.strftime(stamp, time.gmtime(int(ts))).lstrip("0")
+    peak = max(r[5] for r in rows) or 1.0
+    for i, (ts, o, h, l, c, v) in enumerate(rows):
+        up = c >= o
+        colour = "var(--gain)" if up else "var(--loss)"
+        x = x_at(i)
+        top, bottom = y_at(max(o, c)), y_at(min(o, c))
+        tip = "%s%s  open %s  high %s  low %s  close %s" % (
+            day(ts), zone, _price(o), _price(h), _price(l), _price(c))
+        parts.append('<g><title>%s</title>' % _escape(tip.strip()))
+        parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>'
+                     % (x, y_at(h), x, y_at(l), colour))
+        parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
+                     % (x - body / 2, top, body, max(1.0, bottom - top),
+                        colour if not up else "var(--gain)"))
+        if vol_h:
+            vh = vol_h * (v / peak)
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
+                         'fill="var(--ink-3)" opacity="0.35"/>'
+                         % (x - body / 2, pad_top + price_h + gap + vol_h - vh, body, vh))
+        parts.append('</g>')
+
+    # The plan's prices, labelled at the right edge where the eye ends up.
+    styles = {"Stop": ("var(--loss)", "4 3"), "Target": ("var(--gain)", "4 3")}
+    placed = []
+    for name, price in sorted(levels.items(), key=lambda kv: -kv[1]):
+        colour, dash = styles.get(name, ("var(--accent-text)", "6 3"))
+        y = y_at(price)
+        label_y = y + 4
+        for other in placed:                 # keep labels from sitting on each other
+            if abs(label_y - other) < 12:
+                label_y = other + 12
+        placed.append(label_y)
+        parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="1.5" '
+                     'stroke-dasharray="%s"/>' % (pad_left, y, width - pad_right, y, colour, dash))
+        parts.append('<text x="%d" y="%.1f" class="clab lvl" style="fill:%s">%s %s</text>'
+                     % (width - pad_right + 6, label_y, colour, _escape(name), _escape(_price(price))))
+
+    if last is not None and math.isfinite(last):
+        now = "Now %s%s" % (_price(last), ", as of " + as_of if as_of else "")
+        parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--ink)"><title>%s</title></circle>'
+                     % (x_at(len(rows) - 1), y_at(last), _escape(now)))
+
+    # The first and last candle's dates, short enough to sit apart on a
+    # phone. When the latest price was set is in the title and on its dot.
+    first_day, last_day = day(rows[0][0]), day(rows[-1][0])
+    if first_day:
+        parts.append('<text x="%d" y="%d" class="clab">%s</text>'
+                     % (pad_left, height - 6, _escape(first_day)))
+    if last_day:
+        parts.append('<text x="%d" y="%d" text-anchor="end" class="clab">%s</text>'
+                     % (width - pad_right, height - 6, _escape(last_day + zone)))
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Filed financials
 # ---------------------------------------------------------------------------
 
 def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
               width: int = 340, height: int = 170,
-              title: str = "", money: bool = True) -> str:
+              title: str = "", money: bool = True,
+              label: Optional[Callable[[int], str]] = None,
+              fmt: Optional[Callable[[float], str]] = None) -> str:
     """One filed line item across the years, as bars.
 
     Bars rather than a line because these are separate annual measurements, not
     a continuous series, and a line between two audited figures implies values
     in between that were never reported.
+
+    label names each bar's key (a year by default) and fmt says each value
+    (money, or a fraction as a percent with money=False). The operator's
+    analyses-per-day chart passes both: its keys are days, given as epoch
+    seconds, and its values are counts.
     """
     pairs = [(int(y), float(v)) for y, v in zip(years, values)
              if v is not None and math.isfinite(float(v))]
@@ -172,7 +337,10 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
     slot = plot_w / len(pairs)
     bar_w = max(6.0, slot * 0.62)
     zero_y = y_at(0.0)
-    fmt = _money if money else (lambda v: "%.1f%%" % (v * 100))
+    if fmt is None:
+        fmt = _money if money else (lambda v: "%.1f%%" % (v * 100))
+    if label is None:
+        label = str
 
     parts = ['<svg class="chart" viewBox="0 0 %d %d" role="img" '
              'preserveAspectRatio="none" aria-label="%s">'
@@ -192,13 +360,13 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
         bar_h = abs(y_at(amount) - zero_y)
         colour = "var(--accent)" if amount >= 0 else "var(--loss)"
         parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
-                     'rx="2" fill="%s"><title>%d: %s</title></rect>'
-                     % (x, y, bar_w, max(bar_h, 1.0), colour, year,
-                        _escape(fmt(amount))))
+                     'rx="2" fill="%s"><title>%s: %s</title></rect>'
+                     % (x, y, bar_w, max(bar_h, 1.0), colour,
+                        _escape(label(year)), _escape(fmt(amount))))
         if index == 0 or index == len(pairs) - 1:
             parts.append('<text x="%.1f" y="%d" text-anchor="middle" '
-                         'class="clab">%d</text>'
-                         % (x + bar_w / 2, height - 6, year))
+                         'class="clab">%s</text>'
+                         % (x + bar_w / 2, height - 6, _escape(label(year))))
 
     parts.append("</svg>")
     return "".join(parts)

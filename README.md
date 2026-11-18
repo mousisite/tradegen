@@ -125,7 +125,7 @@ otherwise. Each links to where the work happens.
 | 12 | Bull and bear thesis | `bot/thesis.py` | Both cases argued from the gathered evidence, each point carrying what would prove it wrong |
 | 13 | Source citations | throughout | Every figure carries where it came from; filings link to sec.gov |
 | 14 | Investment thesis memory | `bot/thesis.py`, `bot/database.py` | A thesis is saved with the price at the time and closed out later as right, wrong, right-by-luck, or undecided. The outcome offered when you close one is the one the price supports, not the one you remember |
-| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Eleven conditions covering price, percentage moves, volume, moving averages and volatility, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
+| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
 | 15d | Export | `bot/export.py` | The journal, theses, measured strategy record and analysis history as CSV or JSON |
@@ -135,7 +135,7 @@ otherwise. Each links to where the work happens.
 | 19 | Published scoring models | `bot/quality.py` | Piotroski F-Score, Altman Z-Score, Beneish M-Score and the accruals ratio, computed from filed figures. Not invented here: each was published and tested against decades of filings |
 | 20 | Charts | `bot/charts.py` | Price history and filed financials, drawn as inline SVG with no charting library and no third-party script |
 | 21 | Error reporting | `bot/monitoring.py` | Optional Sentry, with personal data and credentials stripped before anything is sent, and expected failures never reported |
-| 22 | Scheduled backups | `backup.py`, `serve.py` | A verified snapshot on a timer, pruned to the newest few |
+| 22 | Scheduled backups | `backup.py`, `serve.py`, `bot/offsite.py` | A verified snapshot on a timer, pruned to the newest few, and copied to a private storage bucket off the server when that is set up |
 | 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
 | 24 | Find something | `bot/ideas.py` | Pick stocks or crypto and how long you hold; it back-tests a list and shows only what cleared the bar. Refuses to pad the list |
 | 25 | Plain English | `bot/plain.py` | The same answer without the jargon, above the technical one. A test fails if jargon leaks in |
@@ -267,7 +267,8 @@ SQLite at `data/stockbot.db`, created on first run.
 | `runs` | Every analysis: price, regime, composite, action, levels, odds |
 | `run_signals` | All 34 strategy scores for every run |
 | `strategy_stats` | Measured performance per symbol, strategy and regime |
-| `trades` | The journal: entry, stop, exit, realised R, P&L |
+| `trades` | The journal: entry, stop, exit, realised R, P&L, and any trailing stop |
+| `trade_exits` | Parts of a position closed while the rest stayed open |
 | `run_news` | Headlines and posts seen at each run |
 
 Strategy statistics are **replaced** per key, not accumulated. Two runs over
@@ -285,8 +286,20 @@ run.bat --symbol AAPL          analyse; the plan is recorded automatically
 paper.bat take AAPL            open a trade from that exact plan
 paper.bat check                mark to market, flags stop and target hits
 paper.bat close 1 --price 329 --reason target
+paper.bat close 1 --price 329 --qty 20   close part of it; the rest stays open
+paper.bat trail 1 --pct 5      trail its stop 5% behind the best price since opening
 paper.bat stats                expectancy, profit factor, max drawdown
 ```
+
+A trailing stop (`--pct`, or `--atr` for a multiple of the ATR measured when it
+is set) sits that far behind the best price since the trade opened, and only
+ever tightens: for a long, the higher of the stop it opened with and the
+highest price minus the trail. The journal, the portfolio, `check` and the
+background stop notice all read it by the same rule. A trade closed in parts
+counts once it is closed in full, at the R of the whole position, each part
+weighted by its size; the parts are listed in the "Trade exits" export. After a
+share split, a trade stays in the shares it was opened with; `close --today`
+takes a price and size in today's shares and converts them.
 
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
 where price never reached the entry, and plans older than two hours. It records
@@ -372,9 +385,10 @@ paper journal and a live one side by side without editing anything:
 ## Finding something to look at
 
 The Find page answers the question people actually arrive with: *out of
-everything, what should I look at today?* Pick stocks or crypto, and whether
-you hold for days, weeks or months. It runs the whole back-test over forty
-instruments and ranks by the measured edge after costs.
+everything, what should I look at today?* Pick stocks, crypto or both, and
+whether you hold for days, weeks or months. It runs the whole back-test over up
+to 150 stocks, 28 coins, or 178 instruments for both, and ranks by the measured
+edge after costs.
 
 Two lists, and the second is why the first can stay honest:
 
@@ -384,7 +398,7 @@ on that instrument's own history.
 **Worth watching** — it has paid off before and nothing is happening today. The
 action offered is to watch it, not to buy it.
 
-Measuring forty instruments typically finds a handful with a positive edge and
+Measuring that many typically finds a handful with a positive edge and
 one or two with a setup actually firing, because an edge measured over years
 says nothing about today. Without the second list the page would be empty
 almost every day: honest, and useless.
@@ -496,6 +510,16 @@ Background checking runs inside the server process on the interval set in
 settings, so an alert is evaluated whether or not you are looking at the page,
 and anything that fires appears on whatever page you are on.
 
+It does not ask for a price that cannot have changed. A stock's alerts and
+open positions' stops wait while its market is closed, from an hour after the
+close, when the day's last prices are in, until the next open: nights,
+weekends and NYSE holidays for a US listing, worked out by rule
+(`bot/sessions.py`), and the hours its own market data gives for a listing
+elsewhere. Coins, mutual funds, indices and anything whose hours are not known
+are checked every time, and so is an alert that is new, edited, re-armed or
+whose last check failed. "Check them all now" and the routines check
+everything. The usage page counts the checks skipped.
+
 **Nothing runs when the window is closed.** The interface says so in those
 words rather than letting you believe a level is being watched overnight.
 Making that true means hosting the app somewhere that stays up, which this
@@ -561,6 +585,15 @@ so trust comes from the connection to Google rather than from cryptography
 written here. Session tokens are opaque and stored, so signing out ends the
 session on the server rather than relying on a browser to discard its copy.
 
+Sign in with Apple is the exception, because Apple has no userinfo endpoint
+and inside the iPhone app its token comes from the phone. So `bot/apple.py`
+checks the token by hand, as narrowly as it can: RS256 only, Apple's
+published keys only, and the issuer, audience, expiry and the nonce this
+server handed out. Inside the app, Google and Apple's web sign-in run in the
+system browser sheet, which hands the result back to the app as a one-time
+code that only works with a secret the app kept (`static/signin-app.js`).
+Deleting an account asks Apple to end its sign-in. DEPLOY.md has the setup.
+
 Credentials are read from the environment and never from `config.json`, because
 `config.json` is a file people edit, copy, and paste into support requests.
 
@@ -569,11 +602,9 @@ Credentials are read from the environment and never from `config.json`, because
 ## Tests
 
 ```
-.runtime\python\python.exe tests
-un_all.py             all sixteen suites
-.runtime\python\python.exe tests
-un_all.py --offline   only those needing no network
-.runtime\python\python.exe tests	est_options.py        one suite on its own
+.runtime\python\python.exe tests\run_all.py             every suite
+.runtime\python\python.exe tests\run_all.py --offline   only those needing no network
+.runtime\python\python.exe tests\test_options.py        one suite on its own
 ```
 
 Each suite is an ordinary script that exits non-zero when something fails, so it
@@ -725,6 +756,7 @@ bot/
   quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
+  offsite.py        each backup copied to a storage bucket, checked, history kept
   usage.py          what people actually do, from rows already written
   ideas.py          the Find page: scan a list, rank by measured edge
   plain.py          the same answer in words a beginner can act on
@@ -732,6 +764,7 @@ bot/
   yahoo.py          authenticated Yahoo session: cookie, crumb, retry
   catalysts.py      earnings and dividend dates, and whether they fall in range
   scheduler.py      the background loop that actually checks alerts
+  sessions.py       market hours, so the loop leaves a closed market alone
   export.py         your journal and measurements as CSV or JSON
   sec.py            EDGAR filings, XBRL company facts, full text search
   fundamentals.py   ratios from Yahoo, reconciled against what was filed
@@ -741,7 +774,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         eleven alert conditions and the checker
+  alerts.py         thirteen alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 ```

@@ -3,10 +3,16 @@
 {% block title %}Strategies · Orenth{% endblock %}
 {% block content %}
 
+{# Online the record is shared: every analysis anyone runs adds to it. #}
 <div class="pagehead">
-  <h1>Which strategies actually work</h1>
-  <p>All 34 strategies, scored on real outcomes from every analysis you have
-    run. Nothing here is a claim from a textbook.</p>
+  <h1>Strategies, ranked by measured results</h1>
+  <p>Every strategy with at least {{ minimum }} measured setups, back-tested on
+    the history of each instrument
+    {{ 'you have analysed' if current_user and current_user.is_local
+       else 'anyone on Orenth has analysed' }}. Nothing here is a claim from a
+    textbook.</p>
+  <p>For one fixed test, run every day on the same popular stocks and coins,
+    see <a href="{{ url_for('backtests') }}">Strategy tests</a>.</p>
 </div>
 
 <div class="card">
@@ -46,14 +52,14 @@
       <tbody>
       {% for row in rows %}
         <tr>
-          <td>{{ row['strategy'].replace('_',' ')|capitalize }}</td>
+          <td>{{ row['strategy']|strategy }}</td>
           <td class="soft">{{ row['family'].replace('_',' ') if row['family'] }}</td>
           <td class="r fig soft">{{ "{:,}".format(row['n']) }}</td>
           <td class="r fig">{{ row['hit_rate']|pct(1) }}</td>
           <td class="r fig {{ 'gain' if row['gross_exp'] > 0 else 'loss' }}">
-            {{ row['gross_exp']|signed(3) }}</td>
+            {{ row['gross_exp']|signed(3) }}R</td>
           <td class="r fig {{ 'gain' if row['net_exp'] > 0 else 'loss' }}">
-            {{ row['net_exp']|signed(3) }}</td>
+            {{ row['net_exp']|signed(3) }}R</td>
           <td class="r fig soft">{{ row['symbols'] }}</td>
           <td>
             {% set g = row['gross_exp'] %}
@@ -81,6 +87,8 @@
     <b>Raw</b> is expectancy before trading costs, which answers one question:
     does the strategy predict direction at all? <b>Kept</b> is what would
     actually have ended up in your account once fees and spread came out.
+    Both are in R, the amount risked on a trade: +0.050R means 5 cents for
+    every dollar risked, on average.
   </p>
   <p class="prose">
     A wide gap between the two columns means the strategy works but the

@@ -1,20 +1,43 @@
 {# How every public strategy test is run. Expects method. #}
-<div class="card" style="margin-top:var(--s3)">
+<div class="card" id="how-we-tested" style="margin-top:var(--s3)">
   <span class="eyebrow">How we tested</span>
   <ul class="list">
     <li>Up to 5 years of daily prices for each stock and coin.</li>
-    <li>Every time the strategy leaned up or down, we took a pretend trade
-      that way. Stop {{ method.stop }} ATR away, target {{ method.target }} ATR
-      away, closed after {{ method.days }} trading days if it hit neither.
-      ATR is how much the price usually moves in a day.</li>
+    <li>On {% if method.stride == 1 %}every trading day{% elif method.stride == 2 %}every
+      other trading day{% elif method.stride == 3 %}every third trading
+      day{% else %}one trading day in {{ method.stride }}{% endif %} on which the
+      strategy leaned up or down, we took a pretend trade that way. Stop
+      {{ method.stop }} ATR away, target {{ method.target }} ATR away, closed
+      after {{ method.days }} trading days if it hit neither. ATR is how much
+      the price usually moves in a day. <b>Days tested</b> counts those trades.</li>
     <li><b>Worked</b> means it reached the target before the stop. If both
       were touched on the same day, we count it as a loss.</li>
     <li>Costs come off every trade: {{ method.equity }}% a round trip for
       stocks, {{ method.crypto }}% for crypto.</li>
     <li><b>Kept a trade</b> is in R, the amount risked. +0.10R means 10 cents
       kept for every dollar risked, on average, after costs.</li>
-    <li>Strategies that fired fewer than {{ method.min }} times on a stock are left out:
-      that few is luck.</li>
+    <li>The ± after it is the margin of error: the true figure lies inside it
+      95 times in 100, if the years ahead behave like the years tested. Trades
+      a few days apart share most of their days and win or lose together, so
+      the margin counts them as fewer, separate trades. Stocks that move
+      together make even this margin a little narrow.</li>
+    <li>A strategy with fewer than {{ method.min }} separate trades on a stock is
+      left out there: that few is luck.</li>
+    <li>The stocks and coins are today's popular names, picked after the years
+      tested. A name often becomes popular by rising, so a strategy that mostly
+      bought these can look better here than it would have at the time.</li>
+    <li>Over years when a stock rose, buying it on any day at all also kept
+      money, and shorting it lost. So compare a strategy with the same pretend
+      trade taken on every tested day on its own side, not with zero:
+      <b>buying on every tested day</b> for one that mostly bought,
+      <b>shorting on every tested day</b> for one that mostly shorted. Kept
+      money alone does not show skill.</li>
+    <li>Each strategy's page also gives <b>holding the index</b>: the same
+      money put in an index instead, for {{ method.days }} trading days from
+      each tested day, after the same costs. The index is SPY, a fund holding
+      the S&amp;P 500, beside a stock, and Bitcoin beside a coin. It is counted
+      in R of the trade it stands in for, so it reads beside <b>Kept a
+      trade</b>.</li>
   </ul>
   <p class="prose faint" style="font-size:var(--t-xs)">Re-run every day. Past
     results do not promise future ones. This is software output, not
