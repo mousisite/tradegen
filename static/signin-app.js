@@ -16,7 +16,12 @@
  * it is there: its webAuth opens the sheet with ASWebAuthenticationSession,
  * which hands the answer back to this app alone and needs no app link, and
  * its appleSignIn uses the system's Apple sheet, with Face ID, and no browser
- * at all. Without it, the Browser and App plugins carry the same steps.
+ * at all. Without it, the Browser and App plugins carry the same steps. It
+ * is looked for at each tap, not once as this loads.
+ *
+ * In the app each button's own link goes nowhere ("#"), so that a tap before
+ * this deferred script has run starts nothing the app cannot finish; the
+ * address a sign-in starts at is the button's data-start.
  *
  * Outside the app this does nothing: window.Capacitor does not exist there.
  */
@@ -32,9 +37,12 @@
   if (!box) { return; }
 
   var FINISH = 'app.orenth.ios://auth/finish';
-  // The app's bridge, when this version of the app has one.
-  var native = window.OrenthNative && window.OrenthNative.available
-    ? window.OrenthNative : null;
+  // The app's bridge, when this version of the app has one and native.js
+  // has put it in place.
+  function bridge() {
+    var found = window.OrenthNative;
+    return found && found.available ? found : null;
+  }
   function pluginThere(name) {
     if (typeof cap.isPluginAvailable === 'function') { return cap.isPluginAvailable(name); }
     return !!plugins[name];
@@ -42,7 +50,7 @@
   // Apple's own sheet: the bridge's appleSignIn over the AppleSignIn plugin,
   // or, in an older build, @capacitor-community/apple-sign-in.
   function nativeApple() {
-    return (native && pluginThere('AppleSignIn')) || !!plugins.SignInWithApple;
+    return (bridge() && pluginThere('AppleSignIn')) || !!plugins.SignInWithApple;
   }
   var KEY = 'orenth-app-signin';
   var said = document.querySelector('[data-app-said]');
@@ -93,19 +101,20 @@
 
   function nextOf(link) {
     try {
-      return new URL(link.getAttribute('href'), location.href).searchParams.get('next') || '';
+      return new URL(link.getAttribute('data-start'), location.href).searchParams.get('next') || '';
     } catch (e) { return ''; }
   }
 
   // Google, or Apple without its plugin: the system browser sheet.
   function inSheet(link) {
+    var native = bridge();
     if ((!native && !Browser) || !window.crypto || !window.crypto.subtle
         || !window.TextEncoder) {
       say(WORDS.update);
       return;
     }
     var verifier = random(32);
-    var start = new URL(link.getAttribute('href'), location.href);
+    var start = new URL(link.getAttribute('data-start'), location.href);
     starting = true;
     window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
       .then(function (hash) {
@@ -172,6 +181,7 @@
   // it into the token, so the token is good for this session and once.
   function withApple(link) {
     var plugin = plugins.SignInWithApple;
+    var native = bridge();
     var next = nextOf(link);
     starting = true;
     fetch(box.getAttribute('data-apple-nonce'), {

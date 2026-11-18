@@ -1309,6 +1309,34 @@ def run(browser, site, base, check, head):
     # -----------------------------------------------------------------------
     head("SIGNING IN INSIDE THE APP")
     # -----------------------------------------------------------------------
+    # The app's sign-in script is deferred, and on a first launch over a slow
+    # connection it can arrive well after the buttons show. A tap in between
+    # must start nothing the app cannot finish: Google refuses sign-in inside
+    # the app's own view, and the app would send it to Safari.
+    ctx = context(390, ua=APP_UA)
+    ctx.add_init_script(FAKE_APP)
+    held = []
+    ctx.route("**/static/signin-app.js*", lambda route: held.append(route))
+    page = ctx.new_page()
+    went = []
+    page.on("request", lambda r: went.append(r.url) if r.is_navigation_request() else None)
+    try:
+        page.goto(base + "/signin?next=/trades", wait_until="commit")
+        page.locator("a.gbtn[data-app-via=google]").tap(no_wait_after=True)
+        page.wait_for_timeout(800)
+        check("Continue with Google tapped before the app's sign-in script has arrived starts "
+              "nothing, and the app stays on the sign-in page",
+              held and not [u for u in went if "/auth/" in u] and "/signin" in page.url,
+              (len(held), went, page.url))
+    except Exception as exc:
+        check("tapping Continue with Google before the app's sign-in script arrives", False, exc)
+    for route in held:
+        try:
+            route.abort()
+        except Exception:
+            pass
+    ctx.close()
+
     minted = []
 
     def mint(source, url):
