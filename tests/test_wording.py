@@ -687,6 +687,17 @@ try:
           "people download",
           said and named and "download them" not in privacy
           and all(exported[w] in export_mod.DATASETS for w in named), (said, named))
+    # The pricing page's Free plan said "Download everything you have
+    # entered", though the watchlist and alerts have no download.
+    exported["analysis history"] = "runs"
+    for where, headers in (("website", {}), ("app", IN_APP_UA)):
+        plans = flat(text(web.app.test_client().get("/pricing", base_url=BASE,
+                                                    headers=headers)))
+        offered = [s for s in re.findall(r"<li>([^<]*)</li>", plans) if "ownload" in s]
+        named = [w for s in offered for w in exported if w in s]
+        check("the pricing page in the %s offers to download only what can be" % where,
+              offered and named and not any("everything" in s for s in offered)
+              and all(exported[w] in export_mod.DATASETS for w in named), (offered, named))
 
     head("OFFLINE")
     check("no page reached for the network", not reached, reached[:5])
