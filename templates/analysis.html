@@ -371,7 +371,7 @@
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
               {{ s.score|signed }}</td>
             <td class="r fig soft">{{ "%.2f"|format(s.weight) }}</td>
-            <td class="soft">{{ s.reason }}</td>
+            <td class="soft say">{{ s.reason }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -564,13 +564,13 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack one">
         <thead><tr><th>Condition</th><th>Why this one</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for sg in suggestions %}
           <tr>
             <td>{{ sg.label }}</td>
-            <td class="soft">{{ sg.why }}</td>
+            <td class="soft" data-label="Why this one">{{ sg.why }}</td>
             <td class="r">
               <form method="post" action="{{ url_for('add_alert') }}">
                 <input type="hidden" name="symbol" value="{{ r.bars.symbol }}">

@@ -83,7 +83,8 @@
         <div class="setfield">
           <label for="m-symbol">Instrument</label>
           <input class="field fig" id="m-symbol" name="symbol" type="text" data-suggest="fill"
-                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+                 placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+                 autocorrect="off" spellcheck="false" enterkeyhint="go">
         </div>
         <div class="setfield">
           <label for="m-direction">Side</label>
@@ -95,21 +96,23 @@
         <div class="setfield">
           <label for="m-entry">Entry price</label>
           <input class="field fig" id="m-entry" name="entry" type="number"
-                 step="any" required>
+                 step="any" inputmode="decimal" required>
         </div>
         <div class="setfield">
           <label for="m-stop">Stop price</label>
           <input class="field fig" id="m-stop" name="stop" type="number"
-                 step="any" required>
+                 step="any" inputmode="decimal" required>
           <div class="hint">Below the entry for a long, above it for a short.</div>
         </div>
         <div class="setfield">
           <label for="m-target">Target <span class="faint">optional</span></label>
-          <input class="field fig" id="m-target" name="target" type="number" step="any">
+          <input class="field fig" id="m-target" name="target" type="number" step="any"
+                 inputmode="decimal">
         </div>
         <div class="setfield">
           <label for="m-qty">Size <span class="faint">optional</span></label>
-          <input class="field fig" id="m-qty" name="quantity" type="number" step="any">
+          <input class="field fig" id="m-qty" name="quantity" type="number" step="any"
+                 inputmode="decimal">
           <div class="hint">Units. Needed for cash P&amp;L, not for R.</div>
         </div>
         <div class="setfield">
@@ -125,7 +128,7 @@
           <label for="m-trail">Trailing stop <span class="faint">optional</span></label>
           <div style="display:flex;gap:6px">
             <input class="field fig" id="m-trail" name="trail" type="number" step="any"
-                   min="0" placeholder="5" style="flex:0 0 72px;min-width:0">
+                   min="0" inputmode="decimal" placeholder="5" style="flex:0 0 72px;min-width:0">
             <label class="sr" for="m-trail-kind">Trail measured as</label>
             <select class="field" id="m-trail-kind" name="trail_kind" style="flex:1 1 auto;min-width:0">
               <option value="pct">% of price</option>
@@ -149,7 +152,7 @@
   <div class="card pad0">
     {% if open_trades %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th>
           <th class="r">Stop</th><th class="r">Target</th><th class="r">Now</th>
@@ -176,26 +179,26 @@
               <div class="faint" style="font-size:var(--t-xs)">{{ qty(p.closed) }} closed
                 at {{ p.avg_exit|price }}{{ ' on average' if p.parts > 1 }},
                 {{ p.pnl|signed }}</div>{% endif %}</td>
-            <td><span class="chip {{ 'long' if long else 'short' }}">
+            <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
               {{ 'Long' if long else 'Short' }}</span></td>
-            <td class="r fig">{{ t['entry']|price }}</td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
             {# The stop in force now. A trail moves it with the best price
                since opening, and only ever tighter; the plan's R stays
                measured from the stop it was opened with. #}
-            <td class="r fig loss">{{ (m.stop if m.stop is defined else t['stop'])|price }}
+            <td class="r fig loss" data-label="Stop">{{ (m.stop if m.stop is defined else t['stop'])|price }}
               {% if m.trail %}<div class="faint" style="font-size:var(--t-xs)">{{ m.trail.words() }}
                 {{ 'under' if long else 'over' }} {{ m.best|price }}</div>
               <div class="faint" style="font-size:var(--t-xs)">{% if m.moved %}{{ 'up' if long else 'down' }}
                 from {{ t['stop']|price }}{% else %}not moved yet{% endif %}</div>
               {% elif t['trail_pct'] or t['trail_dist'] %}<div class="faint" style="font-size:var(--t-xs)">trailing</div>{% endif %}</td>
-            <td class="r fig gain">{{ t['target1']|price }}
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
-            <td class="r fig">{{ m.price|price if m.price else '—' }}
+            <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
               {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
                 today, after a {{ m.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}" data-label="Open R">
               {{ m.r|signed if m.r is not none else '—' }}</td>
-            <td>
+            <td data-label="State">
               {% if m.status == 'past stop' %}<span class="chip short">Stopped</span>
                 {# Traded through and back: when, since the stop shown is today's. #}
                 {% if m.touched_at %}<div class="faint" style="font-size:var(--t-xs);margin-top:4px">crossed
@@ -204,7 +207,7 @@
               {% elif m.status == 'no data' %}<span class="chip mute">No data</span>
               {% else %}<span class="chip mute">Running</span>{% endif %}
             </td>
-            <td>
+            <td class="wide" data-label="Close it">
               {# All of it, or a part when a size was logged. After a split the
                  price can be typed in today's shares, as a broker shows it, or
                  in the shares it was opened with; it is filled in in today's. #}
@@ -215,11 +218,11 @@
                 {% if sized %}
                 <label class="sr" for="q{{ t['id'] }}">How much of {{ t['symbol'] }} to close, empty for all of it</label>
                 <input class="field fig" id="q{{ t['id'] }}" type="number" name="quantity"
-                       step="any" min="0" placeholder="all">
+                       step="any" min="0" inputmode="decimal" placeholder="all">
                 {% endif %}
                 <label class="sr" for="px{{ t['id'] }}">Exit price for {{ t['symbol'] }}</label>
-                <input class="field fig" id="px{{ t['id'] }}" type="number" name="price"
-                       step="any" required placeholder="price"
+                <input class="field fig" id="px{{ t['id'] }}" type="number" inputmode="decimal"
+                       name="price" step="any" required placeholder="price"
                        value="{{ '%s'|format(m.quoted if m.split_words else m.price) if m.price else '' }}">
                 {% if m.split_words %}
                 <label class="sr" for="sh{{ t['id'] }}">Which shares the price{{ ' and size are' if sized else ' is' }} in: today's, or the ones you opened with</label>
@@ -243,10 +246,11 @@
                       style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
                   <input type="hidden" name="trade_id" value="{{ t['id'] }}">
                   <label class="sr" for="tr{{ t['id'] }}">How far behind the {{ 'high' if long else 'low' }} the stop of {{ t['symbol'] }} trails</label>
-                  <input class="field fig" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
-                         min="0" required placeholder="5" style="max-width:80px;min-height:34px">
+                  <input class="field fig sm" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
+                         min="0" required inputmode="decimal" placeholder="5"
+                         style="max-width:80px">
                   <label class="sr" for="tk{{ t['id'] }}">Trail measured as</label>
-                  <select class="field" id="tk{{ t['id'] }}" name="trail_kind" style="min-height:34px">
+                  <select class="field sm" id="tk{{ t['id'] }}" name="trail_kind">
                     <option value="pct">% of price</option>
                     <option value="atr">times ATR</option>
                   </select>
@@ -299,7 +303,7 @@
   <div class="card pad0">
     {% if closed %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th>
           <th class="r">Stop</th><th class="r">Exit</th><th>Why</th>
@@ -315,12 +319,12 @@
           <tr>
             <td><b>{{ t['symbol'] }}</b>{% if from_call %}
               <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}</td>
-            <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
+            <td data-label="Side"><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
-            <td class="r fig">{{ t['entry']|price }}</td>
-            <td class="r fig soft">{{ t['stop']|price }}</td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
+            <td class="r fig soft" data-label="Stop">{{ t['stop']|price }}</td>
             {# Closed in parts: the average exit, with each part beside it. #}
-            <td class="r fig">{{ p.avg_exit|price }}
+            <td class="r fig" data-label="Exit">{{ p.avg_exit|price }}
               {% if p.parts %}
               <details style="text-align:left">
                 <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">average
@@ -331,16 +335,16 @@
                 </ul>
               </details>
               {% endif %}</td>
-            <td class="soft">{{ t['exit_reason'] }}</td>
+            <td class="soft" data-label="Why">{{ t['exit_reason'] }}</td>
             {# What the plan aimed for beside what it made: a target hit makes
                the planned R, a stop hit makes -1. Closed in parts, it is the
                R of the whole position, each part weighted by its size. #}
-            <td class="r fig {{ 'gain' if (p.r or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (p.r or 0) > 0 else 'loss' }}" data-label="R">
               <b>{{ p.r|signed }}</b>
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">of {{ rr|signed }} planned</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (p.pnl or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (p.pnl or 0) > 0 else 'loss' }}" data-label="Cash">
               {{ p.pnl|money }}</td>
-            <td class="r faint">{{ t['ts_closed']|ago }}</td>
+            <td class="r faint" data-label="Closed">{{ t['ts_closed']|ago }}</td>
             <td class="r">
               <form method="post" action="{{ url_for('delete_trade') }}"
                     onsubmit="return confirm('Delete this closed {{ t['symbol'] }} trade? Your statistics will change.');">

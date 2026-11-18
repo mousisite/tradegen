@@ -148,7 +148,9 @@
     back.
   </p>
   <div class="tablewrap">
-    <table>
+    {# A card per row on a phone. Its columns are named once, here, so a
+       row added below is named too without saying so on each cell. #}
+    <table class="stack one" style="--col2: 'What is sent'; --col3: 'Why'">
       <thead><tr><th>Sent to</th><th>What is sent</th><th>Why</th></tr></thead>
       <tbody>
         <tr><td>Yahoo Finance</td><td>The ticker</td><td>Prices, fundamentals, options</td></tr>

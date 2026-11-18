@@ -1,6 +1,17 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
 {% block title %}{{ r.symbol }} research · Orenth{% endblock %}
+{# The year's prices come drawn twice, as the analysis page's chart does.
+   Shrunk to a phone, the wide drawing's labels were 4 pixels tall, so a
+   phone gets the narrow one, drawn for its width. #}
+{% block head_extra %}{% if price_svg and price_svg_narrow %}<style>
+  .yearchart .narrow { display: none; }
+  @media (max-width: 600px) {
+    .yearchart .wide { display: none; }
+    .yearchart .narrow { display: block; }
+    .yearchart .chart { max-height: none; }
+  }
+</style>{% endif %}{% endblock %}
 
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
@@ -319,13 +330,14 @@
 {% endif %}
 
 {% if price_svg %}
-<section>
+<section class="yearchart">
   <div class="sechead">
     <h2>The last year</h2>
     <span class="tail">closing prices, {{ a.bars.interval }} bars</span>
   </div>
   <div class="card">
-    {{ price_svg|safe }}
+    <div class="wide">{{ price_svg|safe }}</div>
+    {% if price_svg_narrow %}<div class="narrow">{{ price_svg_narrow|safe }}</div>{% endif %}
   </div>
 </section>
 {% endif %}
@@ -746,15 +758,15 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Form</th><th>Filed</th><th>What it is</th>
           <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for fl in r.filings %}
           <tr>
-            <td class="fig">{{ fl.form }}</td>
-            <td class="soft">{{ fl.filed }}</td>
-            <td class="soft">{{ fl.meaning }}</td>
+            <td class="fig" data-label="Form">{{ fl.form }}</td>
+            <td class="soft" data-label="Filed">{{ fl.filed }}</td>
+            <td class="soft wide" data-label="What it is">{{ fl.meaning }}</td>
             <td class="r"><a href="{{ fl.index_url }}" target="_blank" rel="noopener">Read</a></td>
           </tr>
         {% endfor %}
@@ -773,24 +785,24 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Saved</th><th class="r">Price then</th><th class="r">Now</th>
           <th class="r">Move</th><th>Called</th><th>Outcome</th>
           <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for row, rev in saved %}
           <tr>
-            <td class="soft">{{ row['created_ts']|ago }}</td>
-            <td class="r fig">{{ row['price']|price }}</td>
+            <td class="soft" data-label="Saved">{{ row['created_ts']|ago }}</td>
+            <td class="r fig" data-label="Price then">{{ row['price']|price }}</td>
             {# Today's price in the shares the thesis was saved in, so it
                sits beside "Price then"; after a split it says so. #}
-            <td class="r fig">{{ rev.now|price if rev.now else '—' }}
+            <td class="r fig" data-label="Now">{{ rev.now|price if rev.now else '—' }}
               {% if rev.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ rev.quoted|price }} today, after a {{ rev.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}" data-label="Move">
               {{ rev.move|pct(1) if rev.usable else '—' }}</td>
-            <td class="fig">{{ row['balance']|signed }}</td>
-            <td>{% if rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
+            <td class="fig" data-label="Called">{{ row['balance']|signed }}</td>
+            <td data-label="Outcome">{% if rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
                  else 'short' if rev.outcome == 'wrong so far' else 'mute' }}">
               {{ rev.outcome }}</span>{% else %}<span class="faint">{{ rev.reason }}</span>{% endif %}</td>
             <td class="r">
@@ -844,18 +856,26 @@
   bar.hidden = false;
   // Mark the section being read, so the bar also says where you are.
   var links = bar.children;
+  var marked = -1;
   function mark() {
     var line = (bar.getBoundingClientRect().bottom || 0) + 24;
     var current = 0;
     heads.forEach(function (h, i) { if (h.getBoundingClientRect().top <= line) { current = i; } });
+    if (current === marked) { return; }
+    marked = current;
     for (var i = 0; i < links.length; i++) {
-      if (i === current) {
-        links[i].setAttribute('aria-current', 'true');
-        if (links[i].scrollIntoView) { links[i].scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
-      } else {
-        links[i].removeAttribute('aria-current');
-      }
+      if (i === current) { links[i].setAttribute('aria-current', 'true'); }
+      else { links[i].removeAttribute('aria-current'); }
     }
+    // The bar scrolls sideways to show the marked link; the page stays put.
+    // scrollIntoView moved the page too: on a phone, where the bar starts
+    // below the first screen, the page scrolled itself down on opening and
+    // pulled back down whenever someone scrolled up past the bar.
+    var link = links[current];
+    var left = link.offsetLeft - 8;
+    var right = link.offsetLeft + link.offsetWidth + 8;
+    if (left < bar.scrollLeft) { bar.scrollLeft = left; }
+    else if (right > bar.scrollLeft + bar.clientWidth) { bar.scrollLeft = right - bar.clientWidth; }
   }
   var waiting = false;
   window.addEventListener('scroll', function () {

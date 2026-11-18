@@ -2284,10 +2284,14 @@ def research():
                 _RESEARCH_CACHE.pop(oldest, None)
 
     # Drawn from the bars and filings already in hand, so no extra request.
-    price_svg = charts_mod.price_chart(
-        [float(v) for v in analysis.bars.close[-260:]],
-        labels=("about a year ago", "now"),
-        title="%s price history" % analysis.bars.symbol)
+    # The year's prices are drawn twice, wide and narrow, as the analysis
+    # page's chart is: shrunk to a phone, the wide drawing's labels were 4
+    # pixels tall. The narrow one is drawn for a phone's width.
+    year = dict(closes=[float(v) for v in analysis.bars.close[-260:]],
+                labels=("about a year ago", "now"),
+                title="%s price history" % analysis.bars.symbol)
+    price_svg = charts_mod.price_chart(**year)
+    price_svg_narrow = charts_mod.price_chart(width=300, height=190, **year)
     filed_charts = charts_mod.charts_for(found.sec_history or {})
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2315,7 +2319,8 @@ def research():
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
-                           price_svg=price_svg, filed_charts=filed_charts,
+                           price_svg=price_svg, price_svg_narrow=price_svg_narrow,
+                           filed_charts=filed_charts,
                            plain=plain_mod.explain_company(found),
                            canonical_url=_canonical("research", analysis.bars))
 
@@ -3654,7 +3659,9 @@ def account():
 @app.route("/account/delete", methods=["POST"])
 def delete_account():
     """Remove this account and everything personal in it."""
-    if request.form.get("confirm") != "delete":
+    # The word as a phone types it: an iPhone starts a box with a capital,
+    # and its suggestions leave a space after the word.
+    if (request.form.get("confirm") or "").strip().lower() != "delete":
         return render_template("error.html", symbol="",
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))

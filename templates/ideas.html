@@ -137,7 +137,7 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th class="r">#</th>
           <th>Instrument</th><th>Call</th><th class="r">Price</th>
@@ -148,16 +148,16 @@
         <tbody>
         {% for r in result.passed %}
           <tr>
-            <td class="r fig"><b>{{ r.rank or '—' }}</b></td>
-            <td><b>{{ r.symbol }}</b></td>
-            <td><span class="chip {{ 'long' if r.action == 'BUY'
+            <td class="r fig" data-label="Rank"><b>{{ r.rank or '—' }}</b></td>
+            <td class="lead"><b>{{ r.symbol }}</b></td>
+            <td data-label="Call"><span class="chip {{ 'long' if r.action == 'BUY'
                  else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
-            <td class="r fig">{{ r.price|price }}</td>
-            <td class="r fig">{{ r.entry|price if r.entry else '—' }}</td>
-            <td class="r fig loss">{{ r.stop|price if r.stop else '—' }}</td>
-            <td class="r fig {{ 'loss' if (r.gap_multiple or 0) > 2.5 }}">
+            <td class="r fig" data-label="Price">{{ r.price|price }}</td>
+            <td class="r fig" data-label="Buy at">{{ r.entry|price if r.entry else '—' }}</td>
+            <td class="r fig loss" data-label="Get out at">{{ r.stop|price if r.stop else '—' }}</td>
+            <td class="r fig {{ 'loss' if (r.gap_multiple or 0) > 2.5 }}" data-label="Gap risk">
               {{ "%.1fx"|format(r.gap_multiple) if r.gap_multiple else '—' }}</td>
-            <td class="r fig">
+            <td class="r fig" data-label="Worked before">
               {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}
               {% if not r.reliable %}<span class="faint">thin</span>{% endif %}
               {% if r.accounts == 'sound' %}
@@ -219,13 +219,13 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Instrument</th><th>Why it was left out</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for r in result.dropped %}
           <tr>
             <td><b>{{ r.symbol }}</b></td>
-            <td class="soft">{{ r.dropped_because }}</td>
+            <td class="soft wide" data-label="Why it was left out">{{ r.dropped_because }}</td>
             <td class="r"><a data-working
               href="{{ url_for('research', symbol=r.symbol, exact=exact_arg(r.symbol)) }}">See why</a></td>
           </tr>
@@ -252,7 +252,7 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th class="r">Price</th>
           <th class="r">Worked before</th><th>Why not today</th><th><span class="sr">Actions</span></th>
@@ -261,13 +261,13 @@
         {% for r in result.watch %}
           <tr>
             <td><b>{{ r.symbol }}</b></td>
-            <td class="r fig">{{ r.price|price }}</td>
-            <td class="r fig">
+            <td class="r fig" data-label="Price">{{ r.price|price }}</td>
+            <td class="r fig" data-label="Worked before">
               {{ ((r.probability or 0) * (r.samples or 0))|round|int }} of {{ r.samples }}</td>
             {# Every row here is a stand-aside. Leaning down with no way to
                short it, and no setup at all, are both nothing to buy, but
                only the second is "nothing firing". #}
-            <td class="soft">{% if (r.conviction or 0) < 0 %}Leaning down, so nothing to buy.{% else %}No setup is firing right now.{% endif %}</td>
+            <td class="soft wide" data-label="Why not today">{% if (r.conviction or 0) < 0 %}Leaning down, so nothing to buy.{% else %}No setup is firing right now.{% endif %}</td>
             <td class="r">
               <form method="post" action="{{ url_for('watch', action='add') }}"
                     style="display:inline">

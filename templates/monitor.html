@@ -99,7 +99,8 @@
         <div class="setfield">
           <label for="a-symbol">Instrument</label>
           <input class="field fig" id="a-symbol" name="symbol" type="text" data-suggest="fill"
-                 placeholder="AAPL" required autocomplete="off" spellcheck="false">
+                 placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+                 autocorrect="off" spellcheck="false" enterkeyhint="go">
         </div>
         <div class="setfield">
           <label for="a-kind">Tell me when it</label>
@@ -112,7 +113,7 @@
         <div class="setfield">
           <label for="a-threshold">Value</label>
           <input class="field fig" id="a-threshold" name="threshold" type="number"
-                 step="any" placeholder="price, percent or level">
+                 step="any" inputmode="decimal" placeholder="price, percent or level">
           <div class="hint">A percent is a whole number: 5 means 5%. Leave empty
             for the conditions that need no value: the moving average, and a
             change of call.</div>
@@ -145,7 +146,7 @@
   <div class="card pad0" style="margin-top:var(--s3)">
     {% if alerts %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Condition</th><th>State</th><th>Last looked</th>
           <th>What happened</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
@@ -154,7 +155,7 @@
             <td>{{ text }}
               {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}
               {% if row['state'] and kinds.get(row['kind'], {}).get('call') %}<div class="faint" style="font-size:var(--t-xs)">call when last checked: {{ row['state'] }}</div>{% endif %}</td>
-            <td>
+            <td data-label="State">
               {# One that keeps watching is still on after it fires: it is
                  watching, and what it last said is in the next column. #}
               {% if row['triggered_ts'] and not row['active'] and not row['repeat'] %}
@@ -166,18 +167,18 @@
                 <span class="chip mute">Paused</span>
               {% endif %}
             </td>
-            <td class="soft">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}
+            <td class="soft" data-label="Last looked">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}
               {# A paused alert is not checked, so what is kept there is a note
                  about why it was paused (an alert moved to a coin's right id). #}
               {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">{{ 'Could not check: ' if row['active'] }}{{ row['last_error'] }}</div>{% endif %}</td>
-            <td class="soft">
+            <td class="soft wide" data-label="What happened">
               {% if row['trigger_note'] %}
                 {{ row['trigger_note'] }}
                 <div class="faint" style="font-size:var(--t-xs)">{{ row['triggered_ts']|ago }}</div>
               {% else %}—{% endif %}
             </td>
             <td class="r">
-              <div style="display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap">
+              <div class="acts">
                 {% if row['triggered_ts'] and not row['active'] and not row['repeat'] %}
                   <form method="post" action="{{ url_for('alert_action', action='reset') }}">
                     <input type="hidden" name="alert_id" value="{{ row['id'] }}">
@@ -207,13 +208,13 @@
                   <input type="hidden" name="alert_id" value="{{ row['id'] }}">
                   {% if kinds.get(row['kind'], {}).get('needs_threshold') %}
                     <label class="sr" for="e-th-{{ row['id'] }}">Value</label>
-                    <input class="field fig" id="e-th-{{ row['id'] }}" name="threshold" type="number"
-                           step="any" style="max-width:110px;min-height:34px"
+                    <input class="field fig sm" id="e-th-{{ row['id'] }}" name="threshold" type="number"
+                           step="any" inputmode="decimal" style="max-width:110px"
                            value="{{ (row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
                   {% endif %}
                   <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
-                  <input class="field" id="e-note-{{ row['id'] }}" name="note" type="text"
-                         style="max-width:180px;min-height:34px" value="{{ row['note'] or '' }}"
+                  <input class="field sm" id="e-note-{{ row['id'] }}" name="note" type="text"
+                         style="max-width:180px" value="{{ row['note'] or '' }}"
                          placeholder="note">
                   <button class="btn quiet sm" type="submit">Save</button>
                 </form>
@@ -249,15 +250,15 @@
   <div class="card pad0">
     {% if events %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>When</th><th>What happened</th><th>Price as of</th><th>Email</th></tr></thead>
         <tbody>
         {% for e in events %}
           <tr>
-            <td class="soft" style="white-space:nowrap">{{ e['ts']|ago }}</td>
-            <td>{% if e['kind'] == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e['message'] }}</td>
-            <td class="soft" style="white-space:nowrap">{{ e['as_of'] or '—' }}</td>
-            <td class="soft">{% if e['emailed'] %}sent{% elif e['email_error'] %}<span style="color:var(--loss)">failed: {{ e['email_error'] }}</span>{% else %}—{% endif %}</td>
+            <td class="soft" style="white-space:nowrap" data-label="When">{{ e['ts']|ago }}</td>
+            <td class="lead">{% if e['kind'] == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e['message'] }}</td>
+            <td class="soft" style="white-space:nowrap" data-label="Price as of">{{ e['as_of'] or '—' }}</td>
+            <td class="soft" data-label="Email">{% if e['emailed'] %}sent{% elif e['email_error'] %}<span style="color:var(--loss)">failed: {{ e['email_error'] }}</span>{% else %}—{% endif %}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -280,7 +281,8 @@
     <form class="searchrow" method="post" action="{{ url_for('watch', action='add') }}">
       <label class="sr" for="w-symbol">Instrument to watch</label>
       <input class="field fig" id="w-symbol" name="symbol" type="text" data-suggest="fill"
-             placeholder="AAPL" required autocomplete="off" spellcheck="false">
+             placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
+             autocorrect="off" spellcheck="false" enterkeyhint="go">
       <label class="sr" for="w-interval">Interval</label>
       <select class="field" id="w-interval" name="interval">
         {% for code, label in intervals %}
@@ -294,19 +296,19 @@
   <div class="card pad0" style="margin-top:var(--s3)">
     {% if watchlist %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Instrument</th><th>Bars</th><th>Added</th>
           <th>Last analysed</th><th>Note</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for w in watchlist %}
           <tr>
             <td><b>{{ w['symbol'] }}</b></td>
-            <td class="fig soft">{{ w['interval'] }}</td>
-            <td class="soft">{{ w['added_ts']|ago }}</td>
-            <td class="soft">{{ w['last_run']|ago if w['last_run'] else 'not yet' }}</td>
-            <td class="soft">{{ w['note'] or '—' }}</td>
+            <td class="fig soft" data-label="Bars">{{ w['interval'] }}</td>
+            <td class="soft" data-label="Added">{{ w['added_ts']|ago }}</td>
+            <td class="soft" data-label="Last analysed">{{ w['last_run']|ago if w['last_run'] else 'not yet' }}</td>
+            <td class="soft" data-label="Note">{{ w['note'] or '—' }}</td>
             <td class="r">
-              <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">
+              <div class="acts">
                 <a data-working href="{{ url_for('analyse', symbol=w['symbol'],
                    interval=w['interval'], exact=exact_arg(w['symbol'], w['exact'])) }}">Analyse</a>
                 <form method="post" action="{{ url_for('watch', action='remove') }}">
@@ -357,7 +359,7 @@
   <div class="card pad0">
     {% if theses %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Instrument</th><th>Saved</th><th class="r">Price then</th>
           <th class="r">Now</th><th class="r">Move</th><th>Called</th>
           <th>How it turned out</th><th><span class="sr">Actions</span></th></tr></thead>
@@ -369,23 +371,23 @@
               {% if row['user_note'] %}
                 <div class="faint" style="font-size:var(--t-xs)">{{ row['user_note'] }}</div>
               {% endif %}</td>
-            <td class="soft">{{ row['created_ts']|ago }}</td>
-            <td class="r fig">{{ row['price']|price }}</td>
-            <td class="r fig">
+            <td class="soft" data-label="Saved">{{ row['created_ts']|ago }}</td>
+            <td class="r fig" data-label="Price then">{{ row['price']|price }}</td>
+            <td class="r fig" data-label="Now">
               {{ (row['closed_price'] if row['closed_price'] else t.now)|price
                  if (row['closed_price'] or t.now) else '—' }}
               {% if t.split_words and not row['closed_price'] %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ t.quoted|price }} today, after a {{ t.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' }}">
+            <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' }}" data-label="Move">
               {{ t.review.move|pct(1) if t.review.usable else '—' }}</td>
-            <td>
+            <td data-label="Called">
               <span class="chip {{ 'long' if (row['balance'] or 0) > 0.15
                                    else 'short' if (row['balance'] or 0) < -0.15
                                    else 'mute' }}">
                 {{ 'Bullish' if (row['balance'] or 0) > 0.15
                    else 'Bearish' if (row['balance'] or 0) < -0.15 else 'Balanced' }}
               </span></td>
-            <td>
+            <td data-label="How it turned out">
               {% if row['outcome'] %}
                 <span class="chip {{ 'long' if row['outcome'] == 'right'
                                      else 'short' if row['outcome'] == 'wrong'
@@ -402,7 +404,7 @@
               {% endif %}
             </td>
             <td class="r">
-              <div style="display:flex;gap:5px;justify-content:flex-end;align-items:center;flex-wrap:wrap">
+              <div class="acts">
                 <a data-working href="{{ url_for('research', symbol=row['symbol'],
                    exact=exact_arg(row['symbol'])) }}">Review</a>
                 {% if not row['outcome'] %}
@@ -411,8 +413,7 @@
                     <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
                     <input type="hidden" name="back" value="{{ url_for('monitor') }}">
                     <label class="sr" for="out-{{ row['id'] }}">Outcome for {{ row['symbol'] }}</label>
-                    <select class="field" id="out-{{ row['id'] }}" name="outcome"
-                            style="min-height:36px;font-size:var(--t-xs);padding:0 26px 0 9px">
+                    <select class="field sm" id="out-{{ row['id'] }}" name="outcome">
                       {% for key, meaning in outcomes.items() %}
                         <option value="{{ key }}"
                           {{ 'selected' if key == t.proposed }}>{{ key }}</option>

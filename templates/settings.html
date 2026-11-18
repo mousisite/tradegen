@@ -27,7 +27,7 @@
       <div class="setfield">
         <label for="account_size">Account size</label>
         <input class="field fig" id="account_size" name="account_size" type="number"
-               step="any" min="1" value="{{ cfg.account_size }}">
+               step="any" min="1" inputmode="decimal" value="{{ cfg.account_size }}">
         {# The desktop version keeps everything on the machine it runs on;
            online it is stored with the account, and the hint has to say so. #}
         <div class="hint">{% if personal %}Used to size positions and to weigh
@@ -37,14 +37,16 @@
       <div class="setfield">
         <label for="risk_per_trade_pct">Risk per trade</label>
         <input class="field fig" id="risk_per_trade_pct" name="risk_per_trade_pct"
-               type="number" step="any" min="0.01" max="10" value="{{ cfg.risk_per_trade_pct }}">
+               type="number" step="any" min="0.01" max="10" inputmode="decimal"
+               value="{{ cfg.risk_per_trade_pct }}">
         <div class="hint">Percent of the account you lose if the stop is hit. One
           percent is a common ceiling.</div>
       </div>
       <div class="setfield">
         <label for="max_position_pct">Largest position</label>
         <input class="field fig" id="max_position_pct" name="max_position_pct"
-               type="number" step="any" min="1" max="100" value="{{ cfg.max_position_pct }}">
+               type="number" step="any" min="1" max="100" inputmode="decimal"
+               value="{{ cfg.max_position_pct }}">
         <div class="hint">Percent of the account in any one instrument. On small
           accounts this cap usually binds before the risk figure does.</div>
       </div>
@@ -62,14 +64,16 @@
       <div class="setfield">
         <label for="cost_bps_equity">Stocks and ETFs, round trip</label>
         <input class="field fig" id="cost_bps_equity" name="cost_bps_equity"
-               type="number" step="any" min="0" value="{{ cfg.cost_bps_equity }}">
+               type="number" step="any" min="0" inputmode="decimal"
+               value="{{ cfg.cost_bps_equity }}">
         <div class="hint">Basis points, in and out combined. 2 is typical for a
           commission-free broker paying only the spread.</div>
       </div>
       <div class="setfield">
         <label for="cost_bps_crypto">Crypto, round trip</label>
         <input class="field fig" id="cost_bps_crypto" name="cost_bps_crypto"
-               type="number" step="any" min="0" value="{{ cfg.cost_bps_crypto }}">
+               type="number" step="any" min="0" inputmode="decimal"
+               value="{{ cfg.cost_bps_crypto }}">
         <div class="hint">20 means 0.1% taker fee on each side, which is normal
           on a retail exchange.</div>
       </div>
@@ -100,14 +104,14 @@
       <div class="setfield">
         <label for="stop_atr_multiple">Stop distance</label>
         <input class="field fig" id="stop_atr_multiple" name="stop_atr_multiple"
-               type="number" step="0.1" min="0.2" max="10" value="{{ cfg.stop_atr_multiple }}">
+               type="number" step="0.1" min="0.2" max="10" inputmode="decimal" value="{{ cfg.stop_atr_multiple }}">
         <div class="hint">In ATR, the instrument's own volatility unit. Wider
           stops survive noise but risk more per unit.</div>
       </div>
       <div class="setfield">
         <label for="target_atr_multiple">First target</label>
         <input class="field fig" id="target_atr_multiple" name="target_atr_multiple"
-               type="number" step="0.1" min="0.2" max="20" value="{{ cfg.target_atr_multiple }}">
+               type="number" step="0.1" min="0.2" max="20" inputmode="decimal" value="{{ cfg.target_atr_multiple }}">
         <div class="hint">Also in ATR. Together with the stop this sets your
           reward to risk.</div>
       </div>
@@ -131,13 +135,15 @@
       <div class="setfield">
         <label for="min_conviction">Minimum conviction</label>
         <input class="field fig" id="min_conviction" name="min_conviction"
-               type="number" step="0.01" min="0" max="1" value="{{ cfg.min_conviction }}">
+               type="number" step="0.01" min="0" max="1" inputmode="decimal"
+               value="{{ cfg.min_conviction }}">
         <div class="hint">Below this the bot proposes nothing at all.</div>
       </div>
       <div class="setfield">
         <label for="strong_conviction">Buy at market above</label>
         <input class="field fig" id="strong_conviction" name="strong_conviction"
-               type="number" step="0.01" min="0" max="1" value="{{ cfg.strong_conviction }}">
+               type="number" step="0.01" min="0" max="1" inputmode="decimal"
+               value="{{ cfg.strong_conviction }}">
         <div class="hint">Under this it will tell you to wait for a better
           price instead of paying the spread now.</div>
       </div>
@@ -190,7 +196,7 @@
       <div class="setfield">
         <label for="alert_check_minutes">Check alerts every</label>
         <input class="field fig" id="alert_check_minutes" name="alert_check_minutes"
-               type="number" step="1" min="0" max="240"
+               type="number" step="1" min="0" max="240" inputmode="numeric"
                value="{{ cfg.alert_check_minutes }}">
         <div class="hint">Minutes. 0 switches it off. Below 1 minute is refused,
           because the data sources are free and rate limited. A stock waits
@@ -260,15 +266,15 @@
   {% if push_devices %}
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Device</th><th>Turned on</th><th>Last notification</th>
           <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for d in push_devices %}
           <tr>
             <td><b>{{ d['label'] or 'A device' }}</b></td>
-            <td class="soft">{{ d['created_ts']|ago }}</td>
-            <td class="soft">{{ d['last_ok_ts']|ago if d['last_ok_ts'] else 'none yet' }}
+            <td class="soft" data-label="Turned on">{{ d['created_ts']|ago }}</td>
+            <td class="soft" data-label="Last notification">{{ d['last_ok_ts']|ago if d['last_ok_ts'] else 'none yet' }}
               {% if d['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">Last try failed: {{ d['last_error'] }}</div>{% endif %}</td>
             <td class="r">
               <form method="post" action="{{ url_for('push_remove') }}">
@@ -309,17 +315,17 @@
                           else 'no account needed, nothing phoned home' }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack one">
         <thead><tr><th>What</th><th class="r">Rows</th><th>Why you would want it</th>
           <th class="r">Download</th></tr></thead>
         <tbody>
         {% for key, spec in datasets.items() %}
           <tr>
             <td><b>{{ spec.label }}</b></td>
-            <td class="r fig {{ 'faint' if not export_counts.get(key) }}">
+            <td class="r fig {{ 'faint' if not export_counts.get(key) }}" data-label="Rows">
               {{ "{:,}".format(export_counts.get(key, 0)) }}</td>
-            <td class="soft">{{ spec.why }}</td>
-            <td class="r">
+            <td class="soft" data-label="Why you would want it">{{ spec.why }}</td>
+            <td class="r" data-label="Download">
               {% if export_counts.get(key) %}
                 <a href="{{ url_for('export_data', dataset=key, fmt='csv') }}">CSV</a>
                 ·
