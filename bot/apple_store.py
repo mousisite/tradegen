@@ -602,7 +602,15 @@ def move_to(conn: sqlite3.Connection, verifier: Verifier, user_id: int, jws: str
 # --- housekeeping ----------------------------------------------------------------
 
 def forget_user(conn: sqlite3.Connection, user_id: int) -> None:
-    """Account deletion: the person's token and subscriptions go.
+    """Account deletion: the person's token goes, and their subscriptions are
+    linked to no account.
+
+    A subscription's row stays, unlinked, until its time has run out. A copy
+    of a transaction verifies for ever (bot/appstore.py), and the row is what
+    remembers a refund: without it, a copy taken before the refund, sent
+    from any new account, would give Pro again for the whole period. Once
+    the time has run out no copy can give Pro, so a row past it goes now,
+    and prune_unowned() takes the rest when their time comes.
 
     Apple keeps billing until the person cancels with Apple. Renewals then
     arrive with nobody to own them, and follow the person if they restore
@@ -610,7 +618,10 @@ def forget_user(conn: sqlite3.Connection, user_id: int) -> None:
     """
     ensure_schema(conn)
     conn.execute("DELETE FROM apple_tokens WHERE user_id=?", (user_id,))
-    conn.execute("DELETE FROM apple_subs WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM apple_subs WHERE user_id=? AND MAX(expires_ms, grace_until_ms)<=?",
+                 (user_id, _now_ms()))
+    conn.execute("UPDATE apple_subs SET user_id=NULL, app_token='', moved_from=NULL, updated=? "
+                 "WHERE user_id=?", (int(time.time()), user_id))
     conn.execute("UPDATE apple_subs SET moved_from=NULL WHERE moved_from=?", (user_id,))
 
 
@@ -643,5 +654,16 @@ def prune_notifications(conn: sqlite3.Connection,
     ensure_schema(conn)
     cur = conn.execute("DELETE FROM apple_notifications WHERE received < ?",
                        (int(time.time()) - days * 86400,))
+    conn.commit()
+    return cur.rowcount
+
+
+def prune_unowned(conn: sqlite3.Connection) -> int:
+    """Forget subscriptions no account owns once their time, grace included,
+    has run out: no copy of them can give Pro any more. A deleted account's
+    end here. A renewal or a restore after that is taken as new."""
+    ensure_schema(conn)
+    cur = conn.execute("DELETE FROM apple_subs WHERE user_id IS NULL "
+                       "AND MAX(expires_ms, grace_until_ms)<=?", (_now_ms(),))
     conn.commit()
     return cur.rowcount

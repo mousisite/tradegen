@@ -875,9 +875,11 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     push.ensure_schema(conn)
     cur = conn.execute("DELETE FROM push_devices WHERE user_id=?", (user_id,))
     removed["push_devices"] = cur.rowcount
-    # Pro bought through Apple: the account's token and its subscriptions.
-    # Apple keeps billing until the person cancels with Apple, which the
-    # Account page says before this runs; renewals then arrive unowned.
+    # Pro bought through Apple: the account's token goes, and its
+    # subscriptions are linked to no account, kept until their time runs out
+    # so that a copy of a refunded purchase cannot give Pro again. Apple
+    # keeps billing until the person cancels with Apple, which the Account
+    # page says before this runs; renewals then arrive unowned.
     from . import apple_store
     apple_store.forget_user(conn, user_id)
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))

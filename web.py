@@ -5413,15 +5413,18 @@ def start_background_jobs():
 def _recheck_plans_job():
     """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost.
 
-    And forget App Store notifications too old for Apple to be retrying.
+    And forget App Store notifications too old for Apple to be retrying, and
+    Apple subscriptions no account owns (a deleted account's) once their time
+    has run out.
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = billing_mod.recheck(conn)
         try:
             apple_store_mod.prune_notifications(conn)
+            apple_store_mod.prune_unowned(conn)
         except sqlite3.Error as exc:
-            result.setdefault("errors", []).append("app store notifications: %s" % exc)
+            result.setdefault("errors", []).append("app store records: %s" % exc)
         return result
     finally:
         conn.close()

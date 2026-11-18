@@ -1048,7 +1048,10 @@ class Ownership(StoreBase):
     def test_deleted_account(self):
         self.app(self.ann, self.tx())
         A.delete_user(self.conn, self.ann)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_subs").fetchone()[0], 0)
+        # The subscription is linked to nobody, and the token is gone. The row
+        # stays while its time runs (test_a_refund_outlives_the_account).
+        rows = self.conn.execute("SELECT user_id, app_token, moved_from FROM apple_subs").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(None, "", None)])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?",
                                            (self.ann,)).fetchone()[0], 0)
         # Apple keeps renewing until the person cancels; the renewal has no owner now.
@@ -1057,6 +1060,47 @@ class Ownership(StoreBase):
         # The same person makes a new account and taps Restore: it follows them.
         self.assertEqual(self.app(self.ben, self.tx(txid="2001", purchase=renew))[0]["outcome"], st.APPLIED)
         self.assertTrue(self.pro(self.ben))
+
+    def test_a_refund_outlives_the_account(self):
+        # Ann buys a year, and her app sends the purchase, which can be copied
+        # off the phone. Apple refunds it; then she deletes her account. A copy
+        # signed before the refund still verifies, and sent from a new account
+        # it must not give the refunded year back.
+        year = self.t0 + 365 * DAY
+        bought = self.tx(product=YEARLY, expires=year, signed=self.t0)
+        self.app(self.ann, bought)
+        refund_at = now_ms() - 1000
+        self.send(self.at("REFUND", refund_at, status=5, product=YEARLY, expires=year,
+                          revocationDate=refund_at))
+        self.assertFalse(self.pro(self.ann))
+        A.delete_user(self.conn, self.ann)
+        again = A.upsert_email_user(self.conn, "ann@example.com").id
+        self.assertEqual(self.app(again, bought)[0]["outcome"], st.STALE)
+        self.assertFalse(self.pro(again))
+        self.assertEqual(self.user(again).apple_until, 0)
+        # Nor in anyone else's.
+        self.assertNotEqual(self.app(self.ben, bought)[0]["outcome"], st.APPLIED)
+        self.assertFalse(self.pro(self.ben))
+
+    def test_what_has_run_out_is_not_kept(self):
+        # Once a subscription's time has run out no copy of it gives Pro, so
+        # nothing about it is kept when nobody owns it.
+        old = now_ms() - 400 * DAY
+        self.app(self.ann, self.tx(otid="3000", txid="3001", purchase=old))
+        self.app(self.ann, self.tx(otid="4000", txid="4001"))
+        A.delete_user(self.conn, self.ann)
+        kept = lambda: sorted(r[0] for r in self.conn.execute("SELECT original_tx_id FROM apple_subs"))
+        self.assertEqual(kept(), ["4000"])
+        # The running one goes once its time, grace included, is up. A row
+        # someone owns stays, however old.
+        self.app(self.ben, self.tx(otid="5000", txid="5001", purchase=old, token="ben"))
+        self.assertEqual(st.prune_unowned(self.conn), 0)
+        self.conn.execute("UPDATE apple_subs SET expires_ms=?, grace_until_ms=? WHERE original_tx_id='4000'",
+                          (now_ms() - 1000, now_ms() + DAY))
+        self.assertEqual(st.prune_unowned(self.conn), 0)
+        self.conn.execute("UPDATE apple_subs SET grace_until_ms=0 WHERE original_tx_id='4000'")
+        self.assertEqual(st.prune_unowned(self.conn), 1)
+        self.assertEqual(kept(), ["5000"])
 
     def test_deleting_the_previous_owner_forgets_the_move(self):
         self.app(self.ann, self.tx())
@@ -1760,6 +1804,32 @@ class Pages(WebBase):
         finally:
             conn.close()
 
+    def test_what_a_deleted_account_bought_is_forgotten_once_it_has_run_out(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        r = client.post("/account/delete", data={"confirm": "delete"}, headers=IN_APP)
+        self.assertEqual(r.status_code, 302)
+        conn = db.connect(WEB_DB)
+        try:
+            row = lambda: conn.execute("SELECT user_id, app_token FROM apple_subs WHERE original_tx_id=?",
+                                       (self.otid,)).fetchone()
+            self.assertEqual(tuple(row()), (None, ""))
+            real = web.billing_mod.recheck
+            web.billing_mod.recheck = lambda c: {}
+            try:
+                web._recheck_plans_job()
+                self.assertIsNotNone(row())          # its year is still running
+                conn.execute("UPDATE apple_subs SET expires_ms=? WHERE original_tx_id=?",
+                             (now_ms() - 1000, self.otid))
+                conn.commit()
+                web._recheck_plans_job()
+            finally:
+                web.billing_mod.recheck = real
+            self.assertIsNone(row())
+        finally:
+            conn.close()
+
     def test_no_warning_without_an_apple_subscription(self):
         page = self.text(self.client(self.ben).get("/account", headers=IN_APP))
         self.assertNotIn("data-apple-billing", page)
@@ -1797,6 +1867,10 @@ class Pages(WebBase):
         privacy = self.text(CLIENT.get("/privacy"))
         self.assertIn("anonymous account token", privacy)
         self.assertIn("Apple takes the payment", privacy)
+        # What deleting the account leaves of it, and for how long.
+        words = " ".join(privacy.split())
+        self.assertIn("kept, linked to no account, until the time it paid for has run out", words)
+        self.assertNotIn("deletes Orenth's record of any Pro bought through Apple", words)
         terms = self.text(CLIENT.get("/terms"))
         self.assertIn("Bought in the iPhone app", terms)
         self.assertNotIn("stripe", self.text(CLIENT.get("/terms", headers=IN_APP)).lower())
