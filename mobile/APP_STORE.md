@@ -26,7 +26,10 @@ Submit.
    https://developer.apple.com/programs/enroll/ as an **Individual**.
 3. **Where to sell at first.** Pick **United States only** when App Store
    Connect asks (Part 5). That keeps the rules simple: in the EU, Apple
-   publishes an individual seller's home address and phone number.
+   publishes an individual seller's home address and phone number. Some US
+   states now have age-check laws for apps, and California's starts on
+   1 January 2027: read **Age checks some US states ask for** in Part 5
+   before launch.
 4. **What you need.** A Mac that can run Xcode 26 or newer (macOS Sequoia
    15.6 or newer for Xcode 26.0 to 26.3; macOS Tahoe for anything newer), an
    iPhone with its cable, and about two hours. Apple has said that from
@@ -418,7 +421,7 @@ Answer the questionnaire like this. The result should be **4+**.
 | Question | Answer | Why |
 | --- | --- | --- |
 | Parental Controls | No | |
-| Age Assurance | No | |
+| Age Assurance | No | The app does not check anyone's age yet. See "Age checks some US states ask for", next |
 | Unrestricted Web Access | **No** | The app shows only orenth.app. Links to any other site open in a sheet with a Done button, and the app's own view never leaves orenth.app |
 | User-Generated Content | No | Nothing one person writes reaches anyone else: journals, notes and alerts are private, and a shared call is a page Orenth makes (stock, call, counts, date). Inside the app the research page shows news headlines, and of StockTwits posts only how many there are and how many say bullish or bearish, never their words |
 | Messaging and Chat | No | |
@@ -436,6 +439,64 @@ Answer the questionnaire like this. The result should be **4+**.
 | Gambling, Contests, Loot Boxes | No / None | |
 | Shared Location | No | |
 | Dating and Relationships | None | |
+
+### Age checks some US states ask for
+
+This is a law question as much as an app question, and the dates matter.
+Read it before launch, and ask a lawyer about the parts that apply to you.
+
+**What the laws say.** Since 2026 several US states make app stores check
+the age of each new account, get a parent's consent for anyone under 18,
+and pass that on; and they make apps use what the store passes on. Apple
+started sharing an age range for new accounts in:
+
+| Where | From |
+| --- | --- |
+| Utah | 6 May 2026 |
+| Texas (SB 2420) | 4 June 2026, once a court lifted the order that had paused it |
+| Louisiana | 1 July 2026 |
+
+Apple's own question-and-answer page on these laws says that in those
+places, "you must check the age of the people using your app", and that
+this holds for an app rated 18+ too, so a 4+ rating does not take Orenth
+out of it.
+
+**California (AB 1043, Civil Code 1798.500 and on), from 1 January 2027.**
+A developer must ask the phone's system or the app store for a signal of
+the person's age range "when the application is downloaded and launched".
+An app installed before 1 January 2027 must ask before 1 July 2027.
+Getting the signal counts as knowing the person's age range. A mistake can
+cost up to $2,500 for each child affected, and a deliberate breach up to
+$7,500.
+
+**What Apple gives an app for this** (iOS 26 and newer; it needs Xcode 26.2
+or newer):
+
+- the **Declared Age Range** API, which asks iOS which age range the person
+  is in, and whether the law where they are asks for one;
+- the **Significant Change** API (PermissionKit), which asks a parent to
+  approve a big change to the app for a child;
+- the **RESCIND_CONSENT** App Store Server Notification, which tells the
+  server when a parent takes their consent back. It arrives at the same
+  address as the subscription notifications ("Sell Pro in the app", step
+  13), which accepts it but does not act on it yet.
+
+**What Orenth needs, before 1 January 2027.** Today the app has no age
+check at all, and a web page cannot ask iOS for the age range: only the
+app's own native code can. So a small native piece is needed: at launch,
+on iOS 26 or newer, ask Declared Age Range for the person's age range;
+send the answer to the server to keep with the account; and act on
+RESCIND_CONSENT. It has not been written yet, because Apple's exact calls
+can only be built and tried on a Mac with Xcode 26.2 or newer. Then decide,
+with legal advice, what Orenth shows or holds back for someone under 18
+in those states, Pro included.
+
+**Until then, answer the questionnaire's Age Assurance question No.** It
+asks whether the app itself checks people's ages, and Orenth does not: it
+asks nobody's age. A Yes before the check exists would be a false answer,
+which Apple can treat as misleading (rule 2.3.6). Once the check is in the
+app, read Apple's definition again, answer to match, and say in the review
+notes where the check runs.
 
 ### Export compliance (encryption)
 
@@ -706,6 +767,9 @@ with the review address: Orenth refuses those for it.
 9. **Deleting an account that has an Apple subscription** says first that
    Apple keeps billing until it is cancelled, with a **Manage subscription**
    button, and still deletes straight away.
+10. **Age checks** (Part 5, "Age checks some US states ask for"): until the
+    app has its native age-range check, the Age Assurance answer stays
+    **No**. The check is needed before 1 January 2027.
 
 ---
 
@@ -743,3 +807,5 @@ with the review address: Orenth refuses those for it.
   the pages leave out what only a website has: the footer's links but Terms
   and Privacy (the tab bar's More has them), the skip link, file downloads,
   and the words of StockTwits posts.
+- Not written yet: the Declared Age Range check (Part 5, "Age checks some
+  US states ask for"). It is native code, needed before 1 January 2027.
