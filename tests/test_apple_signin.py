@@ -6,6 +6,7 @@ with an RSA key made for this run standing in for Apple's signing key and an
 EC P-256 key standing in for the .p8 file. Everything below that boundary is
 the real code: the client secret is really signed, every token is really
 verified, accounts are really made and joined, and sessions really start.
+App Review's account, which only its fixed code opens, is never joined.
 """
 import base64
 import hashlib
@@ -866,6 +867,46 @@ try:
           "If you sign in with Apple" in privacy and "privaterelay.appleid.com" in privacy)
     apple_on()
     web.app.config["AUTH_MODE"] = None
+
+    section("THE APP REVIEW ACCOUNT IS NEVER JOINED TO APPLE")
+
+    # Its address and its fixed code are App Review's way in. An Apple ID
+    # with the same verified address would otherwise join it, and the owner
+    # testing Sign in with Apple with that address would hand the review
+    # account a second way in that is not App Review's.
+    REVIEW_CODE = "Kq3-x8Rw-2mZ7-pL5v-T9"
+    _os.environ["REVIEW_LOGIN_EMAIL"] = "appreview@example.com"
+    _os.environ["REVIEW_LOGIN_CODE"] = REVIEW_CODE
+    try:
+        web._RATE.clear()
+        made = web.app.test_client().post("/signin/review", data={
+            "email": "appreview@example.com", "code": REVIEW_CODE})
+        check("the review sign-in makes its account", made.status_code == 302,
+              made.status_code)
+        back, _, _ = web_sign_in("005.review.1", "AppReview@example.com")
+        said = back.data.decode("utf-8", "replace")
+        check("Apple on the website with the review address is refused, in words",
+              back.status_code == 400 and "kept for Apple" in said, back.status_code)
+        check("and no Apple ID is tied to the review account",
+              identity_row("005.review.1") is None)
+        out = native(lambda n: sign(claims_for("005.review.2", BUNDLE, n,
+                                               email="appreview@example.com")))
+        check("nor in the app's own Apple sheet",
+              out.status_code == 400
+              and "kept for Apple" in (out.get_json() or {}).get("error", ""),
+              (out.status_code, out.get_json()))
+        check("which ties no Apple ID to it either", identity_row("005.review.2") is None)
+        web._RATE.clear()
+        again = web.app.test_client().post("/signin/review", data={
+            "email": "appreview@example.com", "code": REVIEW_CODE})
+        check("so the review sign-in still opens it", again.status_code == 302,
+              again.status_code)
+        other, _, _ = web_sign_in("005.review.3", "someone.else@example.com")
+        check("while Apple with any other address signs in as before",
+              other.status_code == 302, other.status_code)
+    finally:
+        _os.environ.pop("REVIEW_LOGIN_EMAIL", None)
+        _os.environ.pop("REVIEW_LOGIN_CODE", None)
 
     section("LEAVING: APPLE IS ASKED TO END IT")
 

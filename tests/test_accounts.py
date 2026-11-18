@@ -833,7 +833,7 @@ try:
 
     body = stranger.get("/privacy").data.decode("utf-8", "replace")
     for claim in ("openid", "profile", "No tracking scripts",
-                  "No selling, renting or sharing"):
+                  "No selling or renting of personal data"):
         check("the privacy page states: %s" % claim[:34], claim in body)
     terms_body = stranger.get("/terms").data.decode("utf-8", "replace")
     check("the terms say it is not advice",

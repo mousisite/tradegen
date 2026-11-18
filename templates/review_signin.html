@@ -2,7 +2,8 @@
 {% set active = 'signin' %}
 {% block title %}Review sign-in · Orenth{% endblock %}
 {# Only for Apple's App Review, which cannot receive a code by email or text.
-   Linked from nowhere, and kept out of search results. #}
+   Linked from nowhere, and kept out of search results. "Continue with email"
+   sends the review address here, already filled in, instead of a code. #}
 {% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
 {% block content %}
 
@@ -18,11 +19,13 @@
 
   <form class="codeform" method="post" action="{{ url_for('review_signin') }}">
     <label class="sr" for="email">Email</label>
-    <input class="field" id="email" name="email" type="email" required autofocus
+    <input class="field" id="email" name="email" type="email" required
+           {{ '' if email else 'autofocus' }}
            autocomplete="username" inputmode="email" placeholder="Email"
            value="{{ email }}">
     <label class="sr" for="code">Code</label>
     <input class="field" id="code" name="code" type="password" required
+           {{ 'autofocus' if email }}
            autocomplete="current-password" placeholder="Code" maxlength="200"
            style="margin-top:var(--s1)">
     <button class="btn" type="submit">Sign in</button>
