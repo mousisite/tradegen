@@ -241,13 +241,16 @@
     A backup made before you deleted your account still holds a copy until it
     is replaced by newer ones, which takes about a week. The server also
     copies the database each time a new version of Orenth starts, and keeps
-    the last few of those copies; one made before you deleted your account
-    can stay until newer versions replace it, however long that takes.
+    the last {{ release.keep }} of those copies{% if release.days %}, deleting
+    each after {{ release.days }} days{% else %}; one made before you deleted
+    your account can stay until newer versions replace it, however long that
+    takes{% endif %}.
     {% if offsite.provider %}Copies of the backups are also kept off this
     server: the newest from each of the last {{ offsite.days }} days and the
     oldest from each of the last {{ offsite.months }} months. So a copy made
     before you deleted your account can last up to {{ offsite.months }} months
-    there.{% endif %}
+    there, and if copies stop being sent there, those already there stay
+    until they are deleted by hand.{% endif %}
   </p>
   <p class="prose">
     Sessions expire after {{ session_days }} days. Signing out ends the session

@@ -256,7 +256,9 @@ python backup.py --fetch <its name> --out /data/restore
 The app only ever deletes copies named the way its backups are named. So to
 keep one for good, copy a backup by hand under another name, such as
 `keep-2026-11.db`, with `--offsite`; it stays until you delete it in
-Cloudflare. Two more settings are optional: `BACKUP_S3_REGION`
+Cloudflare. If you later remove these settings, the copies already in the
+bucket stay too, and nothing prunes them any more: delete them in Cloudflare,
+since each holds every account, deleted ones included. Two more settings are optional: `BACKUP_S3_REGION`
 (default `auto`, which R2 uses) and `BACKUP_S3_PREFIX` (default `orenth/`, the
 folder in the bucket). Any storage that speaks the S3 protocol works, not only
 R2.

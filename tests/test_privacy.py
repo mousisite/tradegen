@@ -9,13 +9,15 @@ of a signed-in person's on it is sent marked not to be stored.
 Then the page's own words, each beside the code it describes: what the
 sign-in cookie holds, what goes out by email and to phones, what each sign-in
 keeps, who carries and runs the site, the copies taken before each new
-version, what can be downloaded, and what the terms say inside the iPhone app.
+version and those kept off the server, what can be downloaded, and what the
+terms say inside the iPhone app.
 
 No network: Sentry's transport is a list, and nothing else is reached.
 """
 import json
 import os as _os
 import sys as _sys
+import time
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -27,7 +29,8 @@ CLEAR = ("SENTRY_DSN", "SENTRY_TRACES_RATE", "SENTRY_ENVIRONMENT", "SMTP_HOST",
          "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM", "STOCKBOT_PUBLIC_URL",
          "STOCKBOT_BEHIND_PROXY", "STOCKBOT_ADMIN_EMAIL", "STRIPE_SECRET_KEY",
          "STRIPE_PRICE_ID", "STRIPE_PRICE_ID_YEARLY", "STRIPE_WEBHOOK_SECRET",
-         "RENDER", "RENDER_SERVICE_ID", "FLY_APP_NAME")
+         "RENDER", "RENDER_SERVICE_ID", "FLY_APP_NAME", "BACKUP_S3_ENDPOINT",
+         "BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY_ID", "BACKUP_S3_SECRET_ACCESS_KEY")
 for _k in CLEAR:
     _os.environ.pop(_k, None)
 
@@ -37,6 +40,9 @@ import sentry_sdk  # noqa: E402
 from sentry_sdk.transport import Transport  # noqa: E402
 
 import web  # noqa: E402
+# The privacy page reads serve.py's copy policy, and importing serve reads
+# .env as web did, so it is imported here, before the settings are cleared.
+import serve  # noqa: E402
 from bot import accounts as A  # noqa: E402
 from bot import database as db  # noqa: E402
 from bot import digest  # noqa: E402
@@ -435,24 +441,93 @@ try:
     # -----------------------------------------------------------------------
     head("COPIES OF THE DATABASE: THE ONES BEFORE EACH NEW VERSION TOO")
     # -----------------------------------------------------------------------
-    # serve.py copies the whole database whenever a new version starts and
-    # keeps the last few by count, not by age, so a deleted account can stay
-    # in one for as long as the next versions take: not "about a week".
-    import serve  # noqa: E402
-    folder = _os.path.dirname(harness.DB_PATH)
-    _os.environ["RENDER_GIT_COMMIT"] = "privacy-test-release"
-    try:
-        serve._copy_before_release(harness.DB_PATH)
-    finally:
-        _os.environ.pop("RENDER_GIT_COMMIT", None)
-    copies = _os.path.join(folder, "backups", "before-release")
-    check("a new version starting copies the database",
-          _os.path.isdir(copies) and any(f.endswith(".db") for f in _os.listdir(copies)))
+    # serve.py copies the whole database whenever a new version starts. Kept
+    # by count alone, a copy holding a deleted account stays for as long as
+    # the next versions take, months in a quiet spell, not "about a week";
+    # deleted by age too (RELEASE_COPY_DAYS), it goes when its days are up.
+    # The page reads which from serve.py, and a copy 120 days old is held to
+    # what it says.
+    copies = _os.path.join(_os.path.dirname(harness.DB_PATH), "backups", "before-release")
+
+    def new_version(name):
+        """Start as release `name` would, and list the copies left after it."""
+        _os.environ["RENDER_GIT_COMMIT"] = name
+        try:
+            serve._copy_before_release(harness.DB_PATH)
+        finally:
+            _os.environ.pop("RENDER_GIT_COMMIT", None)
+        return sorted(f for f in (_os.listdir(copies) if _os.path.isdir(copies) else [])
+                      if f.endswith(".db"))
+
+    first = new_version("privacy-test-release")
+    check("a new version starting copies the database", len(first) == 1, first)
+    aged = _os.path.join(copies, first[0]) if first else ""
+    if aged:
+        months_ago = time.time() - 120 * 86400
+        _os.utime(aged, (months_ago, months_ago))
+    new_version("privacy-test-release-2")
+    days = getattr(serve, "RELEASE_COPY_DAYS", 0)
+    stayed = bool(aged) and _os.path.exists(aged)
+    COPIES_SAID = ("The server also copies the database each time a new version of "
+                   "Orenth starts, and keeps the last %d of those copies"
+                   % serve.KEEP_RELEASE_COPIES)
+    BY_AGE = ", deleting each after %d days."
+    BY_COUNT = ("; one made before you deleted your account can stay until newer "
+                "versions replace it, however long that takes.")
     page = flat(text(visitor.get("/privacy")))
-    check("the page says so, and how long such a copy can stay",
-          "The server also copies the database each time a new version of Orenth "
-          "starts, and keeps the last few of those copies" in page
-          and "can stay until newer versions replace it, however long that takes" in page)
+    check("a copy 120 days old %s at the next version, as the page says"
+          % ("is deleted" if days else "is still kept"),
+          aged and stayed != bool(days)
+          and (COPIES_SAID + (BY_AGE % days if days else BY_COUNT)) in page,
+          (stayed, days, page[page.find("The server also copies"):][:400]))
+    # Both ways of saying it, whichever serve.py does today.
+    had_days = hasattr(serve, "RELEASE_COPY_DAYS")
+    try:
+        for limit in (0, 7):
+            if limit:
+                serve.RELEASE_COPY_DAYS = limit
+            elif hasattr(serve, "RELEASE_COPY_DAYS"):
+                del serve.RELEASE_COPY_DAYS
+            page = flat(text(visitor.get("/privacy")))
+            check("kept %s, the page says %s" % (
+                      "until %d days old" % limit if limit else "by count alone",
+                      "after how many days each goes" if limit
+                      else "one can stay however long the next versions take"),
+                  (COPIES_SAID + (BY_AGE % limit if limit else BY_COUNT)) in page
+                  and ("however long" in page) != bool(limit),
+                  page[page.find("The server also copies"):][:400])
+    finally:
+        if had_days:
+            serve.RELEASE_COPY_DAYS = days
+        elif hasattr(serve, "RELEASE_COPY_DAYS"):
+            del serve.RELEASE_COPY_DAYS
+
+    # Copies kept off the server are pruned only as each new one is sent, so
+    # once the settings are removed nothing ever deletes those already there.
+    from bot import offsite as offsite_mod  # noqa: E402
+    skipped = offsite_mod.copy_backup(harness.DB_PATH)
+    check("with the off-site settings gone, a backup sends and deletes nothing there",
+          skipped.get("skipped") is True
+          and offsite_mod.copy_in_background(harness.DB_PATH) is None, skipped)
+    R2 = {"BACKUP_S3_ENDPOINT": "https://abc123.r2.cloudflarestorage.com",
+          "BACKUP_S3_BUCKET": "orenth-backups", "BACKUP_S3_ACCESS_KEY_ID": "k",
+          "BACKUP_S3_SECRET_ACCESS_KEY": "s"}
+    _os.environ.update(R2)
+    try:
+        page = flat(text(visitor.get("/privacy")))
+    finally:
+        for _k in R2:
+            _os.environ.pop(_k, None)
+    check("so while copies are kept off the server, the page says those already "
+          "there stay until deleted by hand if the copying stops",
+          "can last up to %d months there, and if copies stop being sent there, those "
+          "already there stay until they are deleted by hand." % offsite_mod.KEEP_MONTHS
+          in page, page[page.find("Copies of the backups are also kept"):][:500])
+    guide = flat(open(_os.path.join(harness.ROOT, "DEPLOY.md"), encoding="utf-8").read())
+    check("and the owner's guide says to delete them there when removing the settings",
+          "If you later remove these settings, the copies already in the bucket stay "
+          "too, and nothing prunes them any more: delete them in Cloudflare" in guide)
+    page = flat(text(visitor.get("/privacy")))
 
     # It said "Every dataset can be downloaded", right after listing the
     # watchlist and alerts, which have no download.

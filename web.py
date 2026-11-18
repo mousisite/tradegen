@@ -3551,6 +3551,7 @@ def sitemap():
 @app.route("/privacy")
 def privacy():
     """Required by Google's consent screen, and worth having regardless."""
+    import serve
     from bot import monitoring
     from bot import offsite as offsite_mod
     # Copies of the backups hold everyone's data, so once they are kept off
@@ -3558,6 +3559,12 @@ def privacy():
     # bucket or its address.
     offsite = {"provider": offsite_mod.provider(), "days": offsite_mod.KEEP_DAYS,
                "months": offsite_mod.KEEP_MONTHS}
+    # So does the copy serve.py takes each time a new version starts. The
+    # page gives how many it keeps and, where serve.py also deletes them by
+    # age (RELEASE_COPY_DAYS), after how many days; read from serve.py, so the
+    # two cannot drift apart.
+    release = {"keep": serve.KEEP_RELEASE_COPIES,
+               "days": getattr(serve, "RELEASE_COPY_DAYS", 0)}
     # Who carries and runs this copy, named where it can be told: Cloudflare
     # adds CF-Connecting-IP to every request it carries (_client_ip reads
     # it), Render sets RENDER and RENDER_SERVICE_ID on its machines, and Fly
@@ -3570,6 +3577,7 @@ def privacy():
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
                            contact=_contact(), offsite=offsite, hosting=hosting,
+                           release=release,
                            sampled=_sampled_words(monitoring.status()["sampled"]))
 
 
