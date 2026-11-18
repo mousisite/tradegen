@@ -43,6 +43,7 @@ except ImportError:
 from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
+from flask.json.provider import DefaultJSONProvider
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -68,6 +69,7 @@ from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import sessions as sessions_mod
@@ -90,6 +92,24 @@ app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 # padded notes could fill the data disk. The screenshot upload sets a larger
 # limit for its own request, because the form reader holds file data to it.
 app.config["MAX_FORM_MEMORY_SIZE"] = 20_000
+
+
+class _RequestJSON(DefaultJSONProvider):
+    """Flask's JSON, except that a body nested deeper than bot/safejson.py
+    allows is refused before it is read, as text that is not JSON.
+
+    request.get_json reads every JSON body through this. JSON nested a few
+    thousand deep would otherwise raise RecursionError, which get_json's
+    silent= does not cover: a few kilobytes from anyone, to any address that
+    takes JSON, would be a 500, a traceback and an error report. Refused
+    here, get_json gives None (silent) or a 400, as for any other junk.
+    """
+
+    def loads(self, s, **kwargs):
+        return safejson.loads(s, **kwargs)
+
+
+app.json = _RequestJSON(app)
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -382,13 +402,14 @@ def _apple_plan() -> Dict:
     on: whether the app sells Pro. pro: the Apple subscription that gives
     this person Pro now, or None. billing: one Apple could still charge for
     (running, or retrying a failed renewal), test purchases included, for the
-    warning before an account is deleted. via: how Pro was got otherwise,
-    so the app can say why it sells nothing: "web" (paid on the website),
-    "invite" or "other".
+    warning before an account is deleted. retrying: whether Apple may yet
+    charge for Pro that has ended, so the website sells none meanwhile.
+    via: how Pro was got otherwise, so the app can say why it sells nothing:
+    "web" (paid on the website), "invite" or "other".
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
-           "products": apple_store_mod.product_ids(), "via": "", "twice": False,
-           "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
+           "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
         return out
@@ -396,6 +417,7 @@ def _apple_plan() -> Dict:
     try:
         out["pro"] = apple_store_mod.subscription(conn, user.id)
         out["billing"] = apple_store_mod.subscription(conn, user.id, counted_only=False)
+        out["retrying"] = apple_store_mod.may_still_charge(conn, user.id)
     finally:
         conn.close()
     plain = dataclasses.replace(user, apple_until=0)
@@ -656,6 +678,7 @@ def _expose_user():
             # static/app-purchase.js while it is on.
             "iap_on": apple_store_mod.enabled(),
             "apple_pro_said": APPLE_PRO_SAID,
+            "apple_retrying_said": APPLE_RETRYING_SAID,
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured(),
             # Apple on the website, and Apple anywhere (the app needs less).
@@ -1068,6 +1091,14 @@ def index():
     finally:
         conn.close()
     attention = _attention(stored, open_trades)
+    # What the prices just read saw is kept, as the journal keeps it: a dip
+    # through a stop between two rounds of the background check may be seen
+    # here alone. Nothing, if the prices were late.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        _keep_trail_bests(conn, open_trades, attention["marks"])
+    finally:
+        conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return render_template("index.html", runs=runs,
                            open_trades=_held(open_trades, attention["marks"]),
@@ -1484,15 +1515,16 @@ def _keep_trail_bests(conn, open_trades, marks) -> None:
     Read here over the trade's whole history, it holds the trail up for a
     reader with fewer bars, such as the background check. Only ever raises
     a long's best (lowers a short's), so it changes nothing else. A crossing
-    of the stop seen here is kept too, the first one only, so it is still a
-    crossing for every reader once that day's bar is finished.
+    of any stop seen here is kept too, the first one only, so it is still a
+    crossing for every reader once that day's bar is finished, and once it
+    is older than the trade's bars reach.
     """
     for t in open_trades:
         mark = marks.get(t["id"]) or {}
         if mark.get("trail") is not None and mark.get("best_at") is not None:
             db_mod.trail_seen(conn, int(t["id"]), mark["best"], mark["best_at"])
-            if mark.get("crossed"):
-                db_mod.trail_crossed(conn, int(t["id"]), *mark["crossed"])
+        if mark.get("crossed"):
+            db_mod.stop_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
 # The session key for what the journal says once after an exit.
@@ -2746,12 +2778,8 @@ def apple_native():
                                               "itself."}), 403
     request.max_content_length = APPLE_JSON_LIMIT
     # Named so that an error report strips it: it holds the identity token.
-    try:
-        token_post = request.get_json(silent=True)
-    except RecursionError:
-        # silent= covers only what is not JSON; this is JSON nested too
-        # deep for Python to read, which anyone can send.
-        token_post = None
+    # JSON nested too deep to read is None here too (_RequestJSON).
+    token_post = request.get_json(silent=True)
     if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
@@ -2836,10 +2864,7 @@ def apple_notifications():
     if not apple_mod.native_ready():
         abort(404)
     request.max_content_length = APPLE_JSON_LIMIT
-    try:
-        body = request.get_json(silent=True, force=True)
-    except RecursionError:
-        body = None              # nested too deep to read, as in apple_native
+    body = request.get_json(silent=True, force=True)
     try:
         event = apple_mod.read_notification(
             body.get("payload") if isinstance(body, dict) else None)
@@ -3263,8 +3288,13 @@ def billing_checkout():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         customer = billing_mod.customer_of(conn, g.user.id)
+        retrying = apple_store_mod.may_still_charge(conn, g.user.id)
     finally:
         conn.close()
+    if retrying:
+        # Apple's renewal failed, but it keeps trying and may yet charge: a
+        # second bill all the same, only later.
+        return _pricing_page(APPLE_RETRYING_SAID, 409)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
@@ -3329,7 +3359,7 @@ def billing_webhook():
                               os.environ["STRIPE_WEBHOOK_SECRET"]):
         return jsonify({"error": "bad signature"}), 400
     try:
-        event = json.loads(payload.decode("utf-8"))
+        event = safejson.loads(payload.decode("utf-8"))
     except ValueError:
         return jsonify({"error": "not json"}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -3351,6 +3381,12 @@ def billing_webhook():
 
 APPLE_PRO_SAID = ("You have Pro through Apple; manage it in your iPhone's "
                   "Settings > Apple Account > Subscriptions.")
+APPLE_RETRYING_SAID = ("Apple is still trying to renew the Pro you bought in the "
+                       "iPhone app, after a payment did not go through, and will "
+                       "charge you once it can. To keep that, update the payment "
+                       "method in your iPhone's Settings > Apple Account. To pay "
+                       "here instead, first cancel it there, under Subscriptions, "
+                       "so you are not charged twice.")
 APPLE_SUBSCRIPTIONS = "https://apps.apple.com/account/subscriptions"
 # Apple's notifications are a few kilobytes.
 APPSTORE_NOTICE_LIMIT = 128 * 1024
@@ -4255,6 +4291,12 @@ def portfolio():
 
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
         kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
+    # What the prices just read saw is kept, as the journal keeps it.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        portfolio_mod.keep_reads(conn, view)
+    finally:
+        conn.close()
     shocks = {pct: portfolio_mod.what_if(view, pct)
               for pct in (-0.05, -0.10, -0.20)} if view.positions else {}
     return render_template("portfolio.html", view=view, cfg=cfg,
@@ -5400,15 +5442,18 @@ def start_background_jobs():
 def _recheck_plans_job():
     """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost.
 
-    And forget App Store notifications too old for Apple to be retrying.
+    And forget App Store notifications too old for Apple to be retrying, and
+    Apple subscriptions no account owns (a deleted account's) once their time
+    has run out.
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = billing_mod.recheck(conn)
         try:
             apple_store_mod.prune_notifications(conn)
+            apple_store_mod.prune_unowned(conn)
         except sqlite3.Error as exc:
-            result.setdefault("errors", []).append("app store notifications: %s" % exc)
+            result.setdefault("errors", []).append("app store records: %s" % exc)
         return result
     finally:
         conn.close()

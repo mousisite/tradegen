@@ -5,6 +5,8 @@ belongs to, and what the site does with it.
     signed test data and certificate vectors from app-store-server-library-
     python (MIT licence, in tests/data/appstore with APPLE_LICENSE.txt), and
     against home-made chains that try every way round them.
+  - JSON that anyone can send, measured before it is read (bot/safejson.py),
+    so nesting too deep for Python is refused, never a 500.
   - Who has Pro (bot/apple_store.py): purchases, renewals, grace periods,
     refunds and their reversal, notifications out of order or twice, old
     copies sent again, one Apple ID shared by two accounts, test purchases,
@@ -56,6 +58,7 @@ from bot import apple_store as st  # noqa: E402
 from bot import appstore as av  # noqa: E402
 from bot import billing  # noqa: E402
 from bot import database as db  # noqa: E402
+from bot import safejson  # noqa: E402
 
 DATA = _os.path.join(HERE, "data", "appstore")
 UTC = datetime.timezone.utc
@@ -573,6 +576,56 @@ class HomeMadeChains(unittest.TestCase):
             av.Verifier(BUNDLE, None)
 
 
+class JSONNesting(unittest.TestCase):
+    """bot/safejson.py: JSON that anyone can send is measured before json.loads
+    reads it, so nesting too deep for Python is refused as a ValueError, like
+    any other text that is not JSON, and never becomes a RecursionError."""
+
+    def test_the_limit(self):
+        limit = safejson.MAX_DEPTH
+        deepest = "[" * limit + "]" * limit
+        self.assertEqual(safejson.loads(deepest), json.loads(deepest))
+        self.assertTrue(issubclass(safejson.TooDeep, ValueError))
+        for deep in ("[" + deepest + "]", "[" * 3000 + "]" * 3000,
+                     '{"a":' * 3000 + "1" + "}" * 3000,
+                     "[" * 100000 + "]" * 100000, "[" * 5000 + '"'):
+            with self.assertRaises(safejson.TooDeep):
+                safejson.loads(deep)
+            with self.assertRaises(safejson.TooDeep):
+                safejson.loads(deep.encode("utf-8"))
+
+    def test_brackets_in_strings_are_text(self):
+        for value in (["[" * 5000], {"{" * 3000: "]" * 3000},
+                      ['"' + "[" * 500, "x\\", [[1]] * 200],
+                      ["\\" + "[" * 300, '\\"' * 200 + "{" * 200],
+                      [[["é[" * 100]]]):
+            text = json.dumps(value)
+            self.assertEqual(safejson.loads(text), value)
+            self.assertEqual(safejson.loads(text.encode("utf-8")), value)
+
+    def test_bytes_are_read_as_json_reads_them(self):
+        # json.loads takes UTF-16 and UTF-32 too; brackets are measured in the
+        # text it would read, not in the bytes.
+        shallow = json.dumps({"jws": ["a.b.c", "[" * 100]})
+        deep = "[" * 3000 + "]" * 3000
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+                         "utf-32", "utf-32-le", "utf-32-be"):
+            self.assertEqual(safejson.loads(shallow.encode(encoding)), json.loads(shallow), encoding)
+            with self.assertRaises(safejson.TooDeep, msg=encoding):
+                safejson.loads(deep.encode(encoding))
+
+    def test_what_is_not_json_stays_a_value_error(self):
+        for junk in ('"' + "[" * 5000,                     # a string that never ends
+                     "]" * 5000 + "[" * 5000 + "]" * 5000,
+                     "{" * 40 + "nope", "", b"\xff\xfe\x00", "﻿[]"):
+            with self.assertRaises(ValueError):
+                safejson.loads(junk)
+
+    def test_options_reach_json_loads(self):
+        self.assertEqual(safejson.loads('{"a": 1, "a": 2}', object_pairs_hook=list),
+                         [("a", 1), ("a", 2)])
+
+
 # --- who has Pro ---------------------------------------------------------------------
 
 STORE_CHAIN = Chain(name="Store")
@@ -821,6 +874,31 @@ class Lifecycle(StoreBase):
         self.assertIsNone(st.subscription(self.conn, self.ann))
         found = st.subscription(self.conn, self.ann, counted_only=False)
         self.assertTrue(found and found["retrying"] and found["renews"])
+        # And so does Stripe's checkout, which then sells nothing.
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        self.assertFalse(st.may_still_charge(self.conn, self.ben))
+
+    def test_what_apple_may_still_charge_for(self):
+        purchase = now_ms() - 31 * DAY
+        self.send(self.at("SUBSCRIBED", purchase, "INITIAL_BUY", purchase=purchase))
+        self.assertFalse(st.may_still_charge(self.conn, self.ann))      # ended, no renewal failed
+        self.send(self.at("DID_FAIL_TO_RENEW", now_ms() - 2000, status=3, purchase=purchase,
+                          renewal={"isInBillingRetryPeriod": True}))
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        # Renewing turned off: Apple stops trying.
+        self.send(self.at("DID_CHANGE_RENEWAL_STATUS", now_ms() - 1000, "AUTO_RENEW_DISABLED", status=3,
+                          purchase=purchase, renewal={"autoRenewStatus": 0}))
+        self.assertFalse(st.may_still_charge(self.conn, self.ann))
+        # Past Apple's 60 days of trying, refunded, or only a test purchase: no.
+        self.conn.execute("UPDATE apple_subs SET auto_renew=1")
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
+        was = self.conn.execute("SELECT expires_ms, revoked_ms, environment FROM apple_subs").fetchone()
+        for column, value in (("expires_ms", now_ms() - 61 * DAY), ("revoked_ms", now_ms()),
+                              ("environment", "Sandbox")):
+            self.conn.execute("UPDATE apple_subs SET %s=?" % column, (value,))
+            self.assertFalse(st.may_still_charge(self.conn, self.ann), column)
+            self.conn.execute("UPDATE apple_subs SET %s=?" % column, (was[column],))
+        self.assertTrue(st.may_still_charge(self.conn, self.ann))
 
     def test_cancel_keeps_pro_to_end_of_period(self):
         self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY"))
@@ -986,6 +1064,105 @@ class Ownership(StoreBase):
         self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(product="other.product"),
                                     PRODUCTS)["outcome"], st.IGNORED)
 
+    def lapsed(self, owner="ann"):
+        """A monthly plan bought 200 days ago on this Apple ID, cancelled and run out."""
+        old = now_ms() - 200 * DAY
+        self.app({"ann": self.ann, "ben": self.ben}[owner], self.tx(purchase=old, token=owner, signed=old))
+        self.send(self.at("EXPIRED", old + 31 * DAY, "VOLUNTARY", status=2, purchase=old, token=owner,
+                          renewal={"autoRenewStatus": 0}))
+        return old
+
+    def bought_now(self, token, **kw):
+        """Someone paying for a year now: in the same group, so Apple keeps
+        the originalTransactionId, and StoreKit stamps the buyer's token."""
+        bought = now_ms() - 60 * 1000
+        kw.setdefault("transactionReason", "PURCHASE")
+        return self.tx(txid="2009", purchase=bought, product=YEARLY, expires=bought + 365 * DAY,
+                       token=token, **kw)
+
+    def test_a_new_purchase_after_it_ran_out_belongs_to_whoever_bought_it(self):
+        # One Apple ID on a family iPad. Ann's plan ran out months ago; Ben,
+        # signed in to his own account, subscribes. He paid, so it is his.
+        self.lapsed()
+        resub = self.bought_now("ben")
+        self.assertEqual(self.app(self.ben, resub)[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        row = self.conn.execute("SELECT user_id, app_token FROM apple_subs").fetchone()
+        self.assertEqual(tuple(row), (self.ben, self.ben_token))
+        # Apple's own notification of it agrees, and Ann's app now finds it is
+        # another account's.
+        self.assertEqual(self.send(self.note("SUBSCRIBED", resub, "RESUBSCRIBE"))[1], st.APPLIED)
+        self.assertEqual(self.app(self.ann, resub)[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertFalse(self.pro(self.ann))
+        # Its renewals stay with him, whatever token they carry.
+        renew = self.tx(txid="2010", purchase=now_ms() - 1000, product=YEARLY, token="ann",
+                        transactionReason="RENEWAL")
+        self.send(self.note("DID_RENEW", renew))
+        self.assertEqual(self.conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ben)
+
+    def test_apples_notification_can_come_first(self):
+        self.lapsed()
+        self.assertEqual(self.send(self.note("SUBSCRIBED", self.bought_now("ben"), "RESUBSCRIBE"))[1],
+                         st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        self.assertLess(self.user(self.ann).apple_until, time.time())
+
+    def test_after_a_refund_too(self):
+        # Ann's year was refunded a month in; Ben subscribes before the year
+        # would have ended.
+        bought = now_ms() - 90 * DAY
+        self.app(self.ann, self.tx(purchase=bought, product=YEARLY, expires=bought + 365 * DAY,
+                                   signed=bought))
+        refund_at = bought + 30 * DAY
+        self.send(self.at("REFUND", refund_at, status=5, purchase=bought, product=YEARLY,
+                          expires=bought + 365 * DAY, revocationDate=refund_at))
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.app(self.ben, self.bought_now("ben"))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+
+    def test_the_owner_it_was_moved_from_can_buy_it_back(self):
+        old = self.lapsed("ben")
+        # Back when it ran, Ann had moved it to herself; it then ran out with her.
+        self.conn.execute("UPDATE apple_subs SET user_id=?, moved_from=?, moved_ms=?",
+                          (self.ann, self.ben, old + DAY))
+        self.conn.commit()
+        self.assertEqual(self.app(self.ben, self.bought_now("ben"))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_what_does_not_take_it_from_its_owner(self):
+        # While it runs, a purchase (an upgrade, say) made signed in to
+        # another account stays with the owner, as do purchases with no
+        # token or one nobody has, a renewal, and a purchase made long ago.
+        bought = now_ms() - 10 * DAY
+        self.app(self.ann, self.tx(purchase=bought))
+        running = self.bought_now("ben")
+        self.assertEqual(self.app(self.ben, running)[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertTrue(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        conn = self.conn
+        for copy in (self.bought_now(None), self.bought_now(str(uuid.uuid4())),
+                     self.bought_now("ben", transactionReason="RENEWAL"),
+                     self.bought_now("ben", transactionReason=None),
+                     self.bought_now("ben", isUpgraded=True)):
+            conn.execute("DELETE FROM apple_subs")
+            conn.commit()
+            self.lapsed()
+            self.app(self.ben, copy)
+            self.send(self.note("SUBSCRIBED", copy, "RESUBSCRIBE"))
+            self.assertEqual(conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ann)
+            self.assertFalse(self.pro(self.ben))
+        # And a purchase made before the plan ran out, sent only now.
+        conn.execute("DELETE FROM apple_subs")
+        conn.commit()
+        old = self.lapsed()
+        early = self.tx(txid="2001", purchase=old + 10 * DAY, product=YEARLY, expires=old + 375 * DAY,
+                        token="ben", transactionReason="PURCHASE")
+        self.app(self.ben, early)
+        self.assertEqual(conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ann)
+
     def test_moving_an_unowned_subscription_claims_it(self):
         self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY", token=None))
         moved = st.move_to(self.conn, self.v, self.ben, self.tx(token=None), PRODUCTS)
@@ -995,7 +1172,10 @@ class Ownership(StoreBase):
     def test_deleted_account(self):
         self.app(self.ann, self.tx())
         A.delete_user(self.conn, self.ann)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_subs").fetchone()[0], 0)
+        # The subscription is linked to nobody, and the token is gone. The row
+        # stays while its time runs (test_a_refund_outlives_the_account).
+        rows = self.conn.execute("SELECT user_id, app_token, moved_from FROM apple_subs").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(None, "", None)])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM apple_tokens WHERE user_id=?",
                                            (self.ann,)).fetchone()[0], 0)
         # Apple keeps renewing until the person cancels; the renewal has no owner now.
@@ -1004,6 +1184,47 @@ class Ownership(StoreBase):
         # The same person makes a new account and taps Restore: it follows them.
         self.assertEqual(self.app(self.ben, self.tx(txid="2001", purchase=renew))[0]["outcome"], st.APPLIED)
         self.assertTrue(self.pro(self.ben))
+
+    def test_a_refund_outlives_the_account(self):
+        # Ann buys a year, and her app sends the purchase, which can be copied
+        # off the phone. Apple refunds it; then she deletes her account. A copy
+        # signed before the refund still verifies, and sent from a new account
+        # it must not give the refunded year back.
+        year = self.t0 + 365 * DAY
+        bought = self.tx(product=YEARLY, expires=year, signed=self.t0)
+        self.app(self.ann, bought)
+        refund_at = now_ms() - 1000
+        self.send(self.at("REFUND", refund_at, status=5, product=YEARLY, expires=year,
+                          revocationDate=refund_at))
+        self.assertFalse(self.pro(self.ann))
+        A.delete_user(self.conn, self.ann)
+        again = A.upsert_email_user(self.conn, "ann@example.com").id
+        self.assertEqual(self.app(again, bought)[0]["outcome"], st.STALE)
+        self.assertFalse(self.pro(again))
+        self.assertEqual(self.user(again).apple_until, 0)
+        # Nor in anyone else's.
+        self.assertNotEqual(self.app(self.ben, bought)[0]["outcome"], st.APPLIED)
+        self.assertFalse(self.pro(self.ben))
+
+    def test_what_has_run_out_is_not_kept(self):
+        # Once a subscription's time has run out no copy of it gives Pro, so
+        # nothing about it is kept when nobody owns it.
+        old = now_ms() - 400 * DAY
+        self.app(self.ann, self.tx(otid="3000", txid="3001", purchase=old))
+        self.app(self.ann, self.tx(otid="4000", txid="4001"))
+        A.delete_user(self.conn, self.ann)
+        kept = lambda: sorted(r[0] for r in self.conn.execute("SELECT original_tx_id FROM apple_subs"))
+        self.assertEqual(kept(), ["4000"])
+        # The running one goes once its time, grace included, is up. A row
+        # someone owns stays, however old.
+        self.app(self.ben, self.tx(otid="5000", txid="5001", purchase=old, token="ben"))
+        self.assertEqual(st.prune_unowned(self.conn), 0)
+        self.conn.execute("UPDATE apple_subs SET expires_ms=?, grace_until_ms=? WHERE original_tx_id='4000'",
+                          (now_ms() - 1000, now_ms() + DAY))
+        self.assertEqual(st.prune_unowned(self.conn), 0)
+        self.conn.execute("UPDATE apple_subs SET grace_until_ms=0 WHERE original_tx_id='4000'")
+        self.assertEqual(st.prune_unowned(self.conn), 1)
+        self.assertEqual(kept(), ["5000"])
 
     def test_deleting_the_previous_owner_forgets_the_move(self):
         self.app(self.ann, self.tx())
@@ -1189,6 +1410,8 @@ NEVER_IN_APP = ("stripe", "/billing/checkout", "/billing/portal", "/billing/code
                 "discount code", "$9.99", "$79.99", "metricool")
 # A price written into a page: inside the app only StoreKit may show one.
 PRICE = re.compile(r"[$£€]\s?\d")
+# Apple's page for managing subscriptions, as a link on a page.
+APPLE_SUBSCRIPTIONS_LINK = 'href="https://apps.apple.com/account/subscriptions"'
 
 
 class WebBase(unittest.TestCase):
@@ -1542,6 +1765,49 @@ class Notifications(WebBase):
         self.assertIn("APPLE_APP_ID", notes[0][0])
 
 
+class DeepJSON(WebBase):
+    """JSON nested thousands deep, which json.loads cannot read without running
+    out of recursion: anyone can post it to Apple's address, and any signed-in
+    page to the app's. Each is refused as not JSON, as the site answers it: a
+    400, with no traceback in the log and nothing for an error report."""
+
+    DEEP = "[" * 3000 + "]" * 3000
+
+    def setUp(self):
+        super().setUp()
+        # As on the site, where an error escaping a route is a 500 and an ERROR
+        # in the log rather than an exception handed to the test.
+        self.addCleanup(web.app.config.__setitem__, "TESTING", web.app.config["TESTING"])
+        web.app.config["TESTING"] = False
+
+    def refused(self, client, path, body, headers=None):
+        with self.assertNoLogs(web.app.logger, level="ERROR"):
+            r = client.post(path, data=body, content_type="application/json",
+                            headers=headers or {})
+        self.assertEqual(r.status_code, 400, (path, r.status_code))
+        self.assertTrue(r.is_json, path)
+        return r.get_json()
+
+    def test_apples_address_from_anyone(self):
+        for body in (self.DEEP, "[" * 30000 + "]" * 30000,
+                     '{"signedPayload": %s}' % self.DEEP):
+            self.assertEqual(self.refused(CLIENT, "/apple/notifications", body),
+                             {"error": "No signedPayload."})
+
+    def test_the_apps_posts(self):
+        client = self.client(self.ann)
+        for path in ("/api/apple/transactions", "/api/apple/move"):
+            for body in (self.DEEP, '{"jws": %s}' % self.DEEP):
+                self.assertEqual(self.refused(client, path, body, FROM_PAGE),
+                                 {"error": "Send it as JSON."})
+        # However often: the hourly limit on moves is for real ones.
+        for _ in range(web.APPSTORE_MOVES_PER_HOUR + 3):
+            self.refused(client, "/api/apple/move", self.DEEP, FROM_PAGE)
+        token = self.state(client)["appAccountToken"]
+        r = self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        self.assertEqual((r.status_code, r.get_json()["pro"]), (200, True))
+
+
 class Pages(WebBase):
     def make_apple_pro(self, user, renews=True, env="Production"):
         client = self.client(user)
@@ -1639,6 +1905,38 @@ class Pages(WebBase):
                                        headers={"User-Agent": SAFARI_UA})
         self.assertEqual(r.status_code, 303)
 
+    def test_stripe_checkout_waits_while_apple_retries_a_renewal(self):
+        # Ann's card failed at renewal, with no grace period: her Pro has
+        # ended, but Apple keeps trying to charge her for up to 60 days. If it
+        # gets through after she paid Stripe, she pays twice.
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        bought = now_ms() - 31 * DAY
+        kept = dict(purchase=bought, expires=bought + 30 * DAY, product=MONTHLY)
+        self.post(client, "/api/apple/transactions", {"jws": [self.tx(token, signed=bought, **kept)]})
+        failed = self.note("DID_FAIL_TO_RENEW", self.tx(token, **kept), status=3,
+                           renewal={"autoRenewStatus": 1, "isInBillingRetryPeriod": True})
+        self.assertEqual(CLIENT.post("/apple/notifications", json={"signedPayload": failed}).status_code, 200)
+        self.assertLess(self.apple_until(self.ann), time.time())
+        del self.sent_to_stripe[:]
+        web_ua = {"User-Agent": SAFARI_UA}
+        page = self.text(client.get("/pricing", headers=web_ua))
+        self.assertIn("Apple is still trying to renew", page)
+        self.assertIn(APPLE_SUBSCRIPTIONS_LINK, page)
+        self.assertNotIn('action="/billing/checkout"', page)
+        r = client.post("/billing/checkout", data={"plan": "monthly"}, headers=web_ua)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("Apple is still trying to renew", self.text(r))
+        self.assertFalse([s for s in self.sent_to_stripe if s[1] == "checkout/sessions"])
+        # She turns renewing off with Apple, which will then not charge her
+        # again: Stripe it is.
+        off = self.note("DID_CHANGE_RENEWAL_STATUS", self.tx(token, **kept), status=3,
+                        renewal={"autoRenewStatus": 0})
+        CLIENT.post("/apple/notifications", json={"signedPayload": off})
+        self.assertIn('action="/billing/checkout"', self.text(client.get("/pricing", headers=web_ua)))
+        r = client.post("/billing/checkout", data={"plan": "monthly"}, headers=web_ua)
+        self.assertEqual(r.status_code, 303)
+
     def test_deleting_an_account_apple_still_bills(self):
         client = self.make_apple_pro(self.ann)
         page = self.text(client.get("/account", headers=IN_APP))
@@ -1661,6 +1959,32 @@ class Pages(WebBase):
                                           (self.ann.id,)).fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM apple_subs WHERE user_id=?",
                                           (self.ann.id,)).fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_what_a_deleted_account_bought_is_forgotten_once_it_has_run_out(self):
+        client = self.client(self.ann)
+        token = self.state(client)["appAccountToken"]
+        self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        r = client.post("/account/delete", data={"confirm": "delete"}, headers=IN_APP)
+        self.assertEqual(r.status_code, 302)
+        conn = db.connect(WEB_DB)
+        try:
+            row = lambda: conn.execute("SELECT user_id, app_token FROM apple_subs WHERE original_tx_id=?",
+                                       (self.otid,)).fetchone()
+            self.assertEqual(tuple(row()), (None, ""))
+            real = web.billing_mod.recheck
+            web.billing_mod.recheck = lambda c: {}
+            try:
+                web._recheck_plans_job()
+                self.assertIsNotNone(row())          # its year is still running
+                conn.execute("UPDATE apple_subs SET expires_ms=? WHERE original_tx_id=?",
+                             (now_ms() - 1000, self.otid))
+                conn.commit()
+                web._recheck_plans_job()
+            finally:
+                web.billing_mod.recheck = real
+            self.assertIsNone(row())
         finally:
             conn.close()
 
@@ -1701,6 +2025,10 @@ class Pages(WebBase):
         privacy = self.text(CLIENT.get("/privacy"))
         self.assertIn("anonymous account token", privacy)
         self.assertIn("Apple takes the payment", privacy)
+        # What deleting the account leaves of it, and for how long.
+        words = " ".join(privacy.split())
+        self.assertIn("kept, linked to no account, until the time it paid for has run out", words)
+        self.assertNotIn("deletes Orenth's record of any Pro bought through Apple", words)
         terms = self.text(CLIENT.get("/terms"))
         self.assertIn("Bought in the iPhone app", terms)
         self.assertNotIn("stripe", self.text(CLIENT.get("/terms", headers=IN_APP)).lower())

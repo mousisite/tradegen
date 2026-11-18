@@ -665,6 +665,49 @@ try:
               reaches("a-erin-next", "erin@corp.example") is None)
         check("while the Apple ID that made it still reaches it",
               reaches("a-erin", "erin@corp.example") == erin.id)
+
+        # The other way round: an account Apple made, then a Google account
+        # with the same address. It joins once, as an Apple ID joins one Google
+        # made: Google is linked beside Apple, so the account still says Apple
+        # made it, and a second Google account with the address is refused.
+        def google_reaches(sub, email):
+            """The account a Google account with this address reaches, or None."""
+            try:
+                return A.upsert_google_user(conn, {"sub": sub, "email": email,
+                                                   "email_verified": True}).id
+            except ValueError:
+                return None
+
+        gina = A.upsert_apple_user(conn, {"sub": "a-gina", "email": "gina@corp.example",
+                                          "email_verified": True})
+        check("an account Apple made is joined by a Google account with its address",
+              google_reaches("g-gina", "gina@corp.example") == gina.id)
+        made = conn.execute("SELECT provider, provider_id FROM users WHERE id=?",
+                            (gina.id,)).fetchone()
+        check("Google is linked beside Apple: the account still says Apple made it",
+              tuple(made) == ("apple", "a-gina")
+              and (A.made_by(conn, "apple", "a-gina") or {"user_id": 0})["user_id"] == gina.id
+              and A.sign_in_methods(conn, A.get_user(conn, gina.id)) == ["Apple", "Google"],
+              (tuple(made), A.sign_in_methods(conn, A.get_user(conn, gina.id))))
+        check("so its Apple Account going leaves it Google as a way in",
+              A.can_still_sign_in(conn, gina.id, "apple", "a-gina"))
+        check("the same Google account comes back to it, whatever its address now",
+              google_reaches("g-gina", "gina.new@corp.example") == gina.id)
+        check("the account keeps its own address",
+              A.get_user(conn, gina.id).email == "gina@corp.example")
+        check("but a second Google account with that address is refused",
+              google_reaches("g-gina-next", "gina@corp.example") is None)
+        check("and the Apple ID that made it still reaches it",
+              reaches("a-gina", "gina@corp.example") == gina.id)
+        # One Google made, then an Apple ID: the same rule, the other way.
+        hal = A.upsert_google_user(conn, {"sub": "g-hal", "email": "hal@corp.example",
+                                          "email_verified": True})
+        check("an Apple ID joins an account Google made, once",
+              reaches("a-hal", "hal@corp.example") == hal.id
+              and reaches("a-hal-next", "hal@corp.example") is None)
+        check("and Google still reaches it, made by Google as it was",
+              google_reaches("g-hal", "hal@corp.example") == hal.id
+              and A.get_user(conn, hal.id).provider == "google")
     finally:
         conn.close()
 

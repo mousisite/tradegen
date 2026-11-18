@@ -82,7 +82,11 @@
     renewals and restored purchases reach the right account; it says nothing
     about who you are. If a subscription is moved from one Orenth account to
     another, Orenth keeps which account it left and when, and emails that
-    account to say so.</p>
+    account to say so. If you delete your account, the token is deleted. The
+    subscription's transaction numbers, plan, dates and any refund are
+    kept, linked to no account, until the time it paid for has run out: a
+    copy of a purchase stays valid, and this record is what stops a refunded
+    one giving Pro again.</p>
   {% endif %}
   <p class="prose">If you press Share on an analysis, Orenth makes a public
     page with that stock, the call, its counts and the date. It does not show
@@ -258,10 +262,12 @@
     strategy record stays, because it was never yours alone and contains
     nothing about you.{% if apple_native %} If you signed in with Apple, it
     also asks Apple to end Orenth's access to your Apple Account.{% endif %}
-    {% if iap_on %}It deletes Orenth's record of any Pro bought through Apple
-    too, but it cannot cancel that subscription: Apple keeps billing until you
-    cancel it in your iPhone's Settings &gt; Apple Account &gt;
-    Subscriptions, which the Account page says before you delete.{% endif %}
+    {% if iap_on %}It deletes the token that tied any Pro bought through Apple
+    to your account, and keeps the rest of that subscription's record only as
+    said above, linked to no account. It cannot cancel that subscription:
+    Apple keeps billing until you cancel it in your iPhone's Settings &gt;
+    Apple Account &gt; Subscriptions, which the Account page says before you
+    delete.{% endif %}
   </p>
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
