@@ -62,8 +62,8 @@ enum OrenthSite {
 /// also true of https://orenth.app.evil.example. So every address the web
 /// view is about to open as a page is checked here first, before Capacitor:
 ///
-/// - An https address on orenth.app itself, and the app's own files
-///   (capacitor://localhost, where the offline page is), are left to
+/// - An https address on orenth.app itself, and the app's own offline page
+///   (server.errorPath, capacitor://localhost/offline.html), are left to
 ///   Capacitor, which opens them in the app as before.
 /// - Anything else is never opened in the app. It opens outside it: another
 ///   site in Safari, mailto: in Mail, and so on, as Capacitor already does
@@ -139,7 +139,7 @@ public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             return nil
         }
-        if isAppFile(url) {
+        if isOfflinePage(url) {
             return nil
         }
         openOutside(url)
@@ -160,18 +160,20 @@ public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    /// capacitor://localhost: the files inside the app, where the offline
-    /// page is.
-    private func isAppFile(_ url: URL) -> Bool {
-        guard let local: URL = bridge?.config.localURL,
-              let localScheme: String = local.scheme,
-              let localHost: String = local.host,
+    /// The page Capacitor shows from inside the app when a load fails
+    /// (server.errorPath): the only one of the app's own files that is ever
+    /// a page.
+    private func isOfflinePage(_ url: URL) -> Bool {
+        guard let page: URL = bridge?.config.errorPathURL,
+              let pageScheme: String = page.scheme,
+              let pageHost: String = page.host,
               let scheme: String = url.scheme,
               let host: String = url.host else {
             return false
         }
-        return scheme.lowercased() == localScheme.lowercased()
-            && host.lowercased() == localHost.lowercased()
+        return scheme.lowercased() == pageScheme.lowercased()
+            && host.lowercased() == pageHost.lowercased()
+            && url.path == page.path
     }
 
     /// The pull to refresh spinner, which a cancelled reload would leave

@@ -864,12 +864,12 @@ check("the guard answers Capacitor's question about every page the web view open
       "override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber?"
       in guard_swift and "isMainFrame" in guard_swift
       and "return NSNumber(value: true)" in guard_swift)
-check("and lets in only https on orenth.app exactly, and the app's own files",
+check("and lets in only https on orenth.app exactly, and the app's own offline page",
       'static let host: String = "orenth.app"' in guard_swift
       and 'scheme.lowercased() == "https" && host.lowercased() == OrenthSite.host' in guard_swift
       and "if OrenthSite.isSitePage(url) {" in guard_swift
-      and "if isAppFile(url) {" in guard_swift
-      and "bridge?.config.localURL" in guard_swift)
+      and "if isOfflinePage(url) {" in guard_swift
+      and "bridge?.config.errorPathURL" in guard_swift and "url.path == page.path" in guard_swift)
 check("anywhere else opens outside the app, and only while it is in use",
       "UIApplication.shared.open(url" in guard_swift
       and "activationState == .foregroundActive" in guard_swift)
