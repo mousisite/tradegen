@@ -117,7 +117,8 @@ Xcode writes these into the project itself. Do not edit any other file.
     - Swipe in from the left edge: it goes back.
     - Tap a link to another website (the research page has filing links):
       it opens in a sheet over the app, with **Done** to close it.
-    - Tap **Share** on a popular stock's page: the iPhone's share sheet opens.
+    - Tap **More** in the bar along the bottom, then **Popular stocks**, any
+      stock, and **Share**: the iPhone's share sheet opens.
     - Turn on **Airplane Mode** and pull a page down: the **No connection**
       page shows. Turn Airplane Mode off and tap **Try again**.
     - In dark mode (Settings > Display & Brightness), the launch screen and
@@ -224,25 +225,48 @@ GitHub. The project is public.
 Apple's reviewers cannot get the codes Orenth emails or texts. So one account,
 used only for App Review, signs in with a fixed code instead.
 
-1. Pick an email address you own and use for nothing else, for example a new
-   free email account. This is `REVIEW_LOGIN_EMAIL`.
+1. Pick an email address you own and use for nothing else: an address at
+   your own domain (for example `appreview@` and your domain), or a new free
+   email account that is **not** a Gmail or other Google account. Reviewers
+   who see a Gmail address try **Continue with Google** with it, which asks
+   for a Google password they do not have. This is `REVIEW_LOGIN_EMAIL`.
+   Never sign in to Orenth with Google or Apple using it: while the review
+   sign-in is on, Orenth refuses both for that address, because joined to
+   Google the account would no longer open with the code. If an account
+   already exists at that address, made with Google, Apple or a text code,
+   pick another address: the code will not open it, and the Render log says
+   so at start-up (`review sign-in on, but its code cannot open its
+   account`).
 2. Make a long random code: in Terminal, type `openssl rand -hex 12` and
    press Return. Copy the 24 letters and numbers it prints. This is
    `REVIEW_LOGIN_CODE`. It must be at least 16 characters long, or the
    review sign-in stays switched off.
-3. Put both in Render (Part 3).
-4. Test it on your iPhone: open **Safari**, type
+3. Put both in Render (Part 3). When Render has restarted, its log says
+   `review sign-in on`.
+4. Test it on your iPhone, the way App Review will: in Orenth, tap **Sign
+   in**, then **Continue with email**. Type the review email and tap **Send
+   me a code**. No email is sent: Orenth opens **Review sign-in** with the
+   email filled in. Type the code and tap **Sign in**. You are signed in.
+   (Continue with email is there once email codes are set up, DEPLOY.md's
+   SMTP settings. Without them, open **Safari**, type
    `app.orenth.ios://open?path=/signin/review` in the address bar, tap Go,
-   then tap **Open**. Orenth opens on **Review sign-in**. Type the email and
-   the code. You are signed in.
-5. While signed in as the review account, add one stock to the watchlist and
-   one alert, so the reviewer sees the app in use. Leave the account on the
-   **Free** plan: the reviewer must be able to try buying Pro.
+   then tap **Open**.)
+5. While signed in as the review account, add one stock to the watchlist,
+   and one alert, then tap **Pause** on that alert (Monitor, in the bar along
+   the bottom). The free plan runs one alert at a time and a paused one does
+   not count, so the reviewer can still add their own alert to test
+   notifications; a second running alert would send them to the Pro screen
+   instead. Leave the account on the **Free** plan: the reviewer must be
+   able to try buying Pro.
 
-The review sign-in is linked from nowhere on the site, works only for that
-one account, never makes it Pro, and stops a network after 15 wrong tries an
-hour. Change the code if it ever leaks: change it in Render and in App Store
-Connect's review notes.
+The review sign-in page is linked from nowhere on the site. Continue with
+email opens it for the review address only, and sends that address no
+email. It works only for that one account, never makes it Pro, and stops a
+network after 15 wrong tries an hour. Change the code if it ever leaks:
+change it in Render and in App Store Connect's review notes. If App Review
+ever says the demo account does not work, look in Render's log for
+`App Review typed the right email and code, but` or `Refused`: the line
+says why.
 
 ---
 
@@ -495,10 +519,10 @@ if they signed up in Part 1).
       (or `All Pro tools, billed yearly`). People see these when they manage
       their subscriptions.
     - **Review Information**. Screenshot: a picture of the app's subscribe
-      screen (in the app: Menu, Account, See Pro), taken on your iPhone with
-      the plans showing (step 20). Review Notes: `Pro removes the daily
-      limits. It is bought in the app under Go Pro, or Menu > Account > See
-      Pro.`
+      screen (in the app: More in the bar along the bottom, Account, See
+      Pro), taken on your iPhone with the plans showing (step 20). Review
+      Notes: `Pro removes the daily limits. It is bought in the app under Go
+      Pro at the top, or More > Account > See Pro.`
     - **Family Sharing**: leave it **off**. Once on, it can never be turned
       off.
 11. Give the group a name people see, too: click the group, then
@@ -540,7 +564,7 @@ if they signed up in Part 1).
     Developer > Sandbox Apple Account** and sign in with the test account.
     Stay signed in to your own Apple Account as usual.
 20. Run Orenth from Xcode (Part 2, step 22). Sign in with a free account.
-    Tap **Go Pro** (or Menu, Account, See Pro). Both plans show, with their
+    Tap **Go Pro** (or More, Account, See Pro). Both plans show, with their
     prices. Tap **Subscribe** on one. Apple's sheet says **[Sandbox]**:
     confirm. The screen says you have Pro. Take the review screenshot
     (step 10) on the screen before you buy.
@@ -579,42 +603,56 @@ Store Connect can take an hour to reach the sandbox.
 ### App Review Information
 
 - **Sign-in required**: tick it. User name: the `REVIEW_LOGIN_EMAIL`.
-  Password: the `REVIEW_LOGIN_CODE`.
+  Password: the `REVIEW_LOGIN_CODE`. These work only on Orenth's **Review
+  sign-in** page, not with Google or Apple; the notes start by saying how a
+  reviewer reaches it (Continue with email, Part 4 step 4).
 - **Contact information**: the account holder's name, phone and email.
-- **Notes**: paste this, then fill in the three `[square brackets]`. It
-  must stay under 4,000 characters (it is about 2,900).
+- **Notes**: paste this, then fill in the three `[square brackets]`. Keep the
+  line that starts `[Only if ANTHROPIC_API_KEY is set]` only when that
+  setting is on in Render, and then delete those words in brackets. It must
+  stay under 4,000 characters (it is about 3,500).
+
+Every native feature is listed first, each with a path that works for the
+review account once signed in, using the bar along the bottom of the
+screen (Analyse, Find, Journal, Monitor, More), which is how the app is
+found round.
 
 ```
+SIGNING IN TO THE REVIEW ACCOUNT
+These credentials work only on Orenth's Review sign-in page, not with Google or Apple:
+1. On the first screen, tap Sign in (top right), then Continue with email.
+2. Type the email below and tap Send me a code. No email is sent: the Review sign-in page opens with the email filled in.
+3. Type the code below and tap Sign in.
+Email: [REVIEW_LOGIN_EMAIL]
+Code: [REVIEW_LOGIN_CODE]
+The page also opens from Safari: type app.orenth.ios://open?path=/signin/review in the address bar, tap Go, then Open.
+The account is on the free plan, so buying Pro can be tested. Everything below starts from the bar along the bottom of the screen.
+
+NATIVE FEATURES, SIGNED IN
+- Notifications: tap Monitor. Under "Notifications on this device", tap Turn on, allow them, then tap Send a test. For a real alert, under Alerts on the same page: type AAPL, choose "Price rises above", type 1, tap Add alert, then "Check them all now". The free plan runs one alert at a time, so the account's sample alert is paused to leave room. Tapping a notification opens the page it is about.
+- In-app purchase (StoreKit): tap Go Pro at the top, or More > Account > See Pro. See below.
+- Share sheet: tap Analyse > NVDA > Share this call > Share.
+- Links to other websites open in a Safari sheet with Done: on the NVDA analysis, tap Research the business, then any filing link.
+- Pull a page down to reload it. Swipe in from the left edge to go back.
+- Offline screen: turn on Airplane Mode and pull a page down; tap Try again once back online.
+- Sign in with Apple, in Apple's own sheet: More > Account > Sign out, then Sign in > Continue with Apple, with your own Apple Account.
+- Google sign-in opens in Apple's secure sign-in sheet, never in the app's own web view.
+[Only if ANTHROPIC_API_KEY is set]- Camera: on Analyse, tick the box agreeing that the picture goes to Anthropic, then tap the chart-screenshot box and take a photo of a chart. Nothing is sent before the box is ticked.
+
+IN-APP PURCHASE
+Tap Go Pro, or More > Account > See Pro. Both subscriptions (Orenth Pro Monthly and Yearly, one group) show with their App Store prices, Restore Purchases, and links to the Terms of Use (EULA), Terms and Privacy Policy. After buying, the Account page has Manage subscription, which opens Apple's sheet. Orenth is also a website (3.1.3(b)): Pro bought there works in the app too, and the app sells Pro only through in-app purchase, with no link to buying on the website.
+
+DELETING AN ACCOUNT
+Tap the round account picture at the top right (or More > Account), then "Leaving" at the bottom: type delete, then tap Delete my account. Everything is deleted straight away, not deactivated.
+
 ABOUT ORENTH
 Orenth is a research and learning tool for stocks and crypto: historical back-tests, charts, price alerts and a practice journal that uses virtual money only. It is not a broker, exchange or wallet. There is no trading, no real money, no deposits or withdrawals, no wallets, and no linking of bank or brokerage accounts. Nothing in it is personalized investment advice, so guidelines 3.2.1(viii), 3.1.5 and 5.1.1(ix) do not apply.
 
 LOOK AROUND WITHOUT SIGNING IN
-On the first screen, tap "Look around first". It opens a full example account (journal, alerts, watchlist) with no sign-in.
-
-THE REVIEW ACCOUNT
-Orenth signs people in with a code sent by email or text, which App Review cannot receive. This one account uses a fixed code instead:
-1. In Safari on the device, type app.orenth.ios://open?path=/signin/review in the address bar and tap Go, then tap Open. Orenth opens on "Review sign-in".
-2. Email: [REVIEW_LOGIN_EMAIL]
-   Code: [REVIEW_LOGIN_CODE]
-The account is on the free plan, so buying Pro can be tested. Sign in with Apple also works with your own Apple Account.
-
-WHAT IS NATIVE
-- Sign in with Apple: Sign in (top right) > Continue with Apple. Apple's own sheet, with Face ID.
-- Google sign-in opens in a secure Safari sheet, never inside the app's own web view.
-- Notifications: sign in, open Menu > Monitor, find "Notifications on this device", tap Turn on and allow notifications, then tap Send a test. A real alert: add a "Price rises above" alert for any stock at a price below today's, then tap "Check them all now". Tapping a notification opens the page it is about.
-- Share sheet: front page > "Today's checks on popular stocks and coins" > any stock > Share.
-- Pull any page down to reload it. Swipe in from the left edge to go back.
-- Offline screen: turn on Airplane Mode and pull a page down. Tap Try again once back online.
-- Links to other websites open in a sheet over the app with a Done button.
-
-IN-APP PURCHASE
-Signed in as the review account (free plan), tap Go Pro at the top, or Menu > Account > See Pro. Both subscriptions (Orenth Pro Monthly and Yearly, one group) show there with their prices from the App Store, Restore Purchases, and links to the Terms of Use (EULA), Terms and Privacy Policy. After buying, the Account page has Manage subscription, which opens Apple's sheet. Orenth is also a website (guideline 3.1.3(b)): Pro bought there also works in the app, and the app sells the same Pro only through in-app purchase, with no link to buying on the website.
-
-DELETING AN ACCOUNT
-Signed in: tap the round account picture at the top right > Account > "Leaving" at the bottom of the page > type delete > Delete my account. Everything is deleted straight away, not deactivated.
+Signed out, "Look around first" on the first screen opens a full example account with no sign-in.
 
 DATA
-Prices: [the price provider and its licence]. Company figures: SEC EDGAR (public). No ads, no tracking, no third-party analytics in the app.
+Prices: [the price provider and its licence]. Company figures: SEC EDGAR (public). Headlines: Google News. StockTwits posts are only counted in the app; their text is not shown. No ads, no tracking, no third-party analytics in the app.
 ```
 
 ### Submit
@@ -629,31 +667,43 @@ Prices: [the price provider and its licence]. Company figures: SEC EDGAR (public
 ## Part 6. Check these before you press Submit
 
 Apple rejects apps for these, so check each one on your own iPhone, in the
-app, signed in as the review account:
+app. Sign in to the review account only through Review sign-in (Part 4,
+step 4), and test Google and Apple sign-in with your own accounts, never
+with the review address: Orenth refuses those for it.
 
-1. **Google sign-in works in the app** and leaves you signed in to the app,
-   not to Safari. **Sign in with Apple** works too.
-2. **Pro can be bought in the app with Apple's in-app purchase** (Part 5,
+1. **Google sign-in works in the app**, with your own Google account, and
+   leaves you signed in to the app, not to Safari. **Sign in with Apple**
+   works too, with your own Apple Account. Then sign out (More > Account).
+2. **Every path in the review notes works**, signed in as the review
+   account, in the order the notes give them: the notifications (one alert
+   of the reviewer's own, beside the paused sample), the purchase screen,
+   the share sheet, a filing link, pull to refresh, swiping back, the
+   offline screen and deleting an account (try that last one with an
+   account of your own, not the review account).
+3. **Pro can be bought in the app with Apple's in-app purchase** (Part 5,
    "Sell Pro in the app", steps 18 to 23, with a sandbox account): both plans
    show with prices, **Restore Purchases** works, and **Manage subscription**
    opens Apple's sheet. Apple will not accept an app where Pro is bought only
    on the website (rule 3.1.1). Inside the app, the site already hides every
    Stripe button, web price and discount box. Both subscriptions are added
    to this version (step 24).
-3. **No page says "not set up"**, or shows an error about a missing key. If
-   the chart-screenshot reader is on, the app must say that the picture is
-   sent to Anthropic and ask before the first one (rule 5.1.2).
-4. **Nothing mentions Android, Google Play or installing an app**, and there
-   is no "add to Home Screen" box inside the app.
-5. **The site answers quickly.** If Render is asleep or slow, App Review sees
+4. **No page says "not set up"**, or shows an error about a missing key. If
+   the chart-screenshot reader is on (`ANTHROPIC_API_KEY`), the Analyse page
+   in the app shows an unticked box saying the picture goes to Anthropic,
+   and a picture picked without ticking it is not sent (rule 5.1.2(i)).
+5. **Nothing mentions Android, Google Play or installing an app**, and there
+   is no "add to Home Screen" box inside the app. The privacy page counts
+   too: the subscribe screen links to it.
+6. **The site answers quickly.** If Render is asleep or slow, App Review sees
    a blank screen. Make sure Cloudflare is not showing a "checking your
    browser" page to phones, and that its rule for Apple's and Stripe's
    servers is in place (DEPLOY.md section 8).
-6. **Account deletion** works from the Account page and confirms it is done.
-7. The **review sign-in** works (Part 4, step 4), and the review account is
-   on the **Free** plan: run `python tools/reset_test_purchases.py` in
+7. **Account deletion** works from the Account page and confirms it is done.
+8. The **review sign-in** works (Part 4, step 4), Render's log says
+   `review sign-in on`, and the review account is on the **Free** plan with
+   its sample alert paused: run `python tools/reset_test_purchases.py` in
    Render's Shell after any test purchase with it.
-8. **Deleting an account that has an Apple subscription** says first that
+9. **Deleting an account that has an Apple subscription** says first that
    Apple keeps billing until it is cancelled, with a **Manage subscription**
    button, and still deletes straight away.
 
@@ -689,4 +739,7 @@ app, signed in as the review account:
 - `scripts/make_assets.py`, then `npx @capacitor/assets generate --ios`:
   the icon and launch screens, drawn from `tools/make_logo.py`.
 - On the website, `static/native.js` connects pages to the phone, and
-  `in_app` in the templates says a page is drawn inside the app.
+  `in_app` in the templates says a page is drawn inside the app. Inside it
+  the pages leave out what only a website has: the footer's links but Terms
+  and Privacy (the tab bar's More has them), the skip link, file downloads,
+  and the words of StockTwits posts.

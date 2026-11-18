@@ -714,6 +714,73 @@ try:
     finally:
         web.auth_mod.sign_in = real_google
         web.app.logger.removeHandler(grab)
+
+    print()
+    print("=" * 72)
+    print("THE REVIEW NOTES' PATHS WORK FOR THE REVIEW ACCOUNT")
+    print("=" * 72)
+    # What the owner pastes into App Store Connect for App Review, from
+    # mobile/APP_STORE.md. Its share step went through a link only the
+    # signed-out front page has, its alert step ran into the free plan's
+    # limit, and its paths went through a top Menu the app hides.
+    guide = open(_os.path.join(harness.ROOT, "mobile", "APP_STORE.md"),
+                 encoding="utf-8").read()
+    notes = guide[guide.index("### App Review Information"):].split("```", 2)[1].strip()
+    blocks = notes.split("\n\n")
+    check("the notes start by saying where the review credentials work",
+          blocks[0].startswith("SIGNING IN TO THE REVIEW ACCOUNT")
+          and "work only on Orenth's Review sign-in page" in blocks[0]
+          and "Continue with email" in blocks[0])
+    check("then every native feature, before anything else",
+          blocks[1].startswith("NATIVE FEATURES"))
+    check("they leave room under App Store Connect's 4,000 bytes to fill them in",
+          len(notes.encode("utf-8")) < 3800, len(notes.encode("utf-8")))
+    check("no path goes through the top Menu, which the app hides",
+          not re.search(r"\bMenu\b", notes), re.findall(r".{0,30}\bMenu\b.{0,30}", notes))
+    check("nor through a link only the signed-out front page has",
+          "Today's checks on popular stocks and coins" not in notes)
+
+    # Part 4 step 5: the owner's sample alert, then paused. The notes then
+    # have the reviewer add one of their own and check it.
+    _os.environ["REVIEW_LOGIN_EMAIL"] = "appreview@example.com"
+    _os.environ["REVIEW_LOGIN_CODE"] = CODE
+    web._RATE.clear()
+    rev = web.app.test_client()
+    signed = rev.post("/signin/review", headers=IN_APP, data={
+        "email": "appreview@example.com", "code": CODE})
+    check("the review account signs in", signed.status_code == 302, signed.status_code)
+    sample = rev.post("/monitor/alert/add", headers=IN_APP, data={
+        "symbol": "MSFT", "kind": "price_above", "threshold": "100000",
+        "interval": "1d", "repeat": "0", "note": "sample"})
+    conn = db.connect(DB)
+    sample_id = conn.execute(
+        "SELECT a.id FROM alerts a JOIN users u ON u.id = a.user_id "
+        "WHERE u.email='appreview@example.com' AND a.note='sample'").fetchone()["id"]
+    conn.close()
+    second = rev.post("/monitor/alert/add", headers=IN_APP, data={
+        "symbol": "AAPL", "kind": "price_above", "threshold": "1", "interval": "1d",
+        "repeat": "0"})
+    check("left running, the sample alert would send the reviewer's own to the Pro "
+          "screen", sample.status_code == 302 and second.status_code == 402,
+          (sample.status_code, second.status_code))
+    rev.post("/monitor/alert/pause", headers=IN_APP, data={"alert_id": str(sample_id)})
+    own = rev.post("/monitor/alert/add", headers=IN_APP, data={
+        "symbol": "AAPL", "kind": "price_above", "threshold": "1", "interval": "1d",
+        "repeat": "0"})
+    check("paused, it leaves room for the reviewer's alert", own.status_code == 302,
+          own.status_code)
+    monitor = text(rev.get("/monitor", headers=IN_APP))
+    check("and the Monitor page has what the notes name",
+          "Notifications on this device" in monitor and "Check them all now" in monitor
+          and "Price rises above" in monitor)
+    account = text(rev.get("/account", headers=IN_APP))
+    page = text(rev.get("/", headers=IN_APP))
+    more = page[page.find('<details class="more">'):]
+    check("More has Account, whose page has See Pro, Sign out and Leaving",
+          'href="/account"' in more[:more.find("</details>")]
+          and ">See Pro<" in account and ">Sign out<" in account
+          and "<h2>Leaving</h2>" in account)
+    check("the front page has NVDA to analyse and share", 'symbol=NVDA' in page)
 finally:
     billing._stripe = real_stripe
     for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
