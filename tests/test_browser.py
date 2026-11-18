@@ -33,6 +33,7 @@ SKIP and passes.
 
     python tests/test_browser.py
 """
+import json
 import os as _os
 import sys as _sys
 import threading
@@ -784,6 +785,40 @@ FAKE_APP = r"""
 """
 
 
+# The app's subscribe screen, with a stand-in for its App Store plugin
+# (AppPurchase) whose answers __SETUP__ gives. A method named in "first"
+# holds its first call until window.__iapRelease(method); every other call
+# is answered at once. window.__iapAsked lists the methods asked for.
+FAKE_STORE = r"""
+(() => {
+  const setup = __SETUP__;
+  const held = {};
+  const seen = {};
+  window.__iapAsked = [];
+  window.__iapRelease = (method) => {
+    (held[method] || []).forEach((resolve) => resolve(setup.answers[method]));
+    held[method] = [];
+  };
+  window.Capacitor = {
+    isNativePlatform: () => true,
+    isPluginAvailable: (name) => name === 'AppPurchase',
+    getPlatform: () => 'ios',
+    Plugins: {},
+    nativePromise: (plugin, method, options) => {
+      window.__iapAsked.push(method);
+      if (plugin !== 'AppPurchase') { return Promise.reject(new Error('not in this app')); }
+      const first = !seen[method];
+      seen[method] = true;
+      if (first && setup.first.indexOf(method) !== -1) {
+        return new Promise((resolve) => { (held[method] = held[method] || []).push(resolve); });
+      }
+      return Promise.resolve(setup.answers[method]);
+    }
+  };
+})();
+"""
+
+
 def main():
     fails = []
 
@@ -1202,6 +1237,73 @@ def run(browser, site, base, check, head):
         except Exception as exc:
             check("the pricing page %s" % ("signed in" if member else "signed out"),
                   False, exc)
+        ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("PRO IN THE APP, WHEN THIS APPLE ACCOUNT'S PRO IS ANOTHER ACCOUNT'S")
+    # -----------------------------------------------------------------------
+    # Pricing asks the App Store for the plans and, at the same time, sends
+    # what this Apple Account holds to the server. Here the server says that
+    # holding belongs to another Orenth account. Whichever answers first, no
+    # plan may then offer Subscribe: buying would only change that account's
+    # subscription. A tap that got in before the answer buys nothing either.
+    from bot import apple_store
+    monthly, yearly = apple_store.product_ids()[:2]
+    plans = {"products": [
+        {"id": monthly, "title": "Orenth Pro Monthly", "displayPrice": "$9.99", "price": "9.99",
+         "currencyCode": "USD", "periodUnit": "month", "periodValue": 1},
+        {"id": yearly, "title": "Orenth Pro Yearly", "displayPrice": "$79.99", "price": "79.99",
+         "currencyCode": "USD", "periodUnit": "year", "periodValue": 1}]}
+    theirs = {"jws": ["a.held.by-another-account"], "transactions": [
+        {"jws": "a.held.by-another-account", "productId": monthly, "transactionId": "7",
+         "originalTransactionId": "7", "verified": True,
+         "appAccountToken": "00000000-0000-4000-8000-000000000000"}]}
+    answers = {"products": plans, "entitlements": theirs,
+               "unfinished": {"jws": [], "transactions": []}, "purchase": {}}
+    STATE = """(() => ({
+      notice: !document.querySelector('[data-iap-elsewhere]').hidden,
+      plans: document.querySelectorAll('[data-buy]').length,
+      offered: [...document.querySelectorAll('[data-buy]')].filter(b => !b.hidden).length,
+      said: (document.querySelector('[data-iap-said]') || {}).textContent || '',
+      asked: window.__iapAsked
+    }))()"""
+    for first in ("products", "entitlements"):
+        posted = []
+
+        def another_account(route):
+            posted.append(route.request.post_data)
+            route.fulfill(status=200, content_type="application/json",
+                          body='{"results": [{"outcome": "other_account"}], "pro": false}')
+
+        ctx = context(390, ua=APP_UA, signed_in=True)
+        ctx.add_init_script(FAKE_STORE.replace("__SETUP__", json.dumps(
+            {"answers": answers, "first": [first]})))
+        ctx.route(base + "/api/apple/transactions", another_account)
+        page = ctx.new_page()
+        try:
+            page.goto(base + "/pricing")
+            if first == "products":
+                # The server answers first; the plans come after.
+                page.wait_for_selector("[data-iap-elsewhere]:not([hidden])")
+                page.evaluate("window.__iapRelease('products')")
+                page.wait_for_function("document.querySelectorAll('[data-buy]').length > 0")
+                seen = page.evaluate(STATE)
+                check("the plans arriving after the server's answer offer no Subscribe, "
+                      "next to the offer to move Pro here",
+                      seen["notice"] and seen["plans"] == 2 and seen["offered"] == 0, seen)
+            else:
+                # The plans come first, and Subscribe is tapped before the
+                # server has answered the check the page made as it opened.
+                page.locator('[data-buy="%s"]' % yearly).tap()
+                page.wait_for_selector("[data-iap-elsewhere]:not([hidden])")
+                seen = page.evaluate(STATE)
+                check("Subscribe tapped before that answer asks the server first, and buys "
+                      "nothing: moving Pro here is offered instead",
+                      "purchase" not in seen["asked"] and posted and seen["offered"] == 0
+                      and "Move it to this account instead" in seen["said"], seen)
+        except Exception as exc:
+            check("the subscribe screen when this Apple Account's Pro is another account's "
+                  "(%s first)" % first, False, exc)
         ctx.close()
 
     # -----------------------------------------------------------------------
