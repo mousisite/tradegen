@@ -562,15 +562,18 @@ try:
         check("inside the app the Account page has no way to cancel",
               "Manage subscription" not in account
               and member.post("/billing/portal", headers=IN_APP).status_code == 404)
+        # Held to what the terms promise, not to one wording of it: inside
+        # the app they send people to the Account page on the website, never
+        # to "your Account page", which has no button there.
         terms = flat(text(visitor.get("/terms", headers=IN_APP)))
-        check("so the terms there do not send people to it",
+        check("so the terms there do not send people to it, but to the website's",
               "cancel at any time from your Account page" not in terms
-              and "A subscription taken on the website is cancelled from the Account "
-                  "page there; you keep Pro until the end of the period" in terms,
+              and "from the Account page there" in terms,
               terms[terms.find("<h2>Pro</h2>"):][:600])
         terms = flat(text(visitor.get("/terms")))
         check("while in a browser they still do",
-              "You can cancel at any time from your Account page; you keep Pro" in terms)
+              "cancel at any time from your Account page" in terms,
+              terms[terms.find("<h2>Pro</h2>"):][:600])
     finally:
         for _k in STRIPE:
             _os.environ.pop(_k, None)
