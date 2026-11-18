@@ -110,8 +110,12 @@
 </head>
 <body>
 {# The first stop for a keyboard, so the ten links in the bar are one press
-   rather than ten on every page. Off screen until it has focus. #}
+   rather than ten on every page. Off screen until it has focus. Not in the
+   iPhone app, which has no row of links to skip and reads as an app, not a
+   website: VoiceOver finds the main landmark itself. #}
+{% if not in_app %}
 <a class="skip" href="#main">Skip to content</a>
+{% endif %}
 
 {# One list, drawn twice: as a row of links on a wide screen and as a menu on
    a phone. Eight links and an avatar are 720 pixels wide, and on a 390 pixel
@@ -181,6 +185,13 @@
             <a href="{{ url_for('account') }}"
                {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
           {% endif %}
+          {# As in the tab bar's More: the iPhone app's footer has only Terms
+             and Privacy. #}
+          {% if in_app %}
+            <a href="{{ url_for('stocks_index') }}">Popular stocks</a>
+            <a href="{{ url_for('backtests') }}">Strategy tests</a>
+            <a href="{{ url_for('record') }}">Track record</a>
+          {% endif %}
         </nav>
       </details>
     </div>
@@ -228,12 +239,15 @@
   majority of retail participants, and this tool's own measurements agree with
   that. Never risk money you cannot afford to lose.
   <br>
+  {# Inside the iPhone app the bar along the bottom is the way round, and a
+     website's row of links under every page is not an app's: only Terms and
+     Privacy stay, and the rest are in the bar's More. #}
   <a href="{{ url_for('terms') }}">Terms</a> ·
-  <a href="{{ url_for('privacy') }}">Privacy</a> ·
+  <a href="{{ url_for('privacy') }}">Privacy</a>{% if not in_app %} ·
   <a href="{{ url_for('stocks_index') }}">Popular stocks</a> ·
   <a href="{{ url_for('backtests') }}">Strategy tests</a> ·
   <a href="{{ url_for('record') }}">Track record</a>{% if billing_on %} ·
-  <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}
+  <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}{% endif %}
 </p>
 </footer>
 </div>
@@ -283,6 +297,13 @@
       {% if current_user and not demo %}
         <a href="{{ url_for('account') }}"
            {% if active == 'account' %}aria-current="page"{% endif %}>Account</a>
+      {% endif %}
+      {# The website has these under every page; the iPhone app has them
+         here, its footer being only Terms and Privacy. #}
+      {% if in_app %}
+        <a href="{{ url_for('stocks_index') }}">Popular stocks</a>
+        <a href="{{ url_for('backtests') }}">Strategy tests</a>
+        <a href="{{ url_for('record') }}">Track record</a>
       {% endif %}
       <p class="fine">
         <a href="{{ url_for('terms') }}">Terms</a>

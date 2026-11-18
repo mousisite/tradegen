@@ -189,6 +189,60 @@ try:
 
     print()
     print("=" * 72)
+    print("INSIDE THE APP, THE BAR ALONG THE BOTTOM IS THE WAY ROUND")
+    print("=" * 72)
+    # App Review turns down an app that is its website as it is (rule 4.2).
+    # A row of a website's links under every page, and a skip link, read as
+    # one: inside the app the footer keeps Terms and Privacy, and the bar's
+    # More holds the rest.
+    PUBLIC_PAGES = {"/stocks", "/backtests", "/record"}
+
+    def links_in(page, start, end):
+        at = page.find(start)
+        part = page[at:page.find(end, at)] if at >= 0 else ""
+        return re.findall(r'href="([^"]+)"', part)
+
+    member = web.app.test_client()
+    sign_in(member, free)
+    for who, client in (("a visitor", c), ("a free account", member)):
+        on_web = text(client.get("/", headers=IN_SAFARI))
+        inside = text(client.get("/", headers=IN_APP))
+        footer_web = links_in(on_web, "<footer>", "</footer>")
+        footer_app = links_in(inside, "<footer>", "</footer>")
+        more_web = links_in(on_web, '<details class="more">', "</details>")
+        more_app = links_in(inside, '<details class="more">', "</details>")
+        check("%s in a browser: the footer links the public pages, and a skip link "
+              "leads the page" % who, PUBLIC_PAGES <= set(footer_web)
+              and 'class="skip"' in on_web, footer_web)
+        check("%s inside the app: the footer has only Terms and Privacy" % who,
+              footer_app == ["/terms", "/privacy"], footer_app)
+        check("%s inside the app: no skip link" % who, 'class="skip"' not in inside)
+        check("%s inside the app: the bar's More has the public pages instead" % who,
+              PUBLIC_PAGES <= set(more_app) and not PUBLIC_PAGES & set(more_web),
+              (more_app, more_web))
+        check("%s inside the app: the bar has the four places and More" % who,
+              re.findall(r'<nav class="tabbar"[^>]*>', inside)
+              and [h for h in links_in(inside, '<nav class="tabbar"', '<details')]
+              == ["/", "/ideas", "/trades", "/monitor"])
+    # The screenshot box spoke of clicking, dragging and Ctrl+V. What it says,
+    # not the page's script, which is the same in both.
+    def shown(page):
+        return " ".join(re.sub(r"(?is)<script\b.*?</script>", " ", page).split())
+
+    _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+    try:
+        on_web = shown(text(member.get("/", headers=IN_SAFARI)))
+        inside = shown(text(member.get("/", headers=IN_APP)))
+    finally:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+    check("in a browser the screenshot box says click, drag or paste",
+          "Click to browse, drag an image in, or paste with Ctrl+V" in on_web)
+    check("inside the app it says tap, or take a photo",
+          "Tap to pick one, or take a photo of a chart." in inside
+          and "Ctrl+V" not in inside and "Click to browse" not in inside)
+
+    print()
+    print("=" * 72)
     print("BILLING ON: STRIPE STAYS OUT OF THE APP")
     print("=" * 72)
     _os.environ.update(STRIPE)
