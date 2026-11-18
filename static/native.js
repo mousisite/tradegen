@@ -11,7 +11,7 @@
  *   - Links to other sites open in a sheet over the app (the in-app browser)
  *     instead of leaving it, so the app never browses the open web.
  *   - The share buttons open the phone's own share sheet.
- *   - The status bar takes the page's own light or dark colours.
+ *   - The status bar's text is dark on a light page and light on a dark one.
  *   - The launch screen goes away as soon as the page is ready.
  *   - app.orenth.ios://open?path=/monitor opens that page of this site.
  *   - window.OrenthNotify.onAppStart(), if the notifications script is there.
@@ -28,8 +28,6 @@
   }
 
   var SCHEME = 'app.orenth.ios';
-  var LIGHT_GROUND = '#f4f3ee';
-  var DARK_GROUND = '#191817';
 
   function noop() {}
 
@@ -325,43 +323,34 @@
   }, true);
 
   // ---------------------------------------------------------------------------
-  // Status bar: the same ground as the page, light or dark, and dark text on a
-  // light ground. Read from the page itself, so it follows whatever the CSS
-  // decided, and checked again when the phone switches appearance.
+  // Status bar: the app draws the page under it, and the site's top bar keeps
+  // its own contents below it, so only the bar's text changes: dark on a
+  // light page, light on a dark one. Read from the page itself, so it follows
+  // whatever the CSS decided, and set again when the phone switches
+  // appearance, and when the in-app browser sheet closes, since the app then
+  // puts back the style it started with.
   // ---------------------------------------------------------------------------
-  function hex(n) {
-    var s = Math.max(0, Math.min(255, Math.round(n))).toString(16);
-    return s.length === 1 ? '0' + s : s;
-  }
-
-  function pageGround() {
-    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    var fallback = dark ? DARK_GROUND : LIGHT_GROUND;
+  function pageIsDark() {
     var node = document.body || document.documentElement;
     var colour = '';
     try { colour = window.getComputedStyle(node).backgroundColor || ''; } catch (e) { colour = ''; }
     var m = colour.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/);
-    if (!m || (m[4] !== undefined && parseFloat(m[4]) === 0)) { return fallback; }
-    return '#' + hex(+m[1]) + hex(+m[2]) + hex(+m[3]);
+    if (!m || (m[4] !== undefined && parseFloat(m[4]) === 0)) {
+      // No colour of its own: the phone's appearance, which the site follows.
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    return (0.299 * Number(m[1]) + 0.587 * Number(m[2]) + 0.114 * Number(m[3])) < 128;
   }
 
-  function isDarkGround(colour) {
-    var r = parseInt(colour.substr(1, 2), 16);
-    var g = parseInt(colour.substr(3, 2), 16);
-    var b = parseInt(colour.substr(5, 2), 16);
-    return (0.299 * r + 0.587 * g + 0.114 * b) < 128;
-  }
-
-  var lastGround = '';
+  var lastStyle = '';
 
   function syncStatusBar() {
     if (!has('StatusBar')) { return; }
-    var ground = pageGround();
-    if (ground === lastGround) { return; }
-    lastGround = ground;
-    // DARK means light text, for a dark ground; LIGHT means dark text.
-    call('StatusBar', 'setStyle', { style: isDarkGround(ground) ? 'DARK' : 'LIGHT' }).catch(noop);
-    call('StatusBar', 'setBackgroundColor', { color: ground }).catch(noop);
+    // DARK means light text, for a dark page; LIGHT means dark text.
+    var style = pageIsDark() ? 'DARK' : 'LIGHT';
+    if (style === lastStyle) { return; }
+    lastStyle = style;
+    call('StatusBar', 'setStyle', { style: style }).catch(noop);
   }
 
   if (window.matchMedia) {
@@ -376,6 +365,10 @@
     new MutationObserver(syncStatusBar).observe(document.documentElement,
       { attributes: true, attributeFilter: ['data-theme', 'class'] });
   }
+  listen('Browser', 'browserFinished', function () {
+    lastStyle = '';
+    syncStatusBar();
+  });
 
   // ---------------------------------------------------------------------------
   // App links: app.orenth.ios://open?path=/monitor. A link that started the

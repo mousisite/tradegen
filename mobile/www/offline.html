@@ -130,10 +130,9 @@
       if (C.isPluginAvailable('SplashScreen')) {
         C.nativePromise('SplashScreen', 'hide', {}).catch(quiet);
       }
+      // The page runs under the status bar; only its text changes.
       if (C.isPluginAvailable('StatusBar')) {
         C.nativePromise('StatusBar', 'setStyle', { style: dark ? 'DARK' : 'LIGHT' }).catch(quiet);
-        C.nativePromise('StatusBar', 'setBackgroundColor',
-                        { color: dark ? '#191817' : '#f4f3ee' }).catch(quiet);
       }
       if (C.isPluginAvailable('NavigationGuard')) {
         C.nativePromise('NavigationGuard', 'lastPage', {}).then(function (r) {

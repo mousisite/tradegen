@@ -643,6 +643,75 @@ NOTCH = r"""
 }
 """
 
+# Inside the app the page runs under the status bar (capacitor.config.json:
+# StatusBar overlaysWebView), so it must keep its own contents clear of it.
+# With the page at its top: every word, picture and control a person can see
+# is below the status bar, and above the home bar where no tab bar covers
+# it. Scrolled down: what passes under the status bar is behind the top bar,
+# which sticks there with the status bar's height added to it. The tab bar
+# reaches the bottom of the screen, padded by the home bar's height.
+APP_NOTCH = r"""
+(inset) => {
+  const H = innerHeight, W = innerWidth, out = {under: [], low: [], screen: H};
+  function shown(el) {
+    for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) {
+        return false;
+      }
+    }
+    const r = el.getBoundingClientRect();
+    return r.width >= 2 && r.height >= 2;      // not a 1-pixel label for screen readers
+  }
+  function name(el) {
+    const words = (el.textContent || el.getAttribute('aria-label') || '').trim()
+      .replace(/\s+/g, ' ').slice(0, 30);
+    return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' "' + words + '"';
+  }
+  window.scrollTo(0, 0);
+  const things = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (!n.textContent.trim() || !n.parentElement || !shown(n.parentElement)) { continue; }
+    const range = document.createRange();
+    range.selectNodeContents(n);
+    for (const box of range.getClientRects()) { things.push([box, n.parentElement]); }
+  }
+  for (const el of document.querySelectorAll('img, svg, input, select, textarea, button, video, canvas')) {
+    if (shown(el)) { things.push([el.getBoundingClientRect(), el]); }
+  }
+  const bar = document.querySelector('.tabbar');
+  const tabs = bar && getComputedStyle(bar).display !== 'none' ? bar : null;
+  for (const [box, el] of things) {
+    if (box.width < 1 || box.height < 1 || box.bottom <= 0 || box.top >= H
+        || box.right <= 0 || box.left >= W) { continue; }
+    if (box.top < inset.top - 0.5) { out.under.push(name(el) + ' at ' + Math.round(box.top)); }
+    if (!tabs && box.bottom > H - inset.bottom + 0.5) {
+      out.low.push(name(el) + ' down to ' + Math.round(box.bottom));
+    }
+  }
+  const top = document.querySelector('.topbar');
+  if (top) {
+    const s = getComputedStyle(top);
+    out.topPad = parseFloat(s.paddingTop);
+    out.sticky = (s.position === 'sticky' || s.position === 'fixed') && parseFloat(s.top) === 0;
+  }
+  if (tabs) {
+    out.tabPad = parseFloat(getComputedStyle(tabs).paddingBottom);
+    out.tabBottom = tabs.getBoundingClientRect().bottom;
+  }
+  window.scrollTo(0, 400);
+  if (scrollY > 0) {
+    out.covered = [10, W / 2, W - 10].every((x) => {
+      const hit = document.elementFromPoint(x, inset.top / 2);
+      return !!(hit && hit.closest('.topbar'));
+    });
+  }
+  window.scrollTo(0, 0);
+  return out;
+}
+"""
+
 # The longest figure a card might have to hold, in the first figure of the
 # portfolio's: it wraps in its column rather than widen the page.
 LONG_FIGURE = r"""
@@ -932,6 +1001,61 @@ def run(browser, site, base, check, head):
         check("with an alert's bar up too, the two do not stick one over the other",
               not both, both[:3])
     ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("INSIDE THE APP, EVERY PAGE CLEARS THE STATUS BAR AND THE NOTCH")
+    # -----------------------------------------------------------------------
+    # 390 by 844 with the notch and home bar of an iPhone 14, every page
+    # signed in and the pages only a visitor sees signed out, and the app's
+    # own offline page, served here as if it were one of the site's.
+    inset = {"top": 47, "bottom": 34, "left": 0, "right": 0}
+    with open(_os.path.join(ROOT, "mobile", "www", "offline.html"), encoding="utf-8") as fh:
+        app_offline = fh.read()
+    unclear, pretended, pages = [], True, 0
+    for member in (True, False):
+        ctx = context(390, ua=APP_UA, signed_in=member)
+        ctx.route(base + "/app-offline.html",
+                  lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                              body=app_offline))
+        page = ctx.new_page()
+        page.set_viewport_size({"width": 390, "height": 844})
+        try:
+            ctx.new_cdp_session(page).send("Emulation.setSafeAreaInsetsOverride",
+                                           {"insets": inset})
+        except Exception as exc:
+            print("   --   this browser cannot pretend to have a notch (%s)" % type(exc).__name__)
+            pretended = False
+            ctx.close()
+            break
+        paths = [p.format(run=run_id, share=share_path) for p, whom, _tab in PAGES
+                 if whom == ("member" if member else "visitor") or (member and whom == "all")]
+        if member:
+            paths.append("/app-offline.html")
+        for path in paths:
+            page.goto(base + path)
+            n = page.evaluate(APP_NOTCH, inset)
+            pages += 1
+            said = []
+            if n["under"]:
+                said.append("under the status bar: " + ", ".join(n["under"][:3]))
+            if n["low"]:
+                said.append("on the home bar: " + ", ".join(n["low"][:3]))
+            if "topPad" in n and (n["topPad"] != inset["top"] or not n["sticky"]):
+                said.append("the top bar is padded %s and %s" % (
+                    n["topPad"], "sticks" if n["sticky"] else "does not stick"))
+            if n.get("covered") is False:
+                said.append("scrolled, the page shows under the status bar")
+            if "tabPad" in n and (n["tabPad"] != inset["bottom"] or n["tabBottom"] != n["screen"]):
+                said.append("the tab bar is padded %s and ends at %s of %s" % (
+                    n["tabPad"], n["tabBottom"], n["screen"]))
+            if said:
+                unclear.append("%s %s: %s" % ("signed in" if member else "signed out", path,
+                                              "; ".join(said)))
+        ctx.close()
+    if pretended:
+        check("inside the app, nothing on any page (%d of them, the offline page among them) "
+              "sits under the status bar, the notch or the home bar, and scrolled, the page "
+              "passes under the top bar" % pages, not unclear, unclear[:4])
 
     # -----------------------------------------------------------------------
     head("A TICKER, TYPED")

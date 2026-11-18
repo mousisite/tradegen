@@ -119,7 +119,9 @@ too. Do not edit any other file.
 22. Press the **Play** button (top left). The first time, it can take a few
     minutes. Orenth opens on the iPhone.
 23. Try these on the iPhone:
-    - Pull a page down: it reloads.
+    - Pull a page down: it reloads. Check that you can see the small
+      spinner turning at the top while it does, and not only the notch or
+      the Dynamic Island over it.
     - Swipe in from the left edge: it goes back.
     - Tap a link to another website (the research page has filing links):
       it opens in a sheet over the app, with **Done** to close it.
@@ -129,8 +131,10 @@ too. Do not edit any other file.
       the page you tapped opens.
     - Tap a link, and before its page opens, tap another or swipe back: you
       get the second one, and never the **No connection** page.
-    - In dark mode (Settings > Display & Brightness), the launch screen and
-      the status bar are dark too.
+    - In dark mode (Settings > Display & Brightness), the launch screen is
+      dark too, and the clock and battery at the top are light, easy to
+      read on the dark page, also after you close a sheet opened from a
+      link. In light mode they are dark.
 
 ### Send the app to Apple (each new version)
 

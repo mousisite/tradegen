@@ -482,7 +482,9 @@ from urllib.parse import quote  # noqa: E402
 # One page of the app at https://orenth.app/monitor, with stand-ins for
 # Capacitor's bridge and plugins. Each link in __LINKS__ arrives on a page of
 # its own as an app link (appUrlOpen); it prints where each one sent the page
-# (location.assign), if anywhere.
+# (location.assign), if anywhere. Then, on a light page, a dark one and one
+# with no colour of its own, what native.js asks of the status bar as the
+# page opens and again when the in-app browser sheet closes.
 NATIVE_IN_APP = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -530,6 +532,16 @@ function page(ground) {
     if (!p.heard['App.appUrlOpen']) { throw new Error('native.js does not listen for app links'); }
     p.heard['App.appUrlOpen']({ url: link });
     out.links[link] = p.went;
+  }
+  out.bar = {};
+  const grounds = { light: 'rgb(244, 243, 238)', dark: 'rgb(25, 24, 23)', none: 'rgba(0, 0, 0, 0)' };
+  for (const name of Object.keys(grounds)) {
+    const p = page(grounds[name]);
+    const asked = () => p.asked.filter((a) => a[0] === 'StatusBar').map((a) => [a[1], a[2]]);
+    const opened = asked();
+    if (!p.heard['Browser.browserFinished']) { throw new Error('native.js does not hear the sheet close'); }
+    p.heard['Browser.browserFinished']();
+    out.bar[name] = { opened: opened, closed: asked().slice(opened.length) };
   }
   console.log(JSON.stringify(out));
 })().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
@@ -600,6 +612,14 @@ else:
               ran["links"][link])
     for link in refused_links:
         check("%r opens nothing" % link, ran["links"][link] == [], ran["links"][link])
+    # The page runs under the status bar, so only the bar's text is set: dark
+    # on a light page, light (DARK) on a dark one, and again once the sheet
+    # has closed, which puts the app's own style back.
+    for ground, style in (("light", "LIGHT"), ("dark", "DARK"), ("none", "LIGHT")):
+        want = [["setStyle", {"style": style}]]
+        check("on a page with %s ground the status bar's style is %s, and again after the "
+              "browser sheet closes, with no colour of its own" % (ground, style),
+              ran["bar"][ground] == {"opened": want, "closed": want}, ran["bar"][ground])
 
 
 # ---------------------------------------------------------------------------
@@ -650,8 +670,10 @@ check("the launch screen hides itself quickly, with no spinner",
       splash.get("launchAutoHide") is True and splash.get("launchShowDuration") == 800
       and splash.get("showSpinner") is False, splash)
 bar = config["plugins"]["StatusBar"]
-check("the status bar sits above the page and follows the phone",
-      bar.get("overlaysWebView") is False and bar.get("style") == "DEFAULT", bar)
+check("the page runs under the status bar, whose text follows the phone, with no strip "
+      "of a colour of its own",
+      bar.get("overlaysWebView") is True and bar.get("style") == "DEFAULT"
+      and "backgroundColor" not in bar, bar)
 check("notifications show while the app is open",
       config["plugins"]["PushNotifications"].get("presentationOptions")
       == ["badge", "sound", "banner", "list"])
@@ -666,6 +688,8 @@ check("and says what is wrong in plain words",
 check("and tries the site again", "https://orenth.app/" in offline)
 check("and has a dark version", "prefers-color-scheme: dark" in offline)
 check("and takes the launch screen away", "'SplashScreen', 'hide'" in offline)
+check("and sets only the status bar's text, since the page runs under the bar",
+      "'StatusBar', 'setStyle'" in offline and "setBackgroundColor" not in offline)
 
 # The offline page's own script, under Node: Try again, and coming back
 # online. Each case is what the app says when asked which page could not be
