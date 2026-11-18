@@ -567,6 +567,60 @@ try:
               "the services listed above" in page)
 
     # -----------------------------------------------------------------------
+    head("THE APP STORE'S PRIVACY ANSWERS AND THIS PAGE SAY THE SAME")
+    # -----------------------------------------------------------------------
+    # The owner's answers to App Store Connect's App Privacy questions are in
+    # mobile/APP_STORE.md, and reviewers hold them against this page. Each
+    # thing kept is named in both: the answers told the owner to declare the
+    # description a browser gives of itself, which this page did not name,
+    # and this page said the profile picture was stored, which nothing
+    # declared, when only its address at Google is.
+    guide = open(_os.path.join(harness.ROOT, "mobile", "APP_STORE.md"),
+                 encoding="utf-8").read()
+    answers = flat(guide[guide.index("### App Privacy"):guide.index("### Age rating")])
+    page = flat(text(visitor.get("/privacy")))
+    for kept, answered, said in (
+            ("each sign-in's browser description",
+             "the browser description saved with each sign-in",
+             "each sign-in is kept with the description your browser or the app "
+             "gives of itself"),
+            ("the network address of a code request",
+             "The network address of each sign-in code request (kept 30 days",
+             "the time of each code request and the network address it came "
+             "from, kept for 30 days"),
+            ("the address of a Google profile picture, not the picture",
+             "the address of the person's Google profile picture; the picture "
+             "itself stays at Google",
+             "the address of your Google profile picture, used to show who is "
+             "signed in. The picture itself stays at Google"),
+            ("the account size and risk typed into settings",
+             "The account size, positions and prices people type into the journal "
+             "and settings",
+             "your settings (such as your account size and risk per trade)"),
+            ("a free account's looks each day",
+             "Which stocks and coins each free account opened on each day (how its "
+             "daily allowance is counted)",
+             "which stocks and coins it opened on each day is kept too, which is "
+             "how its daily allowance is counted"),
+            ("the alerts that fired", "its alert history",
+             "alerts and the alerts that fired"),
+            ("the call pages people share", "the call pages people choose to share",
+             "If you press Share on an analysis, Orenth makes a public page"),
+            ("who joined through an invite",
+             "which account invited which through an invite link",
+             "Your invite link records who joined through it"),
+            ("each iPhone's notification address",
+             "The notification address of each iPhone that turns notifications on",
+             "for the iPhone app, a device token")):
+        check("%s: in the App Privacy answers and on this page" % kept,
+              answered in answers and said in page,
+              ("answers" if answered not in answers else "page", answered, said))
+    row = page[page.find("<td>Google</td>"):]
+    row = row[:row.find("</tr>")]
+    check("and the page names Google among the places data goes, for the picture",
+          "a request for your profile picture each time a page shows it" in row, row)
+
+    # -----------------------------------------------------------------------
     head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")
     # -----------------------------------------------------------------------
     from bot import billing  # noqa: E402

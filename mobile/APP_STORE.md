@@ -353,21 +353,23 @@ partners collect data from this app?" **Yes.** Apple counts what the website
 keeps, because the app shows the website.
 
 Tick these. For every one, answer: **Linked to the user: Yes**, **Used for
-tracking: No**, **Purpose: App Functionality** (and nothing else).
+tracking: No**, **Purpose: App Functionality** (and nothing else). The
+privacy page (`templates/legal.html`) says the same things in its own
+words, and Apple's reviewers compare the two: change both together.
 
 | Data type | Why Orenth keeps it |
 | --- | --- |
 | Contact Info: **Email Address** | It is the account's identity; sign-in codes and the optional weekly email go to it |
-| Contact Info: **Name** | From Google or Apple sign-in, to show who is signed in |
+| Contact Info: **Name** | From Google or Apple sign-in, to show who is signed in. With Google, also the address of the person's Google profile picture; the picture itself stays at Google |
 | Contact Info: **Phone Number** | Only if text-message sign-in is switched on (the Twilio settings). Skip it otherwise |
 | Financial Info: **Other Financial Info** | The account size, positions and prices people type into the journal and settings. No bank, card or brokerage details, ever |
-| User Content: **Other User Content** | Journal notes, saved theses, the watchlist and alerts |
+| User Content: **Other User Content** | Journal notes, saved theses, the watchlist and alerts, and the call pages people choose to share |
 | Identifiers: **User ID** | The account number, the Google or Apple account number, and the random account token the app hands Apple with each purchase |
 | Identifiers: **Device ID** | The notification address of each iPhone that turns notifications on |
 | Purchases: **Purchase History** | Whether the account has Pro, and its subscription record: for Pro bought in the app, the transaction numbers, plan and dates Apple sends |
 | Search History | The history of stocks and coins each person analysed, shown back to them |
-| Usage Data: **Product Interaction** | Which stocks each free account opened today (the daily allowance), and its alert history |
-| Other Data: **Other Data Types** | The network address of each sign-in code request (kept 30 days, to stop abuse), and the browser description saved with each sign-in |
+| Usage Data: **Product Interaction** | Which stocks and coins each free account opened on each day (how its daily allowance is counted), and its alert history |
+| Other Data: **Other Data Types** | The network address of each sign-in code request (kept 30 days, to stop abuse), the browser description saved with each sign-in, and which account invited which through an invite link |
 
 Add these only if the setting is switched on in Render:
 
@@ -375,7 +377,7 @@ Add these only if the setting is switched on in Render:
 | --- | --- | --- | --- |
 | `SENTRY_DSN` | Diagnostics: **Other Diagnostic Data** | Yes | Error reports can include the email of the person whose page failed |
 | `SENTRY_TRACES_RATE`, above 0 | Diagnostics: **Performance Data** | No | A sample of page loads that worked: the address without its query, and how long it took. Off unless this is set |
-| `ANTHROPIC_API_KEY` | User Content: **Photos or Videos** | No | A chart screenshot someone uploads goes to Anthropic to be read. Orenth does not keep it |
+| `ANTHROPIC_API_KEY` | User Content: **Photos or Videos** | No | A chart screenshot someone uploads goes to Anthropic to be read, only once they have ticked the box agreeing to it. Orenth does not keep the picture |
 
 Do **not** tick: Payment Info (Apple and Stripe take cards; Orenth never sees
 them), Location, Contacts, Health, Browsing History, Audio, Sensitive Info,
