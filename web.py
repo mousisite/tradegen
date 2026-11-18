@@ -3227,7 +3227,9 @@ def account():
 @app.route("/account/delete", methods=["POST"])
 def delete_account():
     """Remove this account and everything personal in it."""
-    if request.form.get("confirm") != "delete":
+    # The word as a phone types it: an iPhone starts a box with a capital,
+    # and its suggestions leave a space after the word.
+    if (request.form.get("confirm") or "").strip().lower() != "delete":
         return render_template("error.html", symbol="",
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
