@@ -13,7 +13,12 @@
    the offline page shown instead.
 
    Made by web.py from templates/sw.js. The version changes whenever a file
-   it keeps changes, which gives it a new cache and removes the old one. */
+   it keeps changes, which gives it a new cache and removes the old one.
+   Pages ask for the files it keeps with ?v= and that version, and only
+   those are answered from its copy: after a rollback to a version without
+   a worker, this one stays in browsers, but the older pages ask for their
+   files plain and get them from the server. If this worker itself is what
+   went wrong, DEPLOY.md says how static/sw-retire.js removes it. */
 'use strict';
 
 const VERSION = {{ version|tojson }};
@@ -63,7 +68,9 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(page(event));
     return;
   }
-  if (url.pathname.startsWith(STATIC)) {
+  // Only this version's files: another version's page, or one asking
+  // without the mark, gets the server's.
+  if (url.pathname.startsWith(STATIC) && url.searchParams.get('v') === VERSION) {
     event.respondWith(file(request));
   }
   // Everything else, /api included, goes to the network untouched.
@@ -83,9 +90,10 @@ async function page(event) {
   }
 }
 
-// A public file: from the kept copy when there is one, otherwise from the
-// network, keeping a copy. Only ever something under /static/, and never
-// anything that answers as a page or as data, whatever its address says.
+// A public file of this version: from the kept copy when there is one,
+// otherwise from the network, keeping a copy. Only ever something under
+// /static/, and never anything that answers as a page or as data, whatever
+// its address says.
 async function file(request) {
   const cache = await caches.open(CACHE);
   const kept = await cache.match(request);

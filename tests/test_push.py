@@ -9,9 +9,12 @@ icons. No network: every push service is a stand-in.
 import json
 import os as _os
 import re
+import shutil
 import struct
+import subprocess
 import sys as _sys
 import tempfile
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -189,6 +192,257 @@ def device_rows(user_id):
         conn.close()
 
 
+NODE = shutil.which("node")
+
+
+def run_node(script, *args):
+    """Run a script under Node and return the JSON it printed last.
+
+    The page scripts and the service workers are run for real where Node is
+    installed. Returns None without it, and {"error": ...} if the script
+    itself failed.
+    """
+    if not NODE:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".js", prefix="orenth-test-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    try:
+        proc = subprocess.run([NODE, path] + list(args), capture_output=True, text=True,
+                              encoding="utf-8", timeout=120)
+    finally:
+        _os.remove(path)
+    lines = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        return {"error": (proc.stderr or proc.stdout or "no output")[-1500:]}
+    return json.loads(lines[-1])
+
+
+# static/notify.js inside the iPhone app, with stand-ins for Capacitor's push
+# plugin, fetch, the page's storage and one notifications card.
+NOTIFY_IN_APP = r"""
+const fs = require('fs');
+const vm = require('vm');
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const TOKEN = 'ab'.repeat(32);
+const OWNER = 'orenth-push-owner', KEPT = 'orenth-apns-token';
+
+function store(init) {
+  const m = new Map(Object.entries(init || {}));
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null),
+           setItem: (k, v) => { m.set(k, String(v)); },
+           removeItem: (k) => { m.delete(k); }, dump: () => Object.fromEntries(m) };
+}
+function element() {
+  const on = {};
+  return { hidden: true, disabled: false, textContent: '', className: '',
+           addEventListener: (type, fn) => { on[type] = fn; },
+           click: () => { if (on.click) { on.click(); } } };
+}
+// One page in the app, signed in as `user`; net(url, body) answers each request.
+function page(user, local, net, permission) {
+  const calls = [];
+  const parts = {};
+  for (const sel of ['[data-notify-state]', '[data-notify-said]', '[data-notify-act="on"]',
+                     '[data-notify-act="off"]', '[data-notify-act="test"]']) {
+    parts[sel] = element();
+  }
+  const card = { hidden: true, querySelector: (sel) => parts[sel] || null };
+  const push = {
+    addListener: (ev, fn) => { push['_' + ev] = fn; return Promise.resolve({ remove() {} }); },
+    register: () => {
+      setTimeout(() => push._registration && push._registration({ value: TOKEN }), 0);
+      return Promise.resolve();
+    },
+    checkPermissions: () => Promise.resolve({ receive: permission || 'granted' }),
+    requestPermissions: () => Promise.resolve({ receive: permission || 'granted' }),
+  };
+  const ctx = {
+    console, setTimeout, Promise, JSON, Uint8Array, URL, Error,
+    localStorage: local, sessionStorage: store(),
+    Capacitor: { isNativePlatform: () => true, Plugins: { PushNotifications: push } },
+    navigator: { userAgent: 'Mozilla/5.0 (iPhone) OrenthApp/1' },
+    location: { origin: 'https://orenth.app' },
+    document: {
+      readyState: 'complete',
+      currentScript: { getAttribute: (a) => ({ 'data-user': user, 'data-mark': 'm' + user })[a] },
+      querySelectorAll: (sel) => (sel === '[data-notify]' ? [card] : []),
+      addEventListener() {},
+    },
+    fetch: (url, opts) => {
+      const body = opts && opts.body ? JSON.parse(opts.body) : null;
+      calls.push({ url: url, body: body });
+      return net(url, body);
+    },
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  return { calls: calls, chip: parts['[data-notify-state]'], said: parts['[data-notify-said]'],
+           off: parts['[data-notify-act="off"]'] };
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+const answer = (status, body) => Promise.resolve({
+  ok: status >= 200 && status < 300, status: status, json: () => Promise.resolve(body) });
+const fine = (url) => answer(200, url.indexOf('/config') !== -1
+  ? { web: { enabled: false }, apns: { enabled: true } } : { ok: true, known: true, removed: 1 });
+const FAILURES = {
+  'no connection': () => Promise.reject(new TypeError('Load failed')),
+  'a 502 during a deploy': () => answer(502, {}),
+  'a 429': () => answer(429, { error: 'Wait a while.' }),
+};
+const released = (calls) => calls.some((c) => c.url.indexOf('/unsubscribe') !== -1
+  && c.body && c.body.release === true && c.body.token === TOKEN);
+
+(async () => {
+  const out = { handover: {} };
+  // Someone else's phone: account 1 turned notifications on, account 2 signs in.
+  for (const name of Object.keys(FAILURES)) {
+    const local = store({ [OWNER]: '1', [KEPT]: TOKEN });
+    const first = page('2', local, FAILURES[name]);
+    await settle();
+    const kept = local.dump();
+    const next = page('2', local, fine);
+    await settle();
+    out.handover[name] = { asked: released(first.calls), kept: kept,
+                           asked_again: released(next.calls), after: local.dump() };
+  }
+  // Turning them off while the connection drops, then once it is back.
+  {
+    const local = store({ [OWNER]: '2', [KEPT]: TOKEN });
+    let net = fine;
+    const p = page('2', local, (url, body) => net(url, body));
+    await settle();
+    const before = p.chip.textContent;
+    net = FAILURES['no connection'];
+    p.off.click();
+    await settle();
+    const failed = { chip: p.chip.textContent, said: p.said.textContent, kept: local.dump() };
+    net = fine;
+    p.calls.length = 0;
+    p.off.click();
+    await settle();
+    out.turn_off = { before: before, failed: failed,
+                     then: { chip: p.chip.textContent, said: p.said.textContent,
+                             kept: local.dump(),
+                             told: p.calls.some((c) => c.url.indexOf('/unsubscribe') !== -1
+                                                && c.body && c.body.token === TOKEN) } };
+  }
+  // Switched off in the iPhone's Settings, and the server cannot be told.
+  {
+    const local = store({ [OWNER]: '2', [KEPT]: TOKEN });
+    page('2', local, FAILURES['no connection'], 'denied');
+    await settle();
+    out.revoked = local.dump();
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+
+# A service worker (argv[2]) in a stand-in for the browser's worker scope:
+# its caches, the network, the open windows and its registration.
+# argv[3] is 'worker' for /sw.js, with argv[4] the release's version, or
+# 'retire' for static/sw-retire.js.
+WORKER_SCOPE = r"""
+const fs = require('fs');
+const vm = require('vm');
+const ORIGIN = 'https://orenth.app';
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const MODE = process.argv[3];
+const VERSION = process.argv[4] || '';
+
+const address = (r) => new URL(typeof r === 'string' ? r : r.url, ORIGIN).href;
+class FakeRequest {
+  constructor(url, init) {
+    this.url = address(url);
+    this.method = (init && init.method) || 'GET';
+    this.mode = (init && init.mode) || 'no-cors';
+  }
+}
+const network = [];
+async function fakeFetch(request) {
+  const url = address(request);
+  network.push(url);
+  const type = url.indexOf('/static/') !== -1 ? 'text/css' : 'text/html';
+  return { ok: true, status: 200, type: 'basic', url: url, from: 'network',
+           headers: { get: (h) => (h.toLowerCase() === 'content-type' ? type : null) },
+           clone() { return Object.assign({}, this); } };
+}
+const stores = new Map();
+function cacheNamed(name) {
+  if (!stores.has(name)) { stores.set(name, new Map()); }
+  const kept = stores.get(name);
+  return {
+    match: async (r) => (kept.has(address(r)) ? Object.assign({}, kept.get(address(r)),
+                                                               { from: 'kept' }) : undefined),
+    put: async (r, response) => { kept.set(address(r), response); },
+    addAll: async (list) => { for (const r of list) { kept.set(address(r), await fakeFetch(r)); } },
+  };
+}
+const caches = { open: async (name) => cacheNamed(name), keys: async () => [...stores.keys()],
+                 delete: async (name) => stores.delete(name) };
+const listeners = {};
+const seen = { skipWaiting: 0, unregistered: 0, navigated: [] };
+const windows = ['/monitor', '/trades'].map((path) => ({
+  url: ORIGIN + path, navigate: async (to) => { seen.navigated.push(to); return null; } }));
+const self = {
+  location: { origin: ORIGIN },
+  addEventListener: (type, fn) => { listeners[type] = fn; },
+  skipWaiting: async () => { seen.skipWaiting += 1; },
+  registration: { navigationPreload: null, pushManager: {}, showNotification: async () => {},
+                  unregister: async () => { seen.unregistered += 1; return true; } },
+  clients: { claim: async () => {}, matchAll: async () => windows, openWindow: async () => null },
+};
+const ctx = { self: self, caches: caches, fetch: fakeFetch, Request: FakeRequest,
+              Response: { error: () => ({ from: 'error' }) }, URL: URL, console: console,
+              Promise: Promise, atob: atob, Uint8Array: Uint8Array, JSON: JSON };
+vm.createContext(ctx);
+vm.runInContext(SRC, ctx);
+
+async function dispatch(type) {
+  const waits = [];
+  if (listeners[type]) { listeners[type]({ waitUntil: (p) => { waits.push(p); } }); }
+  await Promise.all(waits);
+}
+async function ask(url, mode) {
+  let answer = null;
+  const event = { request: new FakeRequest(url, { mode: mode }),
+                  preloadResponse: Promise.resolve(undefined),
+                  respondWith: (p) => { answer = p; } };
+  if (listeners.fetch) { listeners.fetch(event); }
+  const response = answer ? await answer : null;
+  return { answered: !!answer, from: response ? response.from : null };
+}
+
+(async () => {
+  const out = {};
+  if (MODE === 'worker') {
+    await dispatch('install');
+    await dispatch('activate');
+    const before = network.length;
+    out.current = await ask('/static/style.css?v=' + VERSION);
+    out.current_fetched = network.slice(before).length > 0;
+    out.older = await ask('/static/style.css');
+    out.another = await ask('/static/style.css?v=000000000000');
+    out.page = await ask('/monitor', 'navigate');
+    out.api = await ask('/api/push/config');
+  } else {
+    for (const name of ['orenth-0123456789ab', 'orenth-ba9876543210', 'another-site']) {
+      stores.set(name, new Map());
+    }
+    await dispatch('install');
+    await dispatch('activate');
+    out.skip_waiting = seen.skipWaiting;
+    out.caches = [...stores.keys()];
+    out.unregistered = seen.unregistered;
+    out.navigated = seen.navigated;
+    out.listens = Object.keys(listeners).sort();
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+
+
 SITE = "https://orenth.app"
 FCM = "https://fcm.googleapis.com/fcm/send/"
 REAL_WEB_POST = push._web_post
@@ -334,9 +588,14 @@ try:
 
     section("WHICH ADDRESSES A PAGE MAY HAND OVER")
     for url, ok in (("https://fcm.googleapis.com/fcm/send/x", True),
+                    ("https://android.googleapis.com/gcm/send/x", True),
                     ("https://updates.push.services.mozilla.com/wpush/v2/x", True),
                     ("https://web.push.apple.com/QGx", True),
                     ("https://wns2-par02p.notify.windows.com/w/?token=x", True),
+                    # Only Microsoft's is spread over hosts of its own.
+                    ("https://x.push.apple.com/abc", False),
+                    ("https://h7.fcm.googleapis.com/x", False),
+                    ("https://other.push.services.mozilla.com/x", False),
                     ("http://fcm.googleapis.com/fcm/send/x", False),
                     ("https://fcm.googleapis.com:8443/x", False),
                     ("https://fcm.googleapis.com@evil.example/x", False),
@@ -518,12 +777,24 @@ try:
     check("without holding the server's fault against the devices",
           len(rows) == 2 and all(r["failures"] == 0 for r in rows)
           and "InvalidProviderToken" in (rows[0]["last_error"] or ""))
-    apple = use_apple(lambda r: (429, "TooManyRequests"))
+    apple = use_apple(lambda r: (429, "TooManyProviderTokenUpdates"))
     push.send_test(conn, alice.id, SITE)
     apple.requests.clear()
     out = push.send_test(conn, alice.id, SITE)
     check("asked to slow down, the next round waits rather than asking again",
           not apple.requests and out["failed"] == 2)
+    push._APNS_PAUSED["until"] = 0.0
+    # TooManyRequests is Apple's answer for one token sent too much.
+    apple = use_apple(lambda r: (429, "TooManyRequests") if str(r.url).endswith("11" * 32)
+                      else (200, ""))
+    out = push.send_test(conn, alice.id, SITE)
+    check("one iPhone sent too much does not hold back the other",
+          len(apple.requests) == 2 and out["sent"] == 1 and out["failed"] == 1, out)
+    apple.requests.clear()
+    out = push.send_test(conn, alice.id, SITE)
+    check("nor pause the next round", len(apple.requests) == 2 and out["sent"] == 1, out)
+    check("and is not held against that iPhone",
+          all(r["failures"] == 0 for r in device_rows(alice.id)))
     push._APNS_PAUSED["until"] = 0.0
 
     def timeout(request):
@@ -533,6 +804,122 @@ try:
     out = push.send_test(conn, alice.id, SITE)
     check("Apple not answering is said once, not waited on for each iPhone",
           len(apple.requests) == 1 and out["failed"] == 2, len(apple.requests))
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    # A typo in APNS_BUNDLE_ID, or a changed one: Apple says every token is
+    # not for that topic, and the fault is the server's.
+    _os.environ["APNS_BUNDLE_ID"] = "app.orenth.iso"
+    phones = []
+    for n in range(3):
+        someone = person("topic-%d@example.com" % n)
+        push.register(conn, someone.id, "apns", ("3%d" % n) * 32)
+        phones.append(alerts.Fired(80 + n, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                   someone.id, ""))
+    conn.execute("UPDATE push_devices SET last_ok_ts=?", (int(time.time()) - 3600,))
+    conn.commit()
+    apple = use_apple(lambda r: (400, "DeviceTokenNotForTopic"))
+    out = push.deliver(conn, phones, SITE)
+    kept = conn.execute("SELECT last_error FROM push_devices WHERE kind='apns'").fetchall()
+    check("iPhones that have had notices are kept when Apple calls the topic wrong",
+          out["dropped"] == 0 and len(kept) == 3, out)
+    check("Apple is asked once that round, not about each",
+          len(apple.requests) == 1, len(apple.requests))
+    check("and the device says which app the server named",
+          kept and "app.orenth.iso" in (kept[0]["last_error"] or ""),
+          [r["last_error"] for r in kept])
+    _os.environ.pop("APNS_BUNDLE_ID")
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+    pasted = person("topic-new@example.com")
+    push.register(conn, pasted.id, "apns", "40" * 32)          # never had a notice
+    push.register(conn, pasted.id, "apns", "41" * 32)
+    conn.execute("UPDATE push_devices SET last_ok_ts=? WHERE address=?",
+                 (int(time.time()) - 3600, "41" * 32))
+    conn.commit()
+    apple = use_apple(lambda r: (400, "DeviceTokenNotForTopic")
+                      if str(r.url).endswith("40" * 32) else (200, ""))
+    out = push.send_test(conn, pasted.id, SITE)
+    check("a token that never had a notice, for another app, is forgotten, and the "
+          "round goes on", out["dropped"] == 1 and out["sent"] == 1
+          and [d["address"] for d in device_rows(pasted.id)] == ["41" * 32], out)
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    section("ONE BROWSER'S TROUBLE IS NOT EVERYONE'S")
+    use_apple(lambda r: (200, ""))
+    busy = []
+    for n in range(3):
+        someone = person("busy-%d@example.com" % n)
+        endpoint, p256dh, auth = push.clean_subscription(subscription(FCM + "busy-%d" % n))
+        push.register(conn, someone.id, "web", endpoint, p256dh, auth)
+        busy.append(alerts.Fired(70 + n, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                 someone.id, ""))
+    for answer, why in ((503, "fails quickly for one browser"),
+                        (429, "asks Orenth to slow down for one browser")):
+        post = Recorder(lambda url, answer=answer: answer if url.endswith("busy-0") else 201)
+        out = push.deliver(conn, busy, SITE, web_post=post)
+        check("a push service that %s still gets the others' notices" % why,
+              len(post.calls) == 3 and out["sent"] == 2 and out["failed"] == 1, out)
+    post = Recorder(lambda url: TimeoutError("no answer") if url.endswith("busy-0") else 201)
+    out = push.deliver(conn, busy, SITE, web_post=post)
+    check("one that does not answer at all is not waited on again this round",
+          len(post.calls) == 1 and out["failed"] == 3, out)
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    section("A PUSH SERVICE THAT NEVER ANSWERS")
+    stalled = person("stalled@example.com")
+    for n in range(10):
+        endpoint, p256dh, auth = push.clean_subscription(
+            subscription("https://h%d.notify.windows.com/w/?token=t%d" % (n, n)))
+        push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    post = Recorder(TimeoutError("no answer"))
+    push.deliver(conn, [alerts.Fired(90, "AAA", "price_above", 1.0, 2.0, "AAA moved.", "",
+                                     stalled.id, "")], SITE, web_post=post)
+    check("ten addresses on ten hosts of one push service are waited on once a round",
+          len(post.calls) == 1, len(post.calls))
+    post = Recorder(TimeoutError("no answer"))
+    push.send_test(conn, stalled.id, SITE, web_post=post)
+    check("and once a test", len(post.calls) == 1, len(post.calls))
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    month_ago = int(time.time()) - 31 * 86400
+    endpoint, p256dh, auth = push.clean_subscription(subscription(FCM + "stalled"))
+    push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    conn.execute("UPDATE push_devices SET created_ts=? WHERE address=?", (month_ago, endpoint))
+    conn.commit()
+    for _ in range(push.MAX_FAILURES):
+        push.send_test(conn, stalled.id, SITE, web_post=Recorder(TimeoutError("no answer")))
+    check("an address no notice has reached in a month, still not answering, is forgotten",
+          not device_rows(stalled.id))
+    push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+    conn.execute("UPDATE push_devices SET created_ts=?, last_ok_ts=? WHERE address=?",
+                 (month_ago, int(time.time()) - 86400, endpoint))
+    conn.commit()
+    for _ in range(push.MAX_FAILURES + 2):
+        push.send_test(conn, stalled.id, SITE, web_post=Recorder(TimeoutError("no answer")))
+    rows = device_rows(stalled.id)
+    check("one a notice reached yesterday is kept through an outage",
+          rows and rows[0]["failures"] == 0, [dict(r) for r in rows])
+    conn.execute("DELETE FROM push_devices")
+    conn.commit()
+
+    budget = getattr(push, "TEST_BUDGET", 20.0)
+    push.TEST_BUDGET = 0.5
+    try:
+        for url in (FCM + "slow", "https://android.googleapis.com/gcm/send/slow",
+                    "https://updates.push.services.mozilla.com/wpush/v2/slow",
+                    "https://web.push.apple.com/slow"):
+            endpoint, p256dh, auth = push.clean_subscription(subscription(url))
+            push.register(conn, stalled.id, "web", endpoint, p256dh, auth)
+        post = Recorder(201, delay=0.3)
+        out = push.send_test(conn, stalled.id, SITE, web_post=post)
+        check("a test stops starting on more devices once its time is up",
+              len(post.calls) == 2 and out["sent"] == 2 and out["failed"] == 2, out)
+    finally:
+        push.TEST_BUDGET = budget
     conn.execute("DELETE FROM push_devices")
     conn.commit()
 
@@ -645,6 +1032,17 @@ try:
           r.status_code == 200 and any(d["address"] == "ab" * 32 and
                                        d["environment"] == "sandbox"
                                        for d in device_rows(alice.id)))
+    for odd in (["x"], {"a": 1}, 5):
+        try:
+            r = c.post("/api/push/subscribe", json={"kind": "apns", "token": "cd" * 32,
+                                                    "environment": odd})
+            answered = r.status_code == 200 and r.is_json and r.get_json()["ok"]
+        except Exception as exc:            # TESTING hands the server's error on
+            answered = exc
+        check("an environment that is not a name (%r) is left out, not an error" % (odd,),
+              answered is True and any(d["address"] == "cd" * 32 and d["environment"] == ""
+                                       for d in device_rows(alice.id)), answered)
+    c.post("/api/push/unsubscribe", json={"kind": "apns", "token": "cd" * 32})
     check("named the iPhone app when its browser says so", push.device_label(
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
         "(KHTML, like Gecko) Mobile/15E148 OrenthApp/1") == "iPhone app")
@@ -881,9 +1279,17 @@ try:
     kept_list = json.loads(re.search(r"const PRECACHE = (\[.*?\]);", source).group(1))
     check("it keeps only public files under /static/",
           kept_list and all(u.startswith("/static/") for u in kept_list), kept_list)
+    marked = "?v=" + web.ASSET_VERSION
     check("including the style sheet and the icons",
-          {"/static/style.css", "/static/icon-192.png", "/static/badge-96.png"}
-          <= set(kept_list))
+          {"/static/style.css" + marked, "/static/icon-192.png" + marked,
+           "/static/badge-96.png" + marked} <= set(kept_list), kept_list)
+    # A version from before the worker asks for /static/style.css plain, so
+    # after a rollback it can never be handed this release's copy.
+    check("each one's address marked with this release's version, as the cache's name is",
+          all(u.endswith(marked) for u in kept_list), kept_list)
+    check("and so are the notification's icon and badge",
+          "const ICON = %s;" % json.dumps("/static/icon-192.png" + marked) in source
+          and "const BADGE = %s;" % json.dumps("/static/badge-96.png" + marked) in source)
     page_fn = source[source.index("async function page("):source.index("async function file(")]
     file_fn = source[source.index("async function file("):source.index("function keepable(")]
     check("a page always comes from the network and is never kept",
@@ -912,6 +1318,32 @@ try:
     check("and a replaced subscription is renewed, the server told only as a check",
           "SUBSCRIBE" in renewal and "check: true" in renewal and "replaces:" in renewal)
     check("the files it keeps are fetched without cookies", "credentials: 'omit'" in source)
+    fd, worker_js = tempfile.mkstemp(suffix=".js", prefix="orenth-sw-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(source)
+    try:
+        ran = run_node(WORKER_SCOPE, worker_js, "worker", web.ASSET_VERSION)
+    finally:
+        _os.remove(worker_js)
+    if ran is None:
+        print("   (Node is not installed, so the worker is read here rather than run)")
+        routed = [line for line in source.splitlines() if "url.pathname.startsWith(STATIC)" in line]
+        check("it answers from its copy only for this release's marked files",
+              routed and all("VERSION" in line for line in routed), routed)
+    elif "error" in ran:
+        check("the worker runs as a browser runs it", False, ran["error"])
+    else:
+        check("this release's style sheet comes from the copy kept at install",
+              ran["current"] == {"answered": True, "from": "kept"}
+              and not ran["current_fetched"], ran)
+        check("an older version's page asking for /static/style.css is left to the "
+              "server, so a rollback gets its own style sheet",
+              ran["older"]["answered"] is False, ran["older"])
+        check("as is one marked with another version", ran["another"]["answered"] is False,
+              ran["another"])
+        check("pages still come from the network through it, and /api past it",
+              ran["page"] == {"answered": True, "from": "network"}
+              and ran["api"]["answered"] is False, ran)
 
     vic = person("victoria@example.com", "Victoria Secretname")
     sign_in(vic)
@@ -927,6 +1359,9 @@ try:
     check("it says what is wrong and offers to try again",
           "No connection" in off and "Try again" in off)
     check("and is kept out of search results", 'name="robots" content="noindex"' in off)
+    check("its style sheet and icon are the kept ones, marked with the version",
+          'href="/static/style.css%s"' % marked in off
+          and 'href="/static/favicon.ico%s"' % marked in off)
 
     home = c.get("/").data.decode("utf-8")
     check("every page links the manifest", 'rel="manifest" href="/manifest.webmanifest"' in home)
@@ -944,6 +1379,12 @@ try:
     check("registers the worker after load, and never inside the iPhone app",
           "'serviceWorker' in navigator && !window.Capacitor" in home
           and "navigator.serviceWorker.register('/sw.js'" in home)
+    check("every page asks for the style sheet and its scripts marked with the version",
+          'href="/static/style.css%s"' % marked in home
+          and 'src="/static/notify.js%s"' % marked in home)
+    in_app = c.get("/privacy", headers={"User-Agent": "Mozilla/5.0 (iPhone) OrenthApp/1"})
+    check("and so does an app page for the phone script",
+          'src="/static/native.js%s"' % marked in in_app.data.decode("utf-8"))
 
     sign_in(alice)
     account = c.get("/account").data.decode("utf-8")
@@ -994,6 +1435,93 @@ try:
           all(w in privacy for w in ("Apple's", "Google's", "Mozilla's", "Microsoft's",
                                      "encrypted for that browser", 'id="notifications"'))
           and "which can read them" in privacy)
+
+    section("THE IPHONE APP FORGETS ITS DEVICE ONLY ONCE THE SERVER HAS")
+    # Nothing at Apple ever retires an iPhone's token, so a device the app
+    # forgets before the server has let it go keeps getting alerts for good.
+    notify_js = _os.path.join(ROOT, "static", "notify.js")
+    phone = {"orenth-push-owner": "2", "orenth-apns-token": "ab" * 32}
+    got = run_node(NOTIFY_IN_APP, notify_js)
+    if got is None:
+        print("   (Node is not installed, so notify.js is read here rather than run)")
+        source = open(notify_js, encoding="utf-8").read()
+        disable = source[source.index("function appDisable("):
+                         source.index("// --- the page's switch")]
+        check("a release or a switch-off that fails never forgets the device",
+              ".catch(function () {}).then(forget)" not in source)
+        check("Turn off forgets it here only after the server has",
+              disable.index("post(UNSUBSCRIBE") < disable.index("write(TOKEN, '')"))
+    elif "error" in got:
+        check("notify.js runs as the app runs it", False, got["error"])
+    else:
+        for name, seen in sorted(got["handover"].items()):
+            check("another account's phone asks the server to let it go (%s)" % name,
+                  seen["asked"], seen)
+            check("and when that fails, keeps the device to ask again (%s)" % name,
+                  seen["kept"] == dict(phone, **{"orenth-push-owner": "1"}), seen["kept"])
+            check("the next page asks again, and only then forgets it (%s)" % name,
+                  seen["asked_again"] and seen["after"] == {}, seen)
+        off = got["turn_off"]
+        check("Turn off with no connection says it did not work, and stays On",
+              off["before"] == "On" and off["failed"]["chip"] == "On"
+              and off["failed"]["said"].startswith("That did not work"), off)
+        check("and keeps the device, so it can be turned off again",
+              off["failed"]["kept"] == phone, off["failed"])
+        check("once the server is told, it says Off and forgets the device",
+              off["then"]["told"] and off["then"]["chip"] == "Off"
+              and off["then"]["kept"] == {}, off["then"])
+        check("switched off in the iPhone's Settings, it is kept until the server is told",
+              got["revoked"] == phone, got["revoked"])
+
+    section("RETIRING THE WORKER AFTER A ROLLBACK")
+    # A version from before the worker answers /sw.js with "not found", and a
+    # browser keeps the worker it has. Served there instead, this removes it.
+    retire_js = _os.path.join(ROOT, "static", "sw-retire.js")
+    retire = open(retire_js, encoding="utf-8").read() if _os.path.exists(retire_js) else ""
+    check("static/sw-retire.js is there for a rolled-back version to serve", bool(retire))
+    ran = run_node(WORKER_SCOPE, retire_js, "retire") if retire else None
+    if retire and ran is None:
+        print("   (Node is not installed, so the retiring worker is read here rather than run)")
+        check("it takes over at once, deletes the kept files, removes itself and reloads",
+              all(x in retire for x in ("skipWaiting", "caches.delete", "unregister()",
+                                        "navigate(")) and "'fetch'" not in retire)
+    elif ran is not None and "error" in ran:
+        check("the retiring worker runs as a browser runs it", False, ran["error"])
+    elif ran is not None:
+        check("it takes over at once, rather than once every tab is closed",
+              ran["skip_waiting"] >= 1, ran)
+        check("deletes every file Orenth kept, and nothing of any other site's",
+              ran["caches"] == ["another-site"], ran["caches"])
+        check("removes itself", ran["unregistered"] == 1, ran)
+        check("and reloads each Orenth page open, so it comes from the server",
+              ran["navigated"] == ["https://orenth.app/monitor", "https://orenth.app/trades"],
+              ran["navigated"])
+        check("answering no request in the meantime", "fetch" not in ran["listens"],
+              ran["listens"])
+    deploy = open(_os.path.join(ROOT, "DEPLOY.md"), encoding="utf-8").read()
+    route = next((m.group(1) for m in re.finditer(r"```python\n(.*?)```", deploy, re.S)
+                  if "sw-retire.js" in m.group(1)), "")
+    check("DEPLOY.md gives the route a rolled-back version adds to serve it", bool(route))
+    if route and retire:
+        from flask import Flask, send_from_directory
+        # What that version has: the app, os, send_from_directory, and the
+        # endpoints a browser may reach without signing in.
+        rolled_back = Flask("rolled_back", root_path=ROOT)
+        names = {"app": rolled_back, "os": _os, "send_from_directory": send_from_directory,
+                 "PUBLIC_ENDPOINTS": set()}
+        exec(textwrap.dedent(route), names)
+        r = rolled_back.test_client().get("/sw.js")
+        check("pasted in, it serves the retiring worker at /sw.js, as JavaScript",
+              r.status_code == 200 and r.mimetype == "application/javascript"
+              and r.data == open(retire_js, "rb").read(), (r.status_code, r.mimetype))
+        check("checked afresh on every visit", "no-cache" in (r.headers.get("Cache-Control")
+                                                             or ""), r.headers.get("Cache-Control"))
+        r.close()
+        served_by = [rule.endpoint for rule in rolled_back.url_map.iter_rules()
+                     if rule.rule == "/sw.js"]
+        check("and to a browser nobody is signed in on, which would otherwise be sent "
+              "to sign in, and a worker is never taken from a redirect",
+              served_by and served_by[0] in names["PUBLIC_ENDPOINTS"], served_by)
 finally:
     push._web_post = REAL_WEB_POST
     web.market_mod.split_history = REAL_HISTORY

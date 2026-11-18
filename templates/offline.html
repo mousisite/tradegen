@@ -13,8 +13,8 @@
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="{{ light }}">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="{{ dark }}">
 <title>No connection · Orenth</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico', v=asset_version) }}" sizes="any">
 </head>
 <body>
 <div class="wrap">

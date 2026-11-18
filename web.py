@@ -3882,6 +3882,10 @@ def favicon():
 # under a name that changes whenever one of them does, worked out once here at
 # start-up from the files themselves.
 ASSET_VERSION = webapp_mod.asset_version(app.root_path)
+# Pages ask for the files the worker keeps with ?v= and this version, and the
+# worker answers only those from its copy. A version from before the worker,
+# put back by a rollback, asks for them plain, and gets its own from here.
+app.jinja_env.globals["asset_version"] = ASSET_VERSION
 
 
 @app.route("/manifest.webmanifest")
@@ -3902,10 +3906,11 @@ def service_worker():
 
     no-cache, so a browser checks for a new one on every visit rather than
     keeping an old one for a day. The same file for everybody: nothing in it
-    depends on who asked.
+    depends on who asked. Every file it keeps is named with this version, as
+    the pages ask for it.
     """
     def static(name):
-        return url_for("static", filename=name)
+        return url_for("static", filename=name, v=ASSET_VERSION)
 
     body = app.jinja_env.get_template("sw.js").render(
         version=ASSET_VERSION, offline=url_for("offline"),
@@ -4545,8 +4550,9 @@ def push_subscribe():
             address = push_mod.clean_token(data.get("token"))
             old = old.strip().lower()
             environment = data.get("environment")
-            extra = {"environment": environment if environment in push_mod.APNS_HOSTS
-                     else ""}
+            # Looked up only if it is text: a list or an object cannot be.
+            extra = {"environment": environment if isinstance(environment, str)
+                     and environment in push_mod.APNS_HOSTS else ""}
         else:
             return jsonify({"error": "kind must be web or apns."}), 400
         if (check or old) and not push_mod.owns(conn, uid(), kind, address) \
