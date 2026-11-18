@@ -6,8 +6,9 @@ import Capacitor
 /// few things a web page cannot do for itself.
 ///
 /// - Registers WebAuthPlugin, the sign-in sheet (see WebAuthPlugin.swift),
-///   and AppPurchasePlugin, Apple's in-app purchase for Pro (see
-///   AppPurchasePlugin.swift).
+///   AppPurchasePlugin, Apple's in-app purchase for Pro (see
+///   AppPurchasePlugin.swift), and NavigationGuardPlugin, which keeps the web
+///   view on orenth.app (see NavigationGuardPlugin.swift).
 /// - Swiping in from the left edge goes back a page, as in Safari.
 /// - Pulling the page down reloads it, and the spinner stops when the page
 ///   has finished loading.
@@ -29,6 +30,9 @@ class MainViewController: CAPBridgeViewController {
         // Here, at launch, so it hears StoreKit's transactions from the start,
         // as Apple asks; it keeps them until a page is listening.
         bridge?.registerPluginInstance(AppPurchasePlugin())
+        // Before the first page loads, so no page from another site is ever
+        // shown in the app, where it would have the whole bridge.
+        bridge?.registerPluginInstance(NavigationGuardPlugin())
 
         guard let webView: WKWebView = self.webView else {
             return

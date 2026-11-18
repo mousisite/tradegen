@@ -669,6 +669,12 @@ app, signed in as the review account:
 - `ios/App/App/MainViewController.swift`: the screen (swipe back, pull to
   refresh). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
   Google sign-in (JavaScript name `WebAuth`).
+- `ios/App/App/NavigationGuardPlugin.swift`: keeps the app's web view on
+  https://orenth.app itself. Capacitor gives every page it shows the whole
+  bridge to the phone, and its own check (the address starts with
+  `https://orenth.app`) also lets in `https://orenth.app.evil.example`, so
+  any other address opens outside the app instead. The sign-in sheet and
+  in-app purchase also answer only pages of orenth.app.
 - `ios/App/App/AppPurchasePlugin.swift`: Apple's in-app purchase, StoreKit 2
   (JavaScript name `AppPurchase`). It hands every transaction to the page as
   Apple's signed JWS and finishes one only when the page says the server has

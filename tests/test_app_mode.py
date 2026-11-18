@@ -469,6 +469,138 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# static/native.js run as the app runs it, under Node: its app links. The app
+# shows any page it is sent to with the whole bridge to the phone (sign-in
+# sheets, purchases), so a link must never take it off orenth.app.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+# One page of the app at https://orenth.app/monitor, with stand-ins for
+# Capacitor's bridge and plugins. Each link in __LINKS__ arrives on a page of
+# its own as an app link (appUrlOpen); it prints where each one sent the page
+# (location.assign), if anywhere.
+NATIVE_IN_APP = r"""
+const fs = require('fs');
+const vm = require('vm');
+const SRC = fs.readFileSync(process.argv[2], 'utf8');
+const LINKS = __LINKS__;
+
+function page(ground) {
+  const heard = {};
+  const went = [];
+  const asked = [];
+  const names = ['App', 'Browser', 'StatusBar', 'SplashScreen', 'Share', 'Haptics'];
+  const C = {
+    isNativePlatform: () => true,
+    isPluginAvailable: (name) => names.indexOf(name) !== -1,
+    nativePromise: (plugin, method, options) => {
+      asked.push([plugin, method, options]);
+      return Promise.resolve({});
+    },
+    Plugins: {},
+  };
+  names.forEach((name) => {
+    C.Plugins[name] = { addListener: (event, fn) => { heard[name + '.' + event] = fn; return { remove() {} }; } };
+  });
+  const ctx = {
+    console, Promise, URL, JSON, setTimeout,
+    Capacitor: C,
+    navigator: {},
+    location: { origin: 'https://orenth.app', href: 'https://orenth.app/monitor', host: 'orenth.app',
+                assign: (to) => { went.push(String(to)); } },
+    document: { readyState: 'complete', addEventListener() {}, body: {}, documentElement: {} },
+    getComputedStyle: () => ({ backgroundColor: ground }),
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    MutationObserver: function () { this.observe = function () {}; },
+  };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  return { heard: heard, went: went, asked: asked };
+}
+
+(async () => {
+  const out = { links: {} };
+  for (const link of LINKS) {
+    const p = page('rgb(244, 243, 238)');
+    if (!p.heard['App.appUrlOpen']) { throw new Error('native.js does not listen for app links'); }
+    p.heard['App.appUrlOpen']({ url: link });
+    out.links[link] = p.went;
+  }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+
+
+def run_native(script):
+    """native.js under Node with the given harness: the JSON it printed last,
+    None without Node, or {"error": ...} if the script failed."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".js", prefix="orenth-test-")
+    with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    try:
+        proc = subprocess.run([node, path, _os.path.join(harness.ROOT, "static", "native.js")],
+                              capture_output=True, text=True, encoding="utf-8", timeout=120)
+    finally:
+        _os.remove(path)
+    lines = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        return {"error": (proc.stderr or proc.stdout or "no output")[-1500:]}
+    return json.loads(lines[-1])
+
+
+print()
+print("=" * 72)
+print("APP LINKS OPEN PAGES OF THIS SITE, AND NEVER ANOTHER")
+print("=" * 72)
+OPEN = "app.orenth.ios://open?path="
+# Each must open nothing, written into the link as it is and fully escaped.
+# Those with a dot segment ("/./", "/%2e/", "/../") resolve to a path that
+# starts "//", which the browser, given that path alone, reads as the address
+# of another site; "%2F" in a link is a slash once the link is read.
+REFUSED = ["/.//orenth.app.evil.example/x", "/%2e//orenth.app.evil.example/x",
+           "/%2E//orenth.app.evil.example/x", "/..//orenth.app.evil.example/x",
+           "/.//orenth.app@evil.example/x", "//orenth.app.evil.example/x",
+           "/\\orenth.app.evil.example/x", "/\\/orenth.app.evil.example/x",
+           "/\t/orenth.app.evil.example/x",
+           "javascript:alert(document.cookie)", "data:text/html,<script>alert(1)</script>",
+           "https://orenth.app.evil.example/x", "http://orenth.app/monitor"]
+refused_links = [OPEN + p for p in REFUSED] + [OPEN + quote(p, safe="") for p in REFUSED]
+# Read once more as a link, this one is "/.//orenth.app@evil.example/x".
+refused_links.append(OPEN + "/.%2F/orenth.app@evil.example/x")
+GOOD_LINKS = {OPEN + "/monitor": "https://orenth.app/monitor",
+              OPEN + quote("/analyse?symbol=NVDA&interval=1d", safe=""):
+                  "https://orenth.app/analyse?symbol=NVDA&interval=1d",
+              OPEN + quote("/research?symbol=NVDA&interval=1d#s-news", safe=""):
+                  "https://orenth.app/research?symbol=NVDA&interval=1d#s-news",
+              # Escaped twice, it is a page of this site that does not exist.
+              OPEN + quote("/.%2F/orenth.app@evil.example/x", safe=""):
+                  "https://orenth.app/.%2F/orenth.app@evil.example/x"}
+ran = run_native(NATIVE_IN_APP.replace("__LINKS__", json.dumps(refused_links + list(GOOD_LINKS))))
+if ran is None:
+    print("   (Node is not installed, so native.js is read here rather than run)")
+    native_js = open(_os.path.join(harness.ROOT, "static", "native.js"), encoding="utf-8").read()
+    check("an app link opens the full address it resolved to, never a bare path",
+          "return resolved.href;" in native_js
+          and "resolved.pathname.slice(0, 2) === '//'" in native_js)
+elif "error" in ran:
+    check("native.js runs as the app runs it", False, ran["error"])
+else:
+    for link, address in sorted(GOOD_LINKS.items()):
+        check("%s opens %s" % (link, address), ran["links"][link] == [address],
+              ran["links"][link])
+    for link in refused_links:
+        check("%r opens nothing" % link, ran["links"][link] == [], ran["links"][link])
+
+
+# ---------------------------------------------------------------------------
 # The iPhone project in mobile/. Xcode cannot run here, so these read the
 # committed files the way Xcode and Capacitor will, and hold them to what was
 # decided: a decision undone by a later edit fails here, not at App Review.
@@ -602,6 +734,37 @@ check("MainViewController registers the App Store plugin at launch, beside the s
       controller.find("registerPluginInstance(WebAuthPlugin())")
       < controller.find("registerPluginInstance(AppPurchasePlugin())")
       < controller.find("guard let webView"))
+
+guard_swift = read("ios", "App", "App", "NavigationGuardPlugin.swift")
+check("MainViewController registers the navigation guard before the first page loads",
+      -1 < controller.find("registerPluginInstance(NavigationGuardPlugin())")
+      < controller.find("guard let webView"))
+check("the guard answers Capacitor's question about every page the web view opens",
+      "override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber?"
+      in guard_swift and "isMainFrame" in guard_swift
+      and "return NSNumber(value: true)" in guard_swift)
+check("and lets in only https on orenth.app exactly, and the app's own files",
+      'static let host: String = "orenth.app"' in guard_swift
+      and 'scheme.lowercased() == "https" && host.lowercased() == OrenthSite.host' in guard_swift
+      and "OrenthSite.isSitePage(url) || isAppFile(url)" in guard_swift
+      and "bridge?.config.localURL" in guard_swift)
+check("anywhere else opens outside the app, and only while it is in use",
+      "UIApplication.shared.open(url" in guard_swift
+      and "activationState == .foregroundActive" in guard_swift)
+check("the sign-in sheet opens only for orenth.app's own pages, at its /auth/ addresses",
+      "OrenthSite.showsSitePage(plugin.webView)" in plugin
+      and "OrenthSite.isSignInAddress(url)" in plugin
+      and 'path.hasPrefix("/auth/")' in guard_swift
+      and "callbackScheme == OrenthSite.appScheme" in plugin and '"NOT_ALLOWED"' in plugin)
+purchase_methods = re.findall(r"@objc func (\w+)\(_ call: CAPPluginCall\) \{(.*?)\n    \}\n",
+                              purchase, re.S)
+check("every App Store method answers only orenth.app's own pages",
+      len(purchase_methods) == 8
+      and all("guard self.fromSitePage(call) else" in body for _name, body in purchase_methods)
+      and "OrenthSite.showsSitePage(self.webView)" in purchase and '"NOT_ALLOWED"' in purchase,
+      [name for name, body in purchase_methods if "fromSitePage" not in body])
+check("a page counts as orenth.app's only if both its address and its history say so",
+      "isSitePage(view.url) && isSitePage(view.backForwardList.currentItem?.url)" in guard_swift)
 methods = re.findall(r'CAPPluginMethod\(name: "(\w+)", returnType: CAPPluginReturnPromise\)', purchase)
 check("AppPurchasePlugin is the AppPurchase plugin, with its eight methods",
       'jsName: String = "AppPurchase"' in purchase and "import StoreKit" in purchase
@@ -636,6 +799,7 @@ check("Xcode project: iPhone only",
 for name, phase in (("MainViewController.swift", "Sources"),
                     ("WebAuthPlugin.swift", "Sources"),
                     ("AppPurchasePlugin.swift", "Sources"),
+                    ("NavigationGuardPlugin.swift", "Sources"),
                     ("PrivacyInfo.xcprivacy", "Resources")):
     check("Xcode project: %s is built into the app" % name,
           pbx.count("/* %s in %s */" % (name, phase)) == 2

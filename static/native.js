@@ -103,26 +103,34 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Same-site paths, checked strictly: one leading slash, no scheme, nothing
-  // that a browser would read as another host.
+  // Same-site addresses, checked strictly. A path must start with one slash
+  // and hold no backslash, space or control character. It is then resolved
+  // as the browser resolves it, and must still be on this site, with a path
+  // the browser could not take for another host: "/.//evil.example" resolves
+  // to the path "//evil.example", which on its own is the address of another
+  // site. What comes back is the full address it resolved to, so the page
+  // goes exactly there and nothing reads the path a second time.
   // ---------------------------------------------------------------------------
-  function safePath(path) {
+  function siteAddress(path) {
     if (typeof path !== 'string' || !path || path.length > 1024) { return null; }
     if (path.charAt(0) !== '/' || path.charAt(1) === '/') { return null; }
     if (/[\\\s\u0000-\u001f\u007f]/.test(path)) { return null; }
     var resolved;
     try { resolved = new URL(path, location.origin); } catch (e) { return null; }
     if (resolved.origin !== location.origin) { return null; }
-    return resolved.pathname + resolved.search + resolved.hash;
+    if (resolved.pathname.slice(0, 2) === '//') { return null; }
+    if (/[\\\u0000-\u001f\u007f]/.test(resolved.pathname)) { return null; }
+    return resolved.href;
   }
 
-  // app.orenth.ios://open?path=/monitor gives "/monitor"; anything else, null.
-  function deepLinkPath(raw) {
+  // app.orenth.ios://open?path=/monitor gives https://orenth.app/monitor;
+  // anything else, null.
+  function deepLinkAddress(raw) {
     if (typeof raw !== 'string' || raw.length > 2048) { return null; }
     var u;
     try { u = new URL(raw); } catch (e) { return null; }
     if (u.protocol !== SCHEME + ':' || u.host !== 'open') { return null; }
-    return safePath(u.searchParams.get('path'));
+    return siteAddress(u.searchParams.get('path'));
   }
 
   // A sign-in answer: this app's scheme, anything but the "open" links.
@@ -374,8 +382,8 @@
   // app is held by the app until this listener is in place.
   // ---------------------------------------------------------------------------
   listen('App', 'appUrlOpen', function (event) {
-    var path = deepLinkPath(event && event.url);
-    if (path !== null) { location.assign(path); }
+    var address = deepLinkAddress(event && event.url);
+    if (address !== null) { location.assign(address); }
   });
 
   // ---------------------------------------------------------------------------

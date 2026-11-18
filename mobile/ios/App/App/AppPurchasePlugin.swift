@@ -29,7 +29,8 @@ import Capacitor
 /// productId, purchaseDate, expiresDate?, appAccountToken?, revoked? }.
 /// Failures carry a code: CANCELLED, PENDING (Ask to Buy), BUSY, NOT_FOUND,
 /// BAD_INPUT, STORE_UNAVAILABLE, PURCHASE_FAILED, RESTORE_FAILED, NO_SCENE,
-/// MANAGE_FAILED.
+/// MANAGE_FAILED, and NOT_ALLOWED for any call from a page that is not
+/// orenth.app's own: Apple's sheets carry the app's name whoever asks.
 ///
 /// StoreKit 2 needs iOS 15, which the app already requires. On iOS 17 and
 /// later the purchase sheet is shown over the app's own window, as Apple
@@ -80,6 +81,18 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
         updatesTask?.cancel()
     }
 
+    // MARK: - Only orenth.app's own pages
+
+    /// Every method asks this first, from a task on the main actor: the web
+    /// view may only be read on the main thread. Rejects the call itself.
+    private func fromSitePage(_ call: CAPPluginCall) -> Bool {
+        if OrenthSite.showsSitePage(self.webView) {
+            return true
+        }
+        call.reject("Only Orenth's own pages can use the App Store.", "NOT_ALLOWED")
+        return false
+    }
+
     // MARK: - Products
 
     @objc func products(_ call: CAPPluginCall) {
@@ -89,7 +102,10 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("ids must list 1 to 20 product ids", "BAD_INPUT")
             return
         }
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             do {
                 let found: [Product] = try await Product.products(for: ids)
                 var list: [[String: Any]] = []
@@ -119,6 +135,9 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             if self.purchasing {
                 call.reject("A purchase is already in progress", "BUSY")
                 return
@@ -164,14 +183,20 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - Entitlements, restore, unfinished, finish
 
     @objc func entitlements(_ call: CAPPluginCall) {
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             let items: [[String: Any]] = await AppPurchasePlugin.collect(Transaction.currentEntitlements)
             call.resolve(AppPurchasePlugin.listing(items))
         }
     }
 
     @objc func restore(_ call: CAPPluginCall) {
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             do {
                 // Asks for the Apple Account's password, so the page calls it
                 // only from a tap on Restore Purchases.
@@ -189,7 +214,10 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func unfinished(_ call: CAPPluginCall) {
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             let items: [[String: Any]] = await AppPurchasePlugin.collect(Transaction.unfinished)
             call.resolve(AppPurchasePlugin.listing(items))
         }
@@ -200,7 +228,10 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("transactionId is required", "BAD_INPUT")
             return
         }
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             var finished: Bool = false
             for await result in Transaction.unfinished {
                 let transaction: Transaction = AppPurchasePlugin.unwrap(result)
@@ -218,6 +249,9 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func manageSubscriptions(_ call: CAPPluginCall) {
         Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             guard let scene: UIWindowScene = self.bridge?.viewController?.viewIfLoaded?.window?.windowScene else {
                 call.reject("There is no window to show the sheet in", "NO_SCENE")
                 return
@@ -232,7 +266,10 @@ public class AppPurchasePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func storefront(_ call: CAPPluginCall) {
-        Task {
+        Task { @MainActor in
+            guard self.fromSitePage(call) else {
+                return
+            }
             let current: Storefront? = await Storefront.current
             call.resolve(["countryCode": current?.countryCode ?? "", "id": current?.id ?? ""])
         }

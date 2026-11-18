@@ -423,24 +423,37 @@
   };
   window.OrenthNotify = API;
 
+  // The page of this site a tapped notification is about, as a full address,
+  // or null. Its path must start with one slash and hold no backslash, space
+  // or control character. It is then read as the browser reads it, and must
+  // still be on this site, with a path the browser could not take for
+  // another host: "/.//evil.example" reads as the path "//evil.example",
+  // which on its own is the address of another site. The page is opened at
+  // the full address, so nothing reads the path a second time.
+  function tappedPage(path) {
+    if (typeof path !== 'string' || !path || path.length > 1024
+        || path.charAt(0) !== '/' || path.charAt(1) === '/'
+        || /[\\\s\u0000-\u001f\u007f]/.test(path)) {
+      return null;
+    }
+    var target;
+    try { target = new URL(path, window.location.origin); } catch (e) { return null; }
+    if (target.origin !== window.location.origin
+        || target.pathname.slice(0, 2) === '//'
+        || /[\\\u0000-\u001f\u007f]/.test(target.pathname)) {
+      return null;
+    }
+    return target.href;
+  }
+
   // Inside the app, a tapped notification opens the page it is about.
   (function () {
     var push = native();
     if (!push) { return; }
     push.addListener('pushNotificationActionPerformed', function (action) {
       var data = action && action.notification && action.notification.data;
-      var path = data && data.url;
-      if (typeof path !== 'string' || path.charAt(0) !== '/' || path.charAt(1) === '/'
-          || path.indexOf('\\') !== -1) {
-        return;
-      }
-      // Read as a browser reads it, which drops tabs and line breaks, so a
-      // path that only looks like one of ours cannot open another site.
-      var target;
-      try { target = new URL(path, window.location.origin); } catch (e) { return; }
-      if (target.origin === window.location.origin) {
-        window.location.assign(target.pathname + target.search + target.hash);
-      }
+      var address = tappedPage(data && data.url);
+      if (address) { window.location.assign(address); }
     });
   })();
 

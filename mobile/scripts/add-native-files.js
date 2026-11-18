@@ -27,7 +27,8 @@ const PBXPROJ = path.join(MOBILE, 'ios', 'App', 'App.xcodeproj', 'project.pbxpro
 const APP_DIR = path.join(MOBILE, 'ios', 'App', 'App');
 
 // Paths relative to the App group, which is the App/App folder.
-const SOURCES = ['MainViewController.swift', 'WebAuthPlugin.swift', 'AppPurchasePlugin.swift'];
+const SOURCES = ['MainViewController.swift', 'WebAuthPlugin.swift', 'AppPurchasePlugin.swift',
+                 'NavigationGuardPlugin.swift'];
 const RESOURCES = ['PrivacyInfo.xcprivacy'];
 
 function groupKey(project, name) {
