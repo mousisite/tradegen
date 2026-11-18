@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
- * Registers Orenth's own native files with the Xcode project and makes the
- * app iPhone-only.
+ * Registers Orenth's own native files with the Xcode project, gives the app
+ * its entitlements, and makes it iPhone-only.
  *
  * Files on disk are invisible to Xcode until project.pbxproj lists them.
  * This does what Xcode's "Add Files to App" would: a file reference in the
@@ -10,6 +10,12 @@
  * same calls, that the Capacitor CLI uses to register SceneDelegate.swift,
  * then reads its own output back to prove the project still parses and holds
  * every file.
+ *
+ * App.entitlements (Push Notifications, Sign in with Apple) is what Xcode's
+ * "+ Capability" would write: a file reference in the App group, in no build
+ * phase, named by CODE_SIGN_ENTITLEMENTS in both of the App target's
+ * configurations. Kept in the project, a copy downloaded afresh is signed
+ * with them, without anyone adding the capabilities again.
  *
  * Safe to run again: anything already registered is left alone.
  *
@@ -20,7 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const xcode = require('xcode');
-const { check } = require('./check-project');
+const { check, ENTITLEMENTS, ENTITLEMENTS_SETTING } = require('./check-project');
 
 const MOBILE = path.resolve(__dirname, '..');
 const PBXPROJ = path.join(MOBILE, 'ios', 'App', 'App.xcodeproj', 'project.pbxproj');
@@ -42,7 +48,7 @@ function groupKey(project, name) {
 }
 
 function main() {
-  for (const name of SOURCES.concat(RESOURCES)) {
+  for (const name of SOURCES.concat(RESOURCES, [ENTITLEMENTS])) {
     if (!fs.existsSync(path.join(APP_DIR, name))) {
       throw new Error('Missing ' + path.join(APP_DIR, name));
     }
@@ -95,9 +101,30 @@ function main() {
     plainReference(file, 'text.xml');
     added.push(name);
   }
+  // Listed in the App group only: Xcode signs entitlements into the app, it
+  // does not build or copy the file.
+  if (!project.hasFile(ENTITLEMENTS)) {
+    const file = project.addFile(ENTITLEMENTS, group, { lastKnownFileType: 'text.plist.entitlements' });
+    if (!file) throw new Error('Could not add ' + ENTITLEMENTS);
+    plainReference(file, 'text.plist.entitlements');
+    added.push(ENTITLEMENTS);
+  }
 
-  // iPhone only. Both of the App target's configurations, nothing else.
+  // Both of the App target's configurations, nothing else: iPhone only, and
+  // signed with the app's entitlements.
   project.updateBuildProperty('TARGETED_DEVICE_FAMILY', '1', null, 'App');
+  project.updateBuildProperty('CODE_SIGN_ENTITLEMENTS', ENTITLEMENTS_SETTING, null, 'App');
+
+  // Xcode keeps a configuration's settings in name order. So does this, so
+  // a setting added here does not move the next time Xcode saves the project.
+  const configs = project.pbxXCBuildConfigurationSection();
+  const list = project.pbxXCConfigurationList()[target.firstTarget.buildConfigurationList];
+  for (const entry of (list && list.buildConfigurations) || []) {
+    const config = configs[entry.value];
+    const sorted = {};
+    for (const key of Object.keys(config.buildSettings).sort()) sorted[key] = config.buildSettings[key];
+    config.buildSettings = sorted;
+  }
 
   // The parser reads "0920" as the number 920. Same value, but keep the text.
   const attributes = project.getFirstProject().firstProject.attributes || {};
@@ -115,6 +142,7 @@ function main() {
   fs.writeFileSync(PBXPROJ, text, 'utf-8');
   console.log(added.length ? 'Added: ' + added.join(', ') : 'Nothing new to add.');
   console.log('TARGETED_DEVICE_FAMILY = 1 (iPhone only).');
+  console.log('CODE_SIGN_ENTITLEMENTS = ' + ENTITLEMENTS_SETTING + ' (Push Notifications, Sign in with Apple).');
   console.log('Checked: the project parses and lists every file.');
 }
 

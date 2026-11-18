@@ -902,6 +902,17 @@ for name, phase in (("MainViewController.swift", "Sources"),
     check("Xcode project: %s is built into the app" % name,
           pbx.count("/* %s in %s */" % (name, phase)) == 2
           and pbx.count("path = %s;" % name) == 1, name)
+with open(_os.path.join(IOS_APP, "App.entitlements"), "rb") as fh:
+    entitlements = plistlib.load(fh)
+check("the app's entitlements grant notifications and Sign in with Apple, and nothing more",
+      entitlements == {"aps-environment": "development",
+                       "com.apple.developer.applesignin": ["Default"]}, entitlements)
+check("Xcode project: both App configurations are signed with them, so a fresh copy is too",
+      pbx.count("CODE_SIGN_ENTITLEMENTS = App/App.entitlements;") == 2)
+check("Xcode project: the file is listed once, as entitlements, and built into nothing",
+      pbx.count("path = App.entitlements;") == 1
+      and "lastKnownFileType = text.plist.entitlements; path = App.entitlements;" in pbx
+      and "App.entitlements in " not in pbx)
 check("Xcode project: no value left as undefined", "= undefined;" not in pbx)
 check("Xcode project: deployment target stays at iOS 15.0",
       set(re.findall(r"IPHONEOS_DEPLOYMENT_TARGET = ([\d.]+);", pbx)) == {"15.0"})

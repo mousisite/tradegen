@@ -84,9 +84,10 @@ Submit.
 11. Wait until the bar at the top of Xcode stops saying **Resolving
     packages** (it downloads Capacitor from GitHub, so you need internet).
 
-Run steps 9 and 10 again any time you download a newer copy of the code.
+Run steps 8 to 10 again any time you download a newer copy of the code,
+then steps 12 to 18.
 
-### Sign the app and add the three capabilities
+### Sign the app and check its capabilities
 
 12. In Xcode's left column, click the blue **App** icon at the very top.
 13. In the middle, under **TARGETS**, click **App**. Then click the
@@ -94,14 +95,19 @@ Run steps 9 and 10 again any time you download a newer copy of the code.
 14. Tick **Automatically manage signing**. Next to **Team**, pick your team
     (the parent's name, if they signed up).
 15. Check that **Bundle Identifier** says `app.orenth.ios`.
-16. Click **+ Capability** (top left of that tab). Type `Push`. Double-click
-    **Push Notifications**.
-17. Click **+ Capability** again. Type `Apple`. Double-click **Sign in with
-    Apple**.
-18. Click **+ Capability** again. Type `Purchase`. Double-click **In-App
-    Purchase**.
+16. Check that **Push Notifications** is listed below. It comes with the
+    project, so there is nothing to add. (If it is missing, click
+    **+ Capability** at the top left of that tab, type `Push`, and
+    double-click **Push Notifications**.)
+17. Check that **Sign in with Apple** is listed too. It also comes with the
+    project. (If it is missing: **+ Capability**, type `Apple`, double-click
+    **Sign in with Apple**.)
+18. Check that **In-App Purchase** is listed. If it is not, click
+    **+ Capability**, type `Purchase`, and double-click **In-App Purchase**.
 
-Xcode writes these into the project itself. Do not edit any other file.
+Push Notifications and Sign in with Apple are kept in the project itself
+(`ios/App/App/App.entitlements`), so a newer copy of the code has them
+too. Do not edit any other file.
 
 ### Run it on your iPhone
 
@@ -659,9 +665,10 @@ app, signed in as the review account:
   site at once.
 - **Something in this `mobile` folder changed:** on the Mac, get the new
   code, run `npm ci`, `npx cap sync ios` and `npx cap open ios` in the
-  `mobile` folder, raise the **Build** number (Part 2, step 24), then
-  Archive and Distribute again (steps 25 to 27). In App Store Connect, make
-  a new version, pick the new build, and submit.
+  `mobile` folder, pick your **Team** again (Part 2, step 14) and check the
+  capabilities are listed (steps 16 to 18), raise the **Build** number
+  (step 24), then Archive and Distribute again (steps 25 to 27). In App
+  Store Connect, make a new version, pick the new build, and submit.
 
 ## For whoever works on the code next
 
@@ -689,8 +696,13 @@ app, signed in as the review account:
   it. On the website, `static/app-purchase.js` is the subscribe screen and
   the go-between, `bot/appstore.py` checks Apple's signatures, and
   `bot/apple_store.py` decides who has Pro.
-- `scripts/add-native-files.js`: lists new native files in the Xcode project
-  and keeps the app iPhone-only. `scripts/check-project.js` checks it.
+- `ios/App/App/App.entitlements`: the app's Push Notifications and Sign in
+  with Apple. `aps-environment` says `development`; Xcode makes it
+  `production` when it exports a build for the App Store.
+- `scripts/add-native-files.js`: lists new native files in the Xcode project,
+  names `App.entitlements` in both of the App target's configurations
+  (`CODE_SIGN_ENTITLEMENTS`), and keeps the app iPhone-only.
+  `scripts/check-project.js` checks it.
 - `scripts/make_assets.py`, then `npx @capacitor/assets generate --ios`:
   the icon and launch screens, drawn from `tools/make_logo.py`.
 - On the website, `static/native.js` connects pages to the phone, and
