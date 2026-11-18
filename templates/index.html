@@ -243,7 +243,12 @@
         <path d="M3 15l4.5-4.5 3.5 3 4-4L21 15"/>
         <circle cx="8.5" cy="8.5" r="1.2"/>
       </svg>
-      {% if has_key %}
+      {% if has_key and in_app %}
+        {# On an iPhone nothing is dropped, clicked or pasted with Ctrl+V. #}
+        <span class="head" id="drophead">Or read a chart screenshot</span>
+        <span class="sub">Tap to pick one, or take a photo of a chart. It reads
+          the ticker for you.</span>
+      {% elif has_key %}
         <span class="head" id="drophead">Or drop a chart screenshot here</span>
         <span class="sub">Click to browse, drag an image in, or paste with
           Ctrl+V. It reads the ticker for you.</span>

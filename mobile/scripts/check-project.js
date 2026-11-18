@@ -2,9 +2,11 @@
 /*
  * Reads project.pbxproj back and checks that Xcode will find what Orenth
  * added: the project parses, every reference in it points at something that
- * exists, Orenth's own Swift files (the screen, the sign-in sheet and the
- * in-app purchase plugin) are compiled by the App target, the privacy
- * manifest is copied into the app, and the app is iPhone-only.
+ * exists, Orenth's own Swift files (the screen, the sign-in sheet, the
+ * in-app purchase plugin and the guard that keeps the web view on
+ * orenth.app) are compiled by the App target, the privacy manifest is copied
+ * into the app, the app is signed with its entitlements (Push Notifications
+ * and Sign in with Apple, in App.entitlements), and it is iPhone-only.
  *
  *   cd mobile && node scripts/check-project.js
  *
@@ -22,8 +24,18 @@ const APP_DIR = path.join(MOBILE, 'ios', 'App', 'App');
 
 const SOURCES = ['AppDelegate.swift', 'SceneDelegate.swift',
                  'MainViewController.swift', 'WebAuthPlugin.swift',
-                 'AppPurchasePlugin.swift'];
+                 'AppPurchasePlugin.swift', 'NavigationGuardPlugin.swift'];
 const RESOURCES = ['PrivacyInfo.xcprivacy'];
+// The app's entitlements, and the setting that names them, relative to the
+// project's folder (ios/App).
+const ENTITLEMENTS = 'App.entitlements';
+const ENTITLEMENTS_SETTING = 'App/App.entitlements';
+// What the file must grant: notifications (Xcode makes it "production" when
+// it exports for the App Store), and Sign in with Apple.
+const GRANTS = [
+  /<key>aps-environment<\/key>\s*<string>development<\/string>/,
+  /<key>com\.apple\.developer\.applesignin<\/key>\s*<array>\s*<string>Default<\/string>\s*<\/array>/
+];
 // Made by "npx cap sync ios" and kept out of git, so a fresh copy lacks them.
 const GENERATED = new Set(['public', 'capacitor.config.json', 'config.xml']);
 
@@ -148,6 +160,34 @@ function check(text, opts) {
   sources.forEach((name) => registered(name, 'Sources'));
   resources.forEach((name) => registered(name, 'Resources'));
 
+  // The entitlements: listed in the App group as Xcode lists them, and in no
+  // build phase, since Xcode signs them into the app rather than copy them.
+  const signed = entries(refs).filter(([, r]) => unquote(r.path) === ENTITLEMENTS);
+  if (signed.length !== 1) {
+    problems.push(ENTITLEMENTS + ' has ' + signed.length + ' file references, expected 1');
+  } else {
+    const [refId, ref] = signed[0];
+    if (!inGroup.has(refId)) problems.push(ENTITLEMENTS + ' is not in the App group');
+    if (unquote(ref.lastKnownFileType) !== 'text.plist.entitlements') {
+      problems.push(ENTITLEMENTS + ' is not marked as entitlements');
+    }
+    if (unquote(ref.sourceTree) !== '<group>') problems.push(ENTITLEMENTS + ' is not relative to its group');
+    if (entries(builds).some(([, b]) => b.fileRef === refId)) {
+      problems.push(ENTITLEMENTS + ' is in a build phase; it should only be listed');
+    }
+  }
+  if (appDir) {
+    const file = path.join(appDir, ENTITLEMENTS);
+    if (!fs.existsSync(file)) {
+      problems.push(ENTITLEMENTS + ' is not on disk');
+    } else {
+      const text = fs.readFileSync(file, 'utf-8');
+      if (!GRANTS.every((grant) => grant.test(text))) {
+        problems.push(ENTITLEMENTS + ' does not grant Push Notifications and Sign in with Apple');
+      }
+    }
+  }
+
   // Everything the App group lists is on disk, apart from what cap sync makes.
   if (appDir) {
     for (const id of inGroup) {
@@ -176,11 +216,15 @@ function check(text, opts) {
     if (unquote(String(settings.PRODUCT_BUNDLE_IDENTIFIER)) !== 'app.orenth.ios') {
       problems.push('the bundle identifier in ' + unquote(config && config.name) + ' is not app.orenth.ios');
     }
+    if (unquote(String(settings.CODE_SIGN_ENTITLEMENTS)) !== ENTITLEMENTS_SETTING) {
+      problems.push('CODE_SIGN_ENTITLEMENTS in ' + unquote(config && config.name) + ' is not ' +
+                    ENTITLEMENTS_SETTING + ', so the app would be signed without its capabilities');
+    }
   }
   return problems;
 }
 
-module.exports = { check, PBXPROJ, APP_DIR };
+module.exports = { check, PBXPROJ, APP_DIR, ENTITLEMENTS, ENTITLEMENTS_SETTING };
 
 if (require.main === module) {
   const problems = check(fs.readFileSync(PBXPROJ, 'utf-8'), { appDir: APP_DIR });
@@ -189,5 +233,5 @@ if (require.main === module) {
     process.exit(1);
   }
   console.log('project.pbxproj parses, every reference resolves, the native files are in the App');
-  console.log('target, and the app is iPhone-only.');
+  console.log('target, the app is signed with its entitlements, and it is iPhone-only.');
 }

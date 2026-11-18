@@ -5,12 +5,14 @@ a proxy, Google sign-in, Stripe on, and no Anthropic key. Every page a
 visitor or a signed-in free account can reach is fetched, and none may show
 builder text: a setting's name, ".env", "restart", a traceback, or a value
 printed as None, nan or undefined. Setup advice is for the owner of a copy
-on their own machine, and the end checks that it still reaches them.
+on their own machine, and the end checks that it still reaches them. Inside
+the iPhone app the analysis lists the headlines but not a post's words, and
+offers no JSON file.
 
-No network: prices are made up, the news is two headlines, and every other
-source is a stand-in that fails the way a busy source does, so the plain
-words for a failure are tested too. Anything that still tries the network
-is recorded, and fails the suite.
+No network: prices are made up, the news is two headlines and one post, and
+every other source is a stand-in that fails the way a busy source does, so
+the plain words for a failure are tested too. Anything that still tries the
+network is recorded, and fails the suite.
 """
 import html as _html
 import os as _os
@@ -472,6 +474,32 @@ try:
     status, page = SEEN[("free", "/usage")]
     check("the operator's page refuses them without naming a setting",
           status == 403 and "runs this installation" in page, status)
+
+    # -----------------------------------------------------------------------
+    head("INSIDE THE IPHONE APP: HEADLINES, NOT STRANGERS' POSTS")
+    # -----------------------------------------------------------------------
+    # A StockTwits post is a stranger's words, unfiltered. The App Store
+    # answers say nothing anyone writes reaches anyone else, and the app's
+    # content rights name headlines. How many posts there are, and how many
+    # say bullish or bearish, stays.
+    APP = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                         "OrenthApp/1"}
+    post = "$NVDA looks strong into the close"
+    browser = flat(text(member.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE)))
+    inside = flat(text(member.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE,
+                                  headers=APP)))
+    check("on the website the analysis shows a post's words", post in browser)
+    check("inside the app it shows the headlines",
+          "NVDA beats estimates and raises guidance" in inside)
+    check("but not a post's words", post not in inside and "· social" not in inside)
+    check("and still counts the posts, bull and bear",
+          re.search(r'Posts</div> <div class="v fig">1</div> <div class="n">1 bull · '
+                    r'0 bear</div>', inside) is not None,
+          inside[inside.find("News and chatter"):][:600])
+    # Nor a file: the app's one screen would show the JSON as bare text.
+    check("the website offers the analysis as JSON", "View as JSON" in browser)
+    check("the app does not", "View as JSON" not in inside and "/api/analyse" not in inside)
 
     run_id = None
     conn = db.connect(DB)

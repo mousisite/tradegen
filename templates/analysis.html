@@ -446,11 +446,17 @@
               {{ r.sentiment.bearish_tags }} bear</div></div>
         </div>
       </div>
-      {% if r.sentiment.items %}
+      {# Inside the iPhone app, headlines only. A StockTwits post is a
+         stranger's words, unfiltered, which neither the app's age rating
+         nor what it says about content rights covers; its count and the
+         bull and bear tally above stay. #}
+      {% set said_items = (r.sentiment.items|selectattr('kind', 'equalto', 'news')|list)
+                          if in_app else r.sentiment.items %}
+      {% if said_items %}
         <div class="tablewrap">
           <table>
             <tbody>
-            {% for it in r.sentiment.items[:6] %}
+            {% for it in said_items[:6] %}
               <tr>
                 <td class="r fig {{ 'gain' if it.score > 0.1 else 'loss' if it.score < -0.1 else 'soft' }}"
                     style="width:56px">{{ it.score|signed }}</td>
@@ -464,6 +470,8 @@
         </div>
       {% elif r.sentiment.method == 'skipped' %}
         <div class="blank">The news was not read for this analysis.</div>
+      {% elif r.sentiment.items %}
+        <div class="blank">No headlines for this instrument just now.</div>
       {% else %}
         <div class="blank">No news retrieved for this instrument.</div>
       {% endif %}
@@ -621,8 +629,9 @@
 
 <p class="legal" style="border-top:0;margin-top:var(--s3);padding-top:0">
   {# The JSON is for an account's own use: for a visitor looking around the
-     example it answered only "Not signed in." #}
-  {% if not demo %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
+     example it answered only "Not signed in." Inside the iPhone app it would
+     fill the app's one screen with bare text, so it is the website's. #}
+  {% if not demo and not in_app %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
                                        exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
   · {% endif %}Data from Yahoo Finance, Google News and StockTwits
   {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}

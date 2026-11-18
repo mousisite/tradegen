@@ -6,12 +6,14 @@ with an RSA key made for this run standing in for Apple's signing key and an
 EC P-256 key standing in for the .p8 file. Everything below that boundary is
 the real code: the client secret is really signed, every token is really
 verified, accounts are really made and joined, and sessions really start.
+App Review's account, which only its fixed code opens, is never joined.
 """
 import base64
 import hashlib
 import hmac
 import json
 import os as _os
+import re
 import sys as _sys
 import time
 from urllib.parse import parse_qs, urlparse
@@ -665,6 +667,49 @@ try:
               reaches("a-erin-next", "erin@corp.example") is None)
         check("while the Apple ID that made it still reaches it",
               reaches("a-erin", "erin@corp.example") == erin.id)
+
+        # The other way round: an account Apple made, then a Google account
+        # with the same address. It joins once, as an Apple ID joins one Google
+        # made: Google is linked beside Apple, so the account still says Apple
+        # made it, and a second Google account with the address is refused.
+        def google_reaches(sub, email):
+            """The account a Google account with this address reaches, or None."""
+            try:
+                return A.upsert_google_user(conn, {"sub": sub, "email": email,
+                                                   "email_verified": True}).id
+            except ValueError:
+                return None
+
+        gina = A.upsert_apple_user(conn, {"sub": "a-gina", "email": "gina@corp.example",
+                                          "email_verified": True})
+        check("an account Apple made is joined by a Google account with its address",
+              google_reaches("g-gina", "gina@corp.example") == gina.id)
+        made = conn.execute("SELECT provider, provider_id FROM users WHERE id=?",
+                            (gina.id,)).fetchone()
+        check("Google is linked beside Apple: the account still says Apple made it",
+              tuple(made) == ("apple", "a-gina")
+              and (A.made_by(conn, "apple", "a-gina") or {"user_id": 0})["user_id"] == gina.id
+              and A.sign_in_methods(conn, A.get_user(conn, gina.id)) == ["Apple", "Google"],
+              (tuple(made), A.sign_in_methods(conn, A.get_user(conn, gina.id))))
+        check("so its Apple Account going leaves it Google as a way in",
+              A.can_still_sign_in(conn, gina.id, "apple", "a-gina"))
+        check("the same Google account comes back to it, whatever its address now",
+              google_reaches("g-gina", "gina.new@corp.example") == gina.id)
+        check("the account keeps its own address",
+              A.get_user(conn, gina.id).email == "gina@corp.example")
+        check("but a second Google account with that address is refused",
+              google_reaches("g-gina-next", "gina@corp.example") is None)
+        check("and the Apple ID that made it still reaches it",
+              reaches("a-gina", "gina@corp.example") == gina.id)
+        # One Google made, then an Apple ID: the same rule, the other way.
+        hal = A.upsert_google_user(conn, {"sub": "g-hal", "email": "hal@corp.example",
+                                          "email_verified": True})
+        check("an Apple ID joins an account Google made, once",
+              reaches("a-hal", "hal@corp.example") == hal.id
+              and reaches("a-hal-next", "hal@corp.example") is None)
+        check("and Google still reaches it, made by Google as it was",
+              google_reaches("g-hal", "hal@corp.example") == hal.id
+              and A.get_user(conn, hal.id).provider == "google")
     finally:
         conn.close()
 
@@ -815,6 +860,14 @@ try:
     check("but the app shows it, for its own Apple sheet",
           "Continue with Apple" in page and 'data-web="0"' in page
           and 'data-native="1"' in page)
+    # /auth/apple does not exist here, so a tap before the deferred
+    # signin-app.js has run must not follow the button's link.
+    apple_button = re.search(r'<a class="abtn" data-app-via="apple"\s+href="([^"]*)"\s+'
+                             r'data-start="([^"]*)"([^>]*)>', page)
+    check("and there the button goes nowhere by itself: the script starts from data-start",
+          apple_button and apple_button.group(1) == "#"
+          and apple_button.group(2).startswith("/auth/apple")
+          and 'role="button"' in apple_button.group(3), apple_button and apple_button.groups())
     check("the operator is told the website half is missing",
           "APPLE_SERVICES_ID" in apple_mod.why_not())
     check("while a visitor is not", "APPLE_SERVICES_ID" not in page)
@@ -823,6 +876,46 @@ try:
           "If you sign in with Apple" in privacy and "privaterelay.appleid.com" in privacy)
     apple_on()
     web.app.config["AUTH_MODE"] = None
+
+    section("THE APP REVIEW ACCOUNT IS NEVER JOINED TO APPLE")
+
+    # Its address and its fixed code are App Review's way in. An Apple ID
+    # with the same verified address would otherwise join it, and the owner
+    # testing Sign in with Apple with that address would hand the review
+    # account a second way in that is not App Review's.
+    REVIEW_CODE = "Kq3-x8Rw-2mZ7-pL5v-T9"
+    _os.environ["REVIEW_LOGIN_EMAIL"] = "appreview@example.com"
+    _os.environ["REVIEW_LOGIN_CODE"] = REVIEW_CODE
+    try:
+        web._RATE.clear()
+        made = web.app.test_client().post("/signin/review", data={
+            "email": "appreview@example.com", "code": REVIEW_CODE})
+        check("the review sign-in makes its account", made.status_code == 302,
+              made.status_code)
+        back, _, _ = web_sign_in("005.review.1", "AppReview@example.com")
+        said = back.data.decode("utf-8", "replace")
+        check("Apple on the website with the review address is refused, in words",
+              back.status_code == 400 and "kept for Apple" in said, back.status_code)
+        check("and no Apple ID is tied to the review account",
+              identity_row("005.review.1") is None)
+        out = native(lambda n: sign(claims_for("005.review.2", BUNDLE, n,
+                                               email="appreview@example.com")))
+        check("nor in the app's own Apple sheet",
+              out.status_code == 400
+              and "kept for Apple" in (out.get_json() or {}).get("error", ""),
+              (out.status_code, out.get_json()))
+        check("which ties no Apple ID to it either", identity_row("005.review.2") is None)
+        web._RATE.clear()
+        again = web.app.test_client().post("/signin/review", data={
+            "email": "appreview@example.com", "code": REVIEW_CODE})
+        check("so the review sign-in still opens it", again.status_code == 302,
+              again.status_code)
+        other, _, _ = web_sign_in("005.review.3", "someone.else@example.com")
+        check("while Apple with any other address signs in as before",
+              other.status_code == 302, other.status_code)
+    finally:
+        _os.environ.pop("REVIEW_LOGIN_EMAIL", None)
+        _os.environ.pop("REVIEW_LOGIN_CODE", None)
 
     section("LEAVING: APPLE IS ASKED TO END IT")
 

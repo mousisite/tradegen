@@ -200,6 +200,9 @@ def main(argv=None) -> int:
     # Only when some of Apple's settings are there: then the missing ones.
     if web.apple_mod.why_not():
         print("    apple          %s" % web.apple_mod.why_not())
+    # App Review's own way in, and why its code would be refused, so a
+    # rejection for "the demo account does not work" names its cause here.
+    print("    review sign-in %s" % web.review_status())
     # Pro sold in the iPhone app, through Apple.
     print("    app purchases  %s" % web.apple_store_mod.describe())
     print("    alert checks   %s"

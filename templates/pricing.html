@@ -17,7 +17,8 @@
       <li>The top {{ limits.find_results }} in every Find list</li>
       <li>{{ limits.alerts }} alert running at a time</li>
       <li>The full journal, portfolio and strategies</li>
-      <li>Download your journal, saved theses and analysis history, any time</li>
+      <li>Download your journal, saved theses and analysis history{{ ' from the website'
+          if in_app }}, any time</li>
     </ul>
     {% if not current_user or demo %}
       <a class="btn quiet" href="{{ url_for('signin', next='/pricing') }}">Create free account</a>
@@ -134,6 +135,11 @@
           <button class="btn quiet" type="submit">Manage subscription</button>
         </form>
       {% endif %}
+    {% elif current_user and not demo and apple.retrying %}
+      {# Apple may yet charge for the Pro it is renewing, so nothing is sold
+         here until that is settled one way or the other. #}
+      <p class="notice">{{ apple_retrying_said }}</p>
+      <a class="btn quiet" href="{{ apple.subscriptions_url }}" data-iap-manage>Manage subscription</a>
     {% elif current_user and not demo %}
       {# The code goes in here, not on Stripe's page, where the box sits
          behind a link that is easy to miss. It is left empty on purpose: the

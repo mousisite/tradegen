@@ -40,7 +40,6 @@ import base64
 import binascii
 import datetime
 import hashlib
-import json
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -51,6 +50,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.x509.oid import ExtensionOID
+
+from . import safejson
 
 # Apple Root CA - G3, from https://www.apple.com/certificateauthority/AppleRootCA-G3.cer
 # SHA-256 63:34:3A:BF:B8:9A:6A:03:EB:B5:7E:9B:3F:5F:A7:BE:7C:4F:5C:75:6F:30:17:B3:A8:C4:88:C3:65:3E:91:79
@@ -138,10 +139,10 @@ def _no_duplicates(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
 
 def _json_object(raw: bytes) -> Dict[str, Any]:
     try:
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        # Duplicate keys could be read two ways; nesting thousands deep is
-        # not something Apple sends.
+        value = safejson.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except (UnicodeDecodeError, ValueError) as exc:
+        # Duplicate keys could be read two ways; nesting too deep for Python
+        # to read is not something Apple sends (bot/safejson.py).
         raise VerificationError(VERIFICATION_FAILURE, "not JSON") from exc
     if not isinstance(value, dict):
         _fail(VERIFICATION_FAILURE, "not a JSON object")

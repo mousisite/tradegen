@@ -279,7 +279,9 @@ try:
                        ).data.decode("utf-8", "replace")
     flat = body[body.find("<td><b>FLAT</b>"):]
     flat = flat[:flat.find("</tr>")]
-    today = _re.findall(r'<td class="r fig([^"]*)">\s*0\.0%', flat)
+    # The cell may carry more attributes after its class (a phone shows each
+    # cell's column name from data-label), so only the class is matched.
+    today = _re.findall(r'<td class="r fig([^"]*)"[^>]*>\s*0\.0%', flat)
     check("a move of 0.0% is not coloured as a loss",
           today and "loss" not in today[0] and "gain" not in today[0], str(today))
     check("and the page says when the quotes were read",

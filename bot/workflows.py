@@ -237,6 +237,8 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True,
                                cost_bps={kind: config_mod.cost_bps_for(kind, cfg)
                                          for kind in ("equity", "crypto", "other")})
+    # What the prices just read saw is kept, as the journal keeps it.
+    portfolio_mod.keep_reads(conn, view)
     for p in view.positions:
         if p.price is None:
             report.steps.append(Step("Position: %s" % p.symbol,

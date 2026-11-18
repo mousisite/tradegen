@@ -33,6 +33,7 @@ SKIP and passes.
 
     python tests/test_browser.py
 """
+import json
 import os as _os
 import sys as _sys
 import threading
@@ -643,6 +644,75 @@ NOTCH = r"""
 }
 """
 
+# Inside the app the page runs under the status bar (capacitor.config.json:
+# StatusBar overlaysWebView), so it must keep its own contents clear of it.
+# With the page at its top: every word, picture and control a person can see
+# is below the status bar, and above the home bar where no tab bar covers
+# it. Scrolled down: what passes under the status bar is behind the top bar,
+# which sticks there with the status bar's height added to it. The tab bar
+# reaches the bottom of the screen, padded by the home bar's height.
+APP_NOTCH = r"""
+(inset) => {
+  const H = innerHeight, W = innerWidth, out = {under: [], low: [], screen: H};
+  function shown(el) {
+    for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) {
+        return false;
+      }
+    }
+    const r = el.getBoundingClientRect();
+    return r.width >= 2 && r.height >= 2;      // not a 1-pixel label for screen readers
+  }
+  function name(el) {
+    const words = (el.textContent || el.getAttribute('aria-label') || '').trim()
+      .replace(/\s+/g, ' ').slice(0, 30);
+    return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' "' + words + '"';
+  }
+  window.scrollTo(0, 0);
+  const things = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (!n.textContent.trim() || !n.parentElement || !shown(n.parentElement)) { continue; }
+    const range = document.createRange();
+    range.selectNodeContents(n);
+    for (const box of range.getClientRects()) { things.push([box, n.parentElement]); }
+  }
+  for (const el of document.querySelectorAll('img, svg, input, select, textarea, button, video, canvas')) {
+    if (shown(el)) { things.push([el.getBoundingClientRect(), el]); }
+  }
+  const bar = document.querySelector('.tabbar');
+  const tabs = bar && getComputedStyle(bar).display !== 'none' ? bar : null;
+  for (const [box, el] of things) {
+    if (box.width < 1 || box.height < 1 || box.bottom <= 0 || box.top >= H
+        || box.right <= 0 || box.left >= W) { continue; }
+    if (box.top < inset.top - 0.5) { out.under.push(name(el) + ' at ' + Math.round(box.top)); }
+    if (!tabs && box.bottom > H - inset.bottom + 0.5) {
+      out.low.push(name(el) + ' down to ' + Math.round(box.bottom));
+    }
+  }
+  const top = document.querySelector('.topbar');
+  if (top) {
+    const s = getComputedStyle(top);
+    out.topPad = parseFloat(s.paddingTop);
+    out.sticky = (s.position === 'sticky' || s.position === 'fixed') && parseFloat(s.top) === 0;
+  }
+  if (tabs) {
+    out.tabPad = parseFloat(getComputedStyle(tabs).paddingBottom);
+    out.tabBottom = tabs.getBoundingClientRect().bottom;
+  }
+  window.scrollTo(0, 400);
+  if (scrollY > 0) {
+    out.covered = [10, W / 2, W - 10].every((x) => {
+      const hit = document.elementFromPoint(x, inset.top / 2);
+      return !!(hit && hit.closest('.topbar'));
+    });
+  }
+  window.scrollTo(0, 0);
+  return out;
+}
+"""
+
 # The longest figure a card might have to hold, in the first figure of the
 # portfolio's: it wraps in its column rather than widen the page.
 LONG_FIGURE = r"""
@@ -710,6 +780,40 @@ FAKE_APP = r"""
     isPluginAvailable: () => false,
     getPlatform: () => 'ios',
     Plugins: {}
+  };
+})();
+"""
+
+
+# The app's subscribe screen, with a stand-in for its App Store plugin
+# (AppPurchase) whose answers __SETUP__ gives. A method named in "first"
+# holds its first call until window.__iapRelease(method); every other call
+# is answered at once. window.__iapAsked lists the methods asked for.
+FAKE_STORE = r"""
+(() => {
+  const setup = __SETUP__;
+  const held = {};
+  const seen = {};
+  window.__iapAsked = [];
+  window.__iapRelease = (method) => {
+    (held[method] || []).forEach((resolve) => resolve(setup.answers[method]));
+    held[method] = [];
+  };
+  window.Capacitor = {
+    isNativePlatform: () => true,
+    isPluginAvailable: (name) => name === 'AppPurchase',
+    getPlatform: () => 'ios',
+    Plugins: {},
+    nativePromise: (plugin, method, options) => {
+      window.__iapAsked.push(method);
+      if (plugin !== 'AppPurchase') { return Promise.reject(new Error('not in this app')); }
+      const first = !seen[method];
+      seen[method] = true;
+      if (first && setup.first.indexOf(method) !== -1) {
+        return new Promise((resolve) => { (held[method] = held[method] || []).push(resolve); });
+      }
+      return Promise.resolve(setup.answers[method]);
+    }
   };
 })();
 """
@@ -934,6 +1038,61 @@ def run(browser, site, base, check, head):
     ctx.close()
 
     # -----------------------------------------------------------------------
+    head("INSIDE THE APP, EVERY PAGE CLEARS THE STATUS BAR AND THE NOTCH")
+    # -----------------------------------------------------------------------
+    # 390 by 844 with the notch and home bar of an iPhone 14, every page
+    # signed in and the pages only a visitor sees signed out, and the app's
+    # own offline page, served here as if it were one of the site's.
+    inset = {"top": 47, "bottom": 34, "left": 0, "right": 0}
+    with open(_os.path.join(ROOT, "mobile", "www", "offline.html"), encoding="utf-8") as fh:
+        app_offline = fh.read()
+    unclear, pretended, pages = [], True, 0
+    for member in (True, False):
+        ctx = context(390, ua=APP_UA, signed_in=member)
+        ctx.route(base + "/app-offline.html",
+                  lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                              body=app_offline))
+        page = ctx.new_page()
+        page.set_viewport_size({"width": 390, "height": 844})
+        try:
+            ctx.new_cdp_session(page).send("Emulation.setSafeAreaInsetsOverride",
+                                           {"insets": inset})
+        except Exception as exc:
+            print("   --   this browser cannot pretend to have a notch (%s)" % type(exc).__name__)
+            pretended = False
+            ctx.close()
+            break
+        paths = [p.format(run=run_id, share=share_path) for p, whom, _tab in PAGES
+                 if whom == ("member" if member else "visitor") or (member and whom == "all")]
+        if member:
+            paths.append("/app-offline.html")
+        for path in paths:
+            page.goto(base + path)
+            n = page.evaluate(APP_NOTCH, inset)
+            pages += 1
+            said = []
+            if n["under"]:
+                said.append("under the status bar: " + ", ".join(n["under"][:3]))
+            if n["low"]:
+                said.append("on the home bar: " + ", ".join(n["low"][:3]))
+            if "topPad" in n and (n["topPad"] != inset["top"] or not n["sticky"]):
+                said.append("the top bar is padded %s and %s" % (
+                    n["topPad"], "sticks" if n["sticky"] else "does not stick"))
+            if n.get("covered") is False:
+                said.append("scrolled, the page shows under the status bar")
+            if "tabPad" in n and (n["tabPad"] != inset["bottom"] or n["tabBottom"] != n["screen"]):
+                said.append("the tab bar is padded %s and ends at %s of %s" % (
+                    n["tabPad"], n["tabBottom"], n["screen"]))
+            if said:
+                unclear.append("%s %s: %s" % ("signed in" if member else "signed out", path,
+                                              "; ".join(said)))
+        ctx.close()
+    if pretended:
+        check("inside the app, nothing on any page (%d of them, the offline page among them) "
+              "sits under the status bar, the notch or the home bar, and scrolled, the page "
+              "passes under the top bar" % pages, not unclear, unclear[:4])
+
+    # -----------------------------------------------------------------------
     head("A TICKER, TYPED")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)
@@ -1081,8 +1240,103 @@ def run(browser, site, base, check, head):
         ctx.close()
 
     # -----------------------------------------------------------------------
+    head("PRO IN THE APP, WHEN THIS APPLE ACCOUNT'S PRO IS ANOTHER ACCOUNT'S")
+    # -----------------------------------------------------------------------
+    # Pricing asks the App Store for the plans and, at the same time, sends
+    # what this Apple Account holds to the server. Here the server says that
+    # holding belongs to another Orenth account. Whichever answers first, no
+    # plan may then offer Subscribe: buying would only change that account's
+    # subscription. A tap that got in before the answer buys nothing either.
+    from bot import apple_store
+    monthly, yearly = apple_store.product_ids()[:2]
+    plans = {"products": [
+        {"id": monthly, "title": "Orenth Pro Monthly", "displayPrice": "$9.99", "price": "9.99",
+         "currencyCode": "USD", "periodUnit": "month", "periodValue": 1},
+        {"id": yearly, "title": "Orenth Pro Yearly", "displayPrice": "$79.99", "price": "79.99",
+         "currencyCode": "USD", "periodUnit": "year", "periodValue": 1}]}
+    theirs = {"jws": ["a.held.by-another-account"], "transactions": [
+        {"jws": "a.held.by-another-account", "productId": monthly, "transactionId": "7",
+         "originalTransactionId": "7", "verified": True,
+         "appAccountToken": "00000000-0000-4000-8000-000000000000"}]}
+    answers = {"products": plans, "entitlements": theirs,
+               "unfinished": {"jws": [], "transactions": []}, "purchase": {}}
+    STATE = """(() => ({
+      notice: !document.querySelector('[data-iap-elsewhere]').hidden,
+      plans: document.querySelectorAll('[data-buy]').length,
+      offered: [...document.querySelectorAll('[data-buy]')].filter(b => !b.hidden).length,
+      said: (document.querySelector('[data-iap-said]') || {}).textContent || '',
+      asked: window.__iapAsked
+    }))()"""
+    for first in ("products", "entitlements"):
+        posted = []
+
+        def another_account(route):
+            posted.append(route.request.post_data)
+            route.fulfill(status=200, content_type="application/json",
+                          body='{"results": [{"outcome": "other_account"}], "pro": false}')
+
+        ctx = context(390, ua=APP_UA, signed_in=True)
+        ctx.add_init_script(FAKE_STORE.replace("__SETUP__", json.dumps(
+            {"answers": answers, "first": [first]})))
+        ctx.route(base + "/api/apple/transactions", another_account)
+        page = ctx.new_page()
+        try:
+            page.goto(base + "/pricing")
+            if first == "products":
+                # The server answers first; the plans come after.
+                page.wait_for_selector("[data-iap-elsewhere]:not([hidden])")
+                page.evaluate("window.__iapRelease('products')")
+                page.wait_for_function("document.querySelectorAll('[data-buy]').length > 0")
+                seen = page.evaluate(STATE)
+                check("the plans arriving after the server's answer offer no Subscribe, "
+                      "next to the offer to move Pro here",
+                      seen["notice"] and seen["plans"] == 2 and seen["offered"] == 0, seen)
+            else:
+                # The plans come first, and Subscribe is tapped before the
+                # server has answered the check the page made as it opened.
+                page.locator('[data-buy="%s"]' % yearly).tap()
+                page.wait_for_selector("[data-iap-elsewhere]:not([hidden])")
+                seen = page.evaluate(STATE)
+                check("Subscribe tapped before that answer asks the server first, and buys "
+                      "nothing: moving Pro here is offered instead",
+                      "purchase" not in seen["asked"] and posted and seen["offered"] == 0
+                      and "Move it to this account instead" in seen["said"], seen)
+        except Exception as exc:
+            check("the subscribe screen when this Apple Account's Pro is another account's "
+                  "(%s first)" % first, False, exc)
+        ctx.close()
+
+    # -----------------------------------------------------------------------
     head("SIGNING IN INSIDE THE APP")
     # -----------------------------------------------------------------------
+    # The app's sign-in script is deferred, and on a first launch over a slow
+    # connection it can arrive well after the buttons show. A tap in between
+    # must start nothing the app cannot finish: Google refuses sign-in inside
+    # the app's own view, and the app would send it to Safari.
+    ctx = context(390, ua=APP_UA)
+    ctx.add_init_script(FAKE_APP)
+    held = []
+    ctx.route("**/static/signin-app.js*", lambda route: held.append(route))
+    page = ctx.new_page()
+    went = []
+    page.on("request", lambda r: went.append(r.url) if r.is_navigation_request() else None)
+    try:
+        page.goto(base + "/signin?next=/trades", wait_until="commit")
+        page.locator("a.gbtn[data-app-via=google]").tap(no_wait_after=True)
+        page.wait_for_timeout(800)
+        check("Continue with Google tapped before the app's sign-in script has arrived starts "
+              "nothing, and the app stays on the sign-in page",
+              held and not [u for u in went if "/auth/" in u] and "/signin" in page.url,
+              (len(held), went, page.url))
+    except Exception as exc:
+        check("tapping Continue with Google before the app's sign-in script arrives", False, exc)
+    for route in held:
+        try:
+            route.abort()
+        except Exception:
+            pass
+    ctx.close()
+
     minted = []
 
     def mint(source, url):

@@ -190,6 +190,13 @@
   var restoreButton = box.querySelector('[data-iap-restore]');
   var products = shop ? (shop.getAttribute('data-products') || '').split(',').filter(Boolean) : [];
   var busy = false;
+  // Set once the server says this Apple Account's Pro belongs to another
+  // Orenth account. From then on no plan offers Subscribe: the App Store
+  // would only change that account's subscription, and this one would get
+  // nothing for it. Moving Pro here is offered instead.
+  var elsewhere = false;
+  var MOVE_INSTEAD = 'This Apple Account already pays for Pro on another Orenth account. ' +
+    'Move it to this account instead.';
 
   function say(text) {
     if (said) { said.textContent = text || ''; }
@@ -279,6 +286,7 @@
     if (intro) { item.appendChild(el('p', 'fine', intro)); }
     var buy = el('button', 'btn', 'Subscribe');
     buy.type = 'button';
+    buy.hidden = elsewhere;
     buy.setAttribute('data-buy', p.id);
     buy.setAttribute('aria-label', 'Subscribe to ' + (p.title || 'Orenth Pro') + ', ' +
       p.displayPrice + (every ? ' per ' + every : ''));
@@ -311,9 +319,10 @@
     });
   }
 
-  // This Apple Account's Pro belongs to another Orenth account: offer the move
-  // instead of a purchase the App Store would not make anyway.
+  // This Apple Account's Pro belongs to another Orenth account: offer the
+  // move, and no purchase, now or for plans drawn later.
   function showElsewhere() {
+    elsewhere = true;
     if (!shop) { return; }
     var notice = shop.querySelector('[data-iap-elsewhere]');
     if (notice) { notice.hidden = false; }
@@ -323,6 +332,18 @@
 
   function outcomes(out) {
     return ((out && out.results) || []).map(function (r) { return r.outcome; });
+  }
+
+  // What this Apple Account already holds, sent to the server without asking
+  // for a password. The server decides whose it is: this account's (then
+  // Pro is restored here), or another Orenth account's. Resolves with its
+  // answer, or null when the Apple Account holds nothing.
+  function checkHeld() {
+    return ap('entitlements').then(function (r) {
+      var jws = (r && r.jws) || [];
+      if (!jws.length) { return null; }
+      return post('/api/apple/transactions', { jws: jws.slice(0, 20) });
+    });
   }
 
   function afterServer(out, done) {
@@ -353,6 +374,11 @@
 
   function buy(productId) {
     if (busy) { return; }
+    if (elsewhere) {
+      showElsewhere();
+      say(MOVE_INSTEAD);
+      return;
+    }
     hold(true);
     say('Opening the App Store…');
     var paid = false;
@@ -365,13 +391,27 @@
         again(1500);
         return null;
       }
-      return ap('purchase', { productId: productId, appAccountToken: state.appAccountToken })
-        .then(function (t) {
-          paid = true;
-          say('Confirming with Apple…');
-          return deliver(t);
-        })
-        .then(function (out) { if (out) { afterServer(out); } });
+      // Checked again just before buying: the check made when the page
+      // opened may not have answered yet.
+      return checkHeld().then(function (held) {
+        if (held && held.pro) {
+          say('You already have Pro through Apple.');
+          again(1500);
+          return null;
+        }
+        if (outcomes(held).indexOf('other_account') >= 0) {
+          showElsewhere();
+          say(MOVE_INSTEAD);
+          return null;
+        }
+        return ap('purchase', { productId: productId, appAccountToken: state.appAccountToken })
+          .then(function (t) {
+            paid = true;
+            say('Confirming with Apple…');
+            return deliver(t);
+          })
+          .then(function (out) { if (out) { afterServer(out); } });
+      });
     }).catch(function (err) {
       var code = err && err.code;
       if (code === 'CANCELLED') { say(''); }
@@ -457,11 +497,7 @@
     watchers.push(function (out) { if (out && out.pro) { again(); } });
     // Quietly, without asking for a password: what this Apple Account
     // already holds. It may be this account's (restored), or another's.
-    ap('entitlements').then(function (r) {
-      var jws = (r && r.jws) || [];
-      if (!jws.length) { return null; }
-      return post('/api/apple/transactions', { jws: jws.slice(0, 20) });
-    }).then(function (out) {
+    checkHeld().then(function (out) {
       if (!out) { return; }
       if (out.pro) { again(); return; }
       if (outcomes(out).indexOf('other_account') >= 0) { showElsewhere(); }

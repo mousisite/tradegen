@@ -20,6 +20,7 @@
 		F797B6E7033F415689DF47CD /* WebAuthPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 682183DD32D1439AA071C854 /* WebAuthPlugin.swift */; };
 		6A3785AC1F4C48B08624FDFF /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */; };
 		FDA9EE7FC99A473BA4B9E4E5 /* AppPurchasePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */; };
+		33AD19E298324FB78C5FD32D /* NavigationGuardPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06DC58547ED04363A1855D68 /* NavigationGuardPlugin.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,6 +39,8 @@
 		682183DD32D1439AA071C854 /* WebAuthPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebAuthPlugin.swift; sourceTree = "<group>"; };
 		639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPurchasePlugin.swift; sourceTree = "<group>"; };
+		06DC58547ED04363A1855D68 /* NavigationGuardPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationGuardPlugin.swift; sourceTree = "<group>"; };
+		3A3DA4B0A74B4B45BCD5D38F /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +88,8 @@
 				682183DD32D1439AA071C854 /* WebAuthPlugin.swift */,
 				639277E8A7074E489ABBF788 /* PrivacyInfo.xcprivacy */,
 				1B038E1C189D4BADA805B9B8 /* AppPurchasePlugin.swift */,
+				06DC58547ED04363A1855D68 /* NavigationGuardPlugin.swift */,
+				3A3DA4B0A74B4B45BCD5D38F /* App.entitlements */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -176,6 +181,7 @@
 				290D552E41BB4A10B19FBE14 /* MainViewController.swift in Sources */,
 				F797B6E7033F415689DF47CD /* WebAuthPlugin.swift in Sources */,
 				FDA9EE7FC99A473BA4B9E4E5 /* AppPurchasePlugin.swift in Sources */,
+				33AD19E298324FB78C5FD32D /* NavigationGuardPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,6 +321,7 @@
 			baseConfigurationReference = 958DCC722DB07C7200EA8C5F /* debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = App/Info.plist;
@@ -337,6 +344,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = App/Info.plist;

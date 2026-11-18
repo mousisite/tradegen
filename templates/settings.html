@@ -311,13 +311,14 @@
 
 <section>
   <div class="sechead"><h2>Take your data with you</h2>
-    <span class="tail">{{ 'download what is yours' if personal
+    <span class="tail">{{ 'downloads are on the website' if in_app
+                          else 'download what is yours' if personal
                           else 'no account needed, nothing phoned home' }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
       <table class="stack one">
         <thead><tr><th>What</th><th class="r">Rows</th><th>Why you would want it</th>
-          <th class="r">Download</th></tr></thead>
+          {% if not in_app %}<th class="r">Download</th>{% endif %}</tr></thead>
         <tbody>
         {% for key, spec in datasets.items() %}
           <tr>
@@ -325,6 +326,9 @@
             <td class="r fig {{ 'faint' if not export_counts.get(key) }}" data-label="Rows">
               {{ "{:,}".format(export_counts.get(key, 0)) }}</td>
             <td class="soft" data-label="Why you would want it">{{ spec.why }}</td>
+            {# Inside the iPhone app a file has nowhere to go: the app's one
+               screen would show it as bare text, with no way to keep it. #}
+            {% if not in_app %}
             <td class="r" data-label="Download">
               {% if export_counts.get(key) %}
                 <a href="{{ url_for('export_data', dataset=key, fmt='csv') }}">CSV</a>
@@ -334,12 +338,15 @@
                 <span class="faint">nothing yet</span>
               {% endif %}
             </td>
+            {% endif %}
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
+      {% if in_app %}Downloads are on the Orenth website: sign in there in a
+      browser, then open Settings.{% endif %}
       {% if personal %}
       The measured strategy record is shared by everyone on Orenth, so that
       download is the whole record, not only the part your analyses added.

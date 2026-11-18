@@ -13,10 +13,16 @@ import Capacitor
 ///
 /// From the page:
 ///   Capacitor.nativePromise('WebAuth', 'start',
-///       { url: 'https://orenth.app/...', callbackScheme: 'app.orenth.ios',
+///       { url: 'https://orenth.app/auth/...', callbackScheme: 'app.orenth.ios',
 ///         ephemeral: false })
 /// resolves to { url: 'app.orenth.ios://...' }, and rejects with the code
 /// "CANCELLED" when the person closes the sheet.
+///
+/// The sheet says "Orenth wants to use orenth.app to sign in", and whatever
+/// it ends on goes to the page that asked. So only a page of orenth.app may
+/// ask (NOT_ALLOWED otherwise), and only for a sign-in address of the site,
+/// https://orenth.app/auth/..., ending on the app's own scheme (INVALID_URL,
+/// INVALID_SCHEME otherwise).
 ///
 /// Registered by MainViewController.capacitorDidLoad().
 @objc(WebAuthPlugin)
@@ -34,22 +40,26 @@ public class WebAuthPlugin: CAPPlugin, CAPBridgedPlugin, ASWebAuthenticationPres
     @objc func start(_ call: CAPPluginCall) {
         guard let address: String = call.getString("url"),
               let url: URL = URL(string: address),
-              let scheme: String = url.scheme,
-              scheme.lowercased() == "https" else {
-            call.reject("The sign-in address must be an https address.", "INVALID_URL")
+              OrenthSite.isSignInAddress(url) else {
+            call.reject("Sign-in must start at https://orenth.app/auth/.", "INVALID_URL")
             return
         }
         guard let callbackScheme: String = call.getString("callbackScheme"),
-              !callbackScheme.isEmpty else {
-            call.reject("The app's own address scheme is missing.", "INVALID_SCHEME")
+              callbackScheme == OrenthSite.appScheme else {
+            call.reject("The sign-in must end on the app's own address.", "INVALID_SCHEME")
             return
         }
         let ephemeral: Bool = call.getBool("ephemeral", false)
 
-        // Plugin methods run on Capacitor's own queue; the sheet is UI.
+        // Plugin methods run on Capacitor's own queue; the web view and the
+        // sheet are UI.
         DispatchQueue.main.async { [weak self] in
             guard let plugin: WebAuthPlugin = self else {
                 call.reject("The sign-in sheet could not be opened.", "UNAVAILABLE")
+                return
+            }
+            guard OrenthSite.showsSitePage(plugin.webView) else {
+                call.reject("Only Orenth's own pages can open the sign-in sheet.", "NOT_ALLOWED")
                 return
             }
             plugin.beginSession(call: call, url: url, callbackScheme: callbackScheme, ephemeral: ephemeral)

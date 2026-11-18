@@ -21,7 +21,9 @@
   <p class="prose">If you sign in with Google, Orenth receives and stores:</p>
   <ul class="list">
     <li>Your email address, used as the identity of your account.</li>
-    <li>Your name and profile picture, used to show who is signed in.</li>
+    <li>Your name, and the address of your Google profile picture, used to
+      show who is signed in. The picture itself stays at Google: a page that
+      shows it fetches it from Google.</li>
     <li>A Google account identifier, so that the account still resolves if your
       email address changes.</li>
   </ul>
@@ -82,7 +84,11 @@
     renewals and restored purchases reach the right account; it says nothing
     about who you are. If a subscription is moved from one Orenth account to
     another, Orenth keeps which account it left and when, and emails that
-    account to say so.</p>
+    account to say so. If you delete your account, the token is deleted. The
+    subscription's transaction numbers, plan, dates and any refund are
+    kept, linked to no account, until the time it paid for has run out: a
+    copy of a purchase stays valid, and this record is what stops a refunded
+    one giving Pro again.</p>
   {% endif %}
   <p class="prose">If you press Share on an analysis, Orenth makes a public
     page with that stock, the call, its counts and the date. It does not show
@@ -99,15 +105,18 @@
     Pro. These are counts only: a day, what happened and how many times. No
     account, address, ticker or network address is kept with them, so they
     cannot be traced back to you.</p>
+  {# Inside the iPhone app nothing names another phone's system (App Store
+     rule 2.3.10), and the subscribe screen links here. #}
   <p class="prose" id="notifications">If you turn on notifications on a phone
     or a computer, Orenth keeps what that device's push service gave it to
     reach the device (for a browser, a web address and two keys; for the
-    iPhone app, a device token), a short name such as "Chrome on Android",
+    iPhone app, a device token), a short name such as "{{ 'iPhone app' if in_app
+    else 'Chrome on Android' }}",
     and when a notification last went through or why it failed. When one of
     your alerts fires, or a position in your journal crosses its stop, its
     text and the time of its price go to the device through that push
-    service: Apple's for iPhones, iPads and Safari, Google's for Chrome and
-    Android, Mozilla's for Firefox and Microsoft's for Edge. For a stop, the
+    service: Apple's for iPhones, iPads and Safari, Google's for Chrome{% if not in_app %} and
+    Android{% endif %}, Mozilla's for Firefox and Microsoft's for Edge. For a stop, the
     text names the stock, its price, the stop and whether your position is
     long or short. A browser's notifications are encrypted for that browser,
     so the push service carries them without being able to read them; only a
@@ -121,7 +130,10 @@
   <h2>What you create</h2>
   <p class="prose">
     Anything you enter is stored against your account: trades, watchlist,
-    alerts, saved theses, and the history of analyses you have run. Only you can
+    alerts and the alerts that fired, saved theses, your settings (such as
+    your account size and risk per trade), and the history of analyses you
+    have run. For a free account, which stocks and coins it opened on each
+    day is kept too, which is how its daily allowance is counted. Only you can
     see it. Other people signed into the same installation cannot read it, and
     that separation is enforced by the database query rather than by the
     interface hiding things.
@@ -177,10 +189,16 @@
             app</td>
             <td>Showing the alert or stop on your phone or computer</td></tr>
         <tr><td>Metricool</td><td>The page address without anything after a ?, the
-            window size and the page you came from, only while not signed in.
+            window size and the page you came from, only while not signed in,
+            and never in the iPhone app.
             As with any request your browser makes, it also gets your network
             address and the description your browser gives of itself</td>
             <td>Counting visits. No cookie is set</td></tr>
+        <tr><td>Google</td><td>Only if you signed in with Google: a request for
+            your profile picture each time a page shows it, which, as any
+            request your browser or the app makes, carries your network address
+            and the description it gives of itself</td>
+            <td>Showing your picture beside your name</td></tr>
         <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe{% if iap_on %} on the website{% endif %}</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
@@ -220,18 +238,29 @@
       </tbody>
     </table>
   </div>
+  {# The App Store asks a privacy policy to say this in so many words
+     (guideline 5.1.1(i)): whoever gets data from the app protects it as
+     the policy does. #}
+  <p class="prose" id="services">
+    Each service above gets only what its row says. It may use that only to
+    do the job its row names, for Orenth, and must protect it at least as
+    well as this page promises.
+  </p>
 
   <h2>What does not happen</h2>
   <ul class="list">
     <li>No advertising, and no advertising identifiers.</li>
     <li>No tracking scripts. The pages load no third-party JavaScript at all.
       Visits are counted only while you are not signed in, as described
-      above, with no cookie.</li>
-    <li>No selling, renting or sharing of personal data with anyone.</li>
+      above, with no cookie, and never in the iPhone app.</li>
+    <li>No selling or renting of personal data, and no sharing of it beyond
+      the services listed above, for the jobs listed there.</li>
     <li>No tracking cookies. Orenth's own cookie keeps you signed in. It
       holds a random session token and, only while something is under way,
       what that needs: the invite you arrived with, the email address or
-      phone number a sign-in code was sent to, the checks and the page to go
+      phone number a sign-in code was sent to (for App Review's own account,
+      which is sent no code, the address typed, until its sign-in page
+      opens), the checks and the page to go
       back to for a sign-in with Google{% if apple_native %} or Apple{% endif %}, or a note of an exit the
       journal just recorded, until the journal shows it. It is signed so
       that it cannot be changed, but it is not encrypted.{% if apple_ready %}
@@ -250,18 +279,20 @@
   <p class="prose">
     Your data stays until you remove it. Your journal and each of its exits,
     your saved theses and your analysis history can be downloaded as CSV or
-    JSON at any time, from the Account and Settings pages, without asking
-    anyone. Deleting
+    JSON at any time, from the Account and Settings pages{% if in_app %} of
+    the Orenth website, in a browser{% endif %}, without asking anyone. Deleting
     your account removes your trades, watchlist, alerts, theses, analysis
     history, shared pages, sign-in records and the devices you turned
     notifications on for straight away; the shared
     strategy record stays, because it was never yours alone and contains
     nothing about you.{% if apple_native %} If you signed in with Apple, it
     also asks Apple to end Orenth's access to your Apple Account.{% endif %}
-    {% if iap_on %}It deletes Orenth's record of any Pro bought through Apple
-    too, but it cannot cancel that subscription: Apple keeps billing until you
-    cancel it in your iPhone's Settings &gt; Apple Account &gt;
-    Subscriptions, which the Account page says before you delete.{% endif %}
+    {% if iap_on %}It deletes the token that tied any Pro bought through Apple
+    to your account, and keeps the rest of that subscription's record only as
+    said above, linked to no account. It cannot cancel that subscription:
+    Apple keeps billing until you cancel it in your iPhone's Settings &gt;
+    Apple Account &gt; Subscriptions, which the Account page says before you
+    delete.{% endif %}
   </p>
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
@@ -347,8 +378,10 @@
 
   <h2>Your account</h2>
   <p class="prose">
-    You are responsible for what happens under your account. You may export your
-    data or delete your account at any time from the Account page. Access may be
+    You are responsible for what happens under your account. {% if in_app %}You
+    may delete your account at any time from the Account page, and export your
+    data from the Account page of the Orenth website.{% else %}You may export your
+    data or delete your account at any time from the Account page.{% endif %} Access may be
     withdrawn for abuse of the service or of the data sources it depends on.
   </p>
 

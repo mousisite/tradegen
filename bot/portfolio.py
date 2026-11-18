@@ -33,9 +33,7 @@ class Trail:
     volatility later cannot widen it and loosen the stop. since is when it was
     set: the trailed level counts on bars that started after that. best and
     best_at are the best price seen since opening as last stored, so a reader
-    whose bars start later than the trade still trails from it. hit_at,
-    hit_price and hit_stop are the first crossing of the stop any reader saw,
-    as stored, so a crossing seen live still counts once that bar is done.
+    whose bars start later than the trade still trails from it.
     """
     pct: Optional[float] = None
     distance: Optional[float] = None
@@ -43,9 +41,6 @@ class Trail:
     since: int = 0
     best: Optional[float] = None
     best_at: Optional[int] = None
-    hit_at: Optional[int] = None
-    hit_price: Optional[float] = None
-    hit_stop: Optional[float] = None
 
     def level(self, direction: int, best: float) -> float:
         """Where the trail puts the stop, given the best price so far."""
@@ -62,6 +57,15 @@ class Trail:
         return _px(self.distance)
 
 
+def _column(row, key):
+    """A journal row's column, or None for a row from before it existed, or a
+    stand-in in a test, that has no such column."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def trail_of(row) -> Optional[Trail]:
     """The trail kept on a journal row, or None when it has none.
 
@@ -69,27 +73,28 @@ def trail_of(row) -> Optional[Trail]:
     columns, and reads as a trade that does not trail.
     """
     def get(key):
-        try:
-            return row[key]
-        except (KeyError, IndexError):
-            return None
+        return _column(row, key)
 
     pct, distance = get("trail_pct"), get("trail_dist")
     if not pct and not distance:
         return None
     best = get("trail_best")
-    hit, hit_price, hit_stop = get("trail_hit_ts"), get("trail_hit_price"), get("trail_hit_stop")
-    if hit_price is None or hit_stop is None:
-        hit = None
     return Trail(pct=float(pct) if pct else None,
                  distance=None if pct else float(distance),
                  atr=float(get("trail_atr")) if get("trail_atr") else None,
                  since=int(get("trail_ts") or get("ts_opened") or 0),
                  best=float(best) if best is not None else None,
-                 best_at=int(get("trail_best_ts")) if get("trail_best_ts") is not None else None,
-                 hit_at=int(hit) if hit is not None else None,
-                 hit_price=float(hit_price) if hit is not None else None,
-                 hit_stop=float(hit_stop) if hit is not None else None)
+                 best_at=int(get("trail_best_ts")) if get("trail_best_ts") is not None else None)
+
+
+def crossing_of(row):
+    """The first crossing of a journal row's stop any reader saw and kept
+    (database.stop_crossed), as (when, price, stop), or None."""
+    when, price, stop = (_column(row, "trail_hit_ts"), _column(row, "trail_hit_price"),
+                         _column(row, "trail_hit_stop"))
+    if when is None or price is None or stop is None:
+        return None
+    return int(when), float(price), float(stop)
 
 
 @dataclass
@@ -123,7 +128,8 @@ class StopRead:
         """The crossing this read saw, as (when, price, stop) to keep, or None.
 
         The first bar that reached the stop, or else today's price past it,
-        at now. A reader of a trailing stop keeps it (database.trail_crossed).
+        at now. A reader keeps it (database.stop_crossed), whether the stop
+        trails or not.
         """
         if self.touched_at is not None:
             return self.touched_at, self.touched, self.touched_stop
@@ -177,7 +183,7 @@ def _walk(bars, direction: int, entry: float, stop: float, opened: int,
 
 def read_stop(bars, direction: int, entry: float, stop: float, opened: int,
               split: float = 1.0, trail: Optional[Trail] = None,
-              now: Optional[int] = None) -> StopRead:
+              now: Optional[int] = None, kept=None) -> StopRead:
     """The one stop rule. The portfolio, the journal, paper.py and the
     background stop notice all read a position through this, so they agree.
 
@@ -188,16 +194,16 @@ def read_stop(bars, direction: int, entry: float, stop: float, opened: int,
     opening: for a long, max(stop, best high - trail); for a short, the
     mirror. The best only ever improves, so the stop only ever tightens. A
     trail set after opening trails from the best since opening too, but a
-    bar from before it was set is held only to the logged stop. A crossing
-    of a trailing stop that a reader saw and kept (Trail.hit_at) counts as
-    one: seen live, it is not in that bar's own reading once the bar is done.
+    bar from before it was set is held only to the logged stop. kept is a
+    crossing of the stop that a reader saw and kept, as (when, price, stop)
+    (crossing_of), and counts as one: seen live, it is not in that bar's own
+    reading once the bar is done, and in time it is not in the bars at all.
     """
     direction = 1 if direction > 0 else -1
     touched_at, touched, touched_stop, best, best_at = _walk(
         bars, direction, entry, stop, opened, split, trail)
-    if (trail is not None and trail.hit_at is not None
-            and (touched_at is None or trail.hit_at < touched_at)):
-        touched_at, touched, touched_stop = trail.hit_at, trail.hit_price, trail.hit_stop
+    if kept is not None and (touched_at is None or kept[0] < touched_at):
+        touched_at, touched, touched_stop = kept
     price = float(bars.last_price) * split
     if trail is not None and trail.best is not None and (trail.best - best) * direction > 0:
         best = trail.best
@@ -212,9 +218,9 @@ def read_stop(bars, direction: int, entry: float, stop: float, opened: int,
 
 
 def read_trade_stop(row, bars, split: float = 1.0) -> StopRead:
-    """read_stop for a journal row, with whatever trail is kept on it."""
+    """read_stop for a journal row, with whatever trail and crossing are kept on it."""
     return read_stop(bars, int(row["direction"]), float(row["entry"]), float(row["stop"]),
-                     int(row["ts_opened"]), split, trail_of(row))
+                     int(row["ts_opened"]), split, trail_of(row), kept=crossing_of(row))
 
 
 def trade_interval(row) -> str:
@@ -326,6 +332,10 @@ class Position:
     trail: Optional[Trail] = None
     # The trade's own bar size, which its stop is read on (trade_interval).
     interval: str = "1d"
+    # A crossing of the stop a reader saw and kept (crossing_of), or None.
+    kept: Optional[tuple] = None
+    # How its stop was read just now, for keep_reads; None when unpriced.
+    read: Optional[StopRead] = None
 
     @property
     def risk_per_unit(self) -> float:
@@ -437,7 +447,7 @@ def build(rows, account: float, with_correlation: bool = True,
                  entry=float(r["entry"]), stop=float(r["stop"]),
                  target=float(r["target1"]) if r["target1"] else None,
                  opened=int(r["ts_opened"]), initial_stop=float(r["stop"]),
-                 trail=trail_of(r), interval=trade_interval(r))
+                 trail=trail_of(r), interval=trade_interval(r), kept=crossing_of(r))
         for r in rows
     ]
 
@@ -503,6 +513,27 @@ def build(rows, account: float, with_correlation: bool = True,
     return view
 
 
+def keep_reads(conn, view: PortfolioView, now: Optional[float] = None) -> None:
+    """Keep what reading the positions saw, as every reader of a stop does.
+
+    The best price under a trailing stop (database.trail_seen) and the first
+    crossing of any stop (database.stop_crossed). A dip through a stop
+    between two rounds of the background check may be seen here alone, and
+    once that bar is finished its high and low no longer show it: kept, it
+    is still a crossing for the journal, the notice and everything else.
+    """
+    from . import database as db
+    now = time.time() if now is None else now
+    for p in view.positions:
+        if p.read is None:
+            continue
+        if p.trail is not None and p.read.best_at is not None:
+            db.trail_seen(conn, p.trade_id, p.read.best, p.read.best_at)
+        crossed = p.read.crossing(now)
+        if crossed is not None:
+            db.stop_crossed(conn, p.trade_id, *crossed)
+
+
 def _enrich(positions: List[Position], view: PortfolioView) -> None:
     """Attach live price, sector and risk stats to each holding, concurrently."""
     def grab(p: Position):
@@ -518,13 +549,15 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             # past its stop. The quote is turned back into those shares.
             p.split = split_factor_since(p.symbol, p.opened, bars)
             p.asset_class = bars.asset_class
-            # The stop by the journal's own rule, trail and split included.
+            # The stop by the journal's own rule, trail, split and any
+            # crossing kept from before these bars included.
             read = read_stop(bars, p.direction, p.entry,
                              p.initial_stop if p.initial_stop is not None else p.stop,
-                             p.opened, p.split, p.trail)
+                             p.opened, p.split, p.trail, kept=p.kept)
             p.price, p.stop = read.price, read.stop
             p.touched_at, p.touched = read.touched_at, read.touched
             p.touched_stop = read.touched_stop
+            p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
             return

@@ -67,7 +67,7 @@ SUITES = [
     ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
     ("test_lock.py",         False, "the lock file the server installs from agrees with requirements.txt"),
     ("test_ai_consent.py",   False, "a screenshot goes to Anthropic only after the person says yes"),
-    ("test_app_mode.py",     False, "the iPhone app: no Stripe or third-party counting inside it, the review sign-in"),
+    ("test_app_mode.py",     False, "the iPhone app: no Stripe, counting, website links or downloads inside it; the review sign-in"),
     ("test_browser.py",      False, "every page at phone sizes in a real browser, and the main flows by touch"),
 ]
 

@@ -4,7 +4,8 @@ App Store guideline 5.1.2(i), and plain fairness: personal data shared with
 a third-party AI needs a clear disclosure and an explicit yes first. A
 screenshot can show anything a person had on screen, so the Analyse page asks
 once, remembers the yes per account, shows it in Settings and takes it back
-there. The example account is shared, so its yes is never kept.
+there. The example account is shared, so its yes is never kept. Inside the
+iPhone app, where the picker can also take a photo, it is the same.
 """
 import io
 import os as _os
@@ -133,6 +134,31 @@ try:
                         (ann.id,)).fetchone()[0]
     conn.close()
     check("removes the yes with everything else", left == 0, left)
+
+    head("INSIDE THE IPHONE APP")
+    # App Review checks rule 5.1.2(i) in the app, where the picker can take a
+    # photo as well as pick a screenshot. The same box asks there, and the
+    # server refuses a picture from the app without the yes just the same.
+    APP = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                         "OrenthApp/1"}
+    conn = db.connect(DB)
+    bea = A.upsert_email_user(conn, "bea@example.com")
+    conn.close()
+    sign_in(bea)
+    page = c.get("/", headers=APP).data.decode("utf-8", "replace")
+    check("the app's Analyse page asks too, naming Anthropic, before any picture",
+          "/static/native.js" in page and 'id="ai_ok"' in page
+          and 'type="checkbox"' in page and "Send my screenshot to Anthropic" in page)
+    before = len(sent)
+    r = c.post("/analyse/image", data={"chart": (png_bytes(), "photo.jpg")},
+               content_type="multipart/form-data", headers=APP)
+    check("a photo sent from the app without the yes is refused",
+          r.status_code == 400 and len(sent) == before, (r.status_code, sent))
+    r = c.post("/analyse/image", data={"chart": (png_bytes(), "photo.jpg"), "ai_ok": "1"},
+               content_type="multipart/form-data", headers=APP)
+    check("and read once the box is ticked", r.status_code == 302
+          and len(sent) == before + 1, (r.status_code, sent))
 
     head("THE PRIVACY PAGE")
     page = c.get("/privacy").data.decode("utf-8", "replace")

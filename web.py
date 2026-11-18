@@ -43,6 +43,7 @@ except ImportError:
 from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
+from flask.json.provider import DefaultJSONProvider
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -68,6 +69,7 @@ from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import sessions as sessions_mod
@@ -90,6 +92,24 @@ app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 # padded notes could fill the data disk. The screenshot upload sets a larger
 # limit for its own request, because the form reader holds file data to it.
 app.config["MAX_FORM_MEMORY_SIZE"] = 20_000
+
+
+class _RequestJSON(DefaultJSONProvider):
+    """Flask's JSON, except that a body nested deeper than bot/safejson.py
+    allows is refused before it is read, as text that is not JSON.
+
+    request.get_json reads every JSON body through this. JSON nested a few
+    thousand deep would otherwise raise RecursionError, which get_json's
+    silent= does not cover: a few kilobytes from anyone, to any address that
+    takes JSON, would be a 500, a traceback and an error report. Refused
+    here, get_json gives None (silent) or a 400, as for any other junk.
+    """
+
+    def loads(self, s, **kwargs):
+        return safejson.loads(s, **kwargs)
+
+
+app.json = _RequestJSON(app)
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -382,13 +402,14 @@ def _apple_plan() -> Dict:
     on: whether the app sells Pro. pro: the Apple subscription that gives
     this person Pro now, or None. billing: one Apple could still charge for
     (running, or retrying a failed renewal), test purchases included, for the
-    warning before an account is deleted. via: how Pro was got otherwise,
-    so the app can say why it sells nothing: "web" (paid on the website),
-    "invite" or "other".
+    warning before an account is deleted. retrying: whether Apple may yet
+    charge for Pro that has ended, so the website sells none meanwhile.
+    via: how Pro was got otherwise, so the app can say why it sells nothing:
+    "web" (paid on the website), "invite" or "other".
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
-           "products": apple_store_mod.product_ids(), "via": "", "twice": False,
-           "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
+           "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
         return out
@@ -396,6 +417,7 @@ def _apple_plan() -> Dict:
     try:
         out["pro"] = apple_store_mod.subscription(conn, user.id)
         out["billing"] = apple_store_mod.subscription(conn, user.id, counted_only=False)
+        out["retrying"] = apple_store_mod.may_still_charge(conn, user.id)
     finally:
         conn.close()
     plain = dataclasses.replace(user, apple_until=0)
@@ -656,6 +678,7 @@ def _expose_user():
             # static/app-purchase.js while it is on.
             "iap_on": apple_store_mod.enabled(),
             "apple_pro_said": APPLE_PRO_SAID,
+            "apple_retrying_said": APPLE_RETRYING_SAID,
             "phone_ready": codes_mod.phone_ready(),
             "google_ready": auth_mod.configured(),
             # Apple on the website, and Apple anywhere (the app needs less).
@@ -1068,6 +1091,14 @@ def index():
     finally:
         conn.close()
     attention = _attention(stored, open_trades)
+    # What the prices just read saw is kept, as the journal keeps it: a dip
+    # through a stop between two rounds of the background check may be seen
+    # here alone. Nothing, if the prices were late.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        _keep_trail_bests(conn, open_trades, attention["marks"])
+    finally:
+        conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return render_template("index.html", runs=runs,
                            open_trades=_held(open_trades, attention["marks"]),
@@ -1484,15 +1515,16 @@ def _keep_trail_bests(conn, open_trades, marks) -> None:
     Read here over the trade's whole history, it holds the trail up for a
     reader with fewer bars, such as the background check. Only ever raises
     a long's best (lowers a short's), so it changes nothing else. A crossing
-    of the stop seen here is kept too, the first one only, so it is still a
-    crossing for every reader once that day's bar is finished.
+    of any stop seen here is kept too, the first one only, so it is still a
+    crossing for every reader once that day's bar is finished, and once it
+    is older than the trade's bars reach.
     """
     for t in open_trades:
         mark = marks.get(t["id"]) or {}
         if mark.get("trail") is not None and mark.get("best_at") is not None:
             db_mod.trail_seen(conn, int(t["id"]), mark["best"], mark["best_at"])
-            if mark.get("crossed"):
-                db_mod.trail_crossed(conn, int(t["id"]), *mark["crossed"])
+        if mark.get("crossed"):
+            db_mod.stop_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
 # The session key for what the journal says once after an exit.
@@ -2584,6 +2616,8 @@ def google_callback():
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        if _kept_for_review(conn, profile.get("email"), "Google sign-in"):
+            return _sign_in_failed(challenge, REVIEW_KEPT % "Google", "refused")
         user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
         return _sign_in_failed(challenge, str(exc), "refused")
@@ -2698,6 +2732,9 @@ def apple_callback():
     refresh_token = tokens.get("refresh_token")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        if _kept_for_review(conn, identity.get("email"), "Sign in with Apple"):
+            return _apple_done(_sign_in_failed(challenge, REVIEW_KEPT % "Apple",
+                                               "refused"))
         user = events_mod.new_account(
             conn, accounts_mod.upsert_apple_user, identity,
             apple_mod.name_from_post(request.form.get("user", "")),
@@ -2746,12 +2783,8 @@ def apple_native():
                                               "itself."}), 403
     request.max_content_length = APPLE_JSON_LIMIT
     # Named so that an error report strips it: it holds the identity token.
-    try:
-        token_post = request.get_json(silent=True)
-    except RecursionError:
-        # silent= covers only what is not JSON; this is JSON nested too
-        # deep for Python to read, which anyone can send.
-        token_post = None
+    # JSON nested too deep to read is None here too (_RequestJSON).
+    token_post = request.get_json(silent=True)
     if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
@@ -2776,6 +2809,13 @@ def apple_native():
     if not apple_mod.spend_nonce(issued_hash):
         return jsonify({"ok": False, "error": "That sign-in was already used. "
                                               "Try again."}), 400
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        kept = _kept_for_review(conn, identity.get("email"), "Sign in with Apple")
+    finally:
+        conn.close()
+    if kept:
+        return jsonify({"ok": False, "error": REVIEW_KEPT % "Apple"}), 400
     refresh_token = _apple_refresh_token(token_post.get("authorizationCode"),
                                          identity["sub"], client_id)
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2836,10 +2876,7 @@ def apple_notifications():
     if not apple_mod.native_ready():
         abort(404)
     request.max_content_length = APPLE_JSON_LIMIT
-    try:
-        body = request.get_json(silent=True, force=True)
-    except RecursionError:
-        body = None              # nested too deep to read, as in apple_native
+    body = request.get_json(silent=True, force=True)
     try:
         event = apple_mod.read_notification(
             body.get("payload") if isinstance(body, dict) else None)
@@ -3067,6 +3104,14 @@ def code_start(channel):
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             target = spec["clean"](value)
+            if channel == "email" and _is_review_address(target):
+                # App Review types its sign-in details where an app asks for
+                # an email, and its account signs in only with its fixed
+                # code. So that address is sent no email: the review page
+                # opens instead, with the address already in it. The address
+                # opens nothing by itself; the code is the secret.
+                session["review_email"] = target
+                return redirect(url_for("review_signin"))
             if channel == "email":
                 codes_mod.send_email_code(conn, target, _client_ip(),
                                           app.secret_key)
@@ -3139,26 +3184,102 @@ def _review_login() -> Optional[Tuple[str, str]]:
     return email, code
 
 
-def _review_account(conn, email: str):
-    """The review account, made on first use with the email provider.
+def _is_review_address(email: str) -> bool:
+    """Whether an address is the review account's, while its sign-in is on."""
+    login = _review_login()
+    return login is not None and (email or "").strip().lower() == login[0]
+
+
+# How an account the fixed code may not open was made, for the log.
+_MADE_WITH = {"google": "Google sign-in", "apple": "Sign in with Apple",
+              "phone": "a text-message code", "demo": "the example account"}
+
+
+def _review_refusal(conn, email: str) -> str:
+    """Why the fixed code may not open the account at this address, or ''.
 
     Never the local account, the example account, an operator, or an account
     someone signs in to another way: a fixed code must open nothing but the
-    one account kept for App Review.
+    one account kept for App Review, and an account Google took over may be
+    a real person's. The words are for the server's log, where the owner
+    looks when App Review says the code does not work.
     """
     operators = {e.strip().lower()
                  for e in (os.environ.get("STOCKBOT_ADMIN_EMAIL") or "").split(",")
                  if e.strip()}
     if email in operators:
-        return None
+        return "REVIEW_LOGIN_EMAIL is an operator's address (STOCKBOT_ADMIN_EMAIL)"
     row = conn.execute("SELECT provider, is_local FROM users WHERE email=?",
                        (email,)).fetchone()
-    if row is not None and (row["is_local"] or row["provider"] != "email"):
+    if row is None or (row["provider"] == "email" and not row["is_local"]):
+        return ""
+    if row["is_local"]:
+        return "REVIEW_LOGIN_EMAIL is the local account's address"
+    return ("the account at REVIEW_LOGIN_EMAIL was made or joined with %s, and "
+            "the review code opens only an account made with an email code. "
+            "Set a new address that nothing else signs in to (mobile/APP_STORE.md, "
+            "Part 4)" % _MADE_WITH.get(row["provider"], row["provider"]))
+
+
+def _review_account(conn, email: str):
+    """The review account, made on first use with the email provider, or
+    None when _review_refusal says the code may not open it."""
+    if _review_refusal(conn, email):
         return None
     try:
         return accounts_mod.upsert_email_user(conn, email)
     except ValueError:
         return None
+
+
+def _kept_for_review(conn, email, way: str) -> bool:
+    """Whether a sign-in another way is reaching for the review account.
+
+    That account must stay one only the review code opens: joined to Google,
+    the code would no longer open it, and App Review would be locked out.
+    So while the review sign-in is on, an address it would open is refused
+    to Google and to Apple, and the log says why. An account at that address
+    made another way before is not the review account, and stays its
+    owner's to sign in to.
+    """
+    if not _is_review_address(email if isinstance(email, str) else ""):
+        return False
+    if _review_refusal(conn, _review_login()[0]):
+        return False
+    app.logger.warning("Refused %s to the App Review account (REVIEW_LOGIN_EMAIL): "
+                       "only the review sign-in may open it. Sign in to Orenth "
+                       "with another account to test %s.", way, way)
+    return True
+
+
+# Said to whoever tries; only the owner of that address can reach this.
+REVIEW_KEPT = ("That email address is kept for Apple's App Review, which signs "
+               "in to it with its own code, so it cannot be used with %s here. "
+               "Use a different account.")
+
+
+def review_status() -> str:
+    """The review sign-in as the start-up log says it, warning when its
+    code cannot open its account."""
+    email = (os.environ.get("REVIEW_LOGIN_EMAIL") or "").strip().lower()
+    code = (os.environ.get("REVIEW_LOGIN_CODE") or "").strip()
+    if not email and not code:
+        return "off"
+    if not email or len(code) < REVIEW_CODE_MIN:
+        return ("off: it needs REVIEW_LOGIN_EMAIL and a REVIEW_LOGIN_CODE of at "
+                "least %d characters" % REVIEW_CODE_MIN)
+    try:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            why = _review_refusal(conn, email)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "on"
+    if why:
+        app.logger.warning("The App Review sign-in cannot open its account: %s.", why)
+        return "on, but its code cannot open its account: %s" % why
+    return "on"
 
 
 @app.route("/signin/review", methods=["GET", "POST"])
@@ -3170,7 +3291,9 @@ def review_signin():
     if getattr(g, "user", None) is not None:
         return redirect(url_for("index"))
     error = ""
-    email = ""
+    # Typed already on "Continue with email", which sends this address here.
+    said = session.pop("review_email", "")
+    email = said[:200] if isinstance(said, str) else ""
     if request.method == "POST":
         email = (request.form.get("email") or "").strip()[:200]
         if _rate_limited("review_signin", REVIEW_TRIES_PER_HOUR):
@@ -3188,9 +3311,16 @@ def review_signin():
         if email_ok and code_ok:
             conn = db_mod.connect(app.config.get("DB_PATH"))
             try:
-                user = _review_account(conn, want_email)
+                why = _review_refusal(conn, want_email)
+                user = None if why else _review_account(conn, want_email)
             finally:
                 conn.close()
+            if why:
+                # The person is told only that it did not match, like any
+                # wrong try. The owner, reading the log after App Review
+                # says the code does not work, is told the cause.
+                app.logger.warning("App Review typed the right email and code, but "
+                                   "they cannot open its account: %s.", why)
         if user is not None:
             # An invite link opened earlier in this browser would hand the
             # account free Pro, and the reviewer must see the account as Free.
@@ -3263,8 +3393,13 @@ def billing_checkout():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         customer = billing_mod.customer_of(conn, g.user.id)
+        retrying = apple_store_mod.may_still_charge(conn, g.user.id)
     finally:
         conn.close()
+    if retrying:
+        # Apple's renewal failed, but it keeps trying and may yet charge: a
+        # second bill all the same, only later.
+        return _pricing_page(APPLE_RETRYING_SAID, 409)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
@@ -3329,7 +3464,7 @@ def billing_webhook():
                               os.environ["STRIPE_WEBHOOK_SECRET"]):
         return jsonify({"error": "bad signature"}), 400
     try:
-        event = json.loads(payload.decode("utf-8"))
+        event = safejson.loads(payload.decode("utf-8"))
     except ValueError:
         return jsonify({"error": "not json"}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -3351,6 +3486,12 @@ def billing_webhook():
 
 APPLE_PRO_SAID = ("You have Pro through Apple; manage it in your iPhone's "
                   "Settings > Apple Account > Subscriptions.")
+APPLE_RETRYING_SAID = ("Apple is still trying to renew the Pro you bought in the "
+                       "iPhone app, after a payment did not go through, and will "
+                       "charge you once it can. To keep that, update the payment "
+                       "method in your iPhone's Settings > Apple Account. To pay "
+                       "here instead, first cancel it there, under Subscriptions, "
+                       "so you are not charged twice.")
 APPLE_SUBSCRIPTIONS = "https://apps.apple.com/account/subscriptions"
 # Apple's notifications are a few kilobytes.
 APPSTORE_NOTICE_LIMIT = 128 * 1024
@@ -4255,6 +4396,12 @@ def portfolio():
 
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
         kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
+    # What the prices just read saw is kept, as the journal keeps it.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        portfolio_mod.keep_reads(conn, view)
+    finally:
+        conn.close()
     shocks = {pct: portfolio_mod.what_if(view, pct)
               for pct in (-0.05, -0.10, -0.20)} if view.positions else {}
     return render_template("portfolio.html", view=view, cfg=cfg,
@@ -5400,15 +5547,18 @@ def start_background_jobs():
 def _recheck_plans_job():
     """Read lapsing Pro plans from Stripe, in case a renewal's webhook was lost.
 
-    And forget App Store notifications too old for Apple to be retrying.
+    And forget App Store notifications too old for Apple to be retrying, and
+    Apple subscriptions no account owns (a deleted account's) once their time
+    has run out.
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = billing_mod.recheck(conn)
         try:
             apple_store_mod.prune_notifications(conn)
+            apple_store_mod.prune_unowned(conn)
         except sqlite3.Error as exc:
-            result.setdefault("errors", []).append("app store notifications: %s" % exc)
+            result.setdefault("errors", []).append("app store records: %s" % exc)
         return result
     finally:
         conn.close()
