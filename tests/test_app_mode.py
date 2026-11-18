@@ -14,6 +14,7 @@ be signed in to with a fixed code. That door must not exist until it is set
 up, must open only that one account, must never make it Pro, and must not
 let anyone guess at the code.
 """
+import logging
 import os as _os
 import re
 import sys as _sys
@@ -36,9 +37,11 @@ def check(name, ok, detail=""):
 
 STRIPE = {"STRIPE_SECRET_KEY": "sk_test_x", "STRIPE_PRICE_ID": "price_x",
           "STRIPE_PRICE_ID_YEARLY": "price_y", "STRIPE_WEBHOOK_SECRET": "whsec_test"}
+SMTP = {"SMTP_HOST": "smtp.example.test", "SMTP_USER": "u", "SMTP_PASSWORD": "p",
+        "MAIL_FROM": "codes@example.com"}
 REVIEW = ("REVIEW_LOGIN_EMAIL", "REVIEW_LOGIN_CODE")
 APPLE = ("APPLE_APP_ID", "APPLE_PRODUCT_IDS", "APPLE_SANDBOX_PRO", "APPLE_SANDBOX_USERS")
-for key in list(STRIPE) + list(REVIEW) + list(APPLE) + ["STOCKBOT_ADMIN_EMAIL"]:
+for key in list(STRIPE) + list(REVIEW) + list(APPLE) + list(SMTP) + ["STOCKBOT_ADMIN_EMAIL"]:
     _os.environ.pop(key, None)
 
 import web  # noqa: E402
@@ -489,6 +492,146 @@ try:
         environ_base={"REMOTE_ADDR": "198.51.100.7"})
     check("while another network can still sign in",
           elsewhere.status_code == 302, elsewhere.status_code)
+
+    print()
+    print("=" * 72)
+    print("APP REVIEW TYPES ITS DETAILS WHERE THE APP ASKS FOR AN EMAIL")
+    print("=" * 72)
+    # The visible way in that takes an email is Continue with email, whose
+    # code box takes six digits. The review address typed there must reach
+    # the review page, not the owner's inbox.
+    _os.environ.update(SMTP)
+    mailed = []
+    real_send = web.codes_mod.send_email_code
+    web.codes_mod.send_email_code = lambda conn, to, ip, key: mailed.append(to)
+    try:
+        web._RATE.clear()
+        reviewer = web.app.test_client()
+        typed = reviewer.post("/signin/email", data={"to": " AppReview@Example.com "},
+                              headers=IN_APP)
+        check("the review address on Continue with email opens the review page",
+              typed.status_code == 302
+              and urlparse(typed.headers.get("Location", "")).path == "/signin/review",
+              (typed.status_code, typed.headers.get("Location")))
+        check("and is sent no email", not mailed, mailed)
+        page = text(reviewer.get("/signin/review", headers=IN_APP))
+        check("which has the address filled in, and waits for the code",
+              'value="appreview@example.com"' in page
+              and re.search(r'id="code"[^>]*autofocus', page) is not None
+              and not re.search(r'id="email"[^>]*autofocus', page))
+        signed = reviewer.post("/signin/review", headers=IN_APP, data={
+            "email": "appreview@example.com", "code": CODE})
+        check("and the code signs in there", signed.status_code == 302,
+              signed.status_code)
+        other = web.app.test_client().post("/signin/email",
+                                           data={"to": "someone@example.com"})
+        check("any other address still gets its code by email",
+              other.status_code == 302 and mailed == ["someone@example.com"]
+              and urlparse(other.headers.get("Location", "")).path
+              == "/signin/email/code", (other.status_code, mailed))
+        _os.environ["REVIEW_LOGIN_CODE"] = "short-code"
+        web.app.test_client().post("/signin/email", data={"to": "appreview@example.com"})
+        check("and with the review sign-in off, so does the review address",
+              mailed == ["someone@example.com", "appreview@example.com"], mailed)
+        _os.environ["REVIEW_LOGIN_CODE"] = CODE
+    finally:
+        web.codes_mod.send_email_code = real_send
+        for key in SMTP:
+            _os.environ.pop(key, None)
+
+    print()
+    print("=" * 72)
+    print("GOOGLE NEVER TAKES THE REVIEW ACCOUNT, AND THE LOG SAYS WHY")
+    print("=" * 72)
+    # Google joining it made its provider "google", after which the review
+    # code was refused as for a stranger's account, App Review could not get
+    # in, and nothing said why.
+    logged = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            logged.append(record.getMessage())
+
+    grab = Grab(level=logging.WARNING)
+    web.app.logger.addHandler(grab)
+    real_google = web.auth_mod.sign_in
+
+    def google_says(email, sub):
+        web.auth_mod.sign_in = lambda code, uri, verifier: {
+            "sub": sub, "email": email, "email_verified": True, "name": "Someone"}
+        client = web.app.test_client()
+        with client.session_transaction() as sess:
+            sess["oauth_state"] = "state-" + sub
+            sess["oauth_verifier"] = "v" * 43
+        back = client.get("/auth/google/callback?state=state-%s&code=c" % sub,
+                          headers=IN_APP)
+        with client.session_transaction() as sess:
+            return back, web.SESSION_KEY in sess
+
+    def provider_of(email):
+        conn = db.connect(DB)
+        try:
+            row = conn.execute("SELECT provider FROM users WHERE email=?",
+                               (email,)).fetchone()
+            return row["provider"] if row else None
+        finally:
+            conn.close()
+
+    try:
+        back, signed = google_says("AppReview@example.com", "g-review")
+        check("Google with the review address is refused, in words",
+              back.status_code == 400 and "kept for Apple" in text(back) and not signed,
+              (back.status_code, signed))
+        check("and the review account is still the email kind",
+              provider_of("appreview@example.com") == "email",
+              provider_of("appreview@example.com"))
+        check("the log says why", any("Refused Google sign-in to the App Review account"
+                                      in m for m in logged), logged)
+        web._RATE.clear()
+        still = web.app.test_client().post("/signin/review", data={
+            "email": "appreview@example.com", "code": CODE})
+        check("so the review sign-in still opens it", still.status_code == 302,
+              still.status_code)
+        check("and start-up says it is on", web.review_status() == "on",
+              web.review_status())
+
+        # An address Google made an account for before it was named the
+        # review address is not the review account: its owner keeps Google,
+        # and the code is refused for it, with the cause in the log.
+        conn = db.connect(DB)
+        A.upsert_google_user(conn, {"sub": "g-owner", "email": "owner@example.com",
+                                    "email_verified": True, "name": "Owner"})
+        conn.close()
+        _os.environ["REVIEW_LOGIN_EMAIL"] = "owner@example.com"
+        del logged[:]
+        back, signed = google_says("owner@example.com", "g-owner")
+        check("an account Google made before still signs in with Google",
+              back.status_code == 302 and signed, back.status_code)
+        web._RATE.clear()
+        refused = web.app.test_client().post("/signin/review", data={
+            "email": "owner@example.com", "code": CODE})
+        check("while the review code is refused for it, as any wrong try",
+              refused.status_code == 400 and web.REVIEW_ERROR in text(refused),
+              refused.status_code)
+        check("and the log names the cause",
+              any("cannot open its account" in m and "made or joined with Google "
+                  "sign-in" in m for m in logged), logged)
+        check("and so does start-up",
+              web.review_status().startswith("on, but its code cannot open its "
+                                             "account: the account at "
+                                             "REVIEW_LOGIN_EMAIL was made or joined "
+                                             "with Google sign-in"),
+              web.review_status())
+        _os.environ["REVIEW_LOGIN_CODE"] = "short-code"
+        check("start-up says a review sign-in left half set up is off",
+              web.review_status().startswith("off: it needs"), web.review_status())
+        for key in REVIEW:
+            _os.environ.pop(key, None)
+        check("and one never set up is plainly off", web.review_status() == "off",
+              web.review_status())
+    finally:
+        web.auth_mod.sign_in = real_google
+        web.app.logger.removeHandler(grab)
 finally:
     billing._stripe = real_stripe
     for key in list(STRIPE) + list(REVIEW) + ["STOCKBOT_ADMIN_EMAIL"]:
