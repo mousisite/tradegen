@@ -596,11 +596,20 @@ try:
               and urlparse(typed.headers.get("Location", "")).path == "/signin/review",
               (typed.status_code, typed.headers.get("Location")))
         check("and is sent no email", not mailed, mailed)
+        with reviewer.session_transaction() as sess:
+            held = sess.get("review_email")
+        privacy = " ".join(text(c.get("/privacy")).split())
+        check("the cookie holds the address until the page opens, as the privacy "
+              "page says", held == "appreview@example.com"
+              and "(for App Review's own account, which is sent no code, the "
+                  "address typed, until its sign-in page opens)" in privacy, held)
         page = text(reviewer.get("/signin/review", headers=IN_APP))
         check("which has the address filled in, and waits for the code",
               'value="appreview@example.com"' in page
               and re.search(r'id="code"[^>]*autofocus', page) is not None
               and not re.search(r'id="email"[^>]*autofocus', page))
+        with reviewer.session_transaction() as sess:
+            check("and then the cookie no longer holds it", "review_email" not in sess)
         signed = reviewer.post("/signin/review", headers=IN_APP, data={
             "email": "appreview@example.com", "code": CODE})
         check("and the code signs in there", signed.status_code == 302,
