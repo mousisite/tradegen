@@ -36,7 +36,9 @@ Who owns it. The person whose appAccountToken the purchase carries. Once a
 subscription is linked to an account it stays there until someone signed in
 on a phone with that Apple ID moves it on purpose (move_to), or the account
 is deleted, so a second Orenth account signed in on the same iPhone cannot
-simply take it.
+simply take it. Except by paying: once it has run out, a new purchase made
+signed in to another account is that account's, though a resubscribe keeps
+the originalTransactionId and so lands on the same row.
 
 Settings, all from the environment, and in-app purchase is off until the
 first is set:
@@ -403,6 +405,22 @@ def subscription(conn: sqlite3.Connection, user_id: int,
 
 # --- applying what Apple signed --------------------------------------------------
 
+def _bought_anew(row: sqlite3.Row, tx: Dict[str, Any], purchase: int) -> bool:
+    """Whether tx is someone paying again for a subscription that had run out.
+
+    A resubscribe keeps the originalTransactionId, so on an Apple ID shared
+    by two Orenth accounts it lands on the row the first one owned. Apple
+    marks it a PURCHASE, made after the stored period, grace or refund ended.
+    A renewal, a billing retry that worked, and an upgrade of a running
+    subscription are not: those stay with the owner, as a move does.
+    """
+    ended = max(row["expires_ms"], row["grace_until_ms"])
+    if row["revoked_ms"]:
+        ended = min(ended, row["revoked_ms"])
+    return (tx.get("transactionReason") == "PURCHASE" and not tx.get("isUpgraded")
+            and purchase > row["purchase_ms"] and ended <= purchase)
+
+
 def _apply_locked(conn: sqlite3.Connection, env: str, tx: Dict[str, Any],
                   products: Iterable[str], from_app_user: Optional[int] = None,
                   note: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
@@ -425,11 +443,16 @@ def _apply_locked(conn: sqlite3.Connection, env: str, tx: Dict[str, Any],
 
     token = _canonical_token(tx.get("appAccountToken"))
     token_user = _user_for_token(conn, token)
-    # Who owns it: a stored owner stays; otherwise the token says; otherwise
-    # the signed-in person who sent it from the app (a purchase made with no
-    # token, such as an offer code redeemed in the App Store).
+    # Who owns it: a stored owner stays, unless the subscription had run out
+    # and this is someone paying for it again, signed in to another account;
+    # otherwise the token says; otherwise the signed-in person who sent it
+    # from the app (a purchase made with no token, such as an offer code
+    # redeemed in the App Store).
+    previous: Optional[int] = None
     if row is not None and row["user_id"] is not None:
         owner: Optional[int] = int(row["user_id"])
+        if token_user is not None and token_user != owner and _bought_anew(row, tx, purchase):
+            previous, owner = owner, token_user
     elif token_user is not None:
         owner = token_user
     else:
@@ -476,7 +499,7 @@ def _apply_locked(conn: sqlite3.Connection, env: str, tx: Dict[str, Any],
             if "autoRenewStatus" in renewal:
                 fields["auto_renew"] = _int(renewal["autoRenewStatus"])
         changed = bool(fields)
-        if row["user_id"] is None and owner is not None:
+        if (row["user_id"] is None or previous is not None) and owner is not None:
             fields["user_id"] = owner
         if fields:
             fields["updated"] = now
@@ -486,6 +509,8 @@ def _apply_locked(conn: sqlite3.Connection, env: str, tx: Dict[str, Any],
 
     if owner is not None:
         _refresh_locked(conn, owner)
+    if previous is not None:
+        _refresh_locked(conn, previous)
     if from_app_user is not None and owner is not None and owner != from_app_user:
         return OTHER_ACCOUNT, otid
     if owner is None:

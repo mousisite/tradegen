@@ -1039,6 +1039,105 @@ class Ownership(StoreBase):
         self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(product="other.product"),
                                     PRODUCTS)["outcome"], st.IGNORED)
 
+    def lapsed(self, owner="ann"):
+        """A monthly plan bought 200 days ago on this Apple ID, cancelled and run out."""
+        old = now_ms() - 200 * DAY
+        self.app({"ann": self.ann, "ben": self.ben}[owner], self.tx(purchase=old, token=owner, signed=old))
+        self.send(self.at("EXPIRED", old + 31 * DAY, "VOLUNTARY", status=2, purchase=old, token=owner,
+                          renewal={"autoRenewStatus": 0}))
+        return old
+
+    def bought_now(self, token, **kw):
+        """Someone paying for a year now: in the same group, so Apple keeps
+        the originalTransactionId, and StoreKit stamps the buyer's token."""
+        bought = now_ms() - 60 * 1000
+        kw.setdefault("transactionReason", "PURCHASE")
+        return self.tx(txid="2009", purchase=bought, product=YEARLY, expires=bought + 365 * DAY,
+                       token=token, **kw)
+
+    def test_a_new_purchase_after_it_ran_out_belongs_to_whoever_bought_it(self):
+        # One Apple ID on a family iPad. Ann's plan ran out months ago; Ben,
+        # signed in to his own account, subscribes. He paid, so it is his.
+        self.lapsed()
+        resub = self.bought_now("ben")
+        self.assertEqual(self.app(self.ben, resub)[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        row = self.conn.execute("SELECT user_id, app_token FROM apple_subs").fetchone()
+        self.assertEqual(tuple(row), (self.ben, self.ben_token))
+        # Apple's own notification of it agrees, and Ann's app now finds it is
+        # another account's.
+        self.assertEqual(self.send(self.note("SUBSCRIBED", resub, "RESUBSCRIBE"))[1], st.APPLIED)
+        self.assertEqual(self.app(self.ann, resub)[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertFalse(self.pro(self.ann))
+        # Its renewals stay with him, whatever token they carry.
+        renew = self.tx(txid="2010", purchase=now_ms() - 1000, product=YEARLY, token="ann",
+                        transactionReason="RENEWAL")
+        self.send(self.note("DID_RENEW", renew))
+        self.assertEqual(self.conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ben)
+
+    def test_apples_notification_can_come_first(self):
+        self.lapsed()
+        self.assertEqual(self.send(self.note("SUBSCRIBED", self.bought_now("ben"), "RESUBSCRIBE"))[1],
+                         st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+        self.assertLess(self.user(self.ann).apple_until, time.time())
+
+    def test_after_a_refund_too(self):
+        # Ann's year was refunded a month in; Ben subscribes before the year
+        # would have ended.
+        bought = now_ms() - 90 * DAY
+        self.app(self.ann, self.tx(purchase=bought, product=YEARLY, expires=bought + 365 * DAY,
+                                   signed=bought))
+        refund_at = bought + 30 * DAY
+        self.send(self.at("REFUND", refund_at, status=5, purchase=bought, product=YEARLY,
+                          expires=bought + 365 * DAY, revocationDate=refund_at))
+        self.assertFalse(self.pro(self.ann))
+        self.assertEqual(self.app(self.ben, self.bought_now("ben"))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+
+    def test_the_owner_it_was_moved_from_can_buy_it_back(self):
+        old = self.lapsed("ben")
+        # Back when it ran, Ann had moved it to herself; it then ran out with her.
+        self.conn.execute("UPDATE apple_subs SET user_id=?, moved_from=?, moved_ms=?",
+                          (self.ann, self.ben, old + DAY))
+        self.conn.commit()
+        self.assertEqual(self.app(self.ben, self.bought_now("ben"))[0]["outcome"], st.APPLIED)
+        self.assertTrue(self.pro(self.ben))
+        self.assertFalse(self.pro(self.ann))
+
+    def test_what_does_not_take_it_from_its_owner(self):
+        # While it runs, a purchase (an upgrade, say) made signed in to
+        # another account stays with the owner, as do purchases with no
+        # token or one nobody has, a renewal, and a purchase made long ago.
+        bought = now_ms() - 10 * DAY
+        self.app(self.ann, self.tx(purchase=bought))
+        running = self.bought_now("ben")
+        self.assertEqual(self.app(self.ben, running)[0]["outcome"], st.OTHER_ACCOUNT)
+        self.assertTrue(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        conn = self.conn
+        for copy in (self.bought_now(None), self.bought_now(str(uuid.uuid4())),
+                     self.bought_now("ben", transactionReason="RENEWAL"),
+                     self.bought_now("ben", transactionReason=None),
+                     self.bought_now("ben", isUpgraded=True)):
+            conn.execute("DELETE FROM apple_subs")
+            conn.commit()
+            self.lapsed()
+            self.app(self.ben, copy)
+            self.send(self.note("SUBSCRIBED", copy, "RESUBSCRIBE"))
+            self.assertEqual(conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ann)
+            self.assertFalse(self.pro(self.ben))
+        # And a purchase made before the plan ran out, sent only now.
+        conn.execute("DELETE FROM apple_subs")
+        conn.commit()
+        old = self.lapsed()
+        early = self.tx(txid="2001", purchase=old + 10 * DAY, product=YEARLY, expires=old + 375 * DAY,
+                        token="ben", transactionReason="PURCHASE")
+        self.app(self.ben, early)
+        self.assertEqual(conn.execute("SELECT user_id FROM apple_subs").fetchone()[0], self.ann)
+
     def test_moving_an_unowned_subscription_claims_it(self):
         self.send(self.at("SUBSCRIBED", self.t0, "INITIAL_BUY", token=None))
         moved = st.move_to(self.conn, self.v, self.ben, self.tx(token=None), PRODUCTS)
