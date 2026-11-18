@@ -602,8 +602,18 @@ th.r, td.r { text-align: right; }
   table.stack > tbody > tr > td:not([data-label]),
   table.stack > tbody > tr > td.wide { grid-column: 1 / -1; }
   table.stack > tbody > tr > td.lead { order: -1; }
-  table.stack > tbody > tr > td[data-label]::before {
-    content: attr(data-label); display: block; margin-bottom: 2px;
+  table.stack > tbody > tr > td[data-label]::before { content: attr(data-label); }
+  /* A table of sentences can instead name its columns once, on the table,
+     as --col2 and --col3, and then a row added later is named as well. A
+     cell's own data-label still wins; an unnamed column stays unnamed. */
+  table.stack.one > tbody > tr > td:nth-child(2):not([data-label])::before {
+    content: var(--col2);
+  }
+  table.stack.one > tbody > tr > td:nth-child(3):not([data-label])::before {
+    content: var(--col3);
+  }
+  table.stack > tbody > tr > td::before {
+    display: block; margin-bottom: 2px;
     font: 500 var(--t-xs)/1.4 var(--sans); letter-spacing: .06em;
     text-transform: uppercase; color: var(--ink-3);
   }
