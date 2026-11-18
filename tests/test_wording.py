@@ -473,6 +473,29 @@ try:
     check("the operator's page refuses them without naming a setting",
           status == 403 and "runs this installation" in page, status)
 
+    # -----------------------------------------------------------------------
+    head("INSIDE THE IPHONE APP: HEADLINES, NOT STRANGERS' POSTS")
+    # -----------------------------------------------------------------------
+    # A StockTwits post is a stranger's words, unfiltered. The App Store
+    # answers say nothing anyone writes reaches anyone else, and the app's
+    # content rights name headlines. How many posts there are, and how many
+    # say bullish or bearish, stays.
+    APP = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) "
+                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+                         "OrenthApp/1"}
+    post = "$NVDA looks strong into the close"
+    browser = flat(text(member.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE)))
+    inside = flat(text(member.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE,
+                                  headers=APP)))
+    check("on the website the analysis shows a post's words", post in browser)
+    check("inside the app it shows the headlines",
+          "NVDA beats estimates and raises guidance" in inside)
+    check("but not a post's words", post not in inside and "· social" not in inside)
+    check("and still counts the posts, bull and bear",
+          re.search(r'Posts</div> <div class="v fig">1</div> <div class="n">1 bull · '
+                    r'0 bear</div>', inside) is not None,
+          inside[inside.find("News and chatter"):][:600])
+
     run_id = None
     conn = db.connect(DB)
     try:

@@ -396,7 +396,7 @@ Answer the questionnaire like this. The result should be **4+**.
 | Parental Controls | No | |
 | Age Assurance | No | |
 | Unrestricted Web Access | **No** | The app shows only orenth.app. Links to any other site open in a sheet with a Done button, and the app's own view never leaves orenth.app |
-| User-Generated Content | No | Shared calls are pages Orenth makes (stock, call, date), with no text from people |
+| User-Generated Content | No | Nothing one person writes reaches anyone else: journals, notes and alerts are private, and a shared call is a page Orenth makes (stock, call, counts, date). Inside the app the research page shows news headlines, and of StockTwits posts only how many there are and how many say bullish or bearish, never their words |
 | Messaging and Chat | No | |
 | Advertising | No | |
 | Social media features | No | |
@@ -423,9 +423,16 @@ Connect does not ask. If it ever does: "Does your app use encryption?" Yes.
 ### Content rights
 
 "Does your app contain, show, or access third-party content?" **Yes**: market
-prices, company filings and news headlines.
+prices, company filings, news headlines, and StockTwits posts (counted, not
+shown).
 
 - Company figures come from SEC EDGAR, which is public US government data.
+- **Headlines come from Google News, and posts from StockTwits.** The app
+  shows the headlines on the research page. StockTwits posts are read only
+  to count them and to tell bullish from bearish: inside the app their
+  words are never shown (the website shows a few). Before Pro goes on sale,
+  check that the terms of both allow this in an app that charges money, as
+  for prices below. Apple can ask for proof (rule 5.2.2).
 - **Prices come from Yahoo Finance without a licence.** That is fine for a
   free hobby project, but not for an app that charges money. Before Pro goes
   on sale, move to a price provider whose licence covers a paid app. Apple
