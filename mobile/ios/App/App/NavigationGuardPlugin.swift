@@ -72,6 +72,13 @@ enum OrenthSite {
 /// A frame inside a page is left to Capacitor: the bridge is only ever put
 /// into the page itself, never into its frames.
 ///
+/// It also remembers the last page of the site the web view set out to
+/// open, so that the offline page's Try again (and a pull to refresh there)
+/// opens the page that could not be opened, not the front page. From the
+/// offline page:
+///   Capacitor.nativePromise('NavigationGuard', 'lastPage')
+///       -> { url: 'https://orenth.app/...' }, or { url: '' }
+///
 /// Capacitor 8.6.2 asks each plugin's shouldOverrideLoad before its own rules
 /// (WebViewDelegationHandler.webView(_:decidePolicyFor:decisionHandler:)):
 /// true cancels the load, false allows it, nil leaves it to Capacitor.
@@ -80,21 +87,50 @@ enum OrenthSite {
 public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier: String = "NavigationGuardPlugin"
     public let jsName: String = "NavigationGuard"
-    public let pluginMethods: [CAPPluginMethod] = []
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "lastPage", returnType: CAPPluginReturnPromise)
+    ]
+
+    // The last page of the site the web view set out to open with a plain
+    // GET. A form that could not be sent is not kept: trying again opens the
+    // page the form was on, and never sends it a second time by itself.
+    // Only read and written on the main thread.
+    private var lastPageAddress: URL?
 
     // Called by Capacitor's navigation delegate, on the main thread.
     override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber? {
         // The page itself: the main frame, or a new window.
-        let wholePage: Bool = navigationAction.targetFrame == nil
-            || navigationAction.targetFrame?.isMainFrame == true
+        let mainFrame: Bool = navigationAction.targetFrame?.isMainFrame == true
+        let wholePage: Bool = navigationAction.targetFrame == nil || mainFrame
         guard wholePage, let url: URL = navigationAction.request.url else {
             return nil
         }
-        if OrenthSite.isSitePage(url) || isAppFile(url) {
+        if OrenthSite.isSitePage(url) {
+            let method: String = navigationAction.request.httpMethod ?? "GET"
+            if mainFrame && method.uppercased() == "GET" {
+                lastPageAddress = url
+            }
+            return nil
+        }
+        if isAppFile(url) {
             return nil
         }
         openOutside(url)
         return NSNumber(value: true)
+    }
+
+    /// The page to open again after a failed load, if the web view has set
+    /// out to open one. Main thread only.
+    func pageToRetry() -> URL? {
+        return lastPageAddress
+    }
+
+    @objc func lastPage(_ call: CAPPluginCall) {
+        // Plugin methods run on Capacitor's own queue.
+        DispatchQueue.main.async { [weak self] in
+            let address: String = self?.lastPageAddress?.absoluteString ?? ""
+            call.resolve(["url": address])
+        }
     }
 
     /// capacitor://localhost: the files inside the app, where the offline

@@ -536,8 +536,8 @@ function page(ground) {
 """
 
 
-def run_native(script):
-    """native.js under Node with the given harness: the JSON it printed last,
+def run_node(script, *args):
+    """A harness under Node, given the file it runs: the JSON it printed last,
     None without Node, or {"error": ...} if the script failed."""
     node = shutil.which("node")
     if not node:
@@ -546,7 +546,7 @@ def run_native(script):
     with _os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(script)
     try:
-        proc = subprocess.run([node, path, _os.path.join(harness.ROOT, "static", "native.js")],
+        proc = subprocess.run([node, path] + list(args),
                               capture_output=True, text=True, encoding="utf-8", timeout=120)
     finally:
         _os.remove(path)
@@ -583,10 +583,12 @@ GOOD_LINKS = {OPEN + "/monitor": "https://orenth.app/monitor",
               # Escaped twice, it is a page of this site that does not exist.
               OPEN + quote("/.%2F/orenth.app@evil.example/x", safe=""):
                   "https://orenth.app/.%2F/orenth.app@evil.example/x"}
-ran = run_native(NATIVE_IN_APP.replace("__LINKS__", json.dumps(refused_links + list(GOOD_LINKS))))
+NATIVE_JS = _os.path.join(harness.ROOT, "static", "native.js")
+ran = run_node(NATIVE_IN_APP.replace("__LINKS__", json.dumps(refused_links + list(GOOD_LINKS))),
+               NATIVE_JS)
 if ran is None:
     print("   (Node is not installed, so native.js is read here rather than run)")
-    native_js = open(_os.path.join(harness.ROOT, "static", "native.js"), encoding="utf-8").read()
+    native_js = open(NATIVE_JS, encoding="utf-8").read()
     check("an app link opens the full address it resolved to, never a bare path",
           "return resolved.href;" in native_js
           and "resolved.pathname.slice(0, 2) === '//'" in native_js)
@@ -665,6 +667,71 @@ check("and tries the site again", "https://orenth.app/" in offline)
 check("and has a dark version", "prefers-color-scheme: dark" in offline)
 check("and takes the launch screen away", "'SplashScreen', 'hide'" in offline)
 
+# The offline page's own script, under Node: Try again, and coming back
+# online. Each case is what the app says when asked which page could not be
+# opened: an address, or "absent" for an app without the guard, or "browser"
+# for no app at all.
+OFFLINE_RETRY = r"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const SRC = html.slice(html.lastIndexOf('<script>') + 8, html.lastIndexOf('</script>'));
+const CASES = __CASES__;
+
+async function offline(lastPage) {
+  const went = [];
+  const on = {};
+  const button = { disabled: false, textContent: 'Try again',
+                   addEventListener: (type, fn) => { on['button ' + type] = fn; } };
+  const ctx = {
+    console, Promise, URL, setTimeout,
+    document: { getElementById: () => button },
+    matchMedia: () => ({ matches: false }),
+    addEventListener: (type, fn) => { on['window ' + type] = fn; },
+    location: { replace: (to) => { went.push(String(to)); },
+                assign: (to) => { went.push('assign ' + to); } },
+  };
+  if (lastPage !== 'browser') {
+    ctx.Capacitor = {
+      isPluginAvailable: (name) => name !== 'NavigationGuard' || lastPage !== 'absent',
+      nativePromise: (plugin, method) => Promise.resolve(
+        plugin === 'NavigationGuard' && method === 'lastPage' ? { url: lastPage } : {}),
+    };
+  }
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(SRC, ctx);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  on['button click']();
+  on['window online']();
+  return went;
+}
+
+(async () => {
+  const out = {};
+  for (const c of CASES) { out[c] = await offline(c); }
+  console.log(JSON.stringify(out));
+})().catch((err) => { console.error(err && err.stack || String(err)); process.exit(1); });
+"""
+HOME = "https://orenth.app/"
+RETRY = {"https://orenth.app/trades?view=open#t-12": "https://orenth.app/trades?view=open#t-12",
+         "https://orenth.app.evil.example/x": HOME, "http://orenth.app/trades": HOME,
+         "https://orenth.app:8443/trades": HOME, "javascript:alert(1)": HOME, "": HOME,
+         "absent": HOME, "browser": HOME}
+retried = run_node(OFFLINE_RETRY.replace("__CASES__", json.dumps(list(RETRY))),
+                   _os.path.join(MOBILE, "www", "offline.html"))
+if retried is None:
+    print("   (Node is not installed, so the offline page is read here rather than run)")
+    check("Try again opens the page that failed, in place of the offline page",
+          "'NavigationGuard', 'lastPage'" in offline and "location.replace(again)" in offline)
+elif "error" in retried:
+    check("the offline page's script runs", False, retried["error"])
+else:
+    for case, address in RETRY.items():
+        check("Try again, and coming back online, with the app saying %r, open %s in place "
+              "of the offline page" % (case, address), retried[case] == [address, address],
+              retried[case])
+
 package = json.loads(read("package.json"))
 pins = dict(package.get("dependencies", {}), **package.get("devDependencies", {}))
 WANT = {"@capacitor/core": "8.6.2", "@capacitor/cli": "8.6.2", "@capacitor/ios": "8.6.2",
@@ -737,8 +804,30 @@ check("MainViewController registers the App Store plugin at launch, beside the s
 
 guard_swift = read("ios", "App", "App", "NavigationGuardPlugin.swift")
 check("MainViewController registers the navigation guard before the first page loads",
-      -1 < controller.find("registerPluginInstance(NavigationGuardPlugin())")
+      "navigationGuard: NavigationGuardPlugin = NavigationGuardPlugin()" in controller
+      and -1 < controller.find("registerPluginInstance(navigationGuard)")
       < controller.find("guard let webView"))
+check("MainViewController wraps Capacitor's navigation delegate before the first page loads, "
+      "and keeps the wrapper",
+      "CancelledLoadFilter(wrapping: capacitorDelegate)" in controller
+      and "cancelledLoadFilter = filter" in controller
+      and "webView.navigationDelegate = filter" in controller)
+check("the wrapper passes Capacitor everything but a load that was only cut short "
+      "(-999, or WebKit's 102), which would show No connection",
+      "override func responds(to aSelector: Selector!) -> Bool" in controller
+      and "override func forwardingTarget(for aSelector: Selector!) -> Any?" in controller
+      and "nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled" in controller
+      and 'nsError.domain == "WebKitErrorDomain" && nsError.code == 102' in controller
+      and controller.count("if CancelledLoadFilter.wasCutShort(error) {") == 2
+      and "capacitorDelegate.webView?(webView, didFailProvisionalNavigation: navigation, "
+          "withError: error)" in controller
+      and "capacitorDelegate.webView?(webView, didFail: navigation, withError: error)"
+          in controller)
+check("the guard remembers the last page asked for with a GET, and a pull on the offline "
+      "page opens it again",
+      'CAPPluginMethod(name: "lastPage", returnType: CAPPluginReturnPromise)' in guard_swift
+      and 'method.uppercased() == "GET"' in guard_swift
+      and "navigationGuard.pageToRetry() ?? bridge?.config.serverURL" in controller)
 check("the guard answers Capacitor's question about every page the web view opens",
       "override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber?"
       in guard_swift and "isMainFrame" in guard_swift
@@ -746,7 +835,8 @@ check("the guard answers Capacitor's question about every page the web view open
 check("and lets in only https on orenth.app exactly, and the app's own files",
       'static let host: String = "orenth.app"' in guard_swift
       and 'scheme.lowercased() == "https" && host.lowercased() == OrenthSite.host' in guard_swift
-      and "OrenthSite.isSitePage(url) || isAppFile(url)" in guard_swift
+      and "if OrenthSite.isSitePage(url) {" in guard_swift
+      and "if isAppFile(url) {" in guard_swift
       and "bridge?.config.localURL" in guard_swift)
 check("anywhere else opens outside the app, and only while it is in use",
       "UIApplication.shared.open(url" in guard_swift

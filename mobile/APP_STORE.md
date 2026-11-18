@@ -118,8 +118,11 @@ Xcode writes these into the project itself. Do not edit any other file.
     - Tap a link to another website (the research page has filing links):
       it opens in a sheet over the app, with **Done** to close it.
     - Tap **Share** on a popular stock's page: the iPhone's share sheet opens.
-    - Turn on **Airplane Mode** and pull a page down: the **No connection**
-      page shows. Turn Airplane Mode off and tap **Try again**.
+    - Turn on **Airplane Mode** and tap a link to another page: the **No
+      connection** page shows. Turn Airplane Mode off and tap **Try again**:
+      the page you tapped opens.
+    - Tap a link, and before its page opens, tap another or swipe back: you
+      get the second one, and never the **No connection** page.
     - In dark mode (Settings > Display & Brightness), the launch screen and
       the status bar are dark too.
 
@@ -665,16 +668,21 @@ app, signed in as the review account:
 - `capacitor.config.json`: the site the app loads, its offline page, and
   the launch screen, status bar and notification settings. Run
   `npx cap sync ios` after any change.
-- `www/offline.html`: the page shown when orenth.app cannot be reached.
+- `www/offline.html`: the page shown when orenth.app cannot be reached. Its
+  **Try again** opens the page that could not be opened, which the app
+  remembers.
 - `ios/App/App/MainViewController.swift`: the screen (swipe back, pull to
-  refresh). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
+  refresh), and `CancelledLoadFilter`, which stops Capacitor showing the
+  offline page for a load that was only cut short (another tap, a swipe
+  back). `ios/App/App/WebAuthPlugin.swift`: Apple's sign-in sheet for
   Google sign-in (JavaScript name `WebAuth`).
 - `ios/App/App/NavigationGuardPlugin.swift`: keeps the app's web view on
   https://orenth.app itself. Capacitor gives every page it shows the whole
   bridge to the phone, and its own check (the address starts with
   `https://orenth.app`) also lets in `https://orenth.app.evil.example`, so
   any other address opens outside the app instead. The sign-in sheet and
-  in-app purchase also answer only pages of orenth.app.
+  in-app purchase also answer only pages of orenth.app. It remembers the
+  last page the app set out to open, for the offline page.
 - `ios/App/App/AppPurchasePlugin.swift`: Apple's in-app purchase, StoreKit 2
   (JavaScript name `AppPurchase`). It hands every transaction to the page as
   Apple's signed JWS and finishes one only when the page says the server has

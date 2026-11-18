@@ -97,18 +97,30 @@
   (function () {
     var HOME = 'https://orenth.app/';
     var button = document.getElementById('again');
+    // Where trying again goes: the page that could not be opened, once the
+    // app has said which it was, or else the front page.
+    var again = HOME;
+
+    // Only ever a page of orenth.app itself.
+    function onSite(address) {
+      var u;
+      try { u = new URL(address); } catch (e) { return false; }
+      return u.protocol === 'https:' && u.host === 'orenth.app';
+    }
 
     function retry() {
       button.disabled = true;
       button.textContent = 'Trying…';
-      window.location.href = HOME;
+      // In place of this page, so going back later does not land on it.
+      window.location.replace(again);
     }
     button.addEventListener('click', retry);
     // Back by itself the moment the phone says it is online again.
     window.addEventListener('online', retry);
 
     // Inside the app: take away the launch screen, which could otherwise sit
-    // on top of this page, and match the status bar to it.
+    // on top of this page, match the status bar to it, and ask which page
+    // could not be opened (the app remembers the last one it set out to open).
     var C = window.Capacitor;
     if (C && typeof C.nativePromise === 'function' &&
         typeof C.isPluginAvailable === 'function') {
@@ -122,6 +134,11 @@
         C.nativePromise('StatusBar', 'setStyle', { style: dark ? 'DARK' : 'LIGHT' }).catch(quiet);
         C.nativePromise('StatusBar', 'setBackgroundColor',
                         { color: dark ? '#191817' : '#f4f3ee' }).catch(quiet);
+      }
+      if (C.isPluginAvailable('NavigationGuard')) {
+        C.nativePromise('NavigationGuard', 'lastPage', {}).then(function (r) {
+          if (r && onSite(r.url)) { again = r.url; }
+        }).catch(quiet);
       }
     }
   })();
