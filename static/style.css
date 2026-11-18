@@ -970,6 +970,11 @@ ul.list.ok li::marker { color: var(--gain); }
     padding-right: max(var(--s2), env(safe-area-inset-right, 0px));
   }
 }
+/* Both stuck in the same place under the top bar, an alert's bar covered
+   the research page's bar of sections. While an alert's bar is up, the
+   sections' bar stays where it is in the page; once the alert is
+   dismissed, it sticks again. */
+body:has(#firebar:not([hidden])) .jump { position: static; }
 
 /* ---------- notifications on this device ---------- */
 
