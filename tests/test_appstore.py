@@ -5,6 +5,8 @@ belongs to, and what the site does with it.
     signed test data and certificate vectors from app-store-server-library-
     python (MIT licence, in tests/data/appstore with APPLE_LICENSE.txt), and
     against home-made chains that try every way round them.
+  - JSON that anyone can send, measured before it is read (bot/safejson.py),
+    so nesting too deep for Python is refused, never a 500.
   - Who has Pro (bot/apple_store.py): purchases, renewals, grace periods,
     refunds and their reversal, notifications out of order or twice, old
     copies sent again, one Apple ID shared by two accounts, test purchases,
@@ -56,6 +58,7 @@ from bot import apple_store as st  # noqa: E402
 from bot import appstore as av  # noqa: E402
 from bot import billing  # noqa: E402
 from bot import database as db  # noqa: E402
+from bot import safejson  # noqa: E402
 
 DATA = _os.path.join(HERE, "data", "appstore")
 UTC = datetime.timezone.utc
@@ -571,6 +574,56 @@ class HomeMadeChains(unittest.TestCase):
     def test_production_needs_app_apple_id(self):
         with self.assertRaises(ValueError):
             av.Verifier(BUNDLE, None)
+
+
+class JSONNesting(unittest.TestCase):
+    """bot/safejson.py: JSON that anyone can send is measured before json.loads
+    reads it, so nesting too deep for Python is refused as a ValueError, like
+    any other text that is not JSON, and never becomes a RecursionError."""
+
+    def test_the_limit(self):
+        limit = safejson.MAX_DEPTH
+        deepest = "[" * limit + "]" * limit
+        self.assertEqual(safejson.loads(deepest), json.loads(deepest))
+        self.assertTrue(issubclass(safejson.TooDeep, ValueError))
+        for deep in ("[" + deepest + "]", "[" * 3000 + "]" * 3000,
+                     '{"a":' * 3000 + "1" + "}" * 3000,
+                     "[" * 100000 + "]" * 100000, "[" * 5000 + '"'):
+            with self.assertRaises(safejson.TooDeep):
+                safejson.loads(deep)
+            with self.assertRaises(safejson.TooDeep):
+                safejson.loads(deep.encode("utf-8"))
+
+    def test_brackets_in_strings_are_text(self):
+        for value in (["[" * 5000], {"{" * 3000: "]" * 3000},
+                      ['"' + "[" * 500, "x\\", [[1]] * 200],
+                      ["\\" + "[" * 300, '\\"' * 200 + "{" * 200],
+                      [[["é[" * 100]]]):
+            text = json.dumps(value)
+            self.assertEqual(safejson.loads(text), value)
+            self.assertEqual(safejson.loads(text.encode("utf-8")), value)
+
+    def test_bytes_are_read_as_json_reads_them(self):
+        # json.loads takes UTF-16 and UTF-32 too; brackets are measured in the
+        # text it would read, not in the bytes.
+        shallow = json.dumps({"jws": ["a.b.c", "[" * 100]})
+        deep = "[" * 3000 + "]" * 3000
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+                         "utf-32", "utf-32-le", "utf-32-be"):
+            self.assertEqual(safejson.loads(shallow.encode(encoding)), json.loads(shallow), encoding)
+            with self.assertRaises(safejson.TooDeep, msg=encoding):
+                safejson.loads(deep.encode(encoding))
+
+    def test_what_is_not_json_stays_a_value_error(self):
+        for junk in ('"' + "[" * 5000,                     # a string that never ends
+                     "]" * 5000 + "[" * 5000 + "]" * 5000,
+                     "{" * 40 + "nope", "", b"\xff\xfe\x00", "﻿[]"):
+            with self.assertRaises(ValueError):
+                safejson.loads(junk)
+
+    def test_options_reach_json_loads(self):
+        self.assertEqual(safejson.loads('{"a": 1, "a": 2}', object_pairs_hook=list),
+                         [("a", 1), ("a", 2)])
 
 
 # --- who has Pro ---------------------------------------------------------------------
@@ -1540,6 +1593,49 @@ class Notifications(WebBase):
             monitoring.note = real
         self.assertEqual(len(notes), 1)
         self.assertIn("APPLE_APP_ID", notes[0][0])
+
+
+class DeepJSON(WebBase):
+    """JSON nested thousands deep, which json.loads cannot read without running
+    out of recursion: anyone can post it to Apple's address, and any signed-in
+    page to the app's. Each is refused as not JSON, as the site answers it: a
+    400, with no traceback in the log and nothing for an error report."""
+
+    DEEP = "[" * 3000 + "]" * 3000
+
+    def setUp(self):
+        super().setUp()
+        # As on the site, where an error escaping a route is a 500 and an ERROR
+        # in the log rather than an exception handed to the test.
+        self.addCleanup(web.app.config.__setitem__, "TESTING", web.app.config["TESTING"])
+        web.app.config["TESTING"] = False
+
+    def refused(self, client, path, body, headers=None):
+        with self.assertNoLogs(web.app.logger, level="ERROR"):
+            r = client.post(path, data=body, content_type="application/json",
+                            headers=headers or {})
+        self.assertEqual(r.status_code, 400, (path, r.status_code))
+        self.assertTrue(r.is_json, path)
+        return r.get_json()
+
+    def test_apples_address_from_anyone(self):
+        for body in (self.DEEP, "[" * 30000 + "]" * 30000,
+                     '{"signedPayload": %s}' % self.DEEP):
+            self.assertEqual(self.refused(CLIENT, "/apple/notifications", body),
+                             {"error": "No signedPayload."})
+
+    def test_the_apps_posts(self):
+        client = self.client(self.ann)
+        for path in ("/api/apple/transactions", "/api/apple/move"):
+            for body in (self.DEEP, '{"jws": %s}' % self.DEEP):
+                self.assertEqual(self.refused(client, path, body, FROM_PAGE),
+                                 {"error": "Send it as JSON."})
+        # However often: the hourly limit on moves is for real ones.
+        for _ in range(web.APPSTORE_MOVES_PER_HOUR + 3):
+            self.refused(client, "/api/apple/move", self.DEEP, FROM_PAGE)
+        token = self.state(client)["appAccountToken"]
+        r = self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        self.assertEqual((r.status_code, r.get_json()["pro"]), (200, True))
 
 
 class Pages(WebBase):

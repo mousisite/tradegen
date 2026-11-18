@@ -190,6 +190,14 @@ try:
     conn = db.connect(DB)
     check("and makes that person Pro", billing.is_pro(A.get_user(conn, free.id)))
     conn.close()
+    deep = b"[" * 3000 + b"]" * 3000
+    try:
+        status = c.post("/billing/webhook", data=deep,
+                        headers={"Stripe-Signature": signed(deep)}).status_code
+    except RecursionError:                  # TESTING hands the server's error on
+        status = 500
+    check("a signed body nested too deep to read is refused as not JSON",
+          status == 400, status)
 
     cancel = json.dumps({"type": "customer.subscription.deleted",
                          "data": {"object": {"customer": "cus_free",

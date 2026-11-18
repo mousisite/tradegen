@@ -1027,6 +1027,15 @@ try:
     r = c.post("/api/push/subscribe", data=json.dumps({"kind": "web", "x": "y" * 20000}),
                content_type="application/json")
     check("as is a body far bigger than a device's details", r.status_code == 413)
+    # Under that size, JSON nested far deeper than Python can read.
+    deep = "[" * 8000 + "]" * 8000
+    for path in ("/api/push/subscribe", "/api/push/unsubscribe", "/api/push/test"):
+        try:
+            status = c.post(path, data=deep, content_type="application/json").status_code
+        except RecursionError:              # TESTING hands the server's error on
+            status = 500
+        check("JSON nested thousands deep, sent to %s, is refused as not JSON" % path,
+              status == 400, status)
     for name, sub in (("plain http", subscription("http://fcm.googleapis.com/fcm/send/x")),
                       ("another host", subscription("https://evil.example/push")),
                       ("a host hidden in the user name",

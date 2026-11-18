@@ -49,6 +49,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
+from . import safejson
+
 log = logging.getLogger(__name__)
 
 ISSUER = "https://appleid.apple.com"
@@ -224,11 +226,11 @@ def _unb64(part: str) -> bytes:
 
 
 def _json_part(part: str) -> Dict:
-    # Read before any signature is checked, so anyone's: JSON nested past
-    # Python's recursion limit is refused like any other junk.
+    # Read before any signature is checked, so anyone's: JSON nested too deep
+    # for Python to read is refused like any other junk (bot/safejson.py).
     try:
-        value = json.loads(_unb64(part).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        value = safejson.loads(_unb64(part).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
         raise AppleError("That sign-in token is not one Apple made.") from exc
     if not isinstance(value, dict):
         raise AppleError("That sign-in token is not one Apple made.")
@@ -304,7 +306,7 @@ def open_flow(value, key: bytes, max_age: int) -> Dict:
     try:
         if not hmac.compare_digest(want.digest(), _unb64(mac)):
             return {}
-        flow = json.loads(_unb64(body).decode("utf-8"))
+        flow = safejson.loads(_unb64(body).decode("utf-8"))
     except (AppleError, ValueError, UnicodeDecodeError):
         return {}
     if not isinstance(flow, dict) or not _number(flow.get("t")):
@@ -359,8 +361,8 @@ def name_from_post(raw_user: str) -> str:
     if not raw_user or len(raw_user) > 2000:
         return ""
     try:
-        data = json.loads(raw_user)
-    except (ValueError, RecursionError):
+        data = safejson.loads(raw_user)
+    except ValueError:
         return ""
     name = data.get("name") if isinstance(data, dict) else None
     if not isinstance(name, dict):
@@ -560,7 +562,7 @@ def read_notification(payload) -> Dict:
     events = claims.get("events")
     if isinstance(events, str):
         try:
-            events = json.loads(events)
+            events = safejson.loads(events)
         except ValueError as exc:
             raise AppleError(NOT_APPLES) from exc
     if not isinstance(events, dict):

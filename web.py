@@ -43,6 +43,7 @@ except ImportError:
 from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
+from flask.json.provider import DefaultJSONProvider
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -68,6 +69,7 @@ from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
 from bot import sessions as sessions_mod
@@ -90,6 +92,24 @@ app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 # padded notes could fill the data disk. The screenshot upload sets a larger
 # limit for its own request, because the form reader holds file data to it.
 app.config["MAX_FORM_MEMORY_SIZE"] = 20_000
+
+
+class _RequestJSON(DefaultJSONProvider):
+    """Flask's JSON, except that a body nested deeper than bot/safejson.py
+    allows is refused before it is read, as text that is not JSON.
+
+    request.get_json reads every JSON body through this. JSON nested a few
+    thousand deep would otherwise raise RecursionError, which get_json's
+    silent= does not cover: a few kilobytes from anyone, to any address that
+    takes JSON, would be a 500, a traceback and an error report. Refused
+    here, get_json gives None (silent) or a 400, as for any other junk.
+    """
+
+    def loads(self, s, **kwargs):
+        return safejson.loads(s, **kwargs)
+
+
+app.json = _RequestJSON(app)
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -2746,12 +2766,8 @@ def apple_native():
                                               "itself."}), 403
     request.max_content_length = APPLE_JSON_LIMIT
     # Named so that an error report strips it: it holds the identity token.
-    try:
-        token_post = request.get_json(silent=True)
-    except RecursionError:
-        # silent= covers only what is not JSON; this is JSON nested too
-        # deep for Python to read, which anyone can send.
-        token_post = None
+    # JSON nested too deep to read is None here too (_RequestJSON).
+    token_post = request.get_json(silent=True)
     if not isinstance(token_post, dict):
         return jsonify({"ok": False, "error": "Nothing to sign in with."}), 400
     if _rate_limited("apple_native", APPLE_SIGNINS_PER_HOUR):
@@ -2836,10 +2852,7 @@ def apple_notifications():
     if not apple_mod.native_ready():
         abort(404)
     request.max_content_length = APPLE_JSON_LIMIT
-    try:
-        body = request.get_json(silent=True, force=True)
-    except RecursionError:
-        body = None              # nested too deep to read, as in apple_native
+    body = request.get_json(silent=True, force=True)
     try:
         event = apple_mod.read_notification(
             body.get("payload") if isinstance(body, dict) else None)
@@ -3329,7 +3342,7 @@ def billing_webhook():
                               os.environ["STRIPE_WEBHOOK_SECRET"]):
         return jsonify({"error": "bad signature"}), 400
     try:
-        event = json.loads(payload.decode("utf-8"))
+        event = safejson.loads(payload.decode("utf-8"))
     except ValueError:
         return jsonify({"error": "not json"}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
