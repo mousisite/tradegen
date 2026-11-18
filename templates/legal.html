@@ -168,8 +168,9 @@
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
         <tr><td>Sentry</td><td>When something breaks: the error, the page
-            address and the values the failing code was working with, which
-            can include your email address. Cookies, form contents and
+            address, the description your browser gives of itself, and the
+            values the failing code was working with, which can include your
+            email address or network address. Cookies, form contents and
             anything that looks like a password or key are removed first.{% if sampled %}
             Also, even when nothing breaks, {{ sampled }} page loads: the page
             address without anything after a ?, and how long it took.{% endif %} Only

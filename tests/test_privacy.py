@@ -216,6 +216,42 @@ try:
           monitoring.status() == {"enabled": True, "detail": "reporting to Sentry",
                                   "sampled": 0.0}, monitoring.status())
 
+    # An error report carries the request's headers. Behind Cloudflare those
+    # held the visitor's network address (CF-Connecting-IP, True-Client-IP)
+    # and country on every report, which Sentry itself does not blank.
+    def breaks():
+        raise RuntimeError("a fault on the privacy page")
+
+    real_contact, quiet = web._contact, web.app.logger.disabled
+    propagates = web.app.config.get("PROPAGATE_EXCEPTIONS")
+    # As on the server: the visitor gets the error page, Sentry the report.
+    web._contact, web.app.logger.disabled = breaks, True
+    web.app.config["PROPAGATE_EXCEPTIONS"] = False
+    del SENT[:]
+    try:
+        r = visitor.get("/privacy", headers={
+            "CF-Connecting-IP": "203.0.113.77", "True-Client-IP": "203.0.113.78",
+            "CF-IPCountry": "XK", "User-Agent": "Mozilla/5.0 (privacy test)"})
+    finally:
+        web._contact, web.app.logger.disabled = real_contact, quiet
+        web.app.config["PROPAGATE_EXCEPTIONS"] = propagates
+    sentry_sdk.flush()
+    reports = [e for e in SENT if e.get("type") != "transaction"]
+    reported = json.dumps(reports)
+    check("an error report leaves out where the visitor is: no network address, "
+          "no country",
+          r.status_code == 500 and len(reports) == 1 and "203.0.113.7" not in reported
+          and '"XK"' not in reported,
+          (r.status_code, [(e.get("request") or {}).get("headers") for e in reports]))
+    check("but still names the browser, which the page says it does",
+          "Mozilla/5.0 (privacy test)" in reported)
+    page = flat(text(visitor.get("/privacy")))
+    check("and the page says what a report carries",
+          "the error, the page address, the description your browser gives of itself, "
+          "and the values the failing code was working with, which can include your "
+          "email address or network address" in page,
+          page[page.find("<td>Sentry"):][:600])
+
     # An error report keeps its query string, which usually names a stock,
     # but not when the query holds the stop link's token or Google's code.
     for query, kept in (("symbol=AAPL&interval=1d", True),

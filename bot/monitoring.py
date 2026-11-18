@@ -14,10 +14,11 @@ them wrong is worse than having no monitoring at all:
 
   Personal data never leaves. Trades, holdings, saved theses and email
   addresses are not error-report material. `send_default_pii` stays off,
-  request bodies are never read, and anything that looks like a credential
-  is stripped before sending. Page loads that worked are sent only when
-  SENTRY_TRACES_RATE asks for a sample of them, and then with no query
-  string at all; the privacy page says so whenever it is on.
+  request bodies are never read, and anything that looks like a credential,
+  or a header saying where the visitor is, is stripped before sending. Page
+  loads that worked are sent only when SENTRY_TRACES_RATE asks for a sample
+  of them, and then with no query string at all; the privacy page says so
+  whenever it is on.
 
   Expected failures are not errors. A rate-limited data source and an unknown
   ticker are conditions the app already handles and explains. Reporting them
@@ -46,6 +47,13 @@ _SECRETISH = re.compile(
 # email's stop link (t) and Google's answer to a sign-in (code, state).
 _SECRET_PARAM = re.compile(r"(?:^|&)(?:t|code|state)=", re.I)
 
+# Request headers that say where a visitor is: the network address Cloudflare
+# and other proxies pass on under names Sentry does not blank (it knows only
+# X-Forwarded-For and X-Real-IP), and Cloudflare's guess at the country. No
+# fault needs them, and every report would otherwise carry them.
+_WHEREABOUTS = re.compile(
+    r"(?:^|[-_])ip(?:v[46])?$|forwarded|client[-_]?ip|ipcountry|addr", re.I)
+
 # Exceptions that mean "the world is as expected and the app handled it".
 _EXPECTED = (
     "DataError",        # unknown ticker, or the source had nothing
@@ -65,7 +73,7 @@ def _scrub(event: Dict, _hint: Optional[Dict] = None) -> Optional[Dict]:
 
         headers = request.get("headers") or {}
         for key in list(headers):
-            if _SECRETISH.search(key):
+            if _SECRETISH.search(key) or _WHEREABOUTS.search(key):
                 headers[key] = "[removed]"
             elif key.lower() == "referer" and isinstance(headers[key], str):
                 # The page before, on this site too, whose query can hold
