@@ -13,7 +13,8 @@ import Capacitor
 ///   CancelledLoadFilter, below).
 /// - Swiping in from the left edge goes back a page, as in Safari.
 /// - Pulling the page down reloads it, and the spinner stops when the page
-///   has finished loading.
+///   has finished loading. A page that answered a form is left as it is,
+///   rather than sending the form again.
 /// - Before the first page arrives, the screen is the site's own ground,
 ///   light or dark to match the phone.
 ///
@@ -97,6 +98,9 @@ class MainViewController: CAPBridgeViewController {
             return
         }
         if OrenthSite.isSitePage(webView.url) {
+            // On a page that answered a form, the guard stops this reload,
+            // which would send the form again.
+            navigationGuard.pullToRefreshStarting()
             _ = webView.reload()
             return
         }

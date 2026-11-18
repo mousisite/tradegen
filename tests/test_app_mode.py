@@ -823,6 +823,14 @@ check("the wrapper passes Capacitor everything but a load that was only cut shor
           "withError: error)" in controller
       and "capacitorDelegate.webView?(webView, didFail: navigation, withError: error)"
           in controller)
+pull = controller[controller.index("func pulledToRefresh("):controller.index("func stopRefreshing(")]
+check("a pull to refresh on a page that answered a form never sends the form again",
+      -1 < pull.find("navigationGuard.pullToRefreshStarting()") < pull.find("webView.reload()")
+      and "afterPull && navigationAction.navigationType == .formResubmitted" in guard_swift
+      and "refreshControl?.endRefreshing()" in guard_swift)
+check("but only the reload a pull asked for: the next page after it uses the pull up",
+      "let afterPull: Bool = mainFrame && pullPending" in guard_swift
+      and "pullPending = false" in guard_swift)
 check("the guard remembers the last page asked for with a GET, and a pull on the offline "
       "page opens it again",
       'CAPPluginMethod(name: "lastPage", returnType: CAPPluginReturnPromise)' in guard_swift

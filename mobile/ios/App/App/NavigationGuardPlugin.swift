@@ -72,6 +72,14 @@ enum OrenthSite {
 /// A frame inside a page is left to Capacitor: the bridge is only ever put
 /// into the page itself, never into its frames.
 ///
+/// A pull to refresh on a page that answered a form would send the form
+/// again (WebKit reloads a POST as a POST, and marks it .formResubmitted for
+/// the app to ask about; Safari asks, Capacitor does not). A code typed
+/// wrong would use up another of its tries. So that reload is cancelled, and
+/// the page stays as it is. Only the reload a pull asked for: when the app
+/// reloads a page by itself after iOS stopped its web content, cancelling
+/// would leave the screen blank.
+///
 /// It also remembers the last page of the site the web view set out to
 /// open, so that the offline page's Try again (and a pull to refresh there)
 /// opens the page that could not be opened, not the front page. From the
@@ -97,6 +105,17 @@ public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
     // Only read and written on the main thread.
     private var lastPageAddress: URL?
 
+    // Set just before a pull to refresh reloads, and used up by the next
+    // page the web view sets out to open, which is that reload. Only read
+    // and written on the main thread.
+    private var pullPending: Bool = false
+
+    /// MainViewController calls this just before it reloads for a pull to
+    /// refresh. Main thread only.
+    func pullToRefreshStarting() {
+        pullPending = true
+    }
+
     // Called by Capacitor's navigation delegate, on the main thread.
     override public func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber? {
         // The page itself: the main frame, or a new window.
@@ -105,7 +124,15 @@ public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
         guard wholePage, let url: URL = navigationAction.request.url else {
             return nil
         }
+        let afterPull: Bool = mainFrame && pullPending
+        if mainFrame {
+            pullPending = false
+        }
         if OrenthSite.isSitePage(url) {
+            if afterPull && navigationAction.navigationType == .formResubmitted {
+                stopRefreshSpinner()
+                return NSNumber(value: true)
+            }
             let method: String = navigationAction.request.httpMethod ?? "GET"
             if mainFrame && method.uppercased() == "GET" {
                 lastPageAddress = url
@@ -145,6 +172,14 @@ public class NavigationGuardPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         return scheme.lowercased() == localScheme.lowercased()
             && host.lowercased() == localHost.lowercased()
+    }
+
+    /// The pull to refresh spinner, which a cancelled reload would leave
+    /// turning: nothing loads, so nothing else stops it.
+    private func stopRefreshSpinner() {
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.scrollView.refreshControl?.endRefreshing()
+        }
     }
 
     /// Safari, or the app the address belongs to. Only while someone is using
