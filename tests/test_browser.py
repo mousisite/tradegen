@@ -11,8 +11,9 @@ inside the iPhone app. On every page it measures what a phone shows wrong:
     that is a sideways scroll away;
   - a button, field or tab smaller than a finger (44 by 44 pixels);
   - a text field under 16 pixels, which makes an iPhone zoom in on it;
-  - a ticker box that lets the phone add capitals or corrections, or a box
-    for a price or a size without the decimal keypad;
+  - a ticker box that does not ask the phone for capitals throughout and
+    no corrections, or a box for a price or a size without the decimal
+    keypad;
   - a chart shrunk until its labels are too small to read;
   - text fainter than its background allows, in light and in dark;
   - the tab bar along the bottom: its five places, which one is current, and
