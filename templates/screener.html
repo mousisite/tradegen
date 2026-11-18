@@ -104,7 +104,7 @@
   <div class="card pad0">
     {% if result.passed %}
     <div class="tablewrap">
-      <table class="named">
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th class="r">Price</th><th class="r">Today</th>
           <th class="r">Market cap</th><th class="r">P/E</th>
@@ -117,20 +117,20 @@
           <tr>
             <td><b>{{ c.symbol }}</b>
               <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
-            <td class="r fig">{{ c.price|price }}</td>
-            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}">
+            <td class="r fig" data-label="Price">{{ c.price|price }}</td>
+            <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}" data-label="Today">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
-            <td class="r fig">{{ "%.1fB"|format(c.market_cap/1000000000)
+            <td class="r fig" data-label="Market cap">{{ "%.1fB"|format(c.market_cap/1000000000)
                 if c.market_cap else '—' }}</td>
-            <td class="r fig">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
+            <td class="r fig" data-label="P/E">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
             {% if result.deep %}
-              <td class="r fig">{{ c.roe|pct if c.roe is not none else '—' }}</td>
-              <td class="r fig">{{ c.net_margin|pct if c.net_margin is not none else '—' }}</td>
-              <td class="r fig {{ 'gain' if (c.revenue_growth or 0) > 0 else '' }}">
+              <td class="r fig" data-label="ROE">{{ c.roe|pct if c.roe is not none else '—' }}</td>
+              <td class="r fig" data-label="Margin">{{ c.net_margin|pct if c.net_margin is not none else '—' }}</td>
+              <td class="r fig {{ 'gain' if (c.revenue_growth or 0) > 0 else '' }}" data-label="Growth">
                 {{ c.revenue_growth|pct if c.revenue_growth is not none else '—' }}</td>
-              <td class="r fig">{{ c.quality|pct if c.quality is not none else '—' }}</td>
+              <td class="r fig" data-label="Quality">{{ c.quality|pct if c.quality is not none else '—' }}</td>
             {% endif %}
-            <td class="r fig soft">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
+            <td class="r fig soft" data-label="Off high">{{ c.off_high|pct if c.off_high is not none else '—' }}</td>
             <td class="r">
               <a data-working href="{{ url_for('analyse', symbol=c.symbol, interval='1d',
                                                exact=exact_arg(c.symbol)) }}">Analyse</a>

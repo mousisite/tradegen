@@ -266,15 +266,15 @@
   {% if push_devices %}
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Device</th><th>Turned on</th><th>Last notification</th>
           <th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for d in push_devices %}
           <tr>
             <td><b>{{ d['label'] or 'A device' }}</b></td>
-            <td class="soft">{{ d['created_ts']|ago }}</td>
-            <td class="soft">{{ d['last_ok_ts']|ago if d['last_ok_ts'] else 'none yet' }}
+            <td class="soft" data-label="Turned on">{{ d['created_ts']|ago }}</td>
+            <td class="soft" data-label="Last notification">{{ d['last_ok_ts']|ago if d['last_ok_ts'] else 'none yet' }}
               {% if d['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">Last try failed: {{ d['last_error'] }}</div>{% endif %}</td>
             <td class="r">
               <form method="post" action="{{ url_for('push_remove') }}">
@@ -298,17 +298,17 @@
                           else 'no account needed, nothing phoned home' }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack one">
         <thead><tr><th>What</th><th class="r">Rows</th><th>Why you would want it</th>
           <th class="r">Download</th></tr></thead>
         <tbody>
         {% for key, spec in datasets.items() %}
           <tr>
             <td><b>{{ spec.label }}</b></td>
-            <td class="r fig {{ 'faint' if not export_counts.get(key) }}">
+            <td class="r fig {{ 'faint' if not export_counts.get(key) }}" data-label="Rows">
               {{ "{:,}".format(export_counts.get(key, 0)) }}</td>
-            <td class="soft">{{ spec.why }}</td>
-            <td class="r">
+            <td class="soft" data-label="Why you would want it">{{ spec.why }}</td>
+            <td class="r" data-label="Download">
               {% if export_counts.get(key) %}
                 <a href="{{ url_for('export_data', dataset=key, fmt='csv') }}">CSV</a>
                 ·

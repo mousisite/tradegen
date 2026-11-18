@@ -395,7 +395,7 @@
   <div class="card pad0">
     {% if runs %}
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>When</th><th>Instrument</th><th>Bars</th><th>Conditions</th>
           <th class="r">Conviction</th><th>Call</th><th class="r">Entry</th>
@@ -404,19 +404,19 @@
         <tbody>
         {% for r in runs %}
           <tr>
-            <td class="faint">{{ r['ts']|ago }}</td>
-            <td><b>{{ r['symbol'] }}</b></td>
-            <td class="fig soft">{{ r['interval'] }}</td>
-            <td class="soft">{{ (r['regime_trend'] or '—')|capitalize }}</td>
-            <td class="r fig">{{ r['conviction']|signed }}</td>
-            <td>
+            <td class="faint" data-label="When">{{ r['ts']|ago }}</td>
+            <td class="lead"><b>{{ r['symbol'] }}</b></td>
+            <td class="fig soft" data-label="Bars">{{ r['interval'] }}</td>
+            <td class="soft" data-label="Conditions">{{ (r['regime_trend'] or '—')|capitalize }}</td>
+            <td class="r fig" data-label="Conviction">{{ r['conviction']|signed }}</td>
+            <td data-label="Call">
               {% set a = r['action'] %}
               <span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
                                    else 'hold' if a == 'WAIT' else 'mute' }}">
                 {{ a|capitalize }}</span>
             </td>
-            <td class="r fig">{{ r['entry']|price }}</td>
-            <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}">
+            <td class="r fig" data-label="Entry">{{ r['entry']|price }}</td>
+            <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}" data-label="Expectancy">
               {{ r['expectancy_r']|signed(3) ~ 'R' if r['expectancy_r'] is not none else '—' }}</td>
             <td class="r"><a data-working
               href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval'],

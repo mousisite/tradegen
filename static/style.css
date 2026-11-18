@@ -627,8 +627,6 @@ th.r, td.r { text-align: right; }
    read in a few lines, not one word to a line down a narrow column. */
 @media (max-width: 760px) {
   .tablewrap td.say { min-width: 15em; }
-  /* A company's name under its ticker, as the screener lists them. */
-  .tablewrap table.named td:first-child { min-width: 10em; }
 }
 
 /* ---------- meters ---------- */
