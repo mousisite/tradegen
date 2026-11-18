@@ -376,9 +376,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # reader trails from it whatever its bars reach back to. The stop
         # column keeps the stop the trade was opened with: R is measured from
         # it, and a version that knows nothing of trails reads it unchanged.
-        # trail_hit_*: the first crossing of a trailing stop any reader saw
-        # (when, the price, the stop in force then), so it stays a crossing
-        # for every reader once that day's bar is finished.
+        # trail_hit_*: the first crossing of the stop, trailing or not, any
+        # reader saw (when, the price, the stop in force then), so it stays a
+        # crossing for every reader once that day's bar is finished, and once
+        # it is older than the trade's bars reach back.
         # exit_split, and split on each part in trade_exits: the shares that
         # day per share the trade was opened with, when the exit was written
         # (10.0 after a ten-for-one in between), so the exits export can give
@@ -948,21 +949,22 @@ def trail_seen(conn: sqlite3.Connection, trade_id: int, best: float,
     return cur.rowcount == 1
 
 
-def trail_crossed(conn: sqlite3.Connection, trade_id: int, when: int, price: float,
-                  stop: float) -> bool:
-    """Keep the first crossing of a trailing stop any reader saw.
+def stop_crossed(conn: sqlite3.Connection, trade_id: int, when: int, price: float,
+                 stop: float) -> bool:
+    """Keep the first crossing of a trade's stop any reader saw, trailing or not.
 
     A finished bar is held to the stop in force when it started, because its
     high and low do not say which came first. So a crossing seen live, after
     that day's own high had trailed the stop up, is not in the finished
-    bar's reading, and an older one drops out of a reader's bars in time.
-    Kept here, it stays a crossing for every reader. Only the first is kept.
-    Prices are in the trade's own shares. True when this call kept it.
+    bar's reading. And any crossing drops out of a reader's bars in time:
+    five-minute bars reach back sixty days, one-minute bars seven. Kept
+    here, it stays a crossing for every reader. Only the first is kept, in
+    the trail_hit_ columns, which every stop uses. Prices are in the trade's
+    own shares. True when this call kept it.
     """
     cur = conn.execute(
         "UPDATE trades SET trail_hit_ts=?, trail_hit_price=?, trail_hit_stop=? "
-        "WHERE id=? AND status='open' AND trail_hit_ts IS NULL "
-        "AND (trail_pct IS NOT NULL OR trail_dist IS NOT NULL)",
+        "WHERE id=? AND status='open' AND trail_hit_ts IS NULL",
         (int(when), float(price), float(stop), trade_id))
     conn.commit()
     return cur.rowcount == 1

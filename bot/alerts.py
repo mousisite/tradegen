@@ -710,12 +710,13 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         from .portfolio import read_trade_stop
         read = read_trade_stop(row, bars, split)
         if read.trail is not None:
-            # The highs this round saw hold the trail up for every reader,
-            # and a crossing it saw stays one once that bar is finished.
+            # The highs this round saw hold the trail up for every reader.
             db.trail_seen(conn, int(row["id"]), read.best, read.best_at)
-            crossed = read.crossing(now)
-            if crossed is not None:
-                db.trail_crossed(conn, int(row["id"]), *crossed)
+        # A crossing it saw stays one once that bar is finished, and once the
+        # bar is older than any reader's bars reach.
+        crossed = read.crossing(now)
+        if crossed is not None:
+            db.stop_crossed(conn, int(row["id"]), *crossed)
         if not read.hit:
             continue
         price, stop = read.price, read.stop

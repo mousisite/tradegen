@@ -670,6 +670,46 @@ try:
           and pos.breached and "STOP HIT" in said and len(told) == 1,
           (mark.get("status"), pos.breached, said, [f.message for f in told]))
 
+    # A fixed stop on a five-minute trade, traded through once and come back.
+    # Five-minute bars reach back sixty days, so in time the touch drops out
+    # of every reader's bars. The first reader to see it keeps it, as it does
+    # a trailing stop's, so it stays a crossing for all four after that.
+    five = 300
+    dip = NOW - 2 * DAY
+    tq5 = db.open_trade(conn, "ZZQ5", "5m", 1, 100.0, 95.0, quantity=10, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (dip - 3 * five, tq5))
+    conn.commit()
+    BARS["ZZQ5"] = {"5m": bars_at([(dip - 2 * five, 101.0, 99.0), (dip - five, 101.0, 99.0),
+                                   (dip, 99.5, 94.0), (dip + five, 102.0, 99.0)],
+                                  live=101, interval="5m")}
+    mark, pos, said, told = four("ZZQ5")
+    check("a fixed stop crossed inside a five-minute trade: all four say so",
+          mark["status"] == "past stop" and close(mark["touched"], 94.0) and pos.breached
+          and "STOP HIT" in said and len(told) == 1 and "traded at 94 on" in told[0].message,
+          (mark.get("status"), pos.breached, said, [f.message for f in told]))
+    kept = conn.execute("SELECT trail_hit_ts, trail_hit_price, trail_hit_stop FROM trades "
+                        "WHERE id=?", (tq5,)).fetchone()
+    check("and its crossing is kept, as a trailing stop's is",
+          tuple(kept) == (dip, 94.0, 95.0), tuple(kept))
+    BARS["ZZQ5"] = {"5m": bars_at([(NOW - DAY + k * five, 102.0, 99.0) for k in range(4)],
+                                  live=101, interval="5m")}
+    mark, pos, said, told = four("ZZQ5")
+    check("once the touch is gone from its bars, all four still count the stop as hit",
+          mark["status"] == "past stop" and close(mark["touched"], 94.0)
+          and close(mark["touched_stop"], 95.0) and pos.breached and close(pos.touched, 94.0)
+          and close(pos.touched_stop, 95.0) and "STOP HIT" in said and not told,
+          (mark.get("status"), mark.get("touched"), pos.breached, pos.touched, said))
+    routine = workflows.RunReport(name="positions", started=0, finished=0)
+    workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH), routine,
+                               lambda _label: None, user=alice.id)
+    named = [s.detail for s in routine.steps if s.label == "Position: ZZQ5"]
+    check("and so does the positions routine",
+          named and "has crossed its stop of 95" in named[0], named)
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (tq5,)).fetchone()
+    _trail, before, after = P.trail_from(row, BARS["ZZQ5"]["5m"], 1.0, pct=0.03)
+    check("and no trail is set on it",
+          "already past its stop" in (trail_problem("ZZQ5", 1, before, after) or ""))
+
 
     # -----------------------------------------------------------------------
     head("PAPER.PY: PARTS, TRAILS AND TODAY'S SHARES")
@@ -897,6 +937,10 @@ try:
     check("as does the portfolio page",
           "Stop breached on ZZK: it traded through its trailing stop of 106.7" in page
           and "Stop breached on ZZJ: it traded through its trailing stop of 114" in page)
+    check("both of them a fixed stop crossed in a five-minute trade, from what was kept",
+          "<b>ZZQ5</b> long: traded through its stop of 95 at 94" in body
+          and "Stop breached on ZZQ5: it traded through its stop of 95" in page,
+          [body[body.find("<b>ZZQ5</b>") - 20:][:200]])
 
     # Its table of open positions shows the stop in force, which a trail
     # moves, and what that stop risks from the entry on what is still held.

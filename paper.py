@@ -398,11 +398,11 @@ def cmd_check(args, conn) -> int:
         read = read_trade_stop(t, bars, split)
         price = read.price
         r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
+        crossed = read.crossing(time.time())
+        if crossed is not None:
+            db.stop_crossed(conn, int(t["id"]), *crossed)
         if read.trail is not None:
             db.trail_seen(conn, int(t["id"]), read.best, read.best_at)
-            crossed = read.crossing(time.time())
-            if crossed is not None:
-                db.trail_crossed(conn, int(t["id"]), *crossed)
             where = "where it started"
             if read.moved:
                 where = "%s from %s" % ("up" if direction > 0 else "down",

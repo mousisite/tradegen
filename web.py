@@ -1507,15 +1507,16 @@ def _keep_trail_bests(conn, open_trades, marks) -> None:
     Read here over the trade's whole history, it holds the trail up for a
     reader with fewer bars, such as the background check. Only ever raises
     a long's best (lowers a short's), so it changes nothing else. A crossing
-    of the stop seen here is kept too, the first one only, so it is still a
-    crossing for every reader once that day's bar is finished.
+    of any stop seen here is kept too, the first one only, so it is still a
+    crossing for every reader once that day's bar is finished, and once it
+    is older than the trade's bars reach.
     """
     for t in open_trades:
         mark = marks.get(t["id"]) or {}
         if mark.get("trail") is not None and mark.get("best_at") is not None:
             db_mod.trail_seen(conn, int(t["id"]), mark["best"], mark["best_at"])
-            if mark.get("crossed"):
-                db_mod.trail_crossed(conn, int(t["id"]), *mark["crossed"])
+        if mark.get("crossed"):
+            db_mod.stop_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
 # The session key for what the journal says once after an exit.
