@@ -132,6 +132,11 @@ body {
   font: 400 var(--t-sm)/1.6 var(--sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* A word too long for its line (a note typed without spaces, a long
+     email address) breaks at the edge of its box instead of running past
+     it: on a phone it ran off a card. A table's columns still size to
+     their longest word, so a figure is never split to fit a column. */
+  overflow-wrap: break-word;
 }
 
 a { color: var(--accent-text); text-decoration: none; }
@@ -994,6 +999,10 @@ ul.list.ok li::marker { color: var(--gain); }
 
 
 .whoami { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+/* The name and address beside the picture. A flex item is at least as wide
+   as its longest word, and a long address widened the page on a phone (449
+   pixels at 360); allowed to shrink, the address wraps instead. */
+.whoami > div { flex: 1 1 12em; min-width: 0; }
 
 /* ---------- sign in ---------- */
 
