@@ -2,14 +2,17 @@
 
 No network: every price is a stand-in. Four places read a position's stop,
 the portfolio, the journal, paper.py and the background stop notice, and they
-must agree, trail and split included. A position closed in parts must count
-right everywhere: its R, the journal's statistics, the portfolio's size and
-risk, the export, deleting it, and an older version reading the same file.
+must agree, trail and split included, on the trade's own bars, and so must
+the front page: a crossing any of them saw stays one. A position closed in
+parts must count right everywhere: its R, the journal's statistics, the
+portfolio's size and risk, the front page, the export, deleting it, and an
+older version reading the same file.
 """
 import csv
 import html
 import io
 import os as _os
+import re
 import sqlite3
 import sys as _sys
 import time
@@ -90,6 +93,19 @@ def bars_of(highs, lows, live, start=None, splits=(), closes=None, symbol="X"):
               meta={"regularMarketTime": int(ts[-1]) + 3600 if n else T0},
               market_open=False, last_bar_time="", gmt_offset=0,
               prev_close=float(cl[-1]) if n else float(live))
+
+
+def bars_at(rows, live, interval="1h", symbol="X"):
+    """Stand-in bars that start at the times given, each row (start, high, low)."""
+    ts = np.array([r[0] for r in rows], dtype=np.int64)
+    hi = np.array([r[1] for r in rows], dtype=float)
+    lo = np.array([r[2] for r in rows], dtype=float)
+    cl = (hi + lo) / 2
+    return NS(symbol=symbol, name=symbol, interval=interval, timestamp=ts, open=cl,
+              high=hi, low=lo, close=cl, volume=np.ones(len(ts)), last_price=float(live),
+              splits=[], asset_class="equity", currency="USD",
+              meta={"regularMarketTime": int(ts[-1]) + 3600}, market_open=False,
+              last_bar_time="", gmt_offset=0, prev_close=float(cl[-1]))
 
 
 def first(bars, k):
@@ -377,7 +393,7 @@ db.migrate(old)
 moved = db.connect(old)
 cols = {r[1] for r in moved.execute("PRAGMA table_info(trades)")}
 check("bringing it up to date adds the parts table and the trail columns, twice safely",
-      {"trail_pct", "trail_best", "trail_best_ts"} <= cols
+      {"trail_pct", "trail_best", "trail_best_ts", "trail_hit_ts"} <= cols
       and moved.execute("SELECT COUNT(*) FROM trade_exits").fetchone()[0] == 0)
 check("and its trades read as before", db.open_positions(moved)[0]["quantity"] == 5)
 moved.close()
@@ -413,6 +429,9 @@ of_a = [x for x in lines if x["trade_id"] == str(ta)]
 check("the exits export lists each part with its own price",
       [float(x["price"]) for x in of_a] == [110.0, 120.0, 95.0]
       and all(x["part"] == "yes" for x in of_a), of_a)
+check("an exit written without its split leaves the shares of its day unsaid",
+      all(x.get("split") == "" and x.get("quantity_traded") == ""
+          and x.get("price_traded") == "" for x in of_a), of_a)
 check("and a trade closed in one go as one exit",
       [x["part"] for x in lines if x["trade_id"] == str(loose)] == ["no"])
 check("nobody else's exits are in it", all(x["symbol"].startswith("ZZ") for x in lines)
@@ -428,6 +447,8 @@ SPLITS = {}
 
 def fake_bars(symbol, interval="1d", lookback=None):
     found = BARS.get(symbol)
+    if isinstance(found, dict):                 # bars for each bar size
+        found = found.get(interval)
     if found is None:
         raise market_mod.DataError("no instrument found for %r" % symbol)
     return found(lookback) if callable(found) else found
@@ -538,6 +559,117 @@ try:
     check("so the notice, whose bars never saw that high, still trails from it",
           len(told) == 1 and "104.5" in told[0].message, [f.message for f in told])
 
+    # Seen live: today's own high trails the stop up to 114, then the price
+    # falls through it before the day is out. Once today's bar is finished,
+    # its high and low do not say which came first, so it is held to the
+    # stop from before it, 95, and shows no crossing. The one a reader saw
+    # is kept on the trade, so the stop stays hit for all four.
+    today = NOW - 6 * 3600                      # today's bar started six hours ago
+    days = bars_of([99, 99, 99, 99, 99, 101], [97, 97, 97, 97, 97, 99], live=120,
+                   start=today - 6 * DAY)
+    done = bars_of([99, 99, 99, 99, 99, 101, 120], [97, 97, 97, 97, 97, 99, 104],
+                   live=116, start=today - 6 * DAY)
+
+    def opened_yesterday(symbol):
+        tid = db.open_trade(conn, symbol, "1d", 1, 100.0, 90.0, quantity=60,
+                            trail_pct=0.05, user=alice.id)
+        conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                     (today - DAY + 3600, today - DAY + 3600, today - DAY + 3600, tid))
+        conn.commit()
+        return tid
+
+    tj = opened_yesterday("ZZJ")
+    BARS["ZZJ"] = days
+    mark, pos, said, told = four("ZZJ")
+    check("a new high, live, trails the stop up at once",
+          close(mark["stop"], 114.0) and mark["status"] == "open" and not pos.breached
+          and not told, (mark.get("stop"), mark.get("status"), said))
+    BARS["ZZJ"] = NS(**dict(vars(days), last_price=113.0))
+    mark, pos, said, told = four("ZZJ")
+    check("and a fall through it, live, is a hit for all four",
+          mark["status"] == "past stop" and pos.breached and "PAST STOP" in said
+          and len(told) == 1 and "is at 113, past the trailing stop of 114" in told[0].message,
+          (mark.get("status"), pos.breached, said, [f.message for f in told]))
+    BARS["ZZJ"] = done
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (tj,)).fetchone()
+    check("today's bar, finished, would not show that crossing on its own",
+          read_stop(done, 1, 100.0, 90.0, int(row["ts_opened"]),
+                    trail=Trail(pct=0.05, since=int(row["trail_ts"]), best=120.0,
+                                best_at=int(row["trail_best_ts"]))).touched_at is None)
+    mark, pos, said, told = four("ZZJ")
+    check("but the crossing seen is kept: all four still count the stop as hit",
+          mark["status"] == "past stop" and close(mark["touched"], 113.0)
+          and close(mark["touched_stop"], 114.0) and pos.breached
+          and close(pos.touched_stop, 114.0) and "STOP HIT" in said and not told,
+          (mark.get("status"), mark.get("touched"), pos.breached, said))
+    _trail, before, after = P.trail_from(row, done, 1.0, pct=0.04)
+    check("and no new trail is set on it",
+          "already past its stop" in (trail_problem("ZZJ", 1, before, after) or ""))
+
+    # The journal keeps a crossing it saw too: the notice, which had not
+    # looked at that moment, tells it once the day is done.
+    tj2 = opened_yesterday("ZZJ2")
+    for live in (120.0, 113.0):
+        BARS["ZZJ2"] = NS(**dict(vars(days), last_price=live))
+        row = conn.execute("SELECT * FROM trades WHERE id=?", (tj2,)).fetchone()
+        web._keep_trail_bests(conn, [row], {tj2: web._mark_one(row)})
+    BARS["ZZJ2"] = done
+    told = [f for f in alerts.check_stops(conn)["fired"] if f.trade_id == tj2]
+    check("a crossing the journal saw is told by the notice once the day is done",
+          len(told) == 1 and "traded at 113 on" in told[0].message
+          and "past the trailing stop of 114" in told[0].message
+          and "is at 116 now" in told[0].message, [f.message for f in told])
+
+    # An hourly trade is read on its own hourly bars by all four. Yesterday's
+    # high at 10:30 trailed the stop up to 106.7, and the 14:30 bar's low of
+    # 106 crossed it before the price came back to 109. On daily bars the
+    # whole day is held to the stop from before it, 97, and shows nothing.
+    hour = 3600
+    d2 = NOW - 2 * hour - DAY                   # yesterday's session
+    d1 = d2 - DAY
+    tk = db.open_trade(conn, "ZZK", "1h", 1, 100.0, 95.0, quantity=10, trail_pct=0.03,
+                       user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                 (d1 + 1800, d1 + 1800, d1 + 1800, tk))
+    conn.commit()
+    climb = [(105, 100), (110, 104), (109, 107.5), (109, 107), (108.5, 107), (108, 106),
+             (109.5, 107.8)]
+    BARS["ZZK"] = {
+        "1h": bars_at([(d1 + k * hour, 99.8, 98.5) for k in range(7)]
+                      + [(d2 + k * hour, hi, lo) for k, (hi, lo) in enumerate(climb)]
+                      + [(d2 + DAY, 109.6, 108.8)], live=109, interval="1h"),
+        "1d": bars_of([99, 99, 99, 99, 99, 99.8, 110], [97, 97, 97, 97, 97, 98.5, 100],
+                      live=109, start=d1 - 5 * DAY)}
+    mark, pos, said, told = four("ZZK")
+    check("an hourly trade: all four read its own bars, and agree its trail was crossed",
+          mark["status"] == "past stop" and close(mark["touched"], 106.0)
+          and close(mark["touched_stop"], 106.7) and pos.breached
+          and close(pos.touched, 106.0) and close(pos.touched_stop, 106.7)
+          and "STOP HIT" in said and len(told) == 1
+          and "traded at 106 on" in told[0].message
+          and "past the trailing stop of 106.7" in told[0].message,
+          (mark.get("status"), pos.breached, pos.touched, said, [f.message for f in told]))
+    routine = workflows.RunReport(name="positions", started=0, finished=0)
+    workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH), routine,
+                               lambda _label: None, user=alice.id)
+    named = [s.detail for s in routine.steps if s.label == "Position: ZZK"]
+    check("and the positions routine names it at the level it was crossed",
+          named and "has crossed its trailing stop of 106.7" in named[0], named)
+
+    # One logged with no bar size is read on daily bars by all four.
+    tn = db.open_trade(conn, "ZZN", None, 1, 100.0, 95.0, quantity=10, trail_pct=0.05,
+                       user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                 (start - DAY + 3600, start - DAY + 3600, start - DAY + 3600, tn))
+    conn.commit()
+    BARS["ZZN"] = {"1d": bars_of([102, 106, 110, 108, 109], [100, 103, 106, 104.6, 104.4],
+                                 live=105, start=start)}
+    mark, pos, said, told = four("ZZN")
+    check("and one logged with no bar size is read on daily bars by all four",
+          mark["status"] == "past stop" and close(mark["touched_stop"], 104.5)
+          and pos.breached and "STOP HIT" in said and len(told) == 1,
+          (mark.get("status"), pos.breached, said, [f.message for f in told]))
+
 
     # -----------------------------------------------------------------------
     head("PAPER.PY: PARTS, TRAILS AND TODAY'S SHARES")
@@ -581,6 +713,12 @@ try:
     code, said = cli("close", tz, "--price", 1020)
     check("and the last part closes it, saying so", code == 0
           and "closed in 2 parts at 1,015 on average" in said, said)
+    sold = [x for x in csv.DictReader(io.StringIO(export.build(conn, "exits", "csv",
+                                                               user=1)["body"]))
+            if x["symbol"] == "ZZQ2"]
+    check("paper.py keeps the split with each exit, so the export gives both in today's shares",
+          [(x.get("split"), x.get("quantity_traded"), x.get("price_traded")) for x in sold]
+          == [("10.0", "10.0", "101.0"), ("10.0", "10.0", "102.0")], sold)
 
     # -----------------------------------------------------------------------
     head("THE JOURNAL PAGE: CLOSING IN PART, TRAILING, A SPLIT")
@@ -751,12 +889,74 @@ try:
     check("the front page names a crossed trailing stop at the level it was crossed",
           "<b>ZZF</b> long: traded through its trailing stop of 104.5 at 104.4" in body,
           body[body.find("ZZF") - 100:][:400])
+    check("and so does it for an hourly trade, and for a crossing kept from when it was seen",
+          "<b>ZZK</b> long: traded through its trailing stop of 106.7 at 106" in body
+          and "<b>ZZJ</b> long: traded through its trailing stop of 114 at 113" in body,
+          [body[body.find(s) - 20:][:200] for s in ("<b>ZZK</b>", "<b>ZZJ</b>")])
+    page = flat(text(c.get("/portfolio")))
+    check("as does the portfolio page",
+          "Stop breached on ZZK: it traded through its trailing stop of 106.7" in page
+          and "Stop breached on ZZJ: it traded through its trailing stop of 114" in page)
+
+    # Its table of open positions shows the stop in force, which a trail
+    # moves, and what that stop risks from the entry on what is still held.
+    def front_row(symbol):
+        """The cells of a position's row in the front page's Open positions table."""
+        page = flat(text(c.get("/")))
+        at = page.rindex("<b>%s</b>" % symbol)
+        row = page[page.rindex("<tr", 0, at):page.index("</tr>", at)]
+        return [re.sub("<[^>]+>", "", cell).strip()
+                for cell in re.findall(r"<td[^>]*>(.*?)</td>", row)]
+
+    def trailed_then_part_closed(symbol, stop, risk, highs, lows, live):
+        tid = db.open_trade(conn, symbol, "1d", 1, 100.0, stop, quantity=60,
+                            risk_amount=risk, trail_pct=0.05, user=alice.id)
+        conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                     (start - DAY + 3600, start - DAY + 3600, start - DAY + 3600, tid))
+        conn.commit()
+        BARS[symbol] = bars_of(highs, lows, live=live, start=start)
+        db.exit_trade(conn, tid, live, 40, user=alice.id)
+
+    trailed_then_part_closed("ZZM", 90.0, 600.0, [102, 104], [100, 101], live=103)
+    cells = front_row("ZZM")
+    check("the front page's open positions show the trailed stop, and the risk on what is left",
+          cells[:4] == ["ZZM", "Long", "100", "98.8"] and cells[5] == "24.00", cells)
+    trailed_then_part_closed("ZZM2", 95.0, 300.0, [110, 120, 130, 129], [104, 114, 124, 126],
+                             live=128)
+    cells = front_row("ZZM2")
+    check("and nothing at risk once the trail has carried the stop past the entry",
+          cells[3] == "123.5" and cells[5] == "0.00", cells)
     page = text(c.get("/portfolio"))
     check("and so does the portfolio", "traded through its trailing stop of" in flat(page)
           and "ZZF" in page)
     r = c.get("/export/exits.csv")
     check("the exits can be downloaded", r.status_code == 200 and "ZZS" in text(r)
           and "1010" in text(r))
+
+    # The journal keeps a trade in the shares it was opened with, and a
+    # broker's record of a sale after a split is in that day's shares. The
+    # split is kept with each exit, so the export gives both.
+    t3 = db.open_trade(conn, "ZZS3", "1d", 1, 1000.0, 900.0, quantity=10, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (NOW - 30 * DAY, t3))
+    conn.commit()
+    SPLITS["ZZS3"] = [(split_at, 10.0)]
+    BARS["ZZS3"] = bars_of([122] * 15, [118] * 15, live=120, start=NOW - 20 * DAY,
+                           splits=[(split_at, 10.0)])
+    c.post("/trades/close", data={"trade_id": t3, "price": "120", "quantity": "100",
+                                  "shares": "today", "reason": "manual", "left": "10.0"})
+    sold = {}
+    for x in csv.DictReader(io.StringIO(text(c.get("/export/exits.csv")))):
+        sold.setdefault(x["symbol"], []).append(
+            (x["quantity"], x["price"], x.get("split"), x.get("quantity_traded"),
+             x.get("price_traded")))
+    check("after a split each sale is also given in the shares of its day, as a broker "
+          "lists it: typed in today's shares, or in the shares opened with",
+          sold.get("ZZS") == [("1.0", "1010.0", "10.0", "10.0", "101.0"),
+                              ("1.0", "1020.0", "10.0", "10.0", "102.0")], sold.get("ZZS"))
+    check("and a trade closed in one go after a split as well",
+          sold.get("ZZS3") == [("10.0", "1200.0", "10.0", "100.0", "120.0")], sold.get("ZZS3"))
+    check("one with no split since opening is the same in both",
+          sold.get("ZZT") == [("20.0", "108.0", "1.0", "20.0", "108.0")], sold.get("ZZT"))
 finally:
     (market_mod.fetch_bars, market_mod.split_history, P.fetch_bars, P.fund.load,
      P.risk_mod.profile, P.risk_mod.correlation_matrix, alerts.fetch_bars,

@@ -105,7 +105,8 @@ def trades(conn: sqlite3.Connection, status: Optional[str] = None,
 
 EXIT_COLUMNS = [
     "trade_id", "symbol", "side", "when", "quantity", "price", "reason",
-    "r_multiple", "pnl", "part", "entry", "stop",
+    "r_multiple", "pnl", "part", "entry", "stop", "split", "quantity_traded",
+    "price_traded",
 ]
 
 
@@ -114,13 +115,18 @@ def exits(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
 
     A trade closed in one go is one row; one closed in parts is a row per
     part, each with its own date and price, which is what a tax return asks
-    for. Prices are in the shares the trade was opened with.
+    for. quantity and price are in the shares the trade was opened with, as
+    the journal keeps them. A broker lists a sale after a split in that
+    day's shares: split is the shares then per share opened with, kept when
+    the exit was written, and quantity_traded and price_traded the sale in
+    them. The three are empty where the split was not known.
     """
     rows = db.list_trades(conn, limit=100000, user=user)
     held = db.exits_for(conn, [row["id"] for row in rows])
     out = []
     for row in rows:
         for part in db.trade_parts(row, held.get(row["id"], []))["exits"]:
+            split = part["split"]
             out.append({
                 "trade_id": row["id"],
                 "symbol": row["symbol"],
@@ -134,6 +140,12 @@ def exits(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
                 "part": "yes" if part["partial"] else "no",
                 "entry": row["entry"],
                 "stop": row["stop"],
+                "split": split,
+                # Rounded only to drop the dust of turning shares back and
+                # forth: 7 of today's shares are 7.000000000000001 otherwise.
+                "quantity_traded": (round(part["quantity"] * split, 8)
+                                    if split and part["quantity"] is not None else None),
+                "price_traded": round(part["price"] / split, 8) if split else None,
                 "_ts": int(part["ts"] or 0),
             })
     out.sort(key=lambda r: (r["_ts"], r["trade_id"]))
@@ -253,14 +265,17 @@ DATASETS = {
     "trades": {
         "label": "Trade journal",
         "why": "Every position opened and closed, with its R multiple. This is "
-               "the one you need at tax time.",
+               "the one you need at tax time. Its prices and sizes are in the "
+               "shares each trade was opened with.",
         "rows": trades,
         "columns": TRADE_COLUMNS,
     },
     "exits": {
         "label": "Trade exits",
         "why": "Each sale or cover with its own date, size and price, parts of "
-               "a position included. A tax return asks for each one.",
+               "a position included. A tax return asks for each one. After a "
+               "share split, quantity_traded and price_traded give it in the "
+               "shares of that day, as your broker lists it.",
         "rows": exits,
         "columns": EXIT_COLUMNS,
     },

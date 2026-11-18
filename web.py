@@ -1052,16 +1052,17 @@ def index():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)
-        open_trades = db_mod.list_trades(conn, status="open", limit=20,
-                                         user=uid())
+        # As held now: a position closed in part counts only what is left.
+        open_trades = db_mod.open_positions(conn, limit=20, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
         stored = _attention_stored(conn, uid())
     finally:
         conn.close()
-    return render_template("index.html", runs=runs, open_trades=open_trades,
-                           summary=summary, counts=counts,
-                           attention=_attention(stored, open_trades),
+    attention = _attention(stored, open_trades)
+    return render_template("index.html", runs=runs,
+                           open_trades=_held(open_trades, attention["marks"]),
+                           summary=summary, counts=counts, attention=attention,
                            has_key=bool(os.environ.get("ANTHROPIC_API_KEY")))
 
 
@@ -1206,7 +1207,7 @@ def _attention(stored: Dict, open_trades) -> Dict:
                     if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
     return {"positions": positions, "late": late, "crossed": len(crossed),
-            "unchecked": unchecked,
+            "unchecked": unchecked, "marks": marks,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
             "watch": stored["watch"], "watch_more": stored["watch_more"],
@@ -1215,6 +1216,26 @@ def _attention(stored: Dict, open_trades) -> Dict:
             "buys_more": max(0, len(buys) - ATTENTION_SHOWN),
             "checked": stored["checked"],
             "any": bool(positions or fired or unchecked or stored["watch"] or buys)}
+
+
+def _held(open_trades, marks) -> list:
+    """The front page's open positions, at the stop in force and the size still held.
+
+    A trail moves the stop and closing part of a position shrinks it, so
+    stop_now is the stop the journal reads (the position's mark), and
+    at_risk what that stop would lose from the entry on what is left:
+    nothing once a trail has carried it past the entry. A position whose
+    price did not come back in time shows the stop it was opened with.
+    """
+    out = []
+    for t in open_trades:
+        stop = (marks.get(t["id"]) or {}).get("stop", t["stop"])
+        left = t["quantity"]
+        at_risk = (None if left is None else
+                   max(0.0, (float(t["entry"]) - float(stop)) * int(t["direction"]))
+                   * float(left))
+        out.append(dict(t, stop_now=stop, at_risk=at_risk))
+    return out
 
 
 def _safe_back(raw, fallback):
@@ -1448,16 +1469,20 @@ def trades():
 
 
 def _keep_trail_bests(conn, open_trades, marks) -> None:
-    """Keep the best price each trailing stop was just read with.
+    """Keep the best price each trailing stop was just read with, and a crossing.
 
     Read here over the trade's whole history, it holds the trail up for a
     reader with fewer bars, such as the background check. Only ever raises
-    a long's best (lowers a short's), so it changes nothing else.
+    a long's best (lowers a short's), so it changes nothing else. A crossing
+    of the stop seen here is kept too, the first one only, so it is still a
+    crossing for every reader once that day's bar is finished.
     """
     for t in open_trades:
         mark = marks.get(t["id"]) or {}
         if mark.get("trail") is not None and mark.get("best_at") is not None:
             db_mod.trail_seen(conn, int(t["id"]), mark["best"], mark["best_at"])
+            if mark.get("crossed"):
+                db_mod.trail_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
 # The session key for what the journal says once after an exit.
@@ -1509,6 +1534,20 @@ def _trade_bars(trade):
                                                int(trade["ts_opened"]), bars)
 
 
+def _exit_split(trade) -> Optional[float]:
+    """A trade's shares today per share it opened with, to keep with an exit, or None.
+
+    Kept so the exports can give a sale in the shares a broker lists. The
+    exit itself is in the trade's own shares and does not need it, so a
+    price source that does not answer leaves it unknown rather than holding
+    the exit back.
+    """
+    try:
+        return _trade_bars(trade)[1]
+    except DataError:
+        return None
+
+
 def _mark_one(trade):
     """Current price, open R, the stop in force and the state of one position.
 
@@ -1544,7 +1583,9 @@ def _mark_one(trade):
             "best": read.best, "best_at": read.best_at,
             # Where and when the stop was traded through, in the same shares.
             "touched": read.touched, "touched_at": read.touched_at,
-            "touched_stop": read.touched_stop}
+            "touched_stop": read.touched_stop,
+            # The crossing to keep, when the stop trails (_keep_trail_bests).
+            "crossed": read.crossing(time.time())}
 
 
 def _mark_to_market(open_trades):
@@ -1679,7 +1720,8 @@ def close_trade():
                 quantity /= split
         done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
                                  request.form.get("notes", ""), user=uid(),
-                                 expect_left=expect_left, expect_open=bool(seen))
+                                 expect_left=expect_left, expect_open=bool(seen),
+                                 split=split if shares == "today" else _exit_split(row))
         session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
                                          split)
     except db_mod.TradeChanged:

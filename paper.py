@@ -38,7 +38,7 @@ from rich.table import Table
 from bot import config as config_mod
 from bot import database as db
 from bot.market import DataError, fetch_bars, format_price, split_factor_since
-from bot.portfolio import atr_of, read_trade_stop, trail_from, trail_problem
+from bot.portfolio import atr_of, read_trade_stop, trade_interval, trail_from, trail_problem
 
 console = Console()
 
@@ -66,7 +66,7 @@ def _bars_for(trade):
 
     Raises DataError when either cannot be had just now.
     """
-    bars = fetch_bars(trade["symbol"], trade["interval"] or "5m")
+    bars = fetch_bars(trade["symbol"], trade_interval(trade))
     return bars, split_factor_since(trade["symbol"], int(trade["ts_opened"]), bars)
 
 
@@ -233,8 +233,16 @@ def cmd_close(args, conn) -> int:
                              "with, after a %s split" % (format_price(args.price),
                                                          format_price(price),
                                                          split_words(split)))
+        else:
+            # Kept with the exit for the exports, which give a sale in the
+            # shares a broker lists. The exit does not need it, so a price
+            # source that does not answer leaves it unknown.
+            try:
+                split = _bars_for(_trade(conn, args.trade_id))[1]
+            except DataError:
+                split = None
         result = db.exit_trade(conn, args.trade_id, price, qty, args.reason,
-                               args.notes or "")
+                               args.notes or "", split=split)
     except ValueError as exc:
         console.print("[red]Rejected:[/] %s" % exc)
         return 2
@@ -342,7 +350,7 @@ def cmd_check(args, conn) -> int:
 
     def grab(trade):
         try:
-            return trade["id"], fetch_bars(trade["symbol"], trade["interval"] or "5m")
+            return trade["id"], fetch_bars(trade["symbol"], trade_interval(trade))
         except Exception:
             return trade["id"], None
 
@@ -392,6 +400,9 @@ def cmd_check(args, conn) -> int:
         r_now = ((price - entry) * direction / risk) if risk > 0 else 0.0
         if read.trail is not None:
             db.trail_seen(conn, int(t["id"]), read.best, read.best_at)
+            crossed = read.crossing(time.time())
+            if crossed is not None:
+                db.trail_crossed(conn, int(t["id"]), *crossed)
             where = "where it started"
             if read.moved:
                 where = "%s from %s" % ("up" if direction > 0 else "down",
