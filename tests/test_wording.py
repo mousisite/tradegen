@@ -332,7 +332,9 @@ try:
     head("A VISITOR, LOOKING AROUND")
     # -----------------------------------------------------------------------
     for path in ("/stocks", "/stock/aapl", "/stock/tsla", "/backtests",
-                 "/backtest/pin-bar", "/backtest/opening-range-break", "/record",
+                 "/backtest/pin-bar", "/backtest/opening-range-break",
+                 "/learn", "/learn/sweep-break-retest", "/learn/journal",
+                 "/learn/practice", "/record",
                  "/record.csv", "/signin", "/signin?next=/pricing", "/terms",
                  "/privacy", "/no-such-page", "/robots.txt", "/sitemap.xml",
                  "/healthz", "/analyse?symbol=NVDA&interval=1d",

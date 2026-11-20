@@ -1,0 +1,22 @@
+{# On a strategy's test page: the Setup lab's result for it, with the course's
+   own stop and targets on 5- and 15-minute prices, beside random entries.
+   Expects strategy. Draws nothing for a strategy that is not one of the
+   course's setups, or before the lab has measured it. #}
+{% from "_learn.html" import pooled_table with context %}
+{% set box = lab_box_data(strategy) %}
+{% if box %}
+<section class="card pad0" id="intraday" style="margin-top:var(--s3)">
+  <div class="cardhead">
+    <span class="eyebrow">Inside the day, with the course's own rules</span>
+    <p class="prose">The Setup lab also tests {{ box.setup.label }} on 5- and
+      15-minute prices, with the stop the course uses ({{ box.stop }}) and two
+      targets, after costs, beside random entries at the same times of day.
+      All instruments added together:</p>
+  </div>
+  {{ pooled_table(box.pooled) }}
+  <div class="cardhead">
+    <p class="prose"><a href="{{ url_for('learn_topic', slug=box.topic) }}">{{ box.title }}:
+      what the course teaches, the exact rule, every instrument &rarr;</a></p>
+  </div>
+</section>
+{% endif %}
