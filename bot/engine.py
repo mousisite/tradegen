@@ -155,7 +155,7 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     # with them would mark the model's own homework.
     standard_score = composite
     levels = build_levels(bars, float(ctx.atr[last]))
-    cost_bps = config_mod.cost_bps_for(bars.asset_class, cfg)
+    cost_bps = config_mod.cost_bps_for_symbol(bars.symbol, bars.asset_class, cfg)
     # Scaled to the interval, so a "day trade" on 5-minute bars does not quietly
     # become a five-week hold when the same number is applied to daily bars.
     horizon = config_mod.horizon_for(bars.interval, cfg)

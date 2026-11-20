@@ -13,6 +13,10 @@
     textbook.</p>
   <p>For one fixed test, run every day on the same popular stocks and coins,
     see <a href="{{ url_for('backtests') }}">Strategy tests</a>.</p>
+  <p>{{ strategy_count }} strategies decide the call; {{ trial_count }} price-action
+    setups are measured on trial. Those marked <span class="chip mute">on trial</span>
+    are scored and tested like the rest, but have no say in the call until their
+    record shows an edge.</p>
 </div>
 
 <div class="card">
@@ -52,7 +56,8 @@
       <tbody>
       {% for row in rows %}
         <tr>
-          <td>{{ row['strategy']|strategy }}</td>
+          <td>{{ row['strategy']|strategy }}{% if row['strategy'] in trial_names %}
+            <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}</td>
           <td class="soft">{{ row['family'].replace('_',' ') if row['family'] }}</td>
           <td class="r fig soft">{{ "{:,}".format(row['n']) }}</td>
           <td class="r fig">{{ row['hit_rate']|pct(1) }}</td>

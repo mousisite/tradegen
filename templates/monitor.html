@@ -105,8 +105,14 @@
         <div class="setfield">
           <label for="a-kind">Tell me when it</label>
           <select class="field" id="a-kind" name="kind">
-            {% for key, spec in kinds.items() %}
-              <option value="{{ key }}">{{ spec.label }}{% if spec.suffix %} … {{ spec.suffix }}{% endif %}</option>
+            {# Grouped in the order the groups first appear: Price,
+               Indicators, Price action, Calls. #}
+            {% for group in kinds.values()|map(attribute='group')|unique %}
+              <optgroup label="{{ group }}">
+              {% for key, spec in kinds.items() if spec.group == group %}
+                <option value="{{ key }}">{{ spec.label }}{% if spec.suffix %} … {{ spec.suffix }}{% endif %}</option>
+              {% endfor %}
+              </optgroup>
             {% endfor %}
           </select>
         </div>
@@ -115,8 +121,11 @@
           <input class="field fig" id="a-threshold" name="threshold" type="number"
                  step="any" inputmode="decimal" placeholder="price, percent or level">
           <div class="hint">A percent is a whole number: 5 means 5%. Leave empty
-            for the conditions that need no value: the moving average, and a
-            change of call.</div>
+            for the conditions that need no value: the moving average, a change
+            of call, and the price action ones (yesterday's high and low, the
+            opening gap, a break of the last swing, the newest gap and London's
+            range). Those say what price did, with the New York time, not what
+            it will do.</div>
         </div>
         <div class="setfield">
           <label for="a-interval">Bars</label>

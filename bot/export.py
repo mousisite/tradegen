@@ -50,6 +50,10 @@ TRADE_COLUMNS = [
     "entry", "stop", "target", "quantity", "quantity_open", "exits",
     "exit_price", "exit_reason", "r_multiple", "pnl", "risk_amount",
     "trail", "account", "note",
+    # The journal's tags and review, in words, and the New York session the
+    # trade was entered in, worked out from its entry time.
+    "setup", "emotion", "checklist", "broke_rule", "followed_plan", "lesson",
+    "reviewed", "session",
 ]
 
 
@@ -70,11 +74,15 @@ def trades(conn: sqlite3.Connection, status: Optional[str] = None,
     still open, they are what its exits have taken so far. The exits
     dataset lists each one, with its own date and price.
     """
+    from . import clock
+    from . import journal
+
     rows = db.list_trades(conn, status=status, limit=100000, user=user)
     exits = db.exits_for(conn, [row["id"] for row in rows])
     out = []
     for row in rows:
         parts = db.trade_parts(row, exits.get(row["id"], []))
+        ticked = journal.checklist_of(row)
         out.append({
             "id": row["id"],
             "symbol": row["symbol"],
@@ -97,6 +105,17 @@ def trades(conn: sqlite3.Connection, status: Optional[str] = None,
             "trail": _trail_said(row),
             "account": row["account"],
             "note": (row["notes"] or "") or (row["strategy_note"] or ""),
+            "setup": journal.SETUP_LABELS.get(db._column(row, "setup") or "", ""),
+            "emotion": journal.EMOTION_LABELS.get(db._column(row, "emotion") or "", ""),
+            "checklist": ("" if ticked is None else "%d of %d ticked%s" % (
+                len(ticked), len(journal.CHECK_KEYS),
+                (": " + ", ".join(ticked)) if ticked else "")),
+            "broke_rule": "; ".join(journal.broke_rules_of(row)),
+            "followed_plan": journal.FOLLOWED_LABELS.get(
+                db._column(row, "followed_plan") or "", ""),
+            "lesson": db._column(row, "lesson") or "",
+            "reviewed": _when(db._column(row, "reviewed_ts")),
+            "session": clock.SESSION_LABELS.get(journal.session_of_trade(row), ""),
         })
     return out
 

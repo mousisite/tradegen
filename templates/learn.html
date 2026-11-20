@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% from "_learn.html" import kept, versus, claim_measured, claim_usual with context %}
+{% set active = 'stocks' %}
+{% set page_blurb = "The ideas a popular free day-trading course teaches (liquidity sweeps, breaks of structure, fair value gaps, sessions, the daily lean), each in plain words and tested on real futures, funds, coins and stocks after trading costs, against random trades at the same times of day. Not financial advice." %}
+{% block title %}Price action, tested: do the day-trading course's ideas work? · Orenth{% endblock %}
+{% block og_title %}Price action, tested · Orenth{% endblock %}
+{% block head_extra %}{% if not page.measured %}<meta name="robots" content="noindex">{% endif %}
+<style>
+  .learn-topics { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+  .learn-topics li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px var(--s1);
+                     padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+  .learn-topics li:last-child { border-bottom: 0; }
+  .learn-topics a { font-weight: 600; }
+  .learn-topics .chip { margin-left: auto; }
+  .learn-claim { font-size: var(--t-sm); color: var(--ink); }
+  .learn-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">Learn</span>
+  <h1>Price action, tested</h1>
+  <p>A popular free day-trading course teaches through a handful of ideas: old
+    highs and lows being taken, breaks of structure, gaps, sessions, and a lean
+    for the day. Here is each idea in plain words, and what happened when Orenth
+    tested it on real prices, after trading costs, beside random trades taken
+    at the same times of day.</p>
+</div>
+
+<div class="plainbox">
+  <span class="eyebrow">The short answer</span>
+  {% if not page.measured %}
+    <p class="lead">Being tested. This fills in after the first nightly run.</p>
+    <p class="prose">Every setup below is tested each night on about 60 days of
+      5- and 15-minute prices of {{ page.universe|length }} futures, funds, coins and stocks. Until
+      the first run finishes there is nothing to report, and this page says so
+      rather than guess.</p>
+  {% else %}
+    {% set t = page.tally %}
+    {% if page.measured_setups %}
+      <p class="lead">On {{ page.main_interval_words }} prices, with a target twice
+        the risk and after costs, {{ t[1] }} of the {{ page.measured_setups }}
+        setup{{ 's' if page.measured_setups != 1 }} measured kept money by more than its margin of error,
+        {{ t[-1] }} lost money by more than its margin, and {{ t[0] }} cannot be
+        told apart from luck{% if t[none] %}; {{ t[none] }} had too few trades to
+        say{% endif %}.</p>
+    {% endif %}
+    {% set ct = page.claim_tally %}
+    {% if page.measured_claims %}
+      <p class="prose">Of the course's claims that could be checked and were
+        measured, {{ ct[1] }} happen more often than usual, {{ ct[-1] }} less
+        often, and {{ ct[0] }} cannot be told apart from what usually
+        happens{% if ct[none] %}; {{ ct[none] }} had too few cases to say{% endif %}.</p>
+    {% endif %}
+    {% if page.cells %}
+      <p class="prose">{{ "{:,}".format(page.cells) }} results got a verdict here
+        (each setup, instrument, bar size and target). About 1 in 20 can clear
+        its margin of error by luck alone, so one or two green results on their
+        own are weak evidence.</p>
+    {% endif %}
+    <p class="prose">These setups do not change Orenth's Buy, Wait or Avoid
+      calls. They are measured and shown, nothing more.</p>
+  {% endif %}
+</div>
+
+{% if page.measured_setups %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The setups</h2></div>
+  <p class="prose" style="margin-bottom:var(--s2)">Each setup with the stop the
+    course uses, on {{ page.main_interval_words }} prices, a target twice the
+    risk, all instruments added together. Random entries are trades at the same
+    times of day, sides and sizes. Each topic has the other target, the
+    15-minute prices and every instrument.</p>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr><th>Setup</th><th class="r">Trades</th><th class="r">Kept a trade</th>
+          <th class="r">Random entries</th><th>In words</th></tr></thead>
+        <tbody>
+        {% for r in page.setups if r.main %}
+          <tr>
+            <td class="lead"><a href="{{ url_for('learn_topic', slug=r.slug) }}">{{ r.setup.label }}</a></td>
+            <td class="r fig" data-label="Trades">{{ "{:,}".format(r.main.n) }}</td>
+            <td class="r" data-label="Kept a trade" style="white-space:nowrap">{{ kept(r.main) }}</td>
+            <td class="r" data-label="Random entries">{{ versus(r.main) }}</td>
+            <td class="wide soft">{% if r.main.verdict is none %}Too few to say{% else %}{{ r.main.words|capitalize }}{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The claims, checked</h2></div>
+  <p class="prose" style="margin-bottom:var(--s2)">What the course says happens,
+    in Orenth's words, beside how often it happened and how often the same thing
+    happens anyway (the comparison each topic describes).</p>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr><th>The claim</th><th class="r">Measured</th><th class="r">Usually</th>
+          <th>In words</th></tr></thead>
+        <tbody>
+        {% for c in page.claims %}
+          <tr>
+            <td class="lead"><span class="learn-claim">{{ c.statement }}</span>
+              {% if c.title %}<a class="soft" style="font-size:var(--t-xs);white-space:nowrap"
+                 href="{{ url_for('learn_topic', slug=c.learn) }}">{{ c.title }} &rarr;</a>{% endif %}</td>
+            {% if c.measured %}
+              <td class="r" data-label="Measured">{{ claim_measured(c) }}</td>
+              <td class="r" data-label="Usually">{{ claim_usual(c) }}</td>
+              <td class="wide">{{ c.words|capitalize }}</td>
+            {% else %}
+              <td class="wide soft" colspan="3">Being tested</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The ideas, one at a time</h2></div>
+  <div class="card">
+    <ul class="learn-topics">
+      {% for t in page.topics %}
+        <li><a href="{{ url_for('learn_topic', slug=t.slug) }}">{{ t.title }}</a>
+          <span class="chip {{ 'mute' if t.measured else 'hold' }}">{{ 'measured' if t.measured else 'being tested' }}</span></li>
+      {% endfor %}
+    </ul>
+  </div>
+  <p class="prose" style="margin-top:var(--s2)"><a href="{{ url_for('learn_practice') }}">Practice:
+    call the next move on a past chart &rarr;</a></p>
+</section>
+
+<div class="card" id="how-we-tested" style="margin-top:var(--s4)">
+  <span class="eyebrow">How the Setup lab tests</span>
+  <ul class="list">
+    <li>Instruments: {{ page.universe|join(', ') }}, on 5- and 15-minute prices.
+      Times are New York time.</li>
+    {% for line in page.method %}<li>{{ line }}</li>{% endfor %}
+    {% if page.costs %}
+      <li>Costs charged a round trip:
+        {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
+    {% endif %}
+    {% if page.skipped_days.incomplete or page.skipped_days.roll %}
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
+        with too few bars and {{ page.skipped_days.roll }} futures contract-change
+        days.</li>
+    {% endif %}
+  </ul>
+  <span class="eyebrow" style="display:block;margin-top:var(--s3)">What this cannot tell you</span>
+  <ul class="list">
+    {% for line in page.limits %}<li>{{ line }}</li>{% endfor %}
+  </ul>
+  {% if page.run and page.run.finished %}
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">Last
+      run finished {{ page.run.finished|day }}.</p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top:var(--s3)">
+  <p class="learn-source">{{ page.source }}{% if not in_app %}
+    <a href="{{ page.video.url }}" rel="nofollow noopener" target="_blank">The video is on YouTube.</a>{% endif %}
+    Past results do not promise future ones. This is software output, not
+    financial advice.</p>
+</div>
+
+<section class="card closing" style="margin-top:var(--s4)">
+  <p class="lead">See what works on the stock you are looking at.</p>
+  <p class="prose">Orenth's own calls, and the strategies behind them, are tested
+    the same way: after costs, with a margin of error.</p>
+  <div class="cta">
+    <a class="btn" href="{{ url_for('backtests') }}">Strategy tests</a>
+    <a class="btn quiet" href="{{ url_for('record') }}">Track record</a>
+  </div>
+</section>
+
+{% endblock %}

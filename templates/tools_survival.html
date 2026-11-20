@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% from "_help.html" import help with context %}
+{% block title %}Survival check · Orenth{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">A tool</span>
+  <h1>How long would an account last?</h1>
+  <p>The same results, a hundred trades at a time, risked at 0.5% up to 10% of the
+    account a trade. The method stays the same; only the risk changes. Nothing you
+    type is kept.</p>
+</div>
+
+<form method="get" action="{{ url_for('survival_tool') }}" class="card">
+  <div class="setgrid">
+    {% if enough %}
+    <div class="setfield">
+      <label for="source">Results from</label>
+      <select class="field" id="source" name="source">
+        <option value="typed" {{ '' if wanted_journal else 'selected' }}>The numbers below</option>
+        <option value="journal" {{ 'selected' if wanted_journal }}>My journal: {{ closed }} closed trades</option>
+      </select>
+    </div>
+    {% endif %}
+    <div class="setfield">
+      <label for="hit">Hit rate, %</label>
+      <input class="field fig" id="hit" name="hit" type="number" step="any" min="0" max="100"
+             inputmode="decimal" value="{{ asked.hit or '45' }}">
+      <div class="hint">How often a trade wins.</div>
+    </div>
+    <div class="setfield">
+      <label for="win">Average win, in R</label>
+      <input class="field fig" id="win" name="win" type="number" step="any" min="0"
+             inputmode="decimal" value="{{ asked.win or '1.5' }}">
+      <div class="hint">1.5 means a win makes one and a half times what was risked.</div>
+    </div>
+    <div class="setfield">
+      <label for="loss">Average loss, in R</label>
+      <input class="field fig" id="loss" name="loss" type="number" step="any" min="0"
+             inputmode="decimal" value="{{ asked.loss or '1' }}">
+      <div class="hint">1 is a loss at the stop.</div>
+    </div>
+  </div>
+  <button class="btn" type="submit" style="margin-top:var(--s3)">Check</button>
+  {% if not enough %}
+    <p class="prose" style="margin-top:var(--s2)">{% if current_user and not demo %}With
+      {{ minimum }} or more closed trades in your journal, this can use your own
+      results{% if closed %}; you have {{ closed }}{% endif %}.{% else %}Signed in, with
+      {{ minimum }} or more closed trades in your journal, this can use your own
+      results.{% endif %}</p>
+  {% endif %}
+</form>
+
+{% if problem %}
+  <div class="notice" style="margin-top:var(--s3)">{{ problem }}</div>
+{% endif %}
+
+{% if result %}
+{% set src = result.source %}
+<section>
+  <div class="sechead"><h2>Over {{ result.trades }} trades {{ help('survival') }}</h2>
+    <span class="tail">{{ '{:,}'.format(result.paths) }} reshuffles</span></div>
+  <p class="prose" style="margin-bottom:var(--s2)">
+    {% if src.from == 'journal' %}Drawn from your {{ src.trades }} closed trades, after
+      costs: they won {{ src.hit_rate|pct }} of the time and averaged
+      {{ src.avg_r|signed(2) }}R a trade.
+    {% else %}A trade wins {{ src.hit_rate|pct }} of the time; on average that is
+      {{ src.avg_r|signed(2) }}R a trade.{% endif %}
+    {% if src.avg_r < 0 %}That loses money on average, so every risk shrinks the
+      account; a bigger one only does it faster.{% elif src.avg_r == 0 %}That breaks
+      even on average, before any bad run.{% endif %}</p>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr><th>Risk a trade</th><th class="r">Typical end</th>
+          <th class="r">Fell 20% from a high</th><th class="r">Fell 50% from a high</th>
+          <th class="r">Ended at zero</th></tr></thead>
+        <tbody>
+        {% for row in result.rows %}
+          <tr>
+            <td><b>{{ '%g'|format(row.risk) }}%</b></td>
+            <td class="r fig {{ 'gain' if row.median_end > 1 else 'loss' if row.median_end < 1 }}" data-label="Typical end">{{ '%.0f'|format(row.median_end * 100) }}% of the start</td>
+            <td class="r fig" data-label="Fell 20% from a high">{{ '%.0f'|format(row.fall20 * 100) }}% of runs</td>
+            <td class="r fig" data-label="Fell 50% from a high">{{ '%.0f'|format(row.fall50 * 100) }}% of runs</td>
+            <td class="r fig" data-label="Ended at zero">{{ '%.0f'|format(row.ruined * 100) }}% of runs</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="prose" style="margin-top:var(--s2)">In a typical run of {{ result.trades }}
+    trades, the longest string of losses in a row was {{ '%g'|format(result.longest_losing_run) }}.
+    These runs draw each trade on its own, like shuffling a deck. Real losses tend to
+    come in bunches, when the market stops suiting a method, so real losing runs are
+    usually longer and real falls deeper than these.</p>
+  <p class="prose" style="margin-top:var(--s2)">"Typical end" is the middle run: half
+    ended above it and half below. Each trade risks the share of what the account
+    holds at the time. TJR's video "How To Start Day Trading In 2026" warns against
+    risking 5, 10 or 20% a trade (5:40:57); the rows for 5% and 10% show what those
+    risks do on these numbers.</p>
+</section>
+{% endif %}
+
+<p class="prose" style="margin-top:var(--s4)">Arithmetic on the numbers given, not
+  advice about what to trade. See also <a href="{{ url_for('size_tool') }}">how big a
+  position</a>.</p>
+
+{% endblock %}

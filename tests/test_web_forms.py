@@ -1,3 +1,4 @@
+from markupsafe import escape as _markup_escape
 """End-to-end exercise of every web route, including the new ones."""
 import io
 import os
@@ -363,7 +364,9 @@ try:
           "How the strategies are tested" in body)
     shown = sorted(fake.signals, key=lambda s: -abs(s.contribution))[:12]
     check("strategy names are the ones the public pages use",
-          all(public_mod.strategy_label(s.name) in body for s in shown))
+          all(str(_markup_escape(public_mod.strategy_label(s.name))) in body for s in shown),
+          repr([public_mod.strategy_label(s.name) for s in shown
+                if str(_markup_escape(public_mod.strategy_label(s.name))) not in body]))
     garbled = [s.name.replace("_", " ").capitalize() for s in shown
                if s.name.replace("_", " ").capitalize() != public_mod.strategy_label(s.name)]
     check("with no 'Rsi' or 'Macd' left",

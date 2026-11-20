@@ -615,12 +615,13 @@ from bot import reasoning, thesis  # noqa: E402
 bull, bear_case = thesis.Case("bull"), thesis.Case("bear")
 thesis._technical_points({"composite": 0.4, "regime": "trending", "expectancy": 0.1,
                           "hit_rate": 0.4, "samples": 120}, bull, bear_case, "today")
+# Only the strategies that vote make the composite; those on trial do not.
 check("the case for a stock counts the strategies it ran",
-      bull.points and ("across %d strategies" % len(S.REGISTRY)) in bull.points[0].detail,
-      bull.points[0].detail if bull.points else "")
+      bull.points and ("across %d strategies" % len(S.voting_names()))
+      in bull.points[0].detail, bull.points[0].detail if bull.points else "")
 brief = reasoning.build_payload("TEST", 100.0, plan=clear)
 check("and so does the brief given to the reasoning step",
-      ("Technical plan (%d-strategy engine)" % len(S.REGISTRY)) in brief, list(brief))
+      ("Technical plan (%d-strategy engine)" % len(S.voting_names())) in brief, list(brief))
 
 # A bearish call's odds are the short side's: a record of betting on a fall
 # that paid argues the bear case, and must not be filed as "this has paid".

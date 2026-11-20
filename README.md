@@ -43,6 +43,7 @@ required.
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
 | **Strategies** | Leaderboard of all 34 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
+| **Price action, tested** | `/learn`: the ideas a popular day-trading course teaches, each in plain words beside what the Setup lab measured, and a practice page for calling the next move |
 
 **Screenshots.** Drag a chart onto the page, click to browse, or press Ctrl+V
 after snipping with Win+Shift+S. It reads the ticker and the timeframe off the
@@ -139,6 +140,13 @@ otherwise. Each links to where the work happens.
 | 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
 | 24 | Find something | `bot/ideas.py` | Pick stocks or crypto and how long you hold; it back-tests a list and shows only what cleared the bar. Refuses to pad the list |
 | 25 | Plain English | `bot/plain.py` | The same answer without the jargon, above the technical one. A test fails if jargon leaks in |
+| 26 | Setup lab | `bot/setuplab.py`, `bot/structure.py`, `bot/liquidity.py`, `bot/labstore.py` | The price-action setups taught in TJR's free day-trading video, found in 5- and 15-minute prices of eight futures, funds, coins and stocks, each traded with the course's own stop and two targets, after costs, beside random entries at the same half hour of other days, with a margin of error that counts one day's trades together. Nightly |
+| 27 | Claims tested | `bot/claims.py`, `bot/clock.py` | The video's checkable claims (London takes Asia's range, yesterday's high then its low, the 9:50 window, gaps that fill, related markets that disagree) measured against what happens anyway, with a margin and a verdict, or "too few to say" |
+| 28 | Price-structure panel | `bot/levelview.py`, `bot/bias.py` | On an analysis, what price is doing in plain words: the trend, the last break of structure, highs or lows taken, live gaps, the 50% line, yesterday's and the sessions' levels, and the daily lean beside its measured record. Times in New York time |
+| 29 | Price-action alerts | `bot/alerts.py` | Yesterday's high or low taken, taken and closed back, today's gap filled, a break of structure, a pullback into a gap, London's range taken. Facts with prices and times, never forecasts |
+| 30 | Journal review and rules | `bot/journal.py`, `bot/database.py` | Tags for setup, feelings and the pre-trade checklist, a review after each trade, results broken down by each, and your own daily limits on losses, trades and time |
+| 31 | Size and survival tools | `bot/journal.py` | Position size for shares, coins or a futures contract from account, risk and stop; and how often a risk per trade survives a long losing run, from your own trades or typed-in figures |
+| 32 | Learn | `bot/learn.py`, `bot/setups.py` | `/learn`: each idea from the video in plain words, what the course teaches with timestamps, the exact rule Orenth codes with its own choices marked, and what the lab measured. Every number comes from the store; the copy states none |
 | — | Screenshot reading | `bot/vision.py` | Identifies the instrument and timeframe from a chart image. Needs a key |
 
 ---
@@ -193,10 +201,86 @@ broker costs.** They change the verdict more than any indicator setting.
 
 ---
 
+## Price action, measured
+
+TJR's video "How To Start Day Trading In 2026" teaches a set of price-action
+setups (sweeps of old highs and lows, breaks of structure, fair value gaps,
+the 50% line, and the sweep, break and retest model) and makes claims about
+sessions, gaps and timing. The Setup lab (`bot/setuplab.py`) and the claims
+(`bot/claims.py`) test them on past prices. This section is the method; the
+results are on the site, and change as the data does.
+
+**Universe.** ES and NQ futures, SPY, QQQ, Bitcoin, Ether, Apple and NVIDIA
+(`setups.LAB_SYMBOLS`), on 5- and 15-minute bars. The data source keeps about
+60 days of those, so every result is one stretch of the market. Stocks and
+funds have day-session prices only, so they have no Asia or London range.
+
+**Entries.** Every time a setup appears (no thinning), at the close of that
+bar. A setup is found by `bot/liquidity.py`, whose value at each bar uses
+only that bar and the ones before it; a test cuts the bars at each entry and
+checks the trade is the same.
+
+**Stops.** Where the course puts them: past the high or low that was taken,
+past the far end of the move a break ended, past a gap's far edge, past the
+bar that turned at the 50% line. A stop closer than a tenth of a usual bar's
+range (ATR 14) is not tradable; those events are counted and left out.
+
+**Targets.** Two rules, kept apart: twice the risk, and the nearest old high
+or low not yet traded through that is at least the risk away (twice the risk
+when there is none, counted).
+
+**Exits.** The stop, the target, or the next 16:00 New York time at that
+bar's close. The stop counts first when one bar reaches both, and a bar
+opening past the stop fills at its open (the rules of
+`calibrate.simulate_trade`, checked trade for trade).
+
+**Costs.** The house round-trip cost for each instrument, in units of the
+trade's risk: futures 1 basis point, stocks and funds 2, coins 20.
+
+**Control.** Each trade is set beside up to five random entries on other
+trading days in the same New York half hour, the same side, with a stop and
+target the same size against that bar's usual range, the same exit and the
+same costs. A setup that keeps money but no more than random trades at that
+time of day has shown nothing about itself.
+
+**Margin.** Two standard errors, with trades on the same trading day counted
+together. A setup needs 30 trades on 10 separate days before it gets a
+verdict: kept money by more than its margin, lost money by more than it, or
+cannot be told apart from luck. About 1 cell in 20 crosses its margin by
+luck alone, and many cells are tested, so a single green cell proves little.
+ES and SPY (and NQ and QQQ) follow the same indexes: pooled together, they
+overstate the evidence.
+
+**Holdout.** The last third of the trading days is checked apart from the
+first two thirds; a result whose sign flips there is marked not stable. The
+four-step model is also run with wider swings (three bars each side).
+
+**Left out.** Futures roll days and days with under 80% of their bars, and
+trades that would carry through a roll. Each is counted.
+
+**Claims.** Each checkable claim is measured against a control of the same
+size: London taking one side of the Asia range and reaching the other is set
+beside a band as wide as Asia's centred on the 03:00 price; the 9:30-9:50
+window beside 10:30-10:55; a close past a swing beside a wick past it; gaps
+beside random zones of the same size; the daily lean beside always saying up.
+Gap fills are set against one in two.
+
+**When.** Nightly on the server after 17:05 New York time, or by hand:
+
+```
+python -m bot.setuplab --refresh --symbols SPY --intervals 15m
+python -m bot.setuplab              # print what is stored
+```
+
+A partial run leaves the claims alone; add `--claims` to measure them anyway.
+
+---
+
 ## The strategy library
 
-34 strategies in six families. Each returns a directional score from -1 to +1
-with a plain-language reading.
+44 strategies in seven families. Each returns a directional score from -1 to
++1 with a plain-language reading. 34 of them, in the first six families,
+decide the call; the 10 in the liquidity family are measured on trial.
 
 **Trend (10)** — `trend_stack`, `macd_momentum`, `supertrend_follow`,
 `adx_di_cross`, `ichimoku_cloud`, `parabolic_sar_flip`, `linreg_channel`,
@@ -216,6 +300,34 @@ with a plain-language reading.
 `gap_behaviour`
 
 **Pattern (3)** — `engulfing_pattern`, `pin_bar`, `momentum_thrust`
+
+**Liquidity (10), on trial** — `sweep_reclaim`, `prior_day_sweep`,
+`equal_levels_sweep`, `session_sweep`, `structure_flip`, `sweep_then_flip`,
+`fvg_retest`, `ifvg_flip`, `premium_discount`, `liquidity_model`
+
+The liquidity family is the price-action setups taught in TJR's video "How To
+Start Day Trading In 2026": an old high or low taken and closed back past,
+yesterday's high or low, equal highs or lows, a session's range, a break of
+the last swing, gaps a move left, the halfway line of the last move, and the
+course's whole sweep-break-retest model. Their names, plain descriptions and
+video timestamps live in `bot/setups.py`; the price structure they read is
+`bot/structure.py`, `bot/clock.py` and `bot/liquidity.py`. `session_sweep`
+needs intraday bars, like `opening_range_break`.
+
+**On trial** means measured, not used. Every analysis scores them and every
+back-test (the per-instrument one and the daily test on the popular names)
+measures them with the house stop, target and costs, but `Strategy.votes` is
+False: `evaluate()` leaves them out of the composite, so the composite, the
+odds and every BUY / WAIT / AVOID are exactly what they would be without
+them (`tests/test_liquidity_strategies.py` proves it). Pages tag them "on
+trial". Promoting one to a vote is a later, separate decision, on its record.
+
+The alerts follow the same levels (`bot/alerts.py`, the "Price action"
+group): yesterday's high or low traded through, or taken and closed back
+inside; the day's opening gap filling; a close past the last swing the
+other way; a pullback into the newest gap; London's range taken between
+08:30 and 12:00 New York time. Each message is a fact with a price and the
+New York time, never a forecast.
 
 ### How it decides which to trust
 
@@ -300,6 +412,27 @@ counts once it is closed in full, at the R of the whole position, each part
 weighted by its size; the parts are listed in the "Trade exits" export. After a
 share split, a trade stays in the shares it was opened with; `close --today`
 takes a price and size in today's shares and converts them.
+
+On the website's Journal, a trade can carry the setup it came from, how you
+felt and a pre-trade checklist, and a trade entered by hand can be given the
+New York time you really entered (up to 30 days back). Once closed, a short
+review keeps whether you followed your plan and what it taught you. **What your
+journal says** (`/trades/breakdown`) splits closed trades after costs by setup,
+New York session, time of the morning, weekday, feeling, plan followed, rules
+broken and checklist, with a margin of error only from ten trades in a group;
+it also gives green days, the break-even hit rate for your own average win and
+loss, your best day's share of the profit, and whether a fixed or trailing loss
+limit would have been hit. Settings holds your **daily rules**: a loss limit in
+R, most trades a day, and no new trades after a New York time. When one says
+stop, the journal asks before logging; a trade logged anyway is marked, so the
+breakdown shows what breaking the rule cost. **See the trade** draws any
+journal trade on its own prices (hourly or daily when its bars no longer reach
+back). Two tools are open to anyone: a **size calculator** (`/tools/size`) for
+shares, coins and futures contracts, with the break-even hit rate after costs
+and the fixed-contract view, and a **survival check** (`/tools/survival`) that
+reshuffles a hit rate and average win and loss, or your own 20+ closed trades,
+to show what risking 0.5% to 10% a trade does over 100 trades. The tags,
+review and rule columns are on the trades table and in the journal export.
 
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
 where price never reached the entry, and plans older than two hours. It records
@@ -777,6 +910,18 @@ bot/
   alerts.py         thirteen alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
+
+  structure.py      swing highs and lows, breaks of structure, sweeps, gaps, the 50% line
+  clock.py          New York time, trading days, sessions, yesterday's and the week's levels
+  liquidity.py      the course's chain: taken, broken, pulled back, turned
+  bias.py           the daily lean, read from hourly and 4-hour bars
+  setups.py         every setup, claim and Learn topic from the video, named once
+  labstore.py       where the lab's results are kept, and the one verdict rule
+  setuplab.py       the Setup lab: every setup on intraday prices, against random entries
+  claims.py         the video's claims, each against what happens anyway
+  levelview.py      the analysis page's price-structure panel and daily lean
+  journal.py        journal tags, breakdowns, daily rules, size and survival
+  learn.py          the Learn pages' words, and what they read from the lab
 ```
 
 ---

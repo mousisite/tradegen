@@ -135,6 +135,10 @@ PERSONAL_SETTINGS = (
     "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
     "target_atr_multiple", "min_conviction", "strong_conviction",
     "horizon_bars", "interval", "allow_shorts", "require_positive_expectancy",
+    # A person's own futures cost, the journal's daily rules and how they
+    # like their candles drawn.
+    "cost_bps_futures", "daily_loss_limit_r", "max_trades_per_day",
+    "last_entry_time", "calm_candles",
 )
 
 

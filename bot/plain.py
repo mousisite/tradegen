@@ -247,6 +247,68 @@ HELP: Dict[str, Dict[str, str]] = {
         "25 or more, ranging at 17 or less, transitional in between. Volatility "
         "is high, normal or low against this instrument's own last 120 bars, and "
         "up, down or sideways is the way it leans.")},
+    # What price is doing (the course's reading of a chart, bot/levelview.py).
+    "structure": {"name": "the trend on these bars", "text": (
+        "A swing high is a high above the two highs before it and not below the two "
+        "after it (a swing low is the mirror). The trend turns up when a bar closes above "
+        "the last swing high and down when one closes below the last swing low; a wick "
+        "past it, or a close exactly on it, does not count.")},
+    "flip_level": {"name": "the price that would turn it", "text": (
+        "The last swing point on the other side of the trend. A bar closing beyond it "
+        "would turn the trend, so it is the price past which the reading is wrong.")},
+    "sweep": {"name": "an old high or low taken", "text": (
+        "Price trading past an earlier swing high or low, yesterday's high or low, or an "
+        "earlier session's. The course reads a run past one that closes back inside as "
+        "stops being taken before a turn; Orenth tests that reading in its Setup lab.")},
+    "draw": {"name": "the key levels", "text": (
+        "Prices the course expects traders to watch: yesterday's and last week's highs "
+        "and lows, the session ranges, and old swing highs and lows price has not traded "
+        "through yet. Equal highs or lows are two or more within a tenth of a typical "
+        "bar's range of each other.")},
+    "prior_day": {"name": "yesterday's high and low", "text": (
+        "The high, low and close of the last whole trading day before today; for futures "
+        "and coins a trading day runs from 18:00 to 17:00 New York time. Taken means price "
+        "has traded past it today (this week, for last week's).")},
+    "typical_bar": {"name": "the distance in typical bars", "text": (
+        "How far the level is from the last close, counted in the average range of one "
+        "bar over the last 14 bars. 2 means about two ordinary bars' moves away.")},
+    "fvg": {"name": "a gap a fast move left", "text": (
+        "Three candles where the first's high and the third's low do not overlap (the "
+        "mirror in a fall) and the middle one moved that way: the course calls the "
+        "stretch between them a fair value gap and expects price to come back into it. It "
+        "stands until a bar closes through it, price closes past a newer swing point, or "
+        "it is 150 bars old.")},
+    "ifvg": {"name": "a close through a gap", "text": (
+        "A close back through the bottom of the gaps the current rise left (the top, in a "
+        "fall), which the course calls an inverse fair value gap and reads as an early "
+        "sign of a turn. The trend itself changes only on a close past the last swing "
+        "point.")},
+    "half_line": {"name": "the halfway line", "text": (
+        "The middle of the last move, from its swing low to the highest high since (the "
+        "mirror in a fall), fixed once a candle closes against the move. The course buys a "
+        "rise in the lower, cheap half and sells a fall in the upper, dear half.")},
+    "opening_gap": {"name": "the opening gap", "text": (
+        "The jump between the previous close and the day's first price: the 17:00 close "
+        "and the 18:00 reopen for futures, the 16:00 close and the 9:30 open for stocks. "
+        "It fills when price trades back to the previous close.")},
+    "session_ny": {"name": "the sessions", "text": (
+        "The course splits the day in New York time: Asia from 18:00 to 3:00, London "
+        "from 3:00 to 8:30, then New York. A session's range counts only when the data "
+        "has at least 80% of its bars.")},
+    "window_ny": {"name": "the course's times", "text": (
+        "The course watches 9:30 to 9:50, takes its entries from 9:50 to 10:10 and stops "
+        "looking for new trades at 10:30, New York time. Orenth's Setup lab measures how "
+        "trades entered at each time of day did.")},
+    "bias": {"name": "the day's lean", "text": (
+        "Orenth's own rules for how the course reads the day: the 4-hour trend (built "
+        "from hourly bars), then whether the hourly took an old high or low today and "
+        "broke its last swing the other way. It is shown beside how often it called the "
+        "day before, and it never changes the call.")},
+    "pair_check": {"name": "two related markets", "text": (
+        "The course compares markets that usually move together, such as the S&P 500 "
+        "and Nasdaq 100 futures, and reads one making a higher high while the other does "
+        "not as a warning. Here their last two swing points are compared over the last "
+        "300 bars both traded.")},
 
     # The plan.
     "entry": {"name": "the entry", "text": (
@@ -324,6 +386,35 @@ HELP: Dict[str, Dict[str, str]] = {
         "The average number of bars these past trades lasted: until the target "
         "or the stop, or until the {bars}-bar limit, when they were closed at "
         "the price then.")},
+    # The journal's breakdown and its tools (bot/journal.py).
+    "followed_plan": {"name": "followed your plan", "text": (
+        "What you said when you reviewed each closed trade: did you enter, place the "
+        "stop and get out as you planned before the trade? Comparing the groups shows "
+        "what keeping to the plan was worth, on your own trades.")},
+    "breakeven_own": {"name": "the break-even hit rate", "text": (
+        "With your own average win of W and average loss of L, both in R after costs, "
+        "you break even by winning L / (W + L) of the trades that won or lost. Win more "
+        "often than that and the journal makes money; less, and it loses.")},
+    "green_days": {"name": "green days", "text": (
+        "New York days whose closed trades added up to a gain, each trade counted on "
+        "the day it closed. Even a method that makes money has many red days.")},
+    "best_day_share": {"name": "the best day's share", "text": (
+        "Your best day's result as a share of your total. A share near or over 100% "
+        "means one day made the profit and the other days, between them, made little "
+        "or lost.")},
+    "loss_limit": {"name": "a loss limit", "text": (
+        "Some accounts are closed once the balance falls a set amount below where it "
+        "started, below its best end of day, or below its best at any point. This walks "
+        "your closed trades in order to show whether, and when, each kind would have "
+        "been hit.")},
+    "fixed_contracts": {"name": "fixed contracts", "text": (
+        "Trading the same number of contracts every time, with the stop a number of "
+        "ticks away. The money lost at the stop is contracts times ticks times what a "
+        "tick is worth, so it grows with the stop.")},
+    "survival": {"name": "the survival check", "text": (
+        "Each row runs the same 2,000 shuffled runs of 100 trades at one risk a trade, "
+        "so the rows differ only by the risk. It shows how often the account fell 20% "
+        "or 50% below its highest, and where the middle run ended.")},
     "holdout": {"name": "the most recent third", "text": (
         "The average result of only the newest third of these trades. If it and "
         "the whole record disagree, one making money and the other losing it, "
@@ -331,7 +422,8 @@ HELP: Dict[str, Dict[str, str]] = {
     "costs": {"name": "trading costs", "text": (
         "Every past trade is charged a round trip of costs: {equity}% of the "
         "price for a stock or fund and {crypto}% for a coin, as set in "
-        "Settings, or {other}% for anything else (a basis point is a hundredth "
+        "Settings, {futures}% for a futures contract, or {other}% for anything "
+        "else (a basis point is a hundredth "
         "of a percent). In R that is the cost divided by the distance to the "
         "stop, so the closer the stop, the more of each trade it eats.")},
     "atr": {"name": "ATR", "text": (
@@ -351,6 +443,11 @@ HELP: Dict[str, Dict[str, str]] = {
         "mean reversion, breakout, volume, structure or pattern.")},
     "lean": {"name": "lean", "text": (
         "The family's weighted opinion today, from -1 (down) to +1 (up).")},
+    "on_trial": {"name": "on trial", "text": (
+        "A price-action setup from a day-trading course (old highs and lows taken, "
+        "breaks of the last swing, gaps, the halfway line), scored and tested like "
+        "every other strategy but with no say in the call. Whether it ever gets one "
+        "is decided later, on its tested record after costs.")},
     "active": {"name": "active", "text": (
         "How many of the family's strategies have an opinion today, out of all "
         "of them.")},
@@ -449,6 +546,7 @@ def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
         "equity": "%g" % (float(setting("cost_bps_equity")) / 100.0),
         "crypto": "%g" % (float(setting("cost_bps_crypto")) / 100.0),
         "other": "%g" % (float(setting("cost_bps_other")) / 100.0),
+        "futures": "%g" % (float(setting("cost_bps_futures")) / 100.0),
         "news": "%d" % round(float(setting("sentiment_weight")) * 100),
     }
     return {key: {"name": h["name"], "text": h["text"].format(**filled)}

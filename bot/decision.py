@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from .calibrate import Calibration
-from .config import cost_bps_for
+from .config import cost_bps_for_symbol
 from .levels import Level, nearest_resistance, nearest_support
 from .market import Bars, format_price
 from .sentiment import Sentiment
@@ -492,7 +492,7 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # Break-even has to carry the round trip. p*(R-c) = (1-p)*(1+c) gives
     # p = (1+c)/(1+R). On tight intraday stops this is not a rounding detail:
     # it can move the required win rate by tens of percentage points.
-    cost_bps = cost_bps_for(bars.asset_class, cfg)
+    cost_bps = cost_bps_for_symbol(bars.symbol, bars.asset_class, cfg)
     cost_r = ((entry * cost_bps / 10000.0) / risk_per_unit) if risk_per_unit > 0 else 0.0
     # The measured break-even where there is a sample to measure, because
     # (1 + cost) / (1 + rr) assumes every loss resolves at the full stop and

@@ -389,7 +389,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
                    ("trail_ts", "INTEGER"), ("trail_best", "REAL"),
                    ("trail_best_ts", "INTEGER"), ("trail_hit_ts", "INTEGER"),
                    ("trail_hit_price", "REAL"), ("trail_hit_stop", "REAL"),
-                   ("exit_split", "REAL")],
+                   ("exit_split", "REAL"),
+                   # The journal's tags (bot/journal.py): which setup (a key of
+                   # setups.JOURNAL_SETUPS), how the person felt (setups.EMOTIONS),
+                   # the checklist ticked (a JSON list of setups.CHECKLIST keys),
+                   # the daily rules it was logged against (comma-separated keys:
+                   # loss, trades, time), and the review after it closed: whether
+                   # the plan was followed (setups.FOLLOWED), the lesson, and when.
+                   # Empty on every trade from before, which then counts as "not
+                   # tagged" and nothing else about it changes.
+                   ("setup", "TEXT"), ("emotion", "TEXT"), ("followed_plan", "TEXT"),
+                   ("checklist", "TEXT"), ("lesson", "TEXT"), ("broke_rule", "TEXT"),
+                   ("reviewed_ts", "INTEGER")],
         "trade_exits": [("split", "REAL")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
@@ -603,13 +614,23 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                run_id: Optional[int] = None, account: str = "paper",
                strategy_note: str = "", notes: str = "", user: int = 1,
                trail_pct: Optional[float] = None, trail_dist: Optional[float] = None,
-               trail_atr: Optional[float] = None) -> int:
+               trail_atr: Optional[float] = None, setup: Optional[str] = None,
+               emotion: Optional[str] = None, checklist=None,
+               broke_rule: Optional[str] = None, opened_ts: Optional[int] = None) -> int:
     """Record a newly opened position, with a trailing stop if one is given.
 
     trail_pct is a share of the best price (0.05 for 5%); trail_dist is a
     distance in price, with trail_atr the ATR multiple it was worked out from.
+
+    setup, emotion and checklist are the journal's tags (keys from bot/setups'
+    lists; checklist an iterable of the keys ticked, stored as a JSON list,
+    None when the checklist was not used). broke_rule is the comma-separated
+    daily rules it was logged against. opened_ts is when the person entered,
+    when that was earlier than now: at most 30 days back and never in the
+    future. Each raises ValueError in words when it is not right.
     """
     import math
+    from .journal import check_opened, check_tags
     if direction not in (1, -1):
         raise ValueError("direction must be +1 (long) or -1 (short)")
     for label, value in (("entry", entry), ("stop", stop), ("target", target1),
@@ -630,20 +651,28 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
         raise ValueError("for a short, the stop must sit above the entry")
     check_trail(trail_pct, trail_dist, trail_atr)
     trails = trail_pct is not None or trail_dist is not None
+    ticked = None if checklist is None else sorted(set(checklist))
+    check_tags(setup=setup, emotion=emotion, checklist=ticked)
+    if broke_rule and not all(k in ("loss", "trades", "time") for k in broke_rule.split(",")):
+        raise ValueError("unknown daily rule %r" % broke_rule)
 
     now = int(time.time())
+    opened = check_opened(opened_ts, now)
+    opened = now if opened is None else opened
     cur = conn.execute(
         """INSERT INTO trades (run_id, account, symbol, interval, direction,
                status, ts_opened, entry, stop, target1, target2, quantity,
                risk_amount, strategy_note, notes, user_id, trail_pct, trail_dist,
-               trail_atr, trail_ts, trail_best, trail_best_ts)
-           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (run_id, account, symbol.upper(), interval, direction, now,
+               trail_atr, trail_ts, trail_best, trail_best_ts, setup, emotion,
+               checklist, broke_rule)
+           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (run_id, account, symbol.upper(), interval, direction, opened,
          float(entry), float(stop), target1, target2, quantity, risk_amount,
          strategy_note, notes, int(user), trail_pct, trail_dist,
          trail_atr if trail_dist is not None else None,
          now if trails else None, float(entry) if trails else None,
-         now if trails else None))
+         now if trails else None, setup or None, emotion or None,
+         None if ticked is None else json.dumps(ticked), broke_rule or None))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -1012,8 +1041,54 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
 
 
 def _cost_of(row, costs: Dict[str, float]) -> float:
-    """A trade's round-trip cost as a fraction of the price."""
-    return float(costs.get("crypto" if row["symbol"].endswith("-USD") else "equity", 0.0))
+    """A trade's round-trip cost as a fraction of the price.
+
+    A futures contract (Yahoo's symbol ends =F) pays costs["futures"] when
+    the caller gives one, and the stock rate otherwise, as it always did.
+    """
+    symbol = row["symbol"]
+    if symbol.endswith("=F") and "futures" in costs:
+        return float(costs["futures"])
+    return float(costs.get("crypto" if symbol.endswith("-USD") else "equity", 0.0))
+
+
+# The longest lesson kept; a longer one is cut, not refused.
+MAX_LESSON = 1000
+
+
+def review_trade(conn: sqlite3.Connection, trade_id: int, followed_plan: Optional[str],
+                 lesson: str, user: Optional[int] = None, setup: Optional[str] = None,
+                 emotion: Optional[str] = None) -> None:
+    """Keep the review of a closed trade: did the plan get followed, and the lesson.
+
+    The setup and feeling can be set or corrected here too; one left None
+    keeps what the trade has. Only a closed trade is reviewed. Raises
+    ValueError in words.
+    """
+    from .journal import check_tags
+    followed_plan = (followed_plan or "").strip() or None
+    lesson = (lesson or "").strip()[:MAX_LESSON]
+    check_tags(setup=setup or None, emotion=emotion or None, followed_plan=followed_plan)
+    sql, args = _own("SELECT * FROM trades WHERE id=?", [trade_id], user)
+    row = conn.execute(sql, args).fetchone()
+    if row is None:
+        raise ValueError("There is no such trade in your journal.")
+    if row["status"] != "closed":
+        raise ValueError("A trade is reviewed once it is closed.")
+    if followed_plan is None and not lesson and setup is None and emotion is None:
+        raise ValueError("Say whether you followed your plan, or write what you learned.")
+    sets, values = ["followed_plan=?", "lesson=?", "reviewed_ts=?"], [
+        followed_plan, lesson or None, int(time.time())]
+    if setup is not None:
+        sets.append("setup=?")
+        values.append(setup or None)
+    if emotion is not None:
+        sets.append("emotion=?")
+        values.append(emotion or None)
+    sql, args = _own("UPDATE trades SET %s WHERE id=?" % ", ".join(sets),
+                     values + [trade_id], user)
+    conn.execute(sql, args)
+    conn.commit()
 
 
 def _open_realised(conn: sqlite3.Connection, account: str, user: Optional[int],

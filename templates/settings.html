@@ -77,6 +77,15 @@
         <div class="hint">20 means 0.1% taker fee on each side, which is normal
           on a retail exchange.</div>
       </div>
+      <div class="setfield">
+        <label for="cost_bps_futures">Futures, round trip</label>
+        <input class="field fig" id="cost_bps_futures" name="cost_bps_futures"
+               type="number" step="any" min="0" inputmode="decimal"
+               value="{{ cfg.cost_bps_futures }}">
+        <div class="hint">For a contract such as ES=F. One tick of slippage and a
+          commission of about five dollars come to about 0.6 on ES and 0.8 on the
+          micro contracts.</div>
+      </div>
     </div>
     <p class="prose" style="margin-top:var(--s3)">
       <b>Why this dominates everything.</b> On five-minute crypto bars, a 20
@@ -124,7 +133,51 @@
           matters: a fixed 24 bars is two hours on 5-minute bars but five weeks
           on daily ones.</div>
       </div>
+      <div class="setfield">
+        <label for="calm_candles">Candle colours</label>
+        <select class="field" id="calm_candles" name="calm_candles">
+          <option value="0" {{ '' if cfg.calm_candles else 'selected' }}>Green and red</option>
+          <option value="1" {{ 'selected' if cfg.calm_candles }}>Calm: grey and dark</option>
+        </select>
+        <div class="hint">Some people find red candles push them to act. The calm
+          colours show the same prices.</div>
+      </div>
     </div>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="sechead"><h2>Your trading rules</h2>
+    <span class="tail">checked before the journal logs a trade</span></div>
+  <div class="card">
+    <div class="setgrid">
+      <div class="setfield">
+        <label for="daily_loss_limit_r">Stop for the day after losing</label>
+        <input class="field fig" id="daily_loss_limit_r" name="daily_loss_limit_r"
+               type="number" step="any" min="0" max="20" inputmode="decimal"
+               value="{{ '%g'|format(cfg.daily_loss_limit_r or 0) }}">
+        <div class="hint">In R, your risk per trade: 2 means two full losses.
+          After costs, counted on trades closed that New York day. 0 switches it off.</div>
+      </div>
+      <div class="setfield">
+        <label for="max_trades_per_day">Most trades a day</label>
+        <input class="field fig" id="max_trades_per_day" name="max_trades_per_day"
+               type="number" step="1" min="0" max="100" inputmode="numeric"
+               value="{{ cfg.max_trades_per_day or 0 }}">
+        <div class="hint">Counted by when you entered, New York date. 0 switches it off.</div>
+      </div>
+      <div class="setfield">
+        <label for="last_entry_time">No new trades after</label>
+        <input class="field fig" id="last_entry_time" name="last_entry_time"
+               type="text" inputmode="numeric" placeholder="10:30" autocomplete="off"
+               value="{{ cfg.last_entry_time or '' }}">
+        <div class="hint">A New York time, like 10:30. Leave it empty to switch it off.</div>
+      </div>
+    </div>
+    <p class="prose" style="margin-top:var(--s3)">When a rule says stop, the journal
+      asks before it logs another trade. You can still log it, and it is marked as
+      one that broke a rule, so <a href="{{ url_for('journal_breakdown') }}">the
+      breakdown</a> shows what breaking it cost.</p>
   </div>
 </section>
 

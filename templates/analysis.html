@@ -14,7 +14,38 @@
     .tradechart .narrow { display: block; }
     .tradechart .chart { max-height: none; }
   }
+</style>{% endif %}{% if extras and extras.structure %}<style>
+  .pricedoing > .card, .pricedoing > .cols, .pricedoing > details { margin-top: var(--s3); }
+  .pricedoing > .sechead + .card, .pricedoing > .sechead + .cols { margin-top: 0; }
+  .pricedoing .eyebrow + .prose { margin-top: 0; }
+  .pricedoing ul.list li { overflow-wrap: anywhere; }
+  .pricedoing details.card > summary { cursor: pointer; }
+  .pricedoing details.card[open] > summary { margin-bottom: var(--s2); }
+  .pricedoing tr.nowrow td { color: var(--ink-3); font-style: italic; }
+  /* The site's .stack layout class would make this table a column of flex
+     items on a wide screen, and its header would stop lining up. */
+  @media (min-width: 761px) { .pricedoing table.stack { display: table; } }
+  .keychart .chart { max-height: 380px; }
+  .keychart .narrow { display: none; }
+  @media (max-width: 600px) {
+    .keychart .wide { display: none; }
+    .keychart .narrow { display: block; }
+    .keychart .chart { max-height: none; }
+  }
 </style>{% endif %}{% endblock %}
+
+{# The "?" for one line of "What price is doing", by its key. Spelled out so
+   test_help.py finds every key the page can use. #}
+{% macro point_help(key) -%}
+{%- if key == 'structure' %}{{ help('structure') }}
+{%- elif key == 'flip_level' %}{{ help('flip_level') }}
+{%- elif key == 'sweep' %}{{ help('sweep') }}
+{%- elif key == 'fvg' %}{{ help('fvg') }}
+{%- elif key == 'ifvg' %}{{ help('ifvg') }}
+{%- elif key == 'half_line' %}{{ help('half_line') }}
+{%- elif key == 'opening_gap' %}{{ help('opening_gap') }}
+{%- endif -%}
+{%- endmacro %}
 
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
@@ -196,9 +227,138 @@
         entry, a price not reached yet, and its stop and target.
       {% elif chart.levels %}The dashed lines are this plan's entry, stop and
         target.{% else %}No plan is drawn: the call is to stand aside.{% endif %}
-      {% if chart.intraday %}Times are UTC.{% endif %}
+      {% if chart.intraday %}Times are New York time.{% endif %}
       Point at a candle to see its prices.</p>
   </div>
+</section>
+{% endif %}
+
+{# What price is doing: the structure, the key levels, the New York clock and
+   the day's lean, from bot/levelview.py. Facts about price and the course's
+   reading of them; none of it changes the call. #}
+{% if extras and extras.structure %}
+{% set x = extras %}
+<section class="pricedoing" id="what-price-is-doing">
+  <div class="sechead">
+    <h2>What price is doing</h2>
+    <span class="tail">{{ x.words }} bars{% if x.intraday %}, times in New York time{% endif %}</span>
+  </div>
+
+  {% if x.clock %}
+  <div class="card">
+    <div class="cardhead"><span class="eyebrow">New York clock</span>{{ help('session_ny') }}</div>
+    {% for w in x.clock.words %}<p class="prose">{{ w }}</p>{% endfor %}
+    <div class="prose faint" style="font-size:var(--t-xs)">The times the course trades by
+      are its own; Orenth measures them rather than trading by them.{{ help('window_ny') }}</div>
+    {% for m in x.clock.measured %}<p class="prose">{{ m }}</p>{% endfor %}
+  </div>
+  {% endif %}
+
+  {% set b = x.bias %}
+  <div class="{{ 'cols b' if b else '' }}">
+    <div class="card">
+      <span class="eyebrow">Structure</span>
+      <ul class="list">
+        {% for p in x.structure.points %}<li>{{ p.text }}{{ point_help(p.help) }}</li>{% endfor %}
+      </ul>
+      {% if x.notes %}
+      <ul class="list warn" style="margin-top:var(--s2)">
+        {% for note in x.notes %}<li>{{ note }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    {% if b %}
+    <div class="card">
+      <div class="cardhead"><span class="eyebrow">The day's lean, read the course's way</span>{{ help('bias') }}</div>
+      {% if b.unavailable %}
+        <p class="prose">{{ b.unavailable }}</p>
+      {% else %}
+        <p class="prose"><b>{{ b.word }}.</b> Read from hourly bars up to the one that
+          started {{ b.as_of }}.</p>
+        <ul class="list">{% for reason in b.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+        {% if b.targets %}
+        <dl class="pairs" style="margin-top:var(--s2)">
+          {% for target in b.targets %}<dt>{{ target.name }}</dt><dd class="fig">{{ target.price|price }}</dd>{% endfor %}
+        </dl>
+        <p class="prose faint" style="font-size:var(--t-xs)">The nearest old highs or lows in
+          the lean's direction, which the course would aim at.</p>
+        {% endif %}
+        {% if b.flip_words %}<div class="prose">{{ b.flip_words }}{{ help('flip_level') }}</div>{% endif %}
+        <div class="prose"><b>How this read did before.</b>
+          {% for w in b.record_words %}{{ w }} {% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
+        <p class="prose faint" style="font-size:var(--t-xs)">The rules are Orenth's own
+          reading of the course's method, not a forecast, and the lean does not change the
+          call above.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% if x.levels %}
+  <details class="card">
+    <summary><b>All key levels ({{ x.levels|length }})</b></summary>
+    <p class="prose">Distances are from the last finished bar's close,
+      {{ x.close|price }}.{% if x.intraday %} Times are New York time.{% endif %}</p>
+    <table class="stack">
+      <thead><tr><th>Level</th><th class="r">Price</th><th class="r">Away</th>
+        <th class="r">Typical bars</th><th>Taken</th></tr></thead>
+      <tbody>
+      {% set ns = namespace(now=false) %}
+      {% for row in x.levels %}
+        {% if not ns.now and row.side != 'above' %}{% set ns.now = true %}
+        <tr class="nowrow"><td class="lead">Last close</td><td class="r fig" data-label="Price">{{ x.close|price }}</td>
+          <td class="r" data-label="Away">0%</td><td class="r" data-label="Typical bars">0</td><td data-label="Taken">now</td></tr>
+        {% endif %}
+        <tr><td class="lead">{{ row.name }}</td>
+          <td class="r fig" data-label="Price">{{ row.price|price }}</td>
+          <td class="r" data-label="Away">{{ "%+.2f"|format(row.pct) }}%</td>
+          <td class="r" data-label="Typical bars">{{ "%.1f"|format(row.atr) if row.atr is not none else 'not measured' }}</td>
+          <td data-label="Taken">{% if row.taken %}{{ row.taken_word }} {{ row.taken_at }}{% elif row.source in ('swing', 'equal') %}not yet{% elif row.source in ('today', 'half') %}&ndash;{% else %}no{% endif %}</td></tr>
+      {% endfor %}
+      {% if not ns.now %}
+        <tr class="nowrow"><td class="lead">Last close</td><td class="r fig" data-label="Price">{{ x.close|price }}</td>
+          <td class="r" data-label="Away">0%</td><td class="r" data-label="Typical bars">0</td><td data-label="Taken">now</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+    {{ help_list(['draw', 'prior_day', 'typical_bar'], 'What the levels and columns mean') }}
+  </details>
+  {% endif %}
+
+  {% if x.chart and x.chart.wide %}
+  <details class="card keychart">
+    <summary><b>Show key levels on the chart</b></summary>
+    <div class="wide">{{ x.chart.wide|safe }}</div>
+    <div class="narrow">{{ x.chart.narrow|safe }}</div>
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
+      The dotted lines are {{ "yesterday's" if x.chart.short == 'Yest.' else "the previous bar's" }}
+      high and low ({{ x.chart.short }}), the nearest old high and low price has not traded
+      through, any equal highs or lows, and the half line, the middle of the last move.
+      {% if x.chart.gaps %}Shaded boxes are gaps still standing, tinted green for a rise's
+        and red for a fall's.{% endif %}
+      {% if x.chart.marks %}Rings mark where yesterday's, a session's or equal highs or
+        lows were taken, or another old high or low was taken and the bar closed back
+        inside it.{% endif %}
+      {% if x.chart.bands %}Grey bands are the Asia and London sessions.{% endif %}
+      Levels more than half the candles' range away are left off; the table lists them.
+      On a phone the chart keeps yesterday's high and low, the nearest old high and low
+      and one gap. {% if x.intraday %}Times are New York time.{% endif %}</p>
+  </details>
+  {% endif %}
+
+  {% if x.pair %}
+  <div class="card">
+    <div class="cardhead"><span class="eyebrow">{{ x.symbol }} beside {{ x.pair.partner }}</span>{{ help('pair_check') }}</div>
+    {% for line in x.pair.rows %}<p class="prose">{{ line }}</p>{% endfor %}
+    <p class="prose">{{ x.pair.measured }}</p>
+  </div>
+  {% endif %}
+
+  <p class="fine" style="margin-top:var(--s2)">These are facts about price and the course's
+    reading of them, not signals, and none of it changes the call above. The ideas come
+    from {{ x.video.creator }}'s free video
+    {% if in_app %}&ldquo;{{ x.video.title }}&rdquo;{% else %}<a href="{{ x.video.url }}" rel="noopener">&ldquo;{{ x.video.title }}&rdquo;</a>{% endif %};
+    the exact rules are Orenth's.</p>
 </section>
 {% endif %}
 
@@ -365,7 +525,8 @@
         <tbody>
         {% for s in ranked[:12] %}
           <tr>
-            <td>{{ s.name|strategy }}</td>
+            <td>{{ s.name|strategy }}{% if s.name in trial_names %}
+              <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}</td>
             <td class="soft">{{ s.family.replace('_',' ') }}</td>
             <td>{{ lean(s.score) }}</td>
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
@@ -378,7 +539,7 @@
       </table>
     </div>
     <div class="helpfoot" style="padding-top:var(--s2)">{{ help_list(
-      ['score', 'weight', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
+      ['score', 'weight', 'on_trial', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
       'What the columns and words mean') }}</div>
   </div>
 </section>
@@ -409,7 +570,8 @@
               {{ st.expectancy|signed(3) }}</td>
             {# The multiplier the call actually used: the all-conditions record
                blended with this market state's own, not the first alone. #}
-            <td class="r fig">{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}</td>
+            {# A strategy on trial has no say in the call, so no weight was applied to it. #}
+            <td class="r fig">{% if st.name in trial_names %}<span class="chip mute" style="white-space:nowrap">on trial</span>{% else %}{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}{% endif %}</td>
           </tr>
         {% endfor %}
         </tbody>
