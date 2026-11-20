@@ -168,6 +168,11 @@ check("the bar that trades past both takes both at once, as equal highs",
 check("and closes back below them", s["st_sweep_back"][28] == 1)
 check("a level taken once cannot be taken again", s["st_sweep"][29] == 0
       and b.high[29] > 101.0)
+took = [e for e in liquidity.events(b, liquidity.series(b), limit=50) if e["kind"] == "take"
+        and e["i"] == 28]
+check("said as equal highs taken, the nearest named, closing back below them",
+      took and took[0]["words"].startswith("Took equal highs (the nearest at 100.95)")
+      and "closed back below them at 100" in took[0]["words"], took and took[0]["words"])
 check("and no equal highs are left", math.isnan(s["st_eqh"][28]))
 s = structure.series(sc.equal_scene(0.2))
 check("two highs 0.2 ATR apart are not equal highs", math.isnan(s["st_eqh"][27]))
@@ -273,8 +278,8 @@ for label, bars, count in series_cases:
     if label.startswith("a future"):
         days = clock.day_table(bars)
         rolled = next(d for d in days if d.roll)
-        picks = sorted(set(picks + [rolled.first, rolled.first - 1, days[5].last,
-                                    days[5].last + 1, days[12].first + 108]))
+        picks = sorted(set(picks + [rolled.roll_at - 1, rolled.roll_at, rolled.first,
+                                    days[5].last, days[5].last + 1, days[12].first + 108]))
     bad = []
     for i in picks:
         cut = liquidity.series(clock.head(bars, i + 1))

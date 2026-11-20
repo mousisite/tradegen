@@ -150,13 +150,16 @@ def stock_series(n=4000, seed=12):
 
 def futures_series(n=17000, seed=13, roll_day=30):
     """A future's 5-minute bars round the clock, the daily pause and weekends,
-    through the November clock change, with a contract roll's jump at the
-    open of trading day `roll_day` (None for none)."""
+    through the November clock change, with a contract roll's jump at 16:00
+    of trading day `roll_day` (None for none), as Yahoo's ES=F switches
+    contract on an expiry Friday."""
     ts = futures_times(n)
     jumps = {}
     starts = np.flatnonzero(np.diff(ts) > 600) + 1
-    if roll_day is not None and len(starts) >= roll_day:
-        jumps[int(starts[roll_day - 1])] = 1.012
+    if roll_day is not None and len(starts) >= roll_day + 1:
+        day = range(int(starts[roll_day - 1]), int(starts[roll_day]))
+        at = next(j for j in day if clock.fmt_ny(int(ts[j])) == "16:00")
+        jumps[at] = 1.05
     return walk(ts, seed=seed, kind="future", vol=0.0008, price=6000.0, jumps=jumps)
 
 

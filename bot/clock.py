@@ -32,7 +32,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from . import indicators as ind
 from . import sessions as sessions_mod
 
 DAY = 86400
@@ -92,11 +91,23 @@ LAB_WINDOW_LABELS = {
 # app choice: a session (or day) with under 80% of its bars is not a range;
 # the data source leaves holes, and a range with a hole in it is too narrow.
 COMPLETE_SHARE = 0.8
-# app choice: a futures day whose opening gap is this many times the usual
-# gap, and more than ROLL_ATR bars' ranges, is a contract roll, not a market move.
-ROLL_GAP_TIMES = 4.0
-ROLL_ATR = 1.5
+# app choice: how a futures contract roll (or a break in the data) is told from
+# a market move. Yahoo's continuous ES=F and NQ=F switch contract inside a day,
+# at 16:00 on the quarterly expiry Friday (ES 55 to 155 points, 4 to 8 hourly
+# ATRs, in 2024-2025), and sometimes at the Sunday reopen in that week (NQ
+# +620 on 23 December 2024). Between two bars of a running session prices
+# hardly move (median 0.01 ATR), so a jump there of more than ROLL_JUMP of a
+# usual day's range is a roll or bad data. An opening gap counts only when
+# over ROLL_GAP of a usual day's range inside the roll window, because weekend
+# news moves the reopen as much (7 April 2025, 9 March 2026). A usual day's
+# range is the median of up to ROLL_DAYS whole days before; ROLL_MIN_DAYS of
+# them are needed. The opening-gap rule the plan proposed (4 times the usual
+# gap and 1.5 ATR) marked every Monday and missed the real switches.
+ROLL_JUMP = 0.5
+ROLL_GAP = 1.0
+ROLL_DAYS = 20
 ROLL_MIN_DAYS = 5
+ROLL_WINDOW = (10, 3)       # days before and after the third Friday of Mar, Jun, Sep, Dec
 
 _INTERVAL_SEC = {"1m": 60, "2m": 120, "5m": 300, "15m": 900, "30m": 1800,
                  "60m": 3600, "90m": 5400, "1h": 3600, "2h": 7200, "4h": 14400,
@@ -414,7 +425,8 @@ class Day:
     prev_close: float = NAN       # the day before's last close in the data
     gap: float = NAN              # open minus that close (NaN for coins)
     gap_filled_at: int = 0        # start time of the bar that traded back to it
-    roll: bool = False
+    roll: bool = False            # a futures roll or a break in the data (see ROLL_JUMP)
+    roll_at: int = -1             # the bar it was seen at (from there on it is known)
     sessions: Dict[str, Session] = field(default_factory=dict)
 
 
@@ -436,10 +448,9 @@ def _days(bars, fr: _Frame) -> List[Day]:
     l_ = np.asarray(bars.low, dtype=float)
     c = np.asarray(bars.close, dtype=float)
     ts = fr.ts
-    atr = ind.atr(h, l_, c, 14) if len(c) else np.zeros(0)
     step_min = max(1, fr.step // 60)
     out: List[Day] = []
-    gaps_seen: List[float] = []
+    ranges_seen: List[float] = []        # whole days' ranges, for the roll rule
     for b, (day_number, s, e) in enumerate(fr.blocks):
         d = date.fromordinal(EPOCH + day_number)
         idx = np.arange(s, e)
@@ -467,19 +478,34 @@ def _days(bars, fr: _Frame) -> List[Day]:
                 where = np.flatnonzero(hit)
                 if where.size:
                     day.gap_filled_at = int(ts[s + where[0]])
-            if fr.instrument == "future":
-                # app choice: a contract roll shows as an opening gap far
-                # bigger than the days before had (their median; at least
-                # ROLL_MIN_DAYS of them) and over 1.5 ATR. Only earlier days
-                # are used, so the flag never depends on what came later.
-                size = abs(day.gap)
-                before = atr[s - 1] if s >= 1 else NAN
-                if len(gaps_seen) >= ROLL_MIN_DAYS and before == before:
-                    usual = float(np.median(gaps_seen))
-                    day.roll = bool(size > ROLL_GAP_TIMES * usual and size > ROLL_ATR * before)
-                gaps_seen.append(size)
+        if fr.instrument == "future" and len(ranges_seen) >= ROLL_MIN_DAYS:
+            # Only whole days before this one are used, and a jump is known
+            # from its own bar, so the flag never depends on a later bar.
+            usual = float(np.median(ranges_seen[-ROLL_DAYS:]))
+            if b > 0 and abs(day.gap) > ROLL_GAP * usual and _roll_window(d):
+                day.roll, day.roll_at = True, s
+            elif e - s > 1:
+                jumps = np.abs(o[s + 1:e] - c[s:e - 1])
+                where = np.flatnonzero(jumps > ROLL_JUMP * usual)
+                if where.size:
+                    day.roll, day.roll_at = True, s + 1 + int(where[0])
+        if day.complete and not day.roll:
+            ranges_seen.append(day.high - day.low)
         out.append(day)
     return out
+
+
+def _roll_window(day: date) -> bool:
+    """Whether a day is near a quarterly expiry: from ROLL_WINDOW[0] days before
+    the third Friday of March, June, September or December to ROLL_WINDOW[1]
+    after it. The equity index futures (ES, NQ, YM, RTY and their micros) roll
+    then."""
+    for month in (3, 6, 9, 12):
+        third = date(day.year, month, 15)
+        third += timedelta(days=(4 - third.weekday()) % 7)
+        if -ROLL_WINDOW[1] <= (third - day).days <= ROLL_WINDOW[0]:
+            return True
+    return False
 
 
 def day_table(bars) -> List[Day]:
@@ -522,7 +548,8 @@ def series(bars) -> Dict[str, np.ndarray]:
     ck_sess_lvl, ck_sess_src: the same for New York (08:30-12:00) and London's
     range, or Asia's when London's is incomplete; ck_gap_lo/hi, ck_gap_dir,
     ck_gap_filled: today's opening gap; ck_wgap_lo/hi, ck_wgap_filled: the
-    week's (futures); ck_roll: a futures roll day.
+    week's (futures); ck_roll: 1 from the bar a futures roll or a break in the
+    data was seen at, to the end of that day (see ROLL_JUMP).
     """
     n = len(bars.close)
     out = empty(n)
@@ -734,7 +761,8 @@ def _intraday(bars, fr: _Frame, days: List[Day], out: Dict[str, np.ndarray]) -> 
                 j = int(np.searchsorted(fr.ts[s:e], d.gap_filled_at))
                 out["ck_gap_filled"][s + j:e] = 1
         if fr.instrument == "future":
-            out["ck_roll"][s:e] = 1 if d.roll else 0
+            if d.roll:
+                out["ck_roll"][d.roll_at:e] = 1      # from the bar it was seen at
             # video 3:19:32, 3:25:57: the week's opening gap, Friday's close
             # against Sunday's 18:00 reopen, kept for the whole week.
             if b > 0 and days[b - 1].week != d.week:

@@ -259,12 +259,9 @@ check("not filled until a bar trades back to that close",
       not np.any(s["ck_gap_filled"][d3.first:fill]))
 check("then filled for the rest of the day",
       np.all(s["ck_gap_filled"][fill:d3.last + 1] == 1))
-check("a contract roll's jump (60 points against a usual few) is flagged for that day",
-      [d.day for d in days if d.roll] == [days[8].day]
-      and np.all(s["ck_roll"][days[8].first:days[8].last + 1] == 1)
-      and not np.any(s["ck_roll"][:days[8].first]), [d.day for d in days if d.roll])
-check("the roll flag uses only the days before it",
-      clock.day_table(clock.head(b, days[8].first + 1))[-1].roll)
+check("a 60-point opening gap away from an expiry is a market move, not a roll",
+      days[8].day == date(2026, 9, 24) and not any(d.roll for d in days),
+      [d.day for d in days if d.roll])
 monday = next(d for d in days[1:] if d.weekday == 0)
 week_end = [d for d in days if d.week == monday.week][-1]
 friday_close = float(b.close[monday.first - 1])
@@ -280,6 +277,48 @@ check("and the next week has its own", s["ck_wgap_hi"][days[-1].first]
 check("a stock's gap is the 09:30 open against the close before",
       clock.series(sc.stock_series(200))["ck_gap_lo"][78] in
       (sc.stock_series(200).close[77], sc.stock_series(200).open[78]))
+
+# ---------------------------------------------------------------------------
+head("A CONTRACT ROLL, OR A BREAK IN THE DATA")
+# ---------------------------------------------------------------------------
+# Yahoo's ES=F switches contract inside a day: at 16:00 on the expiry Friday.
+b = futures(14, start=date(2026, 9, 6))
+days = clock.day_table(b)
+usual = float(np.median([d.high - d.low for d in days[:8]]))
+friday = days[9]
+switch = next(i for i in range(friday.first, friday.last + 1)
+              if clock.fmt_ny(int(b.timestamp[i])) == "16:00")
+for arr in (b.open, b.high, b.low, b.close):
+    arr[switch:] += usual * 0.8                 # the next contract trades higher
+days = clock.day_table(b)
+s = clock.series(b)
+check("a jump between two bars inside a day (16:00 on expiry Friday) is a roll",
+      friday.day == date(2026, 9, 18) and days[9].roll and days[9].roll_at == switch
+      and [d.day for d in days if d.roll] == [date(2026, 9, 18)])
+check("flagged from that bar, not before it: earlier in the day it was not known",
+      not np.any(s["ck_roll"][:switch]) and np.all(s["ck_roll"][switch:friday.last + 1] == 1)
+      and not np.any(s["ck_roll"][friday.last + 1:]))
+check("cut just before the jump there is no roll; just after, there is",
+      not clock.day_table(clock.head(b, switch))[-1].roll
+      and clock.day_table(clock.head(b, switch + 1))[-1].roll)
+calm = futures(14, start=date(2026, 9, 6))
+calm.open[switch:] += usual * 0.3                # a hole in the data, smaller than a roll
+calm.high[switch:] += usual * 0.3
+calm.low[switch:] += usual * 0.3
+calm.close[switch:] += usual * 0.3
+check("a jump under half a usual day's range is left alone (Yahoo's nightly holes)",
+      not any(d.roll for d in clock.day_table(calm)))
+# Some weeks the switch comes at the Sunday reopen instead (NQ, 23 December 2024).
+offsets = [0.0] * 6 + [8.0] * 7 + [16.0] * 3      # gaps on Tue 15 and Thu 24 September
+b = futures(len(offsets), start=date(2026, 9, 6), offsets=offsets)
+days = clock.day_table(b)
+check("an opening gap over a usual day's range in the expiry window is a roll, all day",
+      days[6].day == date(2026, 9, 15) and days[6].roll and days[6].roll_at == days[6].first
+      and np.all(clock.series(b)["ck_roll"][days[6].first:days[6].last + 1] == 1))
+check("the same gap after the window is not", days[13].day == date(2026, 9, 24)
+      and not days[13].roll and [d.day for d in days if d.roll] == [date(2026, 9, 15)])
+check("a coin or a stock never rolls", not np.any(clock.series(sc.coin_series(2000))["ck_roll"])
+      and not np.any(clock.series(sc.stock_series(2000))["ck_roll"]))
 
 # ---------------------------------------------------------------------------
 head("THE WEEK BEFORE")

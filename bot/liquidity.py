@@ -382,11 +382,13 @@ def events(bars, s: Dict[str, np.ndarray], since: Optional[int] = None,
             name = level_name(s, i)
             lvl = float(s["lq_take_lvl"][i])
             back = bool(s["lq_take_back"][i])
+            several = name.startswith("equal") or name[:1].isdigit()
+            it = "them" if several else "it"
             add("take", d, lvl, name,
-                "Took %s at %s %s and closed %s at %s."
-                % (name, fp(lvl), when,
-                   ("back above it" if d == 1 else "back below it") if back else
-                   ("below it" if d == 1 else "above it"), fp(close)))
+                "Took %s %s %s and closed %s %s at %s."
+                % (name, ("(the nearest at %s)" if several else "at %s") % fp(lvl), when,
+                   ("back above" if d == 1 else "back below") if back else
+                   ("below" if d == 1 else "above"), it, fp(close)))
         if s["st_ifvg"][i]:
             when = when or _when(bars, s, i, daily)
             d = int(s["st_ifvg"][i])
