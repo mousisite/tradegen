@@ -419,7 +419,9 @@ def open_manipulation(bars_list) -> Optional[Dict]:
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME, "Levels: yesterday's high and low, and today's Asia, London and "
-             "before-the-open ranges, if price had not already gone past them that day."]
+             "before-the-open ranges, if price had not already gone past them that day.",
+             "By 10:30 the levels nearest the price have often been taken already, so fewer "
+             "are left to take; that alone makes the later window's share lower."]
     return _record("open_manipulation", "5m", by, notes, skipped)
 
 
@@ -700,20 +702,63 @@ def _mean_se(rows: List[Tuple[str, Trade]], value=lambda t: t.r):
     return float(np.mean(vals)), clustered_se(vals, groups), len(vals)
 
 
-def _combine_se(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    if a is None or b is None:
-        return None
-    return math.sqrt(a * a + b * b)
-
-
 def _round(x):
     return None if x is None else round(float(x), 6)
+
+
+def _means(by: Dict[str, Dict], rows: List[Tuple[str, Trade]], base: bool = False,
+           value=lambda t: t.r) -> None:
+    """Each instrument's own average and margin, beside its counts."""
+    per: Dict[str, List] = {}
+    for sym, t in rows:
+        per.setdefault(sym, []).append((sym, t))
+    for sym, mine in per.items():
+        m, se, _ = _mean_se(mine, value)
+        cell = by.setdefault(sym, _cell())
+        cell["base_mean" if base else "mean"] = _round(m)
+        cell["base_se" if base else "se"] = _round(se)
+
+
+def _within(rows_a: List[Tuple[str, Trade]], rows_b: List[Tuple[str, Trade]]):
+    """The difference a minus b taken inside each instrument, then averaged
+    with each instrument weighted by its count in a: (difference, its standard
+    error, trades in a). Pooling the trades first would let the mix of
+    instruments decide it: coins cost ten times what futures do and trade all
+    night, so any window or setup with more coin trades would look worse."""
+    by_a: Dict[str, List] = {}
+    by_b: Dict[str, List] = {}
+    for sym, t in rows_a:
+        by_a.setdefault(sym, []).append((sym, t))
+    for sym, t in rows_b:
+        by_b.setdefault(sym, []).append((sym, t))
+    total = 0.0
+    weight = 0
+    var = 0.0
+    for sym, a in by_a.items():
+        b = by_b.get(sym)
+        if not b:
+            continue
+        ma, sa, na = _mean_se(a)
+        mb, sb, _ = _mean_se(b)
+        if sa is None or sb is None:
+            continue
+        total += na * (ma - mb)
+        var += na * na * (sa * sa + sb * sb)
+        weight += na
+    if not weight:
+        return None, None, 0
+    return total / weight, math.sqrt(var) / weight, weight
+
+
+_WITHIN_NOTE = ("The difference is taken inside each instrument and then averaged, so an "
+                "instrument that costs more to trade does not tilt it.")
 
 
 def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
     """video 4:33:23, 4:37:38: entries from 9:50 to 10:10 do best. The lab's
     sweep, break and retest trades (twice-the-risk target, 5-minute prices) by
-    the time they were entered."""
+    the time they were entered, against the same instrument's trades at other
+    times."""
     rows = _lab(trades, "liquidity_model")
     if not rows:
         return None
@@ -725,16 +770,18 @@ def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
         cell["hits" if mine else "base_hits"] += 1 if t.r > 0 else 0
     macro = [x for x in rows if x[1].window == "macro"]
     other = [x for x in rows if x[1].window != "macro"]
+    _means(by, macro)
+    _means(by, other, base=True)
     m, se, n = _mean_se(macro)
     bm, bse, bn = _mean_se(other)
+    diff, dse, dn = _within(macro, other)
     pooled = _pool(by)
-    diff = None if m is None or bm is None else m - bm
-    dse = _combine_se(se, bse)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
                    "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse)})
-    v = labstore.verdict(diff, dse, n) if bn >= labstore.MIN_TRADES else None
+    v = labstore.verdict(diff, dse, dn) if bn >= labstore.MIN_TRADES else None
     notes = [_ONE_REGIME, "Kept money per trade after costs, in units of risk, for trades "
-             "entered from 9:50 to 10:10 New York time against all the others."]
+             "entered from 9:50 to 10:10 New York time against the same instrument's "
+             "trades at all other times.", _WITHIN_NOTE]
     notes += _index_note(by)
     return _record("macro_window", "5m", by, notes, {}, measure="mean", pooled=pooled,
                    verdict=v)
@@ -742,9 +789,10 @@ def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
 
 def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
     """video 1:19:23-1:29:56: buying the break of a high with the stop under the
-    last low loses. The lab's breakout trades with a twice-the-risk target,
-    against zero, and beside their random entries."""
-    rows = _lab(trades, "crowd_breakout")
+    last low loses. The lab's breakout buys (the claim is about buying; the
+    lab measures the sells too) with a twice-the-risk target, against zero,
+    and beside their random entries."""
+    rows = [x for x in _lab(trades, "crowd_breakout") if x[1].direction > 0]
     if not rows:
         return None
     by: Dict[str, Dict] = {}
@@ -757,6 +805,8 @@ def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
             cell["base_hits"] += 1 if t.control_r > 0 else 0
     m, se, n = _mean_se(rows)
     paired = [x for x in rows if x[1].control_r is not None]
+    _means(by, rows)
+    _means(by, paired, base=True, value=lambda t: t.control_r)
     bm, bse, _ = _mean_se(paired, lambda t: t.control_r)
     dm, dse, _ = _mean_se(paired, lambda t: t.r - t.control_r)
     pooled = _pool(by)
@@ -764,8 +814,11 @@ def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
                    "base_se": _round(bse), "diff": _round(dm), "diff_se": _round(dse)})
     days = len(set((sym, t.day) for sym, t in rows))
     v = labstore.verdict(m, se, n, days=days)
-    notes = [_ONE_REGIME, "A win here means a trade that kept money after costs. The claim "
-             "holds when the trades lost money by more than their margin of error."]
+    notes = [_ONE_REGIME, "Only the buys are counted. A win here means a trade that kept "
+             "money after costs. The claim holds when the trades lost money by more than "
+             "their margin of error.",
+             "Coins cost far more to trade on five-minute bars than futures or stocks, which "
+             "weighs on the pooled figure; each instrument's own figure is kept beside it."]
     notes += _index_note(by)
     return _record("crowd_breakout_loses", "5m", by, notes, {}, measure="mean",
                    pooled=pooled, verdict=None if v is None else -v)
@@ -788,13 +841,14 @@ def sweep_alone_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
         cell = by.setdefault(sym, _cell())
         cell["base_trials"] += 1
         cell["base_hits"] += 1 if t.r > 0 else 0
+    _means(by, sweeps)
+    _means(by, chain, base=True)
     m, se, n = _mean_se(sweeps)
     bm, bse, bn = _mean_se(chain)
-    diff = None if bm is None else bm - m
-    dse = _combine_se(se, bse)
+    diff, dse, dn = _within(chain, sweeps)
     days = len(set((sym, t.day) for sym, t in sweeps))
     first = labstore.verdict(m, se, n, days=days)
-    second = labstore.verdict(diff, dse, min(n, bn)) if bn else None
+    second = labstore.verdict(diff, dse, dn) if dn else None
     if first is None or second is None:
         v = None
     elif first == -1 and second == 1:
@@ -808,7 +862,7 @@ def sweep_alone_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
                    "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse)})
     notes = [_ONE_REGIME, "First: the sweep-and-reclaim trades against zero. Second: the "
              "four-step model's result per trade minus theirs. The claim holds only when "
-             "both parts are clear."]
+             "both parts are clear.", _WITHIN_NOTE]
     notes += _index_note(by)
     return _record("sweep_alone_loses", "5m", by, notes, {}, measure="mean", pooled=pooled,
                    verdict=v)
@@ -1108,15 +1162,20 @@ def run(conn, bars_by_key: Dict[Tuple[str, str], object], fetch: Callable = mark
             log.exception("Claim %s failed", cid)
             errors.append("claim %s: %s" % (cid, exc))
     studied: List[str] = []
+    # The pooled lean and its claim are replaced only when every instrument's
+    # hourly prices came: a part of them would overwrite the whole.
+    whole = len(hourly) == len(symbols)
     try:
         study, skipped = bias_study(hourly)
         for sym, rec in study.items():
+            if sym == labstore.POOL_ALL and not whole:
+                continue
             data = {k: int(rec[k]) for k in ("days", "called", "right", "up_days", "unclear",
                                              "target_reached", "from", "to")}
             labstore.save_bias(conn, sym, data, now=now)
             studied.append(sym)
         rec = bias_works(study, skipped)
-        if rec is not None and rec["pooled"]["trials"]:
+        if whole and rec is not None and rec["pooled"]["trials"]:
             labstore.save_claim(conn, rec, now=now)
             written.append("bias_works")
     except Exception as exc:

@@ -294,11 +294,33 @@ p = rec["pooled"]
 check("trades from 9:50 to 10:10 against all the others",
       p["trials"] == 40 and p["base_trials"] == 60 and p["hits"] == 40, p)
 check("verdict: they did better", rec["verdict"] == 1 and abs(p["diff"] - 1.5) < 1e-9)
+
+# Two instruments: a dear one whose trades all came at other times and lost
+# heavily, and one where 9:50-10:10 did exactly as well as other times.
+# Pooled, the window would look better; inside each instrument it is not.
+mixed = {"BTC-USD": {"liquidity_model": {"2r": [
+            trade("liquidity_model", -2.0 + 0.01 * (k % 5), 700000 + k, "asia")
+            for k in range(60)]}},
+         "ES=F": {"liquidity_model": {"2r": [
+            trade("liquidity_model", 0.2 * ((k % 5) - 2), 700000 + k, "macro")
+            for k in range(40)] + [
+            trade("liquidity_model", 0.2 * ((k % 5) - 2), 700000 + k, "midday")
+            for k in range(40)]}}}
+rec = claims.macro_window(mixed)
+p = rec["pooled"]
+check("the window is compared inside each instrument, so a dear coin trading at night "
+      "does not make it look better", p["mean"] - p["base_mean"] > 0.5
+      and abs(p["diff"]) < 1e-9 and rec["verdict"] == 0, p)
+check("each instrument's own averages are kept", rec["by_symbol"]["ES=F"]["mean"] == 0.0
+      and rec["by_symbol"]["BTC-USD"]["base_mean"] < -1.9, rec["by_symbol"])
 crowd = [trade("crowd_breakout", -1.0, 700000 + k // 2, control=-0.1) for k in range(40)]
-rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": crowd}}})
-check("breakout trades that all lost: the claim that it loses holds",
+sells = [Trade(**dict(t.__dict__, direction=-1, r=5.0)) for t in crowd[:20]]
+rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": crowd + sells}}})
+check("breakout buys that all lost: the claim that it loses holds",
       rec["verdict"] == 1 and rec["pooled"]["mean"] == -1.0
       and abs(rec["pooled"]["diff"] + 0.9) < 1e-9, rec["pooled"])
+check("the sells the lab also measures are not counted in a claim about buying",
+      rec["pooled"]["trials"] == 40, rec["pooled"])
 won = [trade("crowd_breakout", 0.5 + 0.01 * (k % 3), 700000 + k) for k in range(40)]
 rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": won}}})
 check("breakout trades that all won: the claim fails", rec["verdict"] == -1)
@@ -407,6 +429,22 @@ for cid, data in stored.items():
     except ValueError as exc:
         bad.append((cid, str(exc)))
 check("every stored record passes validate_claim", not bad, bad)
+conn2 = sqlite3.connect(":memory:")
+
+
+def fetch_half(symbol, interval):
+    if symbol == "NQ=F":
+        raise RuntimeError("no hourly prices")
+    return fetch(symbol, interval)
+
+
+out = claims.run(conn2, {("ES=F", "5m"): five, ("NQ=F", "5m"): five}, fetch=fetch_half,
+                 pause=0)
+check("when one instrument's hourly prices fail, its lean is not written and the pooled "
+      "one is left as it was", labstore.bias(conn2, "ES=F") is not None
+      and labstore.bias(conn2, labstore.POOL_ALL) is None
+      and labstore.claim(conn2, "bias_works") is None
+      and any("NQ=F" in e for e in out["errors"]), out)
 words = " ".join(" ".join(r["notes"]) for r in stored.values()).lower()
 check("the notes use no jargon",
       not any(j in words for j in ("expectancy", "r-multiple", "confidence interval", " atr",
