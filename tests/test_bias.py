@@ -160,6 +160,21 @@ later = sc.make(long.open.copy(), long.high.copy(), long.low.copy(), long.close.
 later.high[m + 1:] *= 1.5
 later.close[m + 1:] *= 1.4
 check("and changing every later bar changes nothing", bias.read(later, at=t) == bias.read(long, at=t))
+ready = bias.prepare(long)
+differ = []
+for m in list(range(60, len(long.close), 37)) + picks:
+    for t in (int(long.timestamp[m]) + HOUR, int(long.timestamp[m]) + HOUR + 1800):
+        if bias.read(None, at=t, prepared=ready) != bias.read(long, at=t):
+            differ.append(m)
+check("prepared once for the whole series, a read at any time is the same read",
+      not differ, differ[:5])
+stock_ready = bias.prepare(sc.walk(sc.stock_times(7 * 120, step=3600), seed=3, interval="1h",
+                                   vol=0.004))
+st_bars = stock_ready.bars
+differ = [m for m in range(70, len(st_bars.close), 9)
+          if bias.read(None, at=int(st_bars.timestamp[m]) + HOUR, prepared=stock_ready)
+          != bias.read(st_bars, at=int(st_bars.timestamp[m]) + HOUR)]
+check("and for a stock's hourly bars, the open and the close included", not differ, differ[:5])
 reads = [bias.read(long, at=int(long.timestamp[k]) + HOUR) for k in range(80, 480, 4)]
 odd = [(r.lean, r.checks) for r in reads if not (
     (r.checks["rule"] == 4) == (r.lean == 0)

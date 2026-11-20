@@ -770,6 +770,43 @@ def _intraday(bars, fr: _Frame, days: List[Day], out: Dict[str, np.ndarray]) -> 
 
 # --- Longer bars built from shorter ones -------------------------------------------
 
+def buckets(bars, hours: int = 4) -> List[Tuple[int, int, int, int, int]]:
+    """Every bucket of `hours` the bars fall in, still forming or not.
+
+    Each is (start time, first bar, last bar + 1, the time it ends, trading
+    day). It ends `hours` after it starts, or earlier at the futures' 17:00
+    pause or a stock's close. resample() keeps the ones that are over.
+    """
+    fr = _frame(bars)
+    if fr.kind == "daily":
+        raise ValueError("resample needs bars shorter than a day")
+    length = int(hours) * 60
+    n = len(fr.ts)
+    if n == 0:
+        return []
+    minute = fr.minute
+    if fr.instrument in ("future", "coin"):
+        since = (minute - 18 * 60) % (24 * 60)
+    else:
+        since = minute - (9 * 60 + 30)
+    bucket = since // length
+    key = fr.day * 64 + bucket
+    cuts = np.flatnonzero(np.diff(key)) + 1
+    out = []
+    for s, e in zip([0] + cuts.tolist(), cuts.tolist() + [n]):
+        b = int(bucket[s])
+        start = int(fr.ts[s]) - int(since[s] - b * length) * 60
+        end = start + length * 60
+        if fr.instrument == "future":
+            end = start + (min((b + 1) * length, 23 * 60) - b * length) * 60   # the 17:00 pause
+        elif fr.instrument == "stock":
+            hours_day = sessions_mod.us_session(date.fromordinal(EPOCH + int(fr.day[s])))
+            if hours_day:
+                end = min(end, hours_day[1])
+        out.append((start, s, e, end, int(fr.day[s])))
+    return out
+
+
 def resample(bars, hours: int = 4):
     """Bars `hours` long built from intraday ones, the way the course reads
     a 4-hour chart (Yahoo has no 4-hour bars).
@@ -780,46 +817,20 @@ def resample(bars, hours: int = 4):
     bucket still forming at the end is dropped: a bucket counts once its time
     is up, or the market shut for the day, by the last bar given.
     """
-    fr = _frame(bars)
-    if fr.kind == "daily":
-        raise ValueError("resample needs bars shorter than a day")
-    length = int(hours) * 60
-    n = len(fr.ts)
-    if n == 0:
+    rows = buckets(bars, hours)
+    if not rows:
         return head(bars, 0)
-    minute = fr.minute
-    if fr.instrument in ("future", "coin"):
-        since = (minute - 18 * 60) % (24 * 60)
-    else:
-        since = minute - (9 * 60 + 30)
-    bucket = since // length
-    key = fr.day * 64 + bucket
-    cuts = np.flatnonzero(np.diff(key)) + 1
-    starts = [0] + cuts.tolist()
-    ends = cuts.tolist() + [n]
     o = np.asarray(bars.open, dtype=float)
     h = np.asarray(bars.high, dtype=float)
     l_ = np.asarray(bars.low, dtype=float)
     c = np.asarray(bars.close, dtype=float)
     v = np.asarray(bars.volume, dtype=float)
-    rows = []
-    for s, e in zip(starts, ends):
-        offset_min = int(since[s] - bucket[s] * length)
-        start = int(fr.ts[s]) - offset_min * 60
-        rows.append((start, s, e, int(bucket[s]), int(fr.day[s])))
     # The last bucket is kept only once its time is up.
-    start, s, e, b, day_number = rows[-1]
-    end = start + length * 60
-    if fr.instrument == "future":
-        bucket_end_since = min((b + 1) * length, 23 * 60)    # the 17:00 pause
-        end = start + (bucket_end_since - b * length) * 60
-    elif fr.instrument == "stock":
-        hours_day = sessions_mod.us_session(date.fromordinal(EPOCH + day_number))
-        if hours_day:
-            end = min(end, hours_day[1])
-    last_end = int(fr.ts[e - 1]) + fr.step
-    if last_end < end:
+    step = bar_seconds(bars)
+    _, _, e, end, _ = rows[-1]
+    if int(bars.timestamp[e - 1]) + step < end:
         rows = rows[:-1]
+    rows = [(r[0], r[1], r[2], 0, r[4]) for r in rows]
     ts = np.array([r[0] for r in rows], dtype=np.int64)
     return dataclasses.replace(
         bars, interval="%dh" % int(hours), timestamp=ts,

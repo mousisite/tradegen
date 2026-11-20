@@ -74,9 +74,51 @@ def _last(arr: np.ndarray, value: int, start: int = 0, end: Optional[int] = None
     return int(hits[-1]) + start if hits.size else -1
 
 
-def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[BiasRead]:
+@dataclass
+class Prepared:
+    """Everything read() works out from an hourly series, done once for all of it.
+
+    Every series here is the same at bar i whether the bars stop at i or go
+    on, so a read as of any time can slice these instead of starting again.
+    """
+    bars: object
+    kind: str
+    step: int
+    s1: Dict[str, np.ndarray]             # liquidity.series of the hourly bars
+    days: List                            # clock.day_table of them
+    buckets: List[Tuple[int, int, int, int, int]]   # clock.buckets, 4 hours
+    b4: object                            # the 4-hour bars over by the last hourly bar
+    s4: Dict[str, np.ndarray]             # structure.series of those
+
+
+def prepare(bars_1h, k: int = structure.K) -> Optional[Prepared]:
+    """Work out once what reads of this hourly series at many times share.
+
+    A study reading every day of two years prepares once and passes the
+    result to read(); the read is the same as without it.
+    """
+    if bars_1h is None or len(bars_1h.close) == 0:
+        return None
+    kind = clock.kind_of(bars_1h)
+    if kind == "daily":
+        return None
+    b4 = clock.resample(bars_1h, 4)
+    s4 = structure.series(b4, k) if len(b4.close) else structure.empty(0)
+    return Prepared(bars=bars_1h, kind=kind, step=clock.bar_seconds(bars_1h),
+                    s1=liquidity.series(bars_1h, k), days=clock.day_table(bars_1h),
+                    buckets=clock.buckets(bars_1h, 4), b4=b4, s4=s4)
+
+
+def read(bars_1h, at: Optional[int] = None, k: int = structure.K,
+         prepared: Optional[Prepared] = None) -> Optional[BiasRead]:
     """The lean as of `at` (UTC seconds; default: just after the last bar),
-    from the hourly bars that had closed by then. None when there are too few."""
+    from the hourly bars that had closed by then. None when there are too few.
+
+    `prepared`, from prepare() on these same bars, saves working everything out
+    again for each read; bars_1h may then be None.
+    """
+    if prepared is not None:
+        bars_1h = prepared.bars
     if bars_1h is None or len(bars_1h.close) == 0:
         return None
     kind = clock.kind_of(bars_1h)
@@ -90,15 +132,27 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
     m = int(np.searchsorted(ts_all + step, at, side="right"))
     if m < MIN_BARS:
         return None
-    bars = clock.head(bars_1h, m)
-    s1 = liquidity.series(bars, k)
+    if prepared is None:
+        prepared = prepare(clock.head(bars_1h, m), k)
+    return _read(prepared, m, at)
+
+
+def _read(p: Prepared, m: int, at: int) -> BiasRead:
+    """The read from the first m hourly bars, with everything else as of `at`."""
+    kind, step = p.kind, p.step
+    bars = clock.head(p.bars, m)
+    s1 = {key: arr[:m] for key, arr in p.s1.items()}
     last = m - 1
     ts = np.asarray(bars.timestamp, dtype=np.int64)
     close = float(bars.close[last])
 
-    b4 = clock.resample(bars, 4)
-    n4 = len(b4.close)
-    s4 = structure.series(b4, k) if n4 else structure.empty(0)
+    # The 4-hour buckets over by then: those that ended before the last bar's
+    # bucket, and that one when its time was up by the last bar's close.
+    done_by = int(ts[last]) + step
+    n4 = sum(1 for (_, _, e, end, _) in p.buckets if e < m or (e == m and end <= done_by))
+    n4 = min(n4, len(p.b4.close))
+    s4 = {key: arr[:n4] for key, arr in p.s4.items()}
+    ts4 = np.asarray(p.b4.timestamp[:n4], dtype=np.int64)
     t1 = int(s1["st_trend"][last])
     t4 = int(s4["st_trend"][-1]) if n4 else 0
     trend_at4 = int(s4["st_trend_at"][-1]) if n4 else -1
@@ -171,7 +225,7 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
                 "The 4-hour %s left a gap, and a 4-hour bar then closed back through it, "
                 "past %s (%s). The course reads that as a turn against the 4-hour "
                 "trend, so it leans %s."
-                % ("rise" if t4 == 1 else "fall", format_price(edge), when(b4.timestamp[m4]),
+                % ("rise" if t4 == 1 else "fall", format_price(edge), when(ts4[m4]),
                    "down" if t4 == 1 else "up"))
 
     # --- 3: with the 4-hour trend ---------------------------------------------------
@@ -188,7 +242,7 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
                               & (np.arange(n4) > trend_at4)) if n4 else np.zeros(0, int)
         if hits.size:
             m4t = int(hits[-1])
-            after = int(b4.timestamp[m4t]) + 4 * HOUR
+            after = int(ts4[m4t]) + 4 * HOUR
             broke = np.flatnonzero(((s1["st_flip"] == t4) | (s1["st_ext"] == t4))
                                    & (ts >= after))
             if broke.size and m4t >= 1:
@@ -206,7 +260,7 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
                     place = "the 4-hour halfway line at %s" % format_price(line)
                 why = ("Price came back to %s (%s), held there, and the hourly then broke "
                        "its last swing %s (%s), so it leans %s."
-                       % (place, when(b4.timestamp[m4t]), "high" if t4 == 1 else "low",
+                       % (place, when(ts4[m4t]), "high" if t4 == 1 else "low",
                           when(ts[int(broke[-1])]), "up" if t4 == 1 else "down"))
         reasons.append(why)
 
@@ -216,7 +270,10 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
         reasons.append("The checks found no clear lean, so the read is unclear.")
 
     # --- what it would aim at, and what would change its mind -------------------------
-    targets = _targets(bars, s1, last, lean, day_now, kind) if lean else []
+    # Whole days before today only: today's own entry in the table may hold
+    # bars after the read.
+    past = [d for d in p.days if d.day.toordinal() < day_now and d.last < m]
+    targets = _targets(bars, s1, last, lean, day_now, kind, past, today_start) if lean else []
     flip = None
     side = lean or t1
     if side == 1:
@@ -234,8 +291,13 @@ def read(bars_1h, at: Optional[int] = None, k: int = structure.K) -> Optional[Bi
                     extra={"close": close, "kind": kind})
 
 
-def _targets(bars, s1, last: int, lean: int, day_now: int, kind: str) -> List[Tuple[str, float]]:
-    """The nearest old highs (or lows) the lean points at, not yet traded through."""
+def _targets(bars, s1, last: int, lean: int, day_now: int, kind: str, past: List,
+             today_start: int) -> List[Tuple[str, float]]:
+    """The nearest old highs (or lows) the lean points at, not yet traded through.
+
+    From the series at the last bar, today's bars, and `past`: the whole
+    trading days before today.
+    """
     close = float(bars.close[last])
     up = lean == 1
     found: List[Tuple[str, float]] = []
@@ -251,39 +313,38 @@ def _targets(bars, s1, last: int, lean: int, day_now: int, kind: str) -> List[Tu
             found.append((name, p))
 
     side = "high" if up else "low"
-    days = clock.day_table(bars)
-    today_has_bars = int(s1["ck_day"][last]) == day_now
-    if today_has_bars:
+    now_week = date.fromordinal(day_now).isocalendar()[:2]
+    if today_start >= 0:
         today_hi, today_lo = float(s1["ck_day_hi"][last]), float(s1["ck_day_lo"][last])
         pd = float(s1["ck_pdh" if up else "ck_pdl"][last])
         if pd == pd and ((up and today_hi < pd) or (not up and today_lo > pd)):
             add("yesterday's %s" % side, pd)
-        week = days[-1].week
-        wk_hi = max(d.high for d in days if d.week == week)
-        wk_lo = min(d.low for d in days if d.week == week)
+        this_week = [d for d in past if tuple(d.week) == tuple(now_week)]
+        wk_hi = max([d.high for d in this_week] + [today_hi])
+        wk_lo = min([d.low for d in this_week] + [today_lo])
         pw = float(s1["ck_pwh" if up else "ck_pwl"][last])
         if pw == pw and ((up and wk_hi < pw) or (not up and wk_lo > pw)):
             add("last week's %s" % side, pw)
         if kind in ("future", "coin"):
-            today = days[-1]
-            for name, label in (("asia", "the Asia session's"), ("london", "the London session's")):
-                sess = today.sessions.get(name)
-                if sess is None or not sess.complete or sess.last < 0:
+            # A session's range is in the series from the first bar after it,
+            # once it has ended with enough of its bars.
+            for keys, label in ((("ck_asia_hi", "ck_asia_lo"), "the Asia session's"),
+                                (("ck_lon_hi", "ck_lon_lo"), "the London session's")):
+                arr = s1[keys[0] if up else keys[1]]
+                level = float(arr[last])
+                if level != level:
                     continue
-                level = sess.high if up else sess.low
-                later_hi = float(np.max(bars.high[sess.last + 1:last + 1])) \
-                    if sess.last < last else -np.inf
-                later_lo = float(np.min(bars.low[sess.last + 1:last + 1])) \
-                    if sess.last < last else np.inf
-                if (up and later_hi < level) or (not up and later_lo > level):
+                known = np.flatnonzero(np.isfinite(arr[today_start:last + 1]))
+                after = today_start + int(known[0])
+                if (up and float(np.max(bars.high[after:last + 1])) < level) or \
+                        (not up and float(np.min(bars.low[after:last + 1])) > level):
                     add("%s %s" % (label, side), level)
-    else:
-        prev = days[-1]
+    elif past:
+        prev = past[-1]
         if prev.complete:
             add("yesterday's %s" % side, prev.high if up else prev.low)
-        now_week = date.fromordinal(day_now).isocalendar()[:2]
         if tuple(prev.week) != tuple(now_week):
-            wk = [d for d in days if d.week == prev.week]
+            wk = [d for d in past if d.week == prev.week]
             add("last week's %s" % side, max(d.high for d in wk) if up else min(d.low for d in wk))
         else:
             add("last week's %s" % side, s1["ck_pwh" if up else "ck_pwl"][last])
