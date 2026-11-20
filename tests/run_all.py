@@ -58,6 +58,7 @@ SUITES = [
     ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),
     ("test_sessions.py",     False, "market hours, and the alert loop leaving a closed market"),
     ("test_trade_chart.py",  False, "the analysis page's candle chart and plan levels"),
+    ("test_levelview.py",    False, "what price is doing: levels, New York clock, the day's lean"),
     ("test_method.py",       False, "odds per side, gap fills, overlap, the BUY bar, plain words"),
     ("test_record.py",       False, "the public track record, splits, and the strategy tests' margins"),
     ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
