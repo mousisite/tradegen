@@ -93,6 +93,61 @@ check("text is escaped", "&lt;b&gt;" in charts.trade_chart(
     times, opens, highs, lows, closes, levels={"<b>": 100.0}))
 
 print()
+print("--- key levels, gaps, sessions and marks, only when asked for ---")
+plain_svg = charts.trade_chart(times, opens, highs, lows, closes, vols,
+                               levels={"Buy at": 98.0, "Stop": 94.0, "Target": 140.0},
+                               last=101.0, as_of="11 Nov 21:00 UTC", day_label=day)
+check("given none of them, the drawing is exactly as before", plain_svg == svg)
+shown = times[-90:]
+over = charts.trade_chart(
+    times, opens, highs, lows, closes, vols, day_label=day,
+    zones=[(shown[40], None, 101.0, 99.0, "Gap the rise left", 1),
+           (shown[10], shown[30], 97.5, 96.5, "Gap the fall left", -1),
+           (times[0], times[5], 103.0, 102.0, "Off the chart", 1)],
+    marks=[(shown[50], lows[-40], 1, "Took yesterday's low"),
+           (shown[60], highs[-30], -1, "Took an earlier swing high"),
+           (times[0], 100.0, 1, "Before the chart")],
+    extra_levels={"Yest. high": 104.0, "Yest. low": 103.6, "Old high": 103.9,
+                  "Far away": 400.0},
+    bands=[(shown[0], shown[20], "Asia"), (shown[20], shown[45], "London")])
+check("zones draw as boxes, only those on the chart",
+      over.count("<title>Gap the rise left</title>") == 1
+      and over.count("<title>Gap the fall left</title>") == 1 and "Off the chart" not in over)
+check("a rise's gap is tinted green, a fall's red",
+      'fill="var(--gain-wash)"' in over and 'fill="var(--loss-wash)"' in over)
+check("marks are rings on their candles, only those on the chart",
+      over.count("<circle") == 2 and "Before the chart" not in over)
+check("extra levels are thin dotted lines with their names",
+      over.count('stroke-dasharray="1 3"') == 3 and ">Yest. high</text>" in over
+      and "<title>Old high 103.90</title>" in over)
+check("a level far beyond the candles is left off rather than flattening them",
+      "Far away" not in over)
+check("sessions are bands behind the candles, labelled",
+      over.count('fill="var(--sunken)"') == 2 and ">Asia</text>" in over
+      and ">London</text>" in over and over.index(">Asia</text>") < over.index("open "))
+ys = sorted(float(y) for y in re.findall(r'class="clab lvl"[^>]*?y="([\d.]+)"', over)
+            + re.findall(r'y="([\d.]+)" class="clab lvl"', over))
+check("their labels do not sit on each other",
+      len(ys) == 3 and all(b - a >= 11.9 for a, b in zip(ys, ys[1:])), ys)
+calm = charts.trade_chart(times, opens, highs, lows, closes, calm=True)
+check("calm candles use the neutral colours only",
+      "var(--gain)" not in calm and "var(--loss)" not in calm
+      and 'stroke="var(--ink-3)"' in calm and 'fill="var(--ink)"' in calm)
+check("a rise's calm candle is hollow", 'fill="var(--surface)" stroke="var(--ink-3)"' in calm)
+sys_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_sys.path.insert(0, sys_root)
+from bot import clock, levelview  # noqa: E402
+fives = [clock.ny(2026, 11, 18, 9, 30) + 300 * k for k in range(120)]
+ny = charts.trade_chart(fives, opens, highs, lows, closes, interval="5m",
+                        day_label=levelview.ny_day_label)
+check("a New York day label puts New York times in the candles' titles",
+      "<title>%s  open" % clock.label_ny(fives[30]) in ny
+      and clock.label_ny(fives[30]) == "18 Nov 12:00")
+check("with no UTC said", " UTC" not in ny)
+check("and the last candle's New York time along the bottom",
+      ">%s</text>" % clock.label_ny(fives[-1]) in ny)
+
+print()
 print("%d failure(s)" % len(fails))
 print("TRADE CHART OK" if not fails else "FAILURES: %s" % fails)
 _sys.exit(1 if fails else 0)

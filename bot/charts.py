@@ -13,6 +13,7 @@ rather than something misleading.
 """
 from __future__ import annotations
 
+import bisect
 import math
 import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -152,12 +153,21 @@ def bar_words(interval: str) -> str:
     return _BAR_WORDS.get((interval or "1d").lower(), interval or "")
 
 
+def _finite(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[float],
                 lows: Sequence[float], closes: Sequence[float],
                 volumes: Sequence[float] = (), levels: Optional[Dict[str, float]] = None,
                 last: Optional[float] = None, as_of: str = "", day_label=None,
                 width: int = 720, height: int = 300, bars: int = 90,
-                interval: str = "1d") -> str:
+                interval: str = "1d", zones: Sequence = (), marks: Sequence = (),
+                extra_levels: Optional[Dict[str, float]] = None, bands: Sequence = (),
+                calm: bool = False) -> str:
     """Candles with the plan's prices drawn across them.
 
     For the analysis page, where the question is where today's price sits
@@ -174,6 +184,25 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     as_of is when the latest price was set, said in the title and on the dot
     that marks it. Nothing is drawn for a series too short or too broken to
     draw honestly.
+
+    The analysis page's key-levels chart adds, all optional and drawn only
+    when given:
+      zones         [(start, end or None, top, bottom, label, dir)]: shaded
+                    boxes, such as a gap price left open (dir +1 the rise's,
+                    -1 the fall's), from its start time to its end or the
+                    right edge
+      marks         [(time, price, dir, label)]: a ring on a candle, such as
+                    where an old high or low was taken
+      extra_levels  {label: price}: thin dotted lines, labelled at the right
+                    edge with the plan's, kept apart the same way. Unlike the
+                    plan's prices, a level more than half the candles' range
+                    beyond them is left off (the page's table lists it):
+                    stretching the scale to reach it would flatten the candles
+      bands         [(start, end, label)]: light shading behind the candles
+                    for a stretch of time, such as the Asia session
+      calm          hollow grey candles for a rise and ink ones for a fall,
+                    for anyone who finds red and green stir them up
+    Times here are bar start times, as in `times`.
     """
     n = min(len(times), len(opens), len(highs), len(lows), len(closes))
     rows = []
@@ -191,6 +220,28 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     high = max(max(r[2] for r in rows), *(levels.values() or [-math.inf]))
     if last is not None and math.isfinite(last):
         low, high = min(low, last), max(high, last)
+
+    # Context drawn only near the candles: half their range either side.
+    candle_lo, candle_hi = min(r[3] for r in rows), max(r[2] for r in rows)
+    reach = (candle_hi - candle_lo) * 0.5
+    near_lo, near_hi = candle_lo - reach, candle_hi + reach
+    extra = {str(name): float(price) for name, price in (extra_levels or {}).items()
+             if _finite(price) and float(price) > 0
+             and near_lo <= float(price) <= near_hi}
+    boxes = []
+    for zone in zones or ():
+        start, end, top, bottom, label, side = zone
+        if not (_finite(top) and _finite(bottom)):
+            continue
+        top, bottom = max(float(top), float(bottom)), min(float(top), float(bottom))
+        if bottom > near_hi or top < near_lo:
+            continue
+        boxes.append((int(start), None if end is None else int(end),
+                      min(top, near_hi), max(bottom, near_lo), str(label), int(side or 0)))
+    for price in extra.values():
+        low, high = min(low, price), max(high, price)
+    for box in boxes:
+        low, high = min(low, box[3]), max(high, box[2])
     if high <= low:
         high, low = high * 1.01 + 0.01, low * 0.99 - 0.01
 
@@ -228,6 +279,40 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
                      % (pad_left - 8, y + 4, _escape(_price(tick))))
         tick += step
 
+    starts = [r[0] for r in rows]
+
+    def x_edge(ts: int) -> float:
+        """The left edge of the first candle starting at or after ts."""
+        return pad_left + slot * bisect.bisect_left(starts, int(ts))
+
+    # Sessions behind everything, then the gap boxes, then the candles.
+    for start, end, label in bands or ():
+        if not (_finite(start) and _finite(end)) or end <= starts[0] or start > starts[-1]:
+            continue
+        x0, x1 = x_edge(start), x_edge(end)
+        if x1 - x0 < 1:
+            continue
+        parts.append('<g><title>%s</title><rect x="%.1f" y="%d" width="%.1f" height="%.1f" '
+                     'fill="var(--sunken)"/>' % (_escape(label), x0, pad_top, x1 - x0, price_h))
+        if x1 - x0 >= 7 * len(str(label)) + 6:
+            parts.append('<text x="%.1f" y="%d" class="clab">%s</text>'
+                         % (x0 + 3, pad_top + 11, _escape(label)))
+        parts.append('</g>')
+    for start, end, top, bottom, label, side in boxes:
+        if (end is not None and end <= starts[0]) or start > starts[-1]:
+            continue
+        x0 = x_edge(start)
+        x1 = pad_left + plot_w if end is None else x_edge(end)
+        if x1 - x0 < 1:
+            continue
+        wash, edge = (("var(--gain-wash)", "var(--gain)") if side > 0 else
+                      ("var(--loss-wash)", "var(--loss)") if side < 0 else
+                      ("var(--sunken)", "var(--ink-3)"))
+        parts.append('<g><title>%s</title><rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
+                     'fill="%s" stroke="%s" stroke-width="0.8" stroke-opacity="0.5"/></g>'
+                     % (_escape(label), x0, y_at(top), x1 - x0,
+                        max(1.0, y_at(bottom) - y_at(top)), wash, edge))
+
     # A daily candle is named by its date; a shorter one needs the time too,
     # or a day's worth of hourly candles all carry the same name.
     zone = ""
@@ -243,6 +328,8 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     for i, (ts, o, h, l, c, v) in enumerate(rows):
         up = c >= o
         colour = "var(--gain)" if up else "var(--loss)"
+        if calm:
+            colour = "var(--ink-3)" if up else "var(--ink)"
         x = x_at(i)
         top, bottom = y_at(max(o, c)), y_at(min(o, c))
         tip = "%s%s  open %s  high %s  low %s  close %s" % (
@@ -250,9 +337,18 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
         parts.append('<g><title>%s</title>' % _escape(tip.strip()))
         parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>'
                      % (x, y_at(h), x, y_at(l), colour))
-        parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
-                     % (x - body / 2, top, body, max(1.0, bottom - top),
-                        colour if not up else "var(--gain)"))
+        if calm and up:
+            # Hollow: the outline in grey, the inside the card's own colour.
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
+                         'fill="var(--surface)" stroke="var(--ink-3)" stroke-width="1"/>'
+                         % (x - body / 2, top, body, max(1.0, bottom - top)))
+        elif calm:
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="var(--ink)"/>'
+                         % (x - body / 2, top, body, max(1.0, bottom - top)))
+        else:
+            parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="%s"/>'
+                         % (x - body / 2, top, body, max(1.0, bottom - top),
+                            colour if not up else "var(--gain)"))
         if vol_h:
             vh = vol_h * (v / peak)
             parts.append('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" '
@@ -260,10 +356,24 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
                          % (x - body / 2, pad_top + price_h + gap + vol_h - vh, body, vh))
         parts.append('</g>')
 
-    # The plan's prices, labelled at the right edge where the eye ends up.
+    # Where an old high or low was taken: a ring on that candle, at the level.
+    for ts, price, _side, label in marks or ():
+        if not _finite(price):
+            continue
+        j = bisect.bisect_left(starts, int(ts))
+        if j >= len(starts) or starts[j] != int(ts):
+            continue
+        parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--surface)" '
+                     'stroke="var(--ink)" stroke-width="1.5"><title>%s</title></circle>'
+                     % (x_at(j), y_at(float(price)), _escape(label)))
+
+    # The plan's prices, labelled at the right edge where the eye ends up,
+    # with any other levels, dotted and quieter, among them.
     styles = {"Stop": ("var(--loss)", "4 3"), "Target": ("var(--gain)", "4 3")}
     placed = []
-    for name, price in sorted(levels.items(), key=lambda kv: -kv[1]):
+    lines = [(name, price, False) for name, price in levels.items()]
+    lines += [(name, price, True) for name, price in extra.items()]
+    for name, price, quiet in sorted(lines, key=lambda kv: -kv[1]):
         colour, dash = styles.get(name, ("var(--accent-text)", "6 3"))
         y = y_at(price)
         label_y = y + 4
@@ -271,6 +381,14 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
             if abs(label_y - other) < 12:
                 label_y = other + 12
         placed.append(label_y)
+        if quiet:
+            parts.append('<g><title>%s %s</title><line x1="%d" y1="%.1f" x2="%d" y2="%.1f" '
+                         'stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="1 3"/>'
+                         '<text x="%d" y="%.1f" class="clab lvl">%s</text></g>'
+                         % (_escape(name), _escape(_price(price)), pad_left, y,
+                            width - pad_right, y, width - pad_right + 6, label_y,
+                            _escape(name)))
+            continue
         parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="1.5" '
                      'stroke-dasharray="%s"/>' % (pad_left, y, width - pad_right, y, colour, dash))
         parts.append('<text x="%d" y="%.1f" class="clab lvl" style="fill:%s">%s %s</text>'
