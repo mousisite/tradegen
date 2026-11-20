@@ -72,6 +72,8 @@ SUITES = [
     ("test_help.py",         False, "help beside each figure; no setup words or errors to visitors"),
     ("test_privacy.py",      False, "what the privacy page and terms promise, against what the code does"),
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
+    ("test_journal_tags.py", False, "journal tags, review, breakdown, daily rules, export, trade picture"),
+    ("test_risk_tools.py",   False, "the size calculator and the survival check, sums and pages"),
     ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
     ("test_lock.py",         False, "the lock file the server installs from agrees with requirements.txt"),
     ("test_ai_consent.py",   False, "a screenshot goes to Anthropic only after the person says yes"),

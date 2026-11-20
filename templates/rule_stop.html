@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% block title %}Your rule says stop · Orenth{% endblock %}
+{% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+
+{# Shown instead of logging a trade when one of the person's own daily rules
+   says stop. Nothing has been written yet. "Log it anyway" sends the same
+   form again, marked so the trade is kept as one that broke a rule. #}
+<div class="pagehead">
+  <span class="eyebrow">Your trading rules</span>
+  <h1>Stop for today?</h1>
+  <p>{{ said }}</p>
+</div>
+
+<div class="card">
+  <p class="prose">Nothing has been logged yet. You set these rules in Settings so a
+    bad day stays a small one. If you log this trade anyway, it is kept and marked
+    as one that broke a rule, and the journal's breakdown shows how those trades
+    did beside the rest.</p>
+  <div style="display:flex;gap:var(--s1);flex-wrap:wrap;margin-top:var(--s3)">
+    <a class="btn" href="{{ url_for('trades') }}">Don't log it</a>
+    <form method="post" action="{{ action }}">
+      {% for name, value in fields %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {% endfor %}
+      <input type="hidden" name="override" value="1">
+      <button class="btn quiet" type="submit"
+              style="white-space:normal;text-align:center;padding-block:8px">Log it anyway and
+        mark that I broke my rule</button>
+    </form>
+  </div>
+  <p class="prose" style="margin-top:var(--s3)"><a href="{{ settings_url }}">Change your rules</a></p>
+</div>
+
+{% endblock %}

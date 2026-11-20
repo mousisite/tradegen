@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% set long = t['direction'] > 0 %}
+{% block title %}{{ t['symbol'] }} trade · Orenth{% endblock %}
+{# Drawn twice like the analysis page's chart: shrunk to a phone, the wide
+   drawing's labels would be a few pixels tall, so a phone gets the narrow one. #}
+{% block head_extra %}<meta name="robots" content="noindex">{% if pic.wide %}<style>
+  .tradechart .chart { max-height: 380px; }
+  .tradechart .narrow { display: none; }
+  @media (max-width: 600px) {
+    .tradechart .wide { display: none; }
+    .tradechart .narrow { display: block; }
+    .tradechart .chart { max-height: none; }
+  }
+</style>{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">See the trade</span>
+  <h1>{{ t['symbol'] }}, {{ 'long' if long else 'short' }}</h1>
+  <p>Entered {{ pic.entered }} New York time{% if pic.left %}, closed {{ pic.left }}{% else %}, still open{% endif %}.
+    Drawn from {{ t['symbol'] }}'s own prices, not a screenshot.</p>
+</div>
+
+<div class="card">
+  {% if pic.wide %}
+    <div class="tradechart">
+      <div class="wide">{{ pic.wide|safe }}</div>
+      <div class="narrow">{{ pic.narrow|safe }}</div>
+    </div>
+    <p class="prose" style="margin-top:var(--s2)">The dashed lines are the entry,
+      stop{% if t['target1'] %}, target{% endif %}{% if pic.left %} and exit{% endif %}.
+      {% if pic.used != '1d' %}Candle times are New York time.{% endif %}</p>
+  {% endif %}
+  {% if pic.note %}<p class="prose" style="margin-top:var(--s2)">{{ pic.note }}</p>{% endif %}
+  {% if pic.split_words %}<p class="prose" style="margin-top:var(--s2)">{{ t['symbol'] }}
+    split {{ pic.split_words }} after this trade was entered. The prices are drawn in
+    today's shares; the journal keeps the trade in the shares you opened with.</p>{% endif %}
+</div>
+
+<div class="cols b" style="margin-top:var(--s3)">
+  <div class="card">
+    <span class="eyebrow">The trade</span>
+    <dl class="pairs">
+      <dt>Entry</dt><dd class="fig">{{ t['entry']|price }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ t['stop']|price }}</dd>
+      <dt>Target</dt><dd class="fig gain">{{ t['target1']|price if t['target1'] else 'none set' }}</dd>
+      {% if t['status'] == 'closed' %}
+        <dt>Exit</dt><dd class="fig">{{ parts.avg_exit|price }}{% if parts.parts %}
+          <span class="faint">average of {{ parts.exits|length }} exits</span>{% endif %}</dd>
+        <dt>Result</dt><dd class="fig {{ 'gain' if (parts.r or 0) > 0 else 'loss' }}">{{ parts.r|signed }}R
+          <span class="faint">before costs</span></dd>
+      {% endif %}
+    </dl>
+  </div>
+  <div class="card">
+    <span class="eyebrow">Your notes on it</span>
+    <dl class="pairs">
+      <dt>Tags</dt><dd>{{ tags|join(', ') if tags else 'none' }}</dd>
+      {% if broke %}<dt>Rules</dt><dd>Logged after {{ broke|join(' and ') }} said stop</dd>{% endif %}
+      <dt>Followed the plan</dt><dd>{{ followed or 'not said' }}</dd>
+      {% if t['lesson'] %}<dt>What it taught you</dt><dd>{{ t['lesson'] }}</dd>{% endif %}
+    </dl>
+  </div>
+</div>
+
+<div style="margin-top:var(--s3)">
+  <a class="btn quiet" href="{{ url_for('trades') }}{% if t['status'] == 'closed' %}#t{{ t['id'] }}{% endif %}">Back to the journal</a>
+</div>
+
+{% endblock %}

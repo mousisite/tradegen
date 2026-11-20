@@ -386,6 +386,35 @@ HELP: Dict[str, Dict[str, str]] = {
         "The average number of bars these past trades lasted: until the target "
         "or the stop, or until the {bars}-bar limit, when they were closed at "
         "the price then.")},
+    # The journal's breakdown and its tools (bot/journal.py).
+    "followed_plan": {"name": "followed your plan", "text": (
+        "What you said when you reviewed each closed trade: did you enter, place the "
+        "stop and get out as you planned before the trade? Comparing the groups shows "
+        "what keeping to the plan was worth, on your own trades.")},
+    "breakeven_own": {"name": "the break-even hit rate", "text": (
+        "With your own average win of W and average loss of L, both in R after costs, "
+        "you break even by winning L / (W + L) of the trades that won or lost. Win more "
+        "often than that and the journal makes money; less, and it loses.")},
+    "green_days": {"name": "green days", "text": (
+        "New York days whose closed trades added up to a gain, each trade counted on "
+        "the day it closed. Even a method that makes money has many red days.")},
+    "best_day_share": {"name": "the best day's share", "text": (
+        "Your best day's result as a share of your total. A share near or over 100% "
+        "means one day made the profit and the other days, between them, made little "
+        "or lost.")},
+    "loss_limit": {"name": "a loss limit", "text": (
+        "Some accounts are closed once the balance falls a set amount below where it "
+        "started, below its best end of day, or below its best at any point. This walks "
+        "your closed trades in order to show whether, and when, each kind would have "
+        "been hit.")},
+    "fixed_contracts": {"name": "fixed contracts", "text": (
+        "Trading the same number of contracts every time, with the stop a number of "
+        "ticks away. The money lost at the stop is contracts times ticks times what a "
+        "tick is worth, so it grows with the stop.")},
+    "survival": {"name": "the survival check", "text": (
+        "Each row runs the same 2,000 shuffled runs of 100 trades at one risk a trade, "
+        "so the rows differ only by the risk. It shows how often the account fell 20% "
+        "or 50% below its highest, and where the middle run ended.")},
     "holdout": {"name": "the most recent third", "text": (
         "The average result of only the newest third of these trades. If it and "
         "the whole record disagree, one making money and the other losing it, "
