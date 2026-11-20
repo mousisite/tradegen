@@ -376,6 +376,9 @@ for change in bad_values:
     except RuntimeError as exc:
         messages[str(list(change))] = str(exc)
 check("bad values are refused (%d of them)" % len(bad_values), not let_through, let_through)
+check("the time rule reads as minutes after midnight",
+      config.clock_minutes("10:30") == 630 and config.clock_minutes("9:30") == 570
+      and config.clock_minutes("24:00") is None and config.clock_minutes("") is None)
 check("in words, with no setting's name in them",
       all(m.endswith(".") and "_" not in m for m in messages.values()), messages)
 conn = db.connect(DB)

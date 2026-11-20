@@ -229,7 +229,7 @@ def validate(cfg: Dict[str, Any]) -> None:
         raise RuntimeError("The most trades a day must be a whole number from 0 to 100, "
                            "or 0 to switch it off.")
     last = cfg.get("last_entry_time", "")
-    if not isinstance(last, str) or (last.strip() and _minutes(last) is None):
+    if not isinstance(last, str) or (last.strip() and clock_minutes(last) is None):
         raise RuntimeError("The time after which you take no new trades must be a "
                            "time like 10:30, or left empty to switch it off.")
     if not isinstance(cfg.get("calm_candles", False), bool):
@@ -241,8 +241,9 @@ def _is_number(value: Any) -> bool:
             and value == value and value not in (float("inf"), float("-inf")))
 
 
-def _minutes(text: str):
-    """'10:30' or '9:30' as minutes after midnight, or None when it is not a time."""
+def clock_minutes(text: str):
+    """'10:30' or '9:30' as minutes after midnight, or None when it is not a
+    time. The daily rule last_entry_time is read with this."""
     hours, sep, mins = (text or "").strip().partition(":")
     if not sep or not hours.isdigit() or not mins.isdigit() or len(mins) != 2 \
             or len(hours) > 2:
