@@ -701,9 +701,9 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
 
     One failing download is recorded and the rest carry on; a refusal from the
     data source stops the downloads (asking again at once would be refused
-    too). The claims (bot/claims.py) run only on a full run, so a partial
-    command-line run never replaces them with a part of the evidence; pass
-    with_claims to choose. Returns a summary with "checked" and "errors",
+    too). The claims (bot/claims.py) run only on a full run in which every
+    download came, so they are never replaced with a part of the evidence;
+    pass with_claims to choose. Returns a summary with "checked" and "errors",
     and records the run (labstore.save_run).
     """
     from . import claims as claims_mod
@@ -749,7 +749,11 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
                 if interval == "5m":
                     trades_5m[sym] = trades
     claimed: Dict = {"claims": [], "bias": [], "errors": []}
-    if with_claims and not throttled and bars_by_key:
+    if with_claims and errors:
+        # The claims pool every instrument; measured on part of them they
+        # would replace the whole with a part. The stored ones stay.
+        errors.append("claims: left as they were, %d download(s) failed" % len(errors))
+    elif with_claims and bars_by_key:
         try:
             claimed = claims_mod.run(conn, bars_by_key, fetch=fetch, trades=trades_5m,
                                      pause=pause, sleep=sleep, now=now)

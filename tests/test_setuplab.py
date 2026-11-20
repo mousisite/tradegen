@@ -373,6 +373,12 @@ check("the failure is in the summary, by name", any("SPY" in e for e in summary[
       summary["errors"])
 check("the other two are written", sorted(r["symbol"] for r in labstore.results(conn))
       == ["BTC-USD", "ES=F"])
+conn = memory()
+summary = setuplab.run(conn, fetch=fake_fetch(fail=("SPY",)), symbols=["ES=F", "SPY"],
+                       intervals=["15m"], pause=0, now=1795000000, with_claims=True)
+check("with a download missing, the claims are left as they were, and it says so",
+      not summary["claims"] and conn.execute("SELECT COUNT(*) FROM lab_claims").fetchone()[0] == 0
+      and any(e.startswith("claims:") for e in summary["errors"]), summary["errors"])
 waits = []
 summary = setuplab.run(memory(), fetch=fake_fetch(refuse=("ES=F",)),
                        symbols=["AAPL", "ES=F", "SPY"], intervals=["15m"], pause=3.0,
