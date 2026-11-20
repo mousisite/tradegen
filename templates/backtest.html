@@ -13,6 +13,12 @@
   <h1>Does {{ label }} work?</h1>
   <p>{{ info.description }}.{% if not intraday %} Tested on every popular stock
     and coin, with real trading costs taken off.{% endif %}</p>
+  {% if strategy in trial_names %}
+  <p><span class="chip mute">on trial</span> Measured here, not used in Orenth's
+    calls until its record shows an edge. It is one of {{ trial_count }} price-action
+    setups taught in a day-trading course and tested on trial; {{ strategy_count }}
+    other strategies decide the calls.</p>
+  {% endif %}
 </div>
 
 {% if not summary.tested and intraday %}
@@ -20,9 +26,17 @@
      prices these tests use. #}
   <div class="plainbox">
     <span class="eyebrow">Not in the daily test</span>
+    {% if strategy in trial_names %}
+    <p class="prose">This setup reads the sessions inside a trading day, so it
+      only fires on bars shorter than a day. These tests run on daily prices,
+      so it has no result here. Its test on 5- and 15-minute prices is shown on
+      this page once it has run. An analysis on shorter bars scores it, with no
+      say in the call.</p>
+    {% else %}
     <p class="prose">This strategy reads the inside of a trading day, so it
       only fires on hourly or shorter bars. These tests run on daily prices,
       so it has no result here. An analysis on shorter bars still uses it.</p>
+    {% endif %}
   </div>
 {% elif not summary.tested %}
   <div class="plainbox">

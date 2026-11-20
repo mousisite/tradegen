@@ -195,8 +195,9 @@ broker costs.** They change the verdict more than any indicator setting.
 
 ## The strategy library
 
-34 strategies in six families. Each returns a directional score from -1 to +1
-with a plain-language reading.
+44 strategies in seven families. Each returns a directional score from -1 to
++1 with a plain-language reading. 34 of them, in the first six families,
+decide the call; the 10 in the liquidity family are measured on trial.
 
 **Trend (10)** — `trend_stack`, `macd_momentum`, `supertrend_follow`,
 `adx_di_cross`, `ichimoku_cloud`, `parabolic_sar_flip`, `linreg_channel`,
@@ -216,6 +217,34 @@ with a plain-language reading.
 `gap_behaviour`
 
 **Pattern (3)** — `engulfing_pattern`, `pin_bar`, `momentum_thrust`
+
+**Liquidity (10), on trial** — `sweep_reclaim`, `prior_day_sweep`,
+`equal_levels_sweep`, `session_sweep`, `structure_flip`, `sweep_then_flip`,
+`fvg_retest`, `ifvg_flip`, `premium_discount`, `liquidity_model`
+
+The liquidity family is the price-action setups taught in TJR's video "How To
+Start Day Trading In 2026": an old high or low taken and closed back past,
+yesterday's high or low, equal highs or lows, a session's range, a break of
+the last swing, gaps a move left, the halfway line of the last move, and the
+course's whole sweep-break-retest model. Their names, plain descriptions and
+video timestamps live in `bot/setups.py`; the price structure they read is
+`bot/structure.py`, `bot/clock.py` and `bot/liquidity.py`. `session_sweep`
+needs intraday bars, like `opening_range_break`.
+
+**On trial** means measured, not used. Every analysis scores them and every
+back-test (the per-instrument one and the daily test on the popular names)
+measures them with the house stop, target and costs, but `Strategy.votes` is
+False: `evaluate()` leaves them out of the composite, so the composite, the
+odds and every BUY / WAIT / AVOID are exactly what they would be without
+them (`tests/test_liquidity_strategies.py` proves it). Pages tag them "on
+trial". Promoting one to a vote is a later, separate decision, on its record.
+
+The alerts follow the same levels (`bot/alerts.py`, the "Price action"
+group): yesterday's high or low traded through, or taken and closed back
+inside; the day's opening gap filling; a close past the last swing the
+other way; a pullback into the newest gap; London's range taken between
+08:30 and 12:00 New York time. Each message is a fact with a price and the
+New York time, never a forecast.
 
 ### How it decides which to trust
 

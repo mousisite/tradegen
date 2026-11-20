@@ -30,6 +30,8 @@ import time
 from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Tuple
 
+from . import setups as _setups
+
 # What people search for, roughly in that order. Names are here rather than
 # fetched so a page title never depends on a data source being up.
 POPULAR = [
@@ -463,6 +465,9 @@ _CAPS = {"rsi", "macd", "adx", "di", "sar", "tsi", "roc", "cci", "vwap",
          "obv", "mfi"}
 _LABELS = {"zscore_reversion": "Z-score reversion",
            "linreg_channel": "Linear regression channel"}
+# The course's setups on trial are named as bot/setups.py names them, so a
+# page, an alert and the Learn pages all say the same thing.
+_LABELS.update({s.name: s.label for s in _setups.SETUPS})
 
 
 def strategy_label(name: str) -> str:

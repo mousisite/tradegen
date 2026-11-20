@@ -16,11 +16,18 @@ Two design rules run through the whole module:
    is one piece of evidence, not six. The composite discounts within-family
    agreement so a crowded family cannot drown out the rest of the evidence.
 
+3. **Some strategies are on trial.** The price-action setups from TJR's video
+   (the "liquidity" family) are scored on every analysis and measured by every
+   back-test like the rest, but they do not vote: the composite, and so every
+   call and its odds, is built from the voting strategies alone. Whether any of
+   them earns a vote is a later decision, made on their measured record.
+
 Theoretical regime hints on each strategy are only priors. Actual weighting
 comes from measured per-instrument performance in `calibrate.py`.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -28,7 +35,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from . import indicators as ind
-from .market import Bars
+from . import clock, liquidity
+from .market import Bars, format_price
+
+log = logging.getLogger(__name__)
 
 # Families. Used to discount correlated agreement inside the composite.
 TREND = "trend"
@@ -37,6 +47,8 @@ BREAKOUT = "breakout"
 VOLUME = "volume"
 STRUCTURE = "structure"
 PATTERN = "pattern"
+# The course's price-action setups, on trial (see Strategy.votes).
+LIQUIDITY = "liquidity"
 
 TRENDING = "trending"
 RANGING = "ranging"
@@ -66,6 +78,10 @@ class Strategy:
     description: str
     suits: Tuple[str, ...] = ()      # regimes it is theorised to suit
     base_weight: float = 1.0
+    # False: on trial. It is scored and measured like any other, so its
+    # record builds up, but it has no say in the composite and so none in the
+    # call, until that record shows an edge and someone decides to promote it.
+    votes: bool = True
 
 
 @dataclass
@@ -254,7 +270,26 @@ def build_context(bars: Bars) -> Context:
             bw_pct[i] = float((window < bw[i]).sum()) / len(window)
     s["bw_pctile"] = bw_pct
 
+    # The course's price structure, New York clock and liquidity chain, read
+    # by the setups on trial. Its keys are prefixed (st_, ck_, lq_), so they
+    # cannot replace an indicator above. Should reading them fail on some
+    # odd history, the setups on trial say so and sit out; the voting
+    # strategies, and so the call, do not depend on any of it.
+    try:
+        s.update(liquidity.series(bars))
+    except Exception:
+        global _STRUCTURE_FAILED_LOGGED
+        if not _STRUCTURE_FAILED_LOGGED:
+            _STRUCTURE_FAILED_LOGGED = True
+            log.exception("Price structure could not be read for %s; the setups on "
+                          "trial sit out", getattr(bars, "symbol", "?"))
+
     return Context(bars, s, warmup=210, vwap_is_session=vwap_is_session)
+
+
+# Logged once per process, so a history that breaks the structure reader
+# does not fill the log on every analysis.
+_STRUCTURE_FAILED_LOGGED = False
 
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1047,249 @@ def roc_momentum(ctx: Context, i: int) -> Signal:
 
 
 # ---------------------------------------------------------------------------
+# Liquidity family: the course's price-action setups, on trial
+# ---------------------------------------------------------------------------
+# TJR's video ("How To Start Day Trading In 2026") teaches these; bot/setups.py
+# names them and says what the course claims. Each reads the series that
+# structure.py, clock.py and liquidity.py worked out once for the whole
+# history (build_context), at bar i only, so each costs the same whatever the
+# history's length and none sees a bar after i: tests/test_structure.py proves
+# that of every series. +1 means the setup expects a rise, so taking the lows
+# is +1. None of them votes (Strategy.votes); the back-tests measure them all.
+
+# The say of "nothing at this bar", as the other event strategies give it.
+_LQ_QUIET = 0.3
+# A swing is known two bars after it (structure.K), so before the fifth bar
+# there is no structure to read. Every series is empty (NaN or 0) until it
+# has what it needs, so nothing longer is required here.
+_LQ_MIN_BARS = 5
+
+
+def _lq_idle(ctx: Context, name: str, i: int) -> Optional[Signal]:
+    """The idle signal when the setups cannot be read at bar i, else None."""
+    if "lq_chain" not in ctx.s:
+        return _idle(name, LIQUIDITY, "price structure could not be read")
+    if i < _LQ_MIN_BARS:
+        return _idle(name, LIQUIDITY)
+    return None
+
+
+def _lq_quiet(name: str, why: str) -> Signal:
+    return Signal(name, 0.0, _LQ_QUIET, why, LIQUIDITY)
+
+
+def _at_price(v: float, words: str = " at %s") -> str:
+    """' at 412.30', or nothing when the level is not known."""
+    return words % format_price(v) if _ok(v) else ""
+
+
+def _lq_int(ctx: Context, key: str, i: int) -> int:
+    v = ctx.at(key, i)
+    return int(v) if _ok(v) else 0
+
+
+def _took_swings(ctx: Context, i: int, d: int, equal: bool) -> str:
+    """'took the swing low at 412.30 and closed back above it', or the same
+    for several levels or an equal pair taken on one bar."""
+    lvl = ctx.at("st_sweep_lvl", i)
+    count = max(1, _lq_int(ctx, "st_sweep_n", i))
+    side = "low" if d > 0 else "high"
+    if equal:
+        what = "equal %ss" % side
+    elif count > 1:
+        what = "%d swing %ss" % (count, side)
+    else:
+        what = "the swing %s" % side
+    several = equal or count > 1
+    where = _at_price(lvl, " (the nearest at %s)" if several else " at %s")
+    return "took %s%s and closed back %s %s" % (
+        what, where, "above" if d > 0 else "below", "them" if several else "it")
+
+
+def sweep_reclaim(ctx: Context, i: int) -> Signal:
+    """An old swing high or low taken by a wick, the bar closing back past it."""
+    name = "sweep_reclaim"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "st_sweep", i)
+    if d and _lq_int(ctx, "st_sweep_back", i) == 1:
+        return Signal(name, 0.6 * d, 1.0, _took_swings(ctx, i, d, False), LIQUIDITY)
+    return _lq_quiet(name, "no old high or low taken and closed back past at this bar")
+
+
+def prior_day_sweep(ctx: Context, i: int) -> Signal:
+    """Yesterday's high or low taken, the bar closing back inside its range."""
+    name = "prior_day_sweep"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "ck_pd_take", i)
+    if d and _lq_int(ctx, "ck_pd_back", i) == 1:
+        lvl = ctx.at("ck_pdl" if d > 0 else "ck_pdh", i)
+        return Signal(name, 0.6 * d, 1.0, "took yesterday's %s%s and closed back %s it" % (
+            "low" if d > 0 else "high", _at_price(lvl), "above" if d > 0 else "below"),
+            LIQUIDITY)
+    return _lq_quiet(name, "yesterday's high and low not taken and closed back past "
+                           "at this bar")
+
+
+def equal_levels_sweep(ctx: Context, i: int) -> Signal:
+    """Highs (or lows) at the same price, taken together, the bar closing back."""
+    name = "equal_levels_sweep"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "st_sweep", i)
+    if d and _lq_int(ctx, "st_sweep_back", i) == 1 and _lq_int(ctx, "st_sweep_eq", i) == 1:
+        return Signal(name, 0.7 * d, 1.0, _took_swings(ctx, i, d, True), LIQUIDITY)
+    return _lq_quiet(name, "no equal highs or lows taken and closed back past at "
+                           "this bar")
+
+
+def session_sweep(ctx: Context, i: int) -> Signal:
+    """In the New York morning, London's high or low (Asia's when London's
+    prices are incomplete) taken, the bar closing back inside it."""
+    name = "session_sweep"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    if ctx.at("ck_min", i) < 0:
+        return _idle(name, LIQUIDITY, "needs bars shorter than a day")
+    if clock.instrument_of(ctx.bars) == "stock":
+        return _idle(name, LIQUIDITY, "a stock's prices have no Asia or London session")
+    d = _lq_int(ctx, "ck_sess_take", i)
+    if d and _lq_int(ctx, "ck_sess_back", i) == 1:
+        src = clock.SESS_SOURCES[_lq_int(ctx, "ck_sess_src", i)] or "london"
+        return Signal(name, 0.6 * d, 1.0, "took the %s session's %s%s and closed back %s it" % (
+            "London" if src == "london" else "Asia", "low" if d > 0 else "high",
+            _at_price(ctx.at("ck_sess_lvl", i)), "above" if d > 0 else "below"), LIQUIDITY)
+    return _lq_quiet(name, "no earlier session's high or low taken and closed back "
+                           "past at this bar")
+
+
+def structure_flip(ctx: Context, i: int) -> Signal:
+    """A close past the last swing the other way: the trend on these bars turns."""
+    name = "structure_flip"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "st_flip", i)
+    if d:
+        lvl = ctx.at("st_ref_hi" if d > 0 else "st_ref_lo", i - 1)
+        return Signal(name, 0.6 * d, 1.0,
+                      "closed at %s, %s the last swing %s%s: the trend on these bars "
+                      "turned %s" % (format_price(ctx.bars.close[i]),
+                                     "above" if d > 0 else "below",
+                                     "high" if d > 0 else "low", _at_price(lvl),
+                                     "up" if d > 0 else "down"), LIQUIDITY)
+    return _lq_quiet(name, "no close past the last swing the other way at this bar")
+
+
+def sweep_then_flip(ctx: Context, i: int) -> Signal:
+    """An old high or low taken, then soon a close past the last swing the
+    other way, the taken extreme holding in between."""
+    name = "sweep_then_flip"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "lq_asf", i)
+    if d:
+        j = _lq_int(ctx, "lq_asf_sweep_at", i)
+        what = liquidity.level_name(ctx.s, j) if 0 <= j <= i else (
+            "an old low" if d > 0 else "an old high")
+        stop = ctx.at("lq_asf_stop", i)
+        reached = _at_price(stop, " (the %s reached %%s)" % ("low" if d > 0 else "high"))
+        return Signal(name, 0.75 * d, 1.0,
+                      "after taking %s%s, closed at %s, %s its last swing %s" % (
+                          what, reached, format_price(ctx.bars.close[i]),
+                          "above" if d > 0 else "below", "high" if d > 0 else "low"),
+                      LIQUIDITY)
+    return _lq_quiet(name, "no take followed by a break the other way at this bar")
+
+
+def fvg_retest(ctx: Context, i: int) -> Signal:
+    """Back into the newest gap a move left, in the trend's direction, the bar
+    closing that way."""
+    name = "fvg_retest"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    t = _lq_int(ctx, "st_fvg_touch", i)
+    trend = _lq_int(ctx, "st_trend", i - 1)
+    o, c = float(ctx.bars.open[i]), float(ctx.bars.close[i])
+    if t and t == trend and ((c > o) if t > 0 else (c < o)):
+        top = ctx.at("st_fvg_up_top" if t > 0 else "st_fvg_dn_top", i - 1)
+        bot = ctx.at("st_fvg_up_bot" if t > 0 else "st_fvg_dn_bot", i - 1)
+        zone = (" between %s and %s" % (format_price(bot), format_price(top))
+                if _ok(top, bot) else "")
+        return Signal(name, 0.6 * t, 1.0, "came back into the gap%s that the %s left, "
+                      "and closed %s" % (zone, "rise" if t > 0 else "fall",
+                                         "up" if t > 0 else "down"), LIQUIDITY)
+    return _lq_quiet(name, "no pullback into a gap with the trend at this bar")
+
+
+def ifvg_flip(ctx: Context, i: int) -> Signal:
+    """In a rise, a close below the bottom of a gap the rise left (in a
+    fall, above the top of one)."""
+    name = "ifvg_flip"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "st_ifvg", i)
+    if d:
+        return Signal(name, 0.65 * d, 1.0, "closed at %s, %s the %s of a gap the %s left%s" % (
+            format_price(ctx.bars.close[i]), "above" if d > 0 else "below",
+            "top" if d > 0 else "bottom", "fall" if d > 0 else "rise",
+            _at_price(ctx.at("st_ifvg_lvl", i), ", at %s")), LIQUIDITY)
+    return _lq_quiet(name, "no close through a gap against the trend at this bar")
+
+
+def premium_discount(ctx: Context, i: int) -> Signal:
+    """In a rise, a dip to the halfway line of the last leg, the bar closing up
+    (in a fall, a rise to it, closing down)."""
+    name = "premium_discount"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    e = _lq_int(ctx, "st_eq_touch", i)
+    o, c = float(ctx.bars.open[i]), float(ctx.bars.close[i])
+    if e and ((c > o) if e > 0 else (c < o)):
+        return Signal(name, 0.55 * e, 1.0, "%s to the halfway line of the last %s%s and "
+                      "closed %s" % ("dipped" if e > 0 else "rose", "rise" if e > 0 else "fall",
+                                     _at_price(ctx.at("st_eq", i - 1)),
+                                     "up" if e > 0 else "down"), LIQUIDITY)
+    return _lq_quiet(name, "no turn at the halfway line of the last move at this bar")
+
+
+def liquidity_model(ctx: Context, i: int) -> Signal:
+    """The course's main model, all four steps in order: an old high or low
+    taken, a break of the last swing the other way, a pullback into a gap the
+    new move left or to its halfway line, and a bar turning there."""
+    name = "liquidity_model"
+    idle = _lq_idle(ctx, name, i)
+    if idle:
+        return idle
+    d = _lq_int(ctx, "lq_chain", i)
+    if d:
+        j = _lq_int(ctx, "lq_chain_sweep_at", i)
+        what = (liquidity.level_name(ctx.s, j)
+                if 0 <= j <= i and _lq_int(ctx, "lq_take", j) == d
+                else ("an old low" if d > 0 else "an old high"))
+        via = liquidity.VIA[min(max(_lq_int(ctx, "lq_chain_via", i), 0), 2)]
+        where = ("a gap the new move left" if via == "gap"
+                 else "the halfway line of the new move")
+        stop = ctx.at("lq_chain_stop", i)
+        return Signal(name, 0.85 * d, 1.0,
+                      "took %s, broke its last swing %s, came back to %s and closed %s"
+                      "%s" % (what, "high" if d > 0 else "low", where,
+                              "up" if d > 0 else "down",
+                              _at_price(stop, "; the course's stop sits past %s")),
+                      LIQUIDITY)
+    return _lq_quiet(name, "the four steps did not complete at this bar")
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -1095,18 +1373,55 @@ REGISTRY: List[Strategy] = [
              "Long rejection wick at a level", (RANGING, TRANSITIONAL), 0.60),
     Strategy("momentum_thrust", PATTERN, momentum_thrust,
              "Three consecutive bodies in one direction", (TRENDING,), 0.60),
+
+    # Liquidity: the course's price-action setups. On trial: measured and
+    # shown, never part of the composite (votes=False).
+    Strategy("sweep_reclaim", LIQUIDITY, sweep_reclaim,
+             "An old high or low taken, then a close back past it",
+             (RANGING, TRANSITIONAL), 0.70, votes=False),
+    Strategy("prior_day_sweep", LIQUIDITY, prior_day_sweep,
+             "Yesterday's high or low taken, then a close back inside",
+             (RANGING, TRANSITIONAL), 0.70, votes=False),
+    Strategy("equal_levels_sweep", LIQUIDITY, equal_levels_sweep,
+             "Highs or lows at the same price taken, then a close back past them",
+             (RANGING, TRANSITIONAL), 0.70, votes=False),
+    Strategy("session_sweep", LIQUIDITY, session_sweep,
+             "London's high or low taken in the New York morning, then a close back inside",
+             (RANGING, TRANSITIONAL), 0.70, votes=False),
+    Strategy("structure_flip", LIQUIDITY, structure_flip,
+             "A close past the last swing the other way",
+             (TRANSITIONAL,), 0.70, votes=False),
+    Strategy("sweep_then_flip", LIQUIDITY, sweep_then_flip,
+             "An old high or low taken, then a close past the last swing the other way",
+             (TRANSITIONAL, TRENDING), 0.70, votes=False),
+    Strategy("fvg_retest", LIQUIDITY, fvg_retest,
+             "A pullback into a gap the move left, closing with the trend",
+             (TRENDING,), 0.70, votes=False),
+    Strategy("ifvg_flip", LIQUIDITY, ifvg_flip,
+             "A close through a gap the move left, against the trend",
+             (TRANSITIONAL, TRENDING), 0.70, votes=False),
+    Strategy("premium_discount", LIQUIDITY, premium_discount,
+             "A turn at the halfway line of the last move",
+             (TRENDING,), 0.70, votes=False),
+    Strategy("liquidity_model", LIQUIDITY, liquidity_model,
+             "Taken, broken, retested: the course's four steps in order",
+             (TRANSITIONAL, TRENDING), 0.70, votes=False),
 ]
 
 BY_NAME: Dict[str, Strategy] = {s.name: s for s in REGISTRY}
-FAMILIES: Tuple[str, ...] = (TREND, REVERSION, BREAKOUT, VOLUME, STRUCTURE, PATTERN)
+FAMILIES: Tuple[str, ...] = (TREND, REVERSION, BREAKOUT, VOLUME, STRUCTURE, PATTERN,
+                             LIQUIDITY)
 BASE_WEIGHTS: Dict[str, float] = {s.name: s.base_weight for s in REGISTRY}
+
+# The strategies on trial: scored and measured, with no say in the call.
+TRIAL: Tuple[str, ...] = tuple(s.name for s in REGISTRY if not s.votes)
 
 
 # Strategies that read the inside of a trading session, so they can never
 # fire on daily bars, where a session is one bar. Every page that counts the
 # strategies takes the number from here and REGISTRY, never from a typed-in
 # figure, so "34" and "33" cannot drift apart again.
-INTRADAY_ONLY: Tuple[str, ...] = ("opening_range_break",)
+INTRADAY_ONLY: Tuple[str, ...] = ("opening_range_break", "session_sweep")
 
 
 def strategy_names() -> List[str]:
@@ -1114,8 +1429,18 @@ def strategy_names() -> List[str]:
 
 
 def daily_strategy_names() -> List[str]:
-    """The strategies that can fire on daily bars."""
+    """The strategies that can fire on daily bars, voting or on trial."""
     return [s.name for s in REGISTRY if s.name not in INTRADAY_ONLY]
+
+
+def voting_names() -> List[str]:
+    """The strategies that decide the call: every one not on trial."""
+    return [s.name for s in REGISTRY if s.votes]
+
+
+def daily_voting_names() -> List[str]:
+    """The strategies that decide the call and can fire on daily bars."""
+    return [s.name for s in REGISTRY if s.votes and s.name not in INTRADAY_ONLY]
 
 
 # ---------------------------------------------------------------------------
@@ -1184,6 +1509,11 @@ def evaluate(ctx: Context, i: int, weights: Optional[Dict[str, float]] = None,
     nodding along is one observation about trend, not ten independent
     confirmations, and treating it as ten is how a composite becomes
     overconfident.
+
+    A strategy on trial (votes=False) is scored and weighted like the rest,
+    so the back-tests measure it with the same weights it would have, but its
+    signal is left out of the composite: with or without the strategies on
+    trial, the composite is the same number.
     """
     base = dict(BASE_WEIGHTS)
     if weights:
@@ -1191,6 +1521,7 @@ def evaluate(ctx: Context, i: int, weights: Optional[Dict[str, float]] = None,
     reg = regime or classify_regime(ctx, i)
 
     signals: List[Signal] = []
+    voting: List[bool] = []
     for strat in REGISTRY:
         sig = strat.fn(ctx, i)
         w = base.get(strat.name, 1.0)
@@ -1201,12 +1532,13 @@ def evaluate(ctx: Context, i: int, weights: Optional[Dict[str, float]] = None,
         sig.weight *= w
         sig.family = strat.family
         signals.append(sig)
+        voting.append(getattr(strat, "votes", True))
 
     # Discount within-family agreement: the first voice in a family counts
-    # fully, later ones progressively less.
+    # fully, later ones progressively less. Only voting strategies count.
     per_family: Dict[str, List[Signal]] = {}
-    for sig in signals:
-        if sig.weight > 0 and abs(sig.score) > 0.05:
+    for sig, votes in zip(signals, voting):
+        if votes and sig.weight > 0 and abs(sig.score) > 0.05:
             per_family.setdefault(sig.family, []).append(sig)
 
     total_w = 0.0
