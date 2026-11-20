@@ -164,6 +164,44 @@ def coin_series(n=17000, seed=14):
     return walk(coin_times(n), seed=seed, kind="coin", vol=0.0015, price=90000.0)
 
 
+def hourly_path(legs, price=6000.0, wick=0.6, kind="future", start=date(2026, 9, 13)):
+    """A future's hourly bars walking straight from waypoint to waypoint.
+
+    legs is a list of (bars, change): each bar of a leg moves change / bars,
+    opens at the close before, and has a wick of `wick` either side. Trading
+    days are 23 bars (18:00 to 17:00), so bar 23 * d is day d's first.
+    """
+    closes = []
+    p = price
+    for count, change in legs:
+        for _ in range(count):
+            p += change / float(count)
+            closes.append(p)
+    c = np.array(closes)
+    o = np.concatenate([[price], c[:-1]])
+    ts = (futures_times(len(c), start=start, step=3600) if kind == "future"
+          else coin_times(len(c), step=3600))
+    return make(o, np.maximum(o, c) + wick, np.minimum(o, c) - wick, c, ts, kind=kind,
+                interval="1h")
+
+
+# The bias read's scenes (test_bias.py): legs for hourly_path.
+BIAS_UP = [(24, 14), (12, -6), (24, 14), (12, -6), (24, 14), (12, -6), (24, 14), (6, -2)]
+BIAS_TAKEN_THEN_GAP = [(24, -14), (12, 6), (24, -14), (12, 6), (24, -14), (12, 6),
+                       (17, -10), (4, -6), (8, 12)]
+BIAS_TAKEN_THEN_FLIP = [(24, -14), (12, 6), (24, -14), (12, 6), (24, -14), (12, 6),
+                        (17, -10), (4, -6), (10, 24)]
+BIAS_GAP_CLOSED = [(24, 14), (12, -6), (24, 14), (12, -6), (24, 14), (12, -6), (24, 14),
+                   (4, -12), (23, 0.4)]
+
+
+def bias_hourly_turn(drop=2.5):
+    """A 4-hour rise whose hourly bars turned down at the top on the day
+    before, then a quiet day (drop is how far below the hourly swing low)."""
+    return [(24, 14), (12, -6), (24, 14), (12, -6), (24, 14), (3, -1.5), (3, 1.0),
+            (4, -drop), (23, 0.2)]
+
+
 # --- scenes with a known answer (k = 2) --------------------------------------------------
 
 def swing_scene():
