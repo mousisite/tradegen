@@ -546,12 +546,14 @@ def _first_of_day(cond: np.ndarray, day: np.ndarray) -> np.ndarray:
     return out
 
 
-def _price_action(row, bars) -> Tuple[Optional[Fired], Optional[str]]:
+def _price_action(row, bars, series: Optional[Dict[str, np.ndarray]] = None
+                  ) -> Tuple[Optional[Fired], Optional[str]]:
     """A price-action alert against fresh bars: (what fired or None, the
     state to keep). The state is None for the kinds that read the live price
     (met and clear are kept by check()), "bar:<start time>" of the newest
     finished bar for the others. Raises NotApplicable for a kind its
-    instrument or bar size cannot have."""
+    instrument or bar size cannot have. `series` is liquidity.series(bars),
+    when the caller has it already."""
     kind = row["kind"]
     symbol = row["symbol"]
     threshold = row["threshold"]
@@ -575,7 +577,7 @@ def _price_action(row, bars) -> Tuple[Optional[Fired], Optional[str]]:
     n = len(bars.close)
     if n < 3:
         return None, None
-    s = liquidity.series(bars)
+    s = series if series is not None else liquidity.series(bars)
     fp = format_price
 
     if kind in ("takes_prior_high", "takes_prior_low"):
@@ -596,11 +598,15 @@ def _price_action(row, bars) -> Tuple[Optional[Fired], Optional[str]]:
     since, from_state = _since(row, bars)
     if from_state:
         first = int(np.searchsorted(ts, since, side="right"))
+        # Never back: bars that end earlier than the last look (a source
+        # answering with stale data) must not make it look again at bars
+        # it has told about.
+        state = "bar:%d" % max(int(ts[-1]), since)
     else:
         # A first look: bars finished after the alert was set (or last
         # looked at), so an event from before is not news.
         first = int(np.searchsorted(ts + step, since, side="right"))
-    state = "bar:%d" % int(ts[-1])
+        state = "bar:%d" % int(ts[-1])
 
     close = np.asarray(bars.close, dtype=float)
     day = s["ck_day"]
@@ -826,6 +832,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                 calls[key] = None
 
     fired: List[Fired] = []
+    structure: Dict = {}
     for row in rows:
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
@@ -850,8 +857,12 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             continue
         is_event = row["kind"] in EVENT_KINDS
         try:
-            if is_event:
-                hit, seen = _price_action(row, bars)
+            if row["kind"] in PRICE_ACTION_KINDS:
+                # The structure is read once per download, however many
+                # alerts look at it.
+                if key not in structure:
+                    structure[key] = liquidity.series(bars)
+                hit, seen = _price_action(row, bars, structure[key])
             else:
                 hit = _evaluate(row, bars, call)
         except NotApplicable as exc:

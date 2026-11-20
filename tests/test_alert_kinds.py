@@ -144,6 +144,12 @@ check("told again on the next day's sweep",
       said)
 check("its state is the last bar it looked at",
       row(aid)["state"] == "bar:%d" % int(TS[SWEEP2]), row(aid)["state"])
+FEED["ES=F"] = clock.head(ES, SWEEP1 + 4)
+stale = told(aid)
+FEED["ES=F"] = clock.head(ES, SWEEP2 + 1)
+check("stale data from the source does not make it tell an old sweep again",
+      stale is None and told(aid) is None
+      and row(aid)["state"] == "bar:%d" % int(TS[SWEEP2]), row(aid)["state"])
 
 aid = add("ES=F", "sweeps_prior_high", since=TS[SWEEP1 + 10])
 FEED["ES=F"] = clock.head(ES, SWEEP1 + 20)
