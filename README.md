@@ -301,6 +301,27 @@ weighted by its size; the parts are listed in the "Trade exits" export. After a
 share split, a trade stays in the shares it was opened with; `close --today`
 takes a price and size in today's shares and converts them.
 
+On the website's Journal, a trade can carry the setup it came from, how you
+felt and a pre-trade checklist, and a trade entered by hand can be given the
+New York time you really entered (up to 30 days back). Once closed, a short
+review keeps whether you followed your plan and what it taught you. **What your
+journal says** (`/trades/breakdown`) splits closed trades after costs by setup,
+New York session, time of the morning, weekday, feeling, plan followed, rules
+broken and checklist, with a margin of error only from ten trades in a group;
+it also gives green days, the break-even hit rate for your own average win and
+loss, your best day's share of the profit, and whether a fixed or trailing loss
+limit would have been hit. Settings holds your **daily rules**: a loss limit in
+R, most trades a day, and no new trades after a New York time. When one says
+stop, the journal asks before logging; a trade logged anyway is marked, so the
+breakdown shows what breaking the rule cost. **See the trade** draws any
+journal trade on its own prices (hourly or daily when its bars no longer reach
+back). Two tools are open to anyone: a **size calculator** (`/tools/size`) for
+shares, coins and futures contracts, with the break-even hit rate after costs
+and the fixed-contract view, and a **survival check** (`/tools/survival`) that
+reshuffles a hit rate and average win and loss, or your own 20+ closed trades,
+to show what risking 0.5% to 10% a trade does over 100 trades. The tags,
+review and rule columns are on the trades table and in the journal export.
+
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
 where price never reached the entry, and plans older than two hours. It records
 the trade the bot actually recommended rather than a remembered version. Use
