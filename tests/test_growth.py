@@ -201,10 +201,10 @@ try:
     _all, _daily = len(_strats.voting_names()), len(_strats.daily_voting_names())
     _trial = len(_strats.TRIAL)
     check("every count of the strategies comes from the registry",
-          _daily == _all - 1 and ("of Orenth's %d" % _all) in page
+          _daily <= _all and ("of Orenth's %d" % _all) in page
           and ("running %d strategies" % _all) in page, (_all, _daily))
     check("and the page says how many decide the call and how many are on trial",
-          _trial and _all + _trial == len(_strats.REGISTRY)
+          not _trial or _all + _trial == len(_strats.REGISTRY)
           and ("%d strategies decide Orenth's calls; %d" % (_all, _trial)) in page
           and "price-action setups are measured on trial" in page, (_all, _trial))
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")

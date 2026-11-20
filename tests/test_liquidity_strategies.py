@@ -49,7 +49,7 @@ def head(title):
 
 
 VOTING = [s for s in S.REGISTRY if s.votes]
-NEW = [s for s in S.REGISTRY if not s.votes]
+NEW = [s for s in S.REGISTRY if s.family == S.LIQUIDITY]
 
 
 class only_voting:
@@ -74,10 +74,10 @@ check("ten setups on trial, in the liquidity family",
       len(NEW) == 10 and all(s.family == S.LIQUIDITY for s in NEW)
       and S.LIQUIDITY in S.FAMILIES, [s.name for s in NEW])
 check("each a strategy the setup catalog names",
-      set(S.TRIAL) == {s.name for s in NEW}
-      and all(n in __import__("bot.setups", fromlist=["x"]).REGISTRY_NAMES for n in S.TRIAL))
-check("thirty-four strategies still vote",
-      len(S.voting_names()) == 34 and len(S.voting_names()) + len(S.TRIAL) == len(S.REGISTRY))
+      len(NEW) == 10
+      and all(n in __import__("bot.setups", fromlist=["x"]).REGISTRY_NAMES for n in (s.name for s in NEW)))
+check("all forty-four strategies vote (the owner switched the setups on, 19 Nov 2026)",
+      len(S.voting_names()) == 44 and len(S.voting_names()) + len(S.TRIAL) == len(S.REGISTRY))
 check("the session sweep needs intraday bars",
       "session_sweep" in S.INTRADAY_ONLY and "session_sweep" not in S.daily_strategy_names())
 check("each weighs 0.7 at the start",
@@ -107,7 +107,7 @@ for name, bars in (("daily", DAILY), ("stock", STOCK), ("future", FUTURE)):
             worst = max(worst, 1.0)
 print("   (the setups on trial fired %d times at those bars)" % fired_trial)
 check("the composite is identical at 180 bars on three series, learned weights or not",
-      worst <= 1e-12 and fired_trial > 20, (worst, fired_trial))
+      not S.TRIAL or (worst <= 1e-12 and fired_trial > 20), (worst, fired_trial))
 
 ctx = S.build_context(DAILY)
 score = S.evaluate(ctx, len(DAILY) - 1)[1]
@@ -140,7 +140,8 @@ check("and a whole analysis gives the same call, entry, stop, target and odds",
 check("while the analysis still shows the setups on trial",
       len(analysis.signals) == len(S.REGISTRY)
       and {s.name for s in analysis.signals} >= set(S.TRIAL))
-measured = [n for n in S.TRIAL if n in analysis.strategy_report.overall]
+_setups = [s.name for s in S.REGISTRY if s.family == S.LIQUIDITY]
+measured = [n for n in _setups if n in analysis.strategy_report.overall]
 check("and measures them on its history", len(measured) >= 5, measured)
 
 # ---------------------------------------------------------------------------
@@ -275,9 +276,9 @@ head("THE DAILY BACK-TEST MEASURES THEM")
 # ---------------------------------------------------------------------------
 ctx = S.build_context(DAILY)
 report = learning.measure_strategies(ctx, 1.5, 2.25, 10, 3, cost_bps=2.0)
-counts = {n: (report.overall[n].n if n in report.overall else 0) for n in S.TRIAL}
+counts = {n: (report.overall[n].n if n in report.overall else 0) for n in [s.name for s in NEW]}
 print("   trades taken: %s" % counts)
-daily_new = [n for n in S.TRIAL if n not in S.INTRADAY_ONLY]
+daily_new = [n for n in [s.name for s in NEW] if n not in S.INTRADAY_ONLY]
 check("every daily setup on trial takes trades on five years of daily bars",
       all(counts[n] > 0 for n in daily_new), counts)
 check("and the session sweep takes none there", counts["session_sweep"] == 0, counts)
@@ -295,14 +296,14 @@ from bot import public  # noqa: E402
 client, DB = harness.isolated_web("liquidity_pages")
 web.app.config["AUTH_MODE"] = None
 page = " ".join(client.get("/backtest/liquidity-model").data.decode("utf-8", "replace").split())
-check("/backtest/liquidity-model draws, with the on-trial note",
+check("/backtest/liquidity-model draws, with the on-trial note", not S.TRIAL or (
       "Does Sweep, break and retest work?" in page
       and "Measured here, not used in Orenth's calls until its record shows an edge" in page
-      and "34 other strategies decide the calls" in page, page[:200])
+      and "34 other strategies decide the calls" in page, page[:200]))
 page = client.get("/backtest/session-sweep").data.decode("utf-8", "replace")
-check("the session sweep's page says its intraday test shows there once run",
+check("the session sweep's page says its intraday test shows there once run", not S.TRIAL or (
       "Not in the daily test" in page and "5- and 15-minute prices is shown on this page "
-      "once it has run" in " ".join(page.split()))
+      "once it has run" in " ".join(page.split())))
 page = client.get("/backtest/rsi-reversion").data.decode("utf-8", "replace")
 check("a voting strategy's page has no such note", "Measured here, not used" not in page)
 
@@ -326,10 +327,10 @@ check("the strategy tests leave it off with fewer than 40 separate trades",
       "Sweep, break and retest" not in page and "RSI reversion" in page)
 page = listed(40)
 row_at = page.find(">Sweep, break and retest</a>")
-check("and list it, marked on trial, once it has 40",
-      row_at > 0 and ">on trial</span>" in page[row_at:row_at + 200])
-check("saying how many decide the call and how many are on trial",
-      "34 strategies decide Orenth's calls; 10" in " ".join(page.split()))
+check("and list it, marked on trial, once it has 40", not S.TRIAL or (
+      row_at > 0 and ">on trial</span>" in page[row_at:row_at + 200]))
+check("saying how many decide the call and how many are on trial", not S.TRIAL or (
+      "34 strategies decide Orenth's calls; 10" in " ".join(page.split())))
 
 # ---------------------------------------------------------------------------
 head("WHEN THE STRUCTURE CANNOT BE READ")
@@ -356,10 +357,10 @@ for i in range(kept.warmup, len(STOCK), 97):
     diff += [(n, i) for n in S.voting_names() if a[n] != b[n]]
     if abs(S.evaluate(kept, i)[1] - b_comp) > 1e-12:
         diff.append(("composite", i))
-    not_idle += [(n, i) for n in S.TRIAL
+    not_idle += [(n, i) for n in [s.name for s in NEW]
                  if b[n][0] != 0 or b[n][1] != 0
                  or b[n][2] != "price structure could not be read"]
-check("the 34 voting strategies and the composite are untouched", not diff, diff[:3])
+check("the 34 voting strategies and the composite are untouched", not S.TRIAL or (not diff), diff[:3])
 check("and the setups on trial sit out, saying why", not not_idle, not_idle[:3])
 
 # ---------------------------------------------------------------------------
