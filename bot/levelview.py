@@ -625,7 +625,10 @@ def _chart(bars, s: Dict[str, np.ndarray], kind: str, days: List, calm: bool) ->
                                 extra_levels=narrow_levels, zones=narrow_zones, **common)
     if not wide:
         return {}
-    return {"wide": wide, "narrow": narrow or wide, "as_of": as_of,
+    # Told apart from the plan's chart on the same page by its own class.
+    wide = wide.replace('class="chart trade"', 'class="chart trade keylevels"', 1)
+    narrow = (narrow or wide).replace('class="chart trade"', 'class="chart trade keylevels"', 1)
+    return {"wide": wide, "narrow": narrow, "as_of": as_of,
             "gaps": bool(zones), "marks": bool(marks), "bands": bool(bands),
             "short": short}
 
@@ -805,7 +808,7 @@ def bias_record(conn, symbol: str) -> Dict:
     days, called, right = int(rec["days"]), int(rec["called"]), int(rec["right"])
     up = int(rec["up_days"])
     where = ("Across every instrument studied (this one was not)" if pooled
-             else "On %s" % symbol)
+             else "For %s" % symbol)
     words = []
     if called:
         low, high = labstore.wilson(right, called)
