@@ -365,7 +365,8 @@
         <tbody>
         {% for s in ranked[:12] %}
           <tr>
-            <td>{{ s.name|strategy }}</td>
+            <td>{{ s.name|strategy }}{% if s.name in trial_names %}
+              <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}</td>
             <td class="soft">{{ s.family.replace('_',' ') }}</td>
             <td>{{ lean(s.score) }}</td>
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
@@ -378,7 +379,7 @@
       </table>
     </div>
     <div class="helpfoot" style="padding-top:var(--s2)">{{ help_list(
-      ['score', 'weight', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
+      ['score', 'weight', 'on_trial', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
       'What the columns and words mean') }}</div>
   </div>
 </section>
@@ -409,7 +410,8 @@
               {{ st.expectancy|signed(3) }}</td>
             {# The multiplier the call actually used: the all-conditions record
                blended with this market state's own, not the first alone. #}
-            <td class="r fig">{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}</td>
+            {# A strategy on trial has no say in the call, so no weight was applied to it. #}
+            <td class="r fig">{% if st.name in trial_names %}<span class="chip mute" style="white-space:nowrap">on trial</span>{% else %}{{ "%.2f"|format(r.learned.get(st.name, st.multiplier()) if r.learned else st.multiplier()) }}{% endif %}</td>
           </tr>
         {% endfor %}
         </tbody>

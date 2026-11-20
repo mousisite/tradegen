@@ -1463,12 +1463,22 @@ def _trade_chart(result) -> Dict:
 
 
 def _family_rollup(result: engine.Analysis):
-    """Aggregate signals per family so the page shows structure, not a list."""
+    """Aggregate signals per family so the page shows structure, not a list.
+
+    Only the strategies that vote: those on trial have no say in the call, so
+    they are left out of the family leans, and a family with no voting member
+    is not shown at all rather than as "0 active".
+    """
     rows = []
+    trial = strategies_mod.TRIAL
+    voting = {s.family for s in strategies_mod.REGISTRY if s.votes}
     for family in FAMILIES:
+        if family not in voting:
+            continue
         group = [s for s in result.signals
-                 if s.family == family and s.weight > 0 and abs(s.score) > 0.05]
-        total = sum(1 for s in result.signals if s.family == family)
+                 if s.family == family and s.weight > 0 and abs(s.score) > 0.05
+                 and s.name not in trial]
+        total = sum(1 for s in result.signals if s.family == family and s.name not in trial)
         if not group:
             rows.append({"name": family, "lean": 0.0, "active": 0,
                          "total": total, "loudest": None})
@@ -3997,9 +4007,14 @@ def _brand():
             "site_name": "Orenth",
             "site_logo": base + url_for("static", filename="logo.png"),
             "same_as": SAME_AS,
-            # One source for every page that counts the strategies.
-            "strategy_count": len(strategies_mod.REGISTRY),
-            "daily_strategy_count": len(strategies_mod.daily_strategy_names())}
+            # One source for every page that counts the strategies: those
+            # that decide the call, and apart from them those on trial.
+            "strategy_count": len(strategies_mod.voting_names()),
+            "daily_strategy_count": len(strategies_mod.daily_voting_names()),
+            "trial_count": len(strategies_mod.TRIAL),
+            "daily_trial_count": len([n for n in strategies_mod.TRIAL
+                                      if n not in strategies_mod.INTRADAY_ONLY]),
+            "trial_names": strategies_mod.TRIAL}
 
 
 @app.context_processor

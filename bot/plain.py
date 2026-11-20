@@ -352,6 +352,11 @@ HELP: Dict[str, Dict[str, str]] = {
         "mean reversion, breakout, volume, structure or pattern.")},
     "lean": {"name": "lean", "text": (
         "The family's weighted opinion today, from -1 (down) to +1 (up).")},
+    "on_trial": {"name": "on trial", "text": (
+        "A price-action setup from a day-trading course (old highs and lows taken, "
+        "breaks of the last swing, gaps, the halfway line), scored and tested like "
+        "every other strategy but with no say in the call. Whether it ever gets one "
+        "is decided later, on its tested record after costs.")},
     "active": {"name": "active", "text": (
         "How many of the family's strategies have an opinion today, out of all "
         "of them.")},
