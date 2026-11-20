@@ -89,7 +89,8 @@ LAB_WINDOW_LABELS = {
     "after": "After 16:00",
 }
 
-# video 4:29:07: a session (or day) with too few of its bars is not a range.
+# app choice: a session (or day) with under 80% of its bars is not a range;
+# the data source leaves holes, and a range with a hole in it is too narrow.
 COMPLETE_SHARE = 0.8
 # app choice: a futures day whose opening gap is this many times the usual
 # gap, and more than ROLL_ATR bars' ranges, is a contract roll, not a market move.
@@ -552,9 +553,9 @@ def _sess_index(minute: np.ndarray) -> np.ndarray:
 def _weeks(days: List[Day]):
     """For each day, the previous week's (high, low, last close), or None.
 
-    The first week in the data counts only when it starts on a Monday with a
-    whole day: otherwise it is a part-week, and its high and low are not that
-    week's.
+    app choice: the first week in the data counts only when it starts on a
+    Monday with a whole day: otherwise it is a part-week, and its high and
+    low are not that week's.
     """
     by_week: Dict[Tuple[int, int], list] = {}
     order: List[Tuple[int, int]] = []

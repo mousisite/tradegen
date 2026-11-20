@@ -46,9 +46,10 @@ POOL_ALL = "_all"
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create the four tables when missing. No commit: a read through here
+    must not commit whatever the caller has under way (the writes commit)."""
     for statement in _TABLES:
         conn.execute(statement)
-    conn.commit()
 
 
 # --- the one rule ---------------------------------------------------------------

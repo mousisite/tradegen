@@ -249,7 +249,7 @@ def series(bars, k: int = K) -> Dict[str, np.ndarray]:
       st_eqh, st_eql                     nearest equal highs above, lows below
       st_fvg_up_top/bot/stack_bot/at, st_fvg_dn_top/bot/stack_top/at
                                          the most recent live gap each way
-      st_fvg_new, st_fvg_touch, st_ifvg  gap events
+      st_fvg_new, st_fvg_touch, st_ifvg  gap events; st_ifvg_lvl the edge closed through
       st_eq, st_leg_lo, st_leg_hi, st_eq_touch
                                          the 50% line of the last move
       st_atr                             ATR(14), the size every tolerance uses
@@ -351,7 +351,9 @@ def series(bars, k: int = K) -> Dict[str, np.ndarray]:
         touch_up = touch_dn = 0
         if gov_up is not None and not gov_up[4] and lo_i <= gov_up[1]:
             # video 2:51:15-2:58:34: price comes back into the gap. It counts
-            # unless the bar closes below the gap's bottom (a wick may go through).
+            # unless the bar closes below the gap's bottom (a wick may go
+            # through). app choice: only the first touch of the newest gap, so
+            # one gap is one event.
             touch_up = 1 if cl_i >= gov_up[2] else 0
         if gov_dn is not None and not gov_dn[4] and hi_i >= gov_dn[2]:
             touch_dn = -1 if cl_i <= gov_dn[1] else 0

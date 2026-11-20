@@ -178,6 +178,9 @@ def _chain(bars, s: Dict[str, np.ndarray], daily: bool) -> Dict[str, np.ndarray]
                 st[2] = False
 
         # --- the four steps, each way ---------------------------------------------
+        # video 2:44:58 (potential, confirmation, continuation), 4:02:52-4:11:09
+        # and 6:24:12-6:30:28 (taken, confirmed, continued; the stop past the
+        # high or low that was taken).
         for side in (1, -1):
             c = ch[side]
             up = side == 1
@@ -218,7 +221,9 @@ def _chain(bars, s: Dict[str, np.ndarray], daily: bool) -> Dict[str, np.ndarray]
                     c[0] = 0                     # one signal per take
 
             # Step 1 again: a take starts a chain, or a further take past the
-            # extreme starts it over.
+            # extreme starts it over. app choice: a take that does not go past
+            # the extreme leaves a chain in progress alone, and the new move's
+            # leg is measured from the extreme, where the move began.
             moved = False
             extreme = lo_i if up else hi_i
             beyond = (extreme < c[2]) if up else (extreme > c[2])

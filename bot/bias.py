@@ -57,12 +57,12 @@ class BiasRead:
 
 def _trend_words(t: int, where: str) -> str:
     if t == 1:
-        return ("On %s the last swing broken was a high, so the trend there counts "
-                "as up." % where)
+        return ("On %s the trend counts as up: it last turned, or made a new high, with "
+                "a close above a swing high." % where)
     if t == -1:
-        return ("On %s the last swing broken was a low, so the trend there counts "
-                "as down." % where)
-    return "On %s no swing has been broken yet, so there is no trend there." % where
+        return ("On %s the trend counts as down: it last turned, or made a new low, "
+                "with a close below a swing low." % where)
+    return "On %s no close past a swing point has set a trend yet." % where
 
 
 def _last(arr: np.ndarray, value: int, start: int = 0, end: Optional[int] = None) -> int:
@@ -198,7 +198,7 @@ def _read(p: Prepared, m: int, at: int) -> BiasRead:
             checks["rule"] = 1
             reasons.append(
                 "Since this trading day began, price took %s at %s (%s), then %s (%s). "
-                "The course reads that as a turn, so it leans %s."
+                "The course takes that as the day's direction, so it leans %s."
                 % (name, format_price(s1["lq_take_lvl"][j]), when(ts[j]), how, when(ts[mm]),
                    "up" if d == 1 else "down"))
     if checks["sweep"] is None and today_start >= 0:
@@ -210,6 +210,9 @@ def _read(p: Prepared, m: int, at: int) -> BiasRead:
                                "at": int(ts[j]), "price": float(s1["lq_take_lvl"][j])}
 
     # --- 2: the 4-hour gap closed through ------------------------------------------
+    # video 4:59:46-5:24:14 with 3:42:47-3:58:38: a gap closed through turns
+    # against the move that left it. app choice: the newest gap in the 4-hour
+    # trend's direction, closed through during that trend, with no newer one since.
     if lean is None and t4 != 0 and n4:
         m4 = _last(s4["st_ifvg"], -t4)
         g4 = _last(s4["st_fvg_new"], t4)
