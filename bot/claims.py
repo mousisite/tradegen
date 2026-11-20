@@ -892,7 +892,7 @@ def ndog_fills(bars_list) -> Optional[Dict]:
     notes = [_ONE_REGIME, "Filled means price traded back to the 17:00 close before the "
              "pause. The share filled by 9:30 is set against one in two.",
              "Monday's opening gap is the weekend's, counted with the weekly gaps."]
-    return _record("ndog_fills", "5m", by, notes, skipped, verdict="half")
+    return _record("ndog_fills", "5m", by, notes, skipped, pooled=pooled, verdict="half")
 
 
 def nwog_fills(bars_list) -> Optional[Dict]:
@@ -944,7 +944,7 @@ def nwog_fills(bars_list) -> Optional[Dict]:
     notes = ["Hourly prices, about two years. Filled means price traded back to Friday's "
              "close. The share filled by Friday 16:00 is set against one in two; the share "
              "filled by Monday 16:00 is shown beside it."]
-    return _record("nwog_fills", "1h", by, notes, skipped, verdict="half")
+    return _record("nwog_fills", "1h", by, notes, skipped, pooled=pooled, verdict="half")
 
 
 # --- the bias study --------------------------------------------------------------------

@@ -61,6 +61,7 @@ SUITES = [
     ("test_method.py",       False, "odds per side, gap fills, overlap, the BUY bar, plain words"),
     ("test_record.py",       False, "the public track record, splits, and the strategy tests' margins"),
     ("test_setuplab.py",     False, "the Setup lab: own stops and targets, random entries, no peeking"),
+    ("test_claims.py",       False, "the video's claims on scripted days, against what usually happens"),
     ("test_market.py",       False, "refusals in words, whole funds, a coin's blank day, splits, tickers"),
     ("test_tickers.py",      False, "a ticker shared by a coin and a stock: both reachable, kept apart"),
     ("test_features.py",     False, "the front page, the trade review, plan against result, counts"),
