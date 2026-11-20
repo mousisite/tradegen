@@ -407,6 +407,32 @@ check("a run that stored nothing is tried again after two hours", setuplab.due(c
 labstore.save_run(conn, noon - 3600, noon - 3600 + 5, {"checked": 0})
 check("but not sooner", not setuplab.due(conn, noon))
 
+# ---------------------------------------------------------------------------
+head("THE SERVER'S NIGHTLY JOB MEASURES ONLY WHEN DUE")
+# ---------------------------------------------------------------------------
+import web  # noqa: E402
+from bot import database as db_mod  # noqa: E402
+
+harness.isolate("setuplab-web")
+conn = db_mod.connect(harness.DB_PATH)
+labstore.save_run(conn, int(time.time()) - 3600, int(time.time()) - 3000, {"checked": 16})
+conn.close()
+calls = []
+real_run = setuplab.run
+setuplab.run = lambda conn_, **kw: calls.append(kw) or {"checked": 16, "errors": []}
+try:
+    out = web._lab_job()
+    check("an hour after a run it does nothing", out == {"checked": 0, "skipped": 1}
+          and not calls, out)
+    harness.isolate("setuplab-web-new")
+    out = web._lab_job()
+    check("on a server where it never ran it measures, on the house settings",
+          out == {"checked": 16, "errors": []} and len(calls) == 1
+          and calls[0]["cfg"]["cost_bps_futures"] == config.DEFAULTS["cost_bps_futures"],
+          (out, len(calls)))
+finally:
+    setuplab.run = real_run
+
 print()
 print("%d failure(s)" % len(fails))
 print("SETUP LAB OK" if not fails else "FAILURES: %s" % fails)
