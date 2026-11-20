@@ -193,6 +193,81 @@ broker costs.** They change the verdict more than any indicator setting.
 
 ---
 
+## Price action, measured
+
+TJR's video "How To Start Day Trading In 2026" teaches a set of price-action
+setups (sweeps of old highs and lows, breaks of structure, fair value gaps,
+the 50% line, and the sweep, break and retest model) and makes claims about
+sessions, gaps and timing. The Setup lab (`bot/setuplab.py`) and the claims
+(`bot/claims.py`) test them on past prices. This section is the method; the
+results are on the site, and change as the data does.
+
+**Universe.** ES and NQ futures, SPY, QQQ, Bitcoin, Ether, Apple and NVIDIA
+(`setups.LAB_SYMBOLS`), on 5- and 15-minute bars. The data source keeps about
+60 days of those, so every result is one stretch of the market. Stocks and
+funds have day-session prices only, so they have no Asia or London range.
+
+**Entries.** Every time a setup appears (no thinning), at the close of that
+bar. A setup is found by `bot/liquidity.py`, whose value at each bar uses
+only that bar and the ones before it; a test cuts the bars at each entry and
+checks the trade is the same.
+
+**Stops.** Where the course puts them: past the high or low that was taken,
+past the far end of the move a break ended, past a gap's far edge, past the
+bar that turned at the 50% line. A stop closer than a tenth of a usual bar's
+range (ATR 14) is not tradable; those events are counted and left out.
+
+**Targets.** Two rules, kept apart: twice the risk, and the nearest old high
+or low not yet traded through that is at least the risk away (twice the risk
+when there is none, counted).
+
+**Exits.** The stop, the target, or the next 16:00 New York time at that
+bar's close. The stop counts first when one bar reaches both, and a bar
+opening past the stop fills at its open (the rules of
+`calibrate.simulate_trade`, checked trade for trade).
+
+**Costs.** The house round-trip cost for each instrument, in units of the
+trade's risk: futures 1 basis point, stocks and funds 2, coins 20.
+
+**Control.** Each trade is set beside up to five random entries on other
+trading days in the same New York half hour, the same side, with a stop and
+target the same size against that bar's usual range, the same exit and the
+same costs. A setup that keeps money but no more than random trades at that
+time of day has shown nothing about itself.
+
+**Margin.** Two standard errors, with trades on the same trading day counted
+together. A setup needs 30 trades on 10 separate days before it gets a
+verdict: kept money by more than its margin, lost money by more than it, or
+cannot be told apart from luck. About 1 cell in 20 crosses its margin by
+luck alone, and many cells are tested, so a single green cell proves little.
+ES and SPY (and NQ and QQQ) follow the same indexes: pooled together, they
+overstate the evidence.
+
+**Holdout.** The last third of the trading days is checked apart from the
+first two thirds; a result whose sign flips there is marked not stable. The
+four-step model is also run with wider swings (three bars each side).
+
+**Left out.** Futures roll days and days with under 80% of their bars, and
+trades that would carry through a roll. Each is counted.
+
+**Claims.** Each checkable claim is measured against a control of the same
+size: London taking one side of the Asia range and reaching the other is set
+beside a band as wide as Asia's centred on the 03:00 price; the 9:30-9:50
+window beside 10:30-10:55; a close past a swing beside a wick past it; gaps
+beside random zones of the same size; the daily lean beside always saying up.
+Gap fills are set against one in two.
+
+**When.** Nightly on the server after 17:05 New York time, or by hand:
+
+```
+python -m bot.setuplab --refresh --symbols SPY --intervals 15m
+python -m bot.setuplab              # print what is stored
+```
+
+A partial run leaves the claims alone; add `--claims` to measure them anyway.
+
+---
+
 ## The strategy library
 
 34 strategies in six families. Each returns a directional score from -1 to +1
