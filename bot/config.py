@@ -50,6 +50,17 @@ DEFAULTS: Dict[str, Any] = {
     "cost_bps_equity": 2.0,
     "cost_bps_crypto": 20.0,
     "cost_bps_other": 5.0,
+    # Futures (a symbol ending =F) pay their own: one tick of slippage and a
+    # commission of about $5 is 0.6bp on ES at 6,000, 0.25bp on NQ and 0.8bp
+    # on the micro contracts. Charged the 5bp "other" rate they paid about
+    # eight times too much, which sank every 5-minute futures test.
+    "cost_bps_futures": 1.0,
+
+    # --- daily rules for the journal (0 or "" switches each off) ------------
+    "daily_loss_limit_r": 0.0,      # stop for the day after losing this many R
+    "max_trades_per_day": 0,        # most trades a day
+    "last_entry_time": "",          # no new trades after this New York time, "HH:MM"
+    "calm_candles": False,          # grey and ink candles instead of green and red
 
     # --- calibration ------------------------------------------------------
     "calibration_stride": 3,
@@ -129,6 +140,18 @@ def cost_bps_for(asset_class: str, cfg: Dict[str, Any]) -> float:
     }.get(asset_class, cfg.get("cost_bps_other", 5.0)))
 
 
+def cost_bps_for_symbol(symbol: str, asset_class: str, cfg: Dict[str, Any]) -> float:
+    """Round-trip cost in basis points for one instrument.
+
+    A futures contract (Yahoo's symbol ends in =F) has its own cost; the data
+    source files futures under "other", whose rate is several times what a
+    future costs to trade. Anything else is costed by its asset class.
+    """
+    if (symbol or "").strip().upper().endswith("=F"):
+        return float(cfg.get("cost_bps_futures", DEFAULTS["cost_bps_futures"]))
+    return cost_bps_for(asset_class, cfg)
+
+
 def load(path: str | None = None) -> Dict[str, Any]:
     """Merge defaults, config.json and environment overrides."""
     cfg = json.loads(json.dumps(DEFAULTS))          # deep copy
@@ -190,9 +213,44 @@ def validate(cfg: Dict[str, Any]) -> None:
     if cfg["min_conviction"] > cfg["strong_conviction"]:
         raise RuntimeError("The market-entry threshold cannot be below the "
                            "minimum conviction threshold.")
-    for key in ("cost_bps_equity", "cost_bps_crypto", "cost_bps_other"):
-        if cfg.get(key, 0) < 0:
+    for key in ("cost_bps_equity", "cost_bps_crypto", "cost_bps_other", "cost_bps_futures"):
+        value = cfg.get(key, 0)
+        if not _is_number(value):
+            raise RuntimeError("Trading costs must be numbers.")
+        if value < 0:
             raise RuntimeError("Trading costs cannot be negative.")
+
+    limit = cfg.get("daily_loss_limit_r", 0.0)
+    if not _is_number(limit) or not (0 <= limit <= 20):
+        raise RuntimeError("The daily loss limit must be a number from 0 to 20 times "
+                           "your risk per trade, or 0 to switch it off.")
+    most = cfg.get("max_trades_per_day", 0)
+    if not _is_number(most) or float(most) != int(most) or not (0 <= most <= 100):
+        raise RuntimeError("The most trades a day must be a whole number from 0 to 100, "
+                           "or 0 to switch it off.")
+    last = cfg.get("last_entry_time", "")
+    if not isinstance(last, str) or (last.strip() and _minutes(last) is None):
+        raise RuntimeError("The time after which you take no new trades must be a "
+                           "time like 10:30, or left empty to switch it off.")
+    if not isinstance(cfg.get("calm_candles", False), bool):
+        raise RuntimeError("Calm candle colours must be either on or off.")
+
+
+def _is_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value == value and value not in (float("inf"), float("-inf")))
+
+
+def _minutes(text: str):
+    """'10:30' or '9:30' as minutes after midnight, or None when it is not a time."""
+    hours, sep, mins = (text or "").strip().partition(":")
+    if not sep or not hours.isdigit() or not mins.isdigit() or len(mins) != 2 \
+            or len(hours) > 2:
+        return None
+    h, m = int(hours), int(mins)
+    if h > 23 or m > 59:
+        return None
+    return h * 60 + m
 
 
 def save(cfg: Dict[str, Any], path: str | None = None) -> str:
