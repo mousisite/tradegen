@@ -1379,6 +1379,14 @@ def analyse():
     _spend_view(symbol, interval, exact)
 
     families = _family_rollup(result)
+    # What price is doing (levels, the clock, the day's lean): a part that
+    # cannot be worked out must not cost the person the analysis.
+    try:
+        from bot import levelview as levelview_mod
+        extras = levelview_mod.for_analysis(result, cfg, db_path=app.config.get("DB_PATH"))
+    except Exception:
+        app.logger.exception("Could not read the levels for %s", result.bars.symbol)
+        extras = {}
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
     # "10 bars" means nothing without the interval attached to it.
     hold_text = config_mod.describe_horizon(
@@ -1415,7 +1423,8 @@ def analyse():
                            families=families, ranked=ranked, hold_text=hold_text,
                            plan=result.plan, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
-                           overlap=overlap, chart=_trade_chart(result),
+                           overlap=overlap,
+                           chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
                            help_text=plain_mod.help_for(cfg, result.bars.interval),
@@ -1424,10 +1433,11 @@ def analyse():
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
                                result.bars.symbol))
                                if result.bars.symbol in public_mod.NAMES else ""),
-                           canonical_url=_canonical("analyse", result.bars))
+                           canonical_url=_canonical("analyse", result.bars),
+                           extras=extras)
 
 
-def _trade_chart(result) -> Dict:
+def _trade_chart(result, calm: bool = False) -> Dict:
     """The analysis page's candle chart, from the bars already in hand.
 
     Drawn twice, wide and narrow, and the page shows one: scaled down to a
@@ -1444,7 +1454,12 @@ def _trade_chart(result) -> Dict:
                   "Stop": plan.stop, "Target": plan.target1}
     as_of = alerts_mod.as_of(bars)
     drawn = dict(levels=levels, last=bars.last_price, as_of=as_of,
-                 interval=bars.interval)
+                 interval=bars.interval, calm=calm)
+    if charts_mod.bar_words(bars.interval) != "daily":
+        # The course, and most day traders, read intraday candles in New York time.
+        from bot import levelview as levelview_mod
+        as_of = levelview_mod.ny_as_of(bars)
+        drawn.update(as_of=as_of, day_label=levelview_mod.ny_day_label)
     series = (bars.timestamp, bars.open, bars.high, bars.low, bars.close,
               bars.volume)
     try:
