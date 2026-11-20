@@ -4512,6 +4512,16 @@ def sitemap():
         ("/backtest/" + public_mod.strategy_slug(name), "daily", "0.7")
         for name in strategies_mod.strategy_names()
         if public_mod.strategy_results(rows, name)]
+    # The Learn pages once they have something measured; until then they ask
+    # search engines to wait, so they are not sent there.
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        learned = learn_mod.measured_slugs(conn, _registered_setups())
+    finally:
+        conn.close()
+    if learned:
+        pages += [("/learn", "daily", "0.7")] + [
+            ("/learn/" + slug, "daily", "0.6") for slug in learned]
     rows = "".join(
         "<url><loc>%s%s</loc><changefreq>%s</changefreq>"
         "<priority>%s</priority></url>" % (base, path, freq, priority)
@@ -5618,6 +5628,130 @@ def record_fingerprints():
     return Response(body, mimetype="text/csv", headers={
         "Content-Disposition": 'attachment; filename="orenth-record-fingerprints.csv"',
         "Cache-Control": "public, max-age=900"})
+
+
+# --- Learn: the price-action ideas from TJR's video, beside what was measured ---
+#
+# Every number on these pages comes from the Setup lab's store (bot/labstore.py)
+# or the daily strategy test; bot/learn.py holds the words. Public, like the
+# strategy tests, and kept out of search until something is measured.
+from bot import learn as learn_mod  # noqa: E402
+from bot import setups as setups_mod  # noqa: E402
+
+PUBLIC_ENDPOINTS.update({"learn", "learn_topic", "learn_practice"})
+
+
+def _registered_setups() -> list:
+    """The setups that are strategies in this build: the daily test reads only those."""
+    return [s.name for s in setups_mod.SETUPS if s.name in strategies_mod.BY_NAME]
+
+
+def _learn_links() -> dict:
+    """The journal and risk tools, linked from the Learn pages where this build has them."""
+    return {key: url_for(endpoint) for key, endpoint in (
+        ("size", "size_tool"), ("survival", "survival_tool"),
+        ("breakdown", "journal_breakdown"), ("trades", "trades"))
+        if endpoint in app.view_functions}
+
+
+@app.route("/learn")
+def learn():
+    """Price action, tested: the course's ideas, the claims, and what was measured."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        page = learn_mod.hub(conn, _registered_setups())
+    finally:
+        conn.close()
+    return render_template("learn.html", page=page, links=_learn_links(),
+                           strategy_slug=public_mod.strategy_slug)
+
+
+@app.route("/learn/<slug>")
+def learn_topic(slug):
+    """One idea: what it is, what the course teaches, Orenth's exact rule, the result."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        page = learn_mod.topic(conn, slug, _registered_setups())
+    finally:
+        conn.close()
+    if page is None:
+        abort(404)
+    return render_template("learn_topic.html", page=page, links=_learn_links(),
+                           strategy_slug=public_mod.strategy_slug)
+
+
+@app.route("/learn/practice", methods=["GET", "POST"])
+def learn_practice():
+    """Call the next move on a past chart. The tally lives in this browser's
+    session cookie only: nothing is written to the database."""
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        items = learn_mod.practice_items(conn)
+    finally:
+        conn.close()
+    tally = session.get("practice_tally") or {"n": 0, "right": 0}
+    if request.method == "POST":
+        if not _from_this_site():
+            abort(403)
+        if request.form.get("reset"):
+            for key in ("practice_tally", "practice_last", "practice_done"):
+                session.pop(key, None)
+            return redirect(url_for("learn_practice"), code=303)
+        k = request.form.get("item", type=int)
+        pick = request.form.get("pick", "")
+        if not items or k is None or not 0 <= k < len(items) \
+                or pick not in dict(learn_mod.PRACTICE_PICKS):
+            abort(400)
+        answer = learn_mod.practice_answer(items[k])
+        done = list(session.get("practice_done") or [])
+        if k not in done:
+            # Answering the same chart again shows it again but is not counted.
+            tally = {"n": int(tally.get("n", 0)) + 1,
+                     "right": int(tally.get("right", 0)) + (pick == answer)}
+            session["practice_tally"] = tally
+            session["practice_done"] = (done + [k])[-200:]
+        session["practice_last"] = {"item": k, "pick": pick, "answer": answer}
+        return redirect(url_for("learn_practice", shown=k), code=303)
+
+    item = reveal = None
+    k = 0
+    if items:
+        shown = request.args.get("shown", type=int)
+        last = session.get("practice_last") or {}
+        if shown is not None and last.get("item") == shown and 0 <= shown < len(items):
+            k, reveal = shown, last
+        else:
+            k = (request.args.get("n", type=int) or 0) % len(items)
+        item = items[k]
+    chart = learn_mod.practice_chart(item, bool(reveal)) if item else ""
+    return render_template(
+        "learn_practice.html", item=item, k=k, count=len(items), reveal=reveal,
+        chart=chart, tally=tally, picks=learn_mod.PRACTICE_PICKS,
+        ahead=learn_mod.PRACTICE_AHEAD,
+        next_k=(k + 1) % len(items) if items else 0,
+        name=learn_mod.symbol_name(item["symbol"]) if item else "",
+        setup_label=(setups_mod.BY_NAME[item["setup"]].label
+                     if item and item["setup"] in setups_mod.BY_NAME else ""),
+        setup_topic=(setups_mod.BY_NAME[item["setup"]].learn
+                     if item and item["setup"] in setups_mod.BY_NAME else ""),
+        interval_words=learn_mod.interval_words(item["interval"]) if item else "")
+
+
+def _lab_box_data(strategy):
+    """The Setup lab's result for a strategy's test page (_lab_box.html), or
+    None. A failure here must never take the strategy page down with it."""
+    try:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            return learn_mod.lab_box(conn, strategy)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        app.logger.exception("lab box for %s", strategy)
+        return None
+
+
+app.jinja_env.globals["lab_box_data"] = _lab_box_data
 
 
 @app.route("/stock/<sym>/card.png")

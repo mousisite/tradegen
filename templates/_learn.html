@@ -1,0 +1,59 @@
+{# Figures as the Learn pages and the strategy test pages' lab box say them.
+   Every figure comes from bot/learn.py, which reads the Setup lab's store;
+   a figure that is missing prints a dash, never a word like None. #}
+
+{% macro kept(c) -%}
+<span class="fig {{ 'gain' if c.verdict == 1 else 'loss' if c.verdict == -1 }}">{{ c.mean|signed(2) }}R</span>{% if c.margin is not none %} <span class="soft">±{{ '%.2f'|format(c.margin) }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro versus(c) -%}
+{% if c.control is not none %}<span class="fig">{{ c.control|signed(2) }}R</span>{% else %}—{% endif %}
+{%- endmacro %}
+
+{% macro diff(c) -%}
+{% if c.diff is not none %}<span class="fig {{ 'gain' if c.diff_verdict == 1 else 'loss' if c.diff_verdict == -1 }}">{{ c.diff|signed(2) }}R</span>{% if c.diff_margin is not none %} <span class="soft">±{{ '%.2f'|format(c.diff_margin) }}</span>{% endif %}{% else %}—{% endif %}
+{%- endmacro %}
+
+{% macro rate(r) -%}
+{% if r %}{{ "{:,}".format(r.hits) }} of {{ "{:,}".format(r.trials) }} <span class="soft">({{ r.rate|pct(0) }}, likely between {{ r.low|pct(0) }} and {{ r.high|pct(0) }})</span>{% else %}—{% endif %}
+{%- endmacro %}
+
+{# One cell's verdict as a sentence. #}
+{% macro said(c) -%}
+{% if c.verdict is none %}Too few trades, or too few separate days, to say.{% else %}After costs it {{ c.words }}{% if c.diff_verdict is not none %}, and {{ c.diff_words }}{% endif %}.{% endif %}
+{%- endmacro %}
+
+{% macro claim_measured(c) -%}
+{% if c.measure == 'mean' %}{% if c.mean is not none %}<span class="fig">{{ '%.2f'|format(c.mean) }}</span>{% if c.margin is not none %} <span class="soft">±{{ '%.2f'|format(c.margin) }}</span>{% endif %}{% else %}—{% endif %}{% else %}{{ rate(c.rate) }}{% endif %}
+{%- endmacro %}
+
+{% macro claim_usual(c) -%}
+{% if c.measure == 'mean' %}{% if c.base is not none %}<span class="fig">{{ '%.2f'|format(c.base) }}</span>{% if c.base_margin is not none %} <span class="soft">±{{ '%.2f'|format(c.base_margin) }}</span>{% endif %}{% else %}—{% endif %}{% elif c.base %}{{ rate(c.base) }}{% else %}<span class="soft">no comparison: it describes what happened</span>{% endif %}
+{%- endmacro %}
+
+{# The pooled cells of one setup: each bar size and target rule. #}
+{% macro pooled_table(cells) -%}
+<div class="tablewrap">
+  <table class="stack">
+    <thead><tr>
+      <th>Prices and target</th><th class="r">Trades</th><th class="r">Hit rate</th>
+      <th class="r">Kept a trade</th><th class="r">Random entries</th>
+      <th class="r">Difference</th><th>In words</th>
+    </tr></thead>
+    <tbody>
+    {% for c in cells %}
+      <tr>
+        <td class="lead"><b>{{ c.interval_words|capitalize }}</b>, {{ c.rule_words }}
+          <span class="soft">· {{ c.instruments }} instrument{{ 's' if c.instruments != 1 }}</span></td>
+        <td class="r fig" data-label="Trades">{{ "{:,}".format(c.n) }}</td>
+        <td class="r fig" data-label="Hit rate">{{ c.hit|pct(0) }}</td>
+        <td class="r" data-label="Kept a trade" style="white-space:nowrap">{{ kept(c) }}</td>
+        <td class="r" data-label="Random entries">{{ versus(c) }}</td>
+        <td class="r" data-label="Difference" style="white-space:nowrap">{{ diff(c) }}</td>
+        <td class="wide">{{ said(c) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{%- endmacro %}

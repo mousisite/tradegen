@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% from "_learn.html" import kept, versus, diff, rate, said, pooled_table, claim_measured, claim_usual with context %}
+{% set active = 'stocks' %}
+{% set page_blurb = page.title ~ ": " ~ page.concept.what ~ " What the course teaches, the exact rule Orenth tests, and the result on real prices after trading costs. Not financial advice." %}
+{% block title %}{{ page.title }}: what the course teaches, and what testing found · Orenth{% endblock %}
+{% block og_title %}{{ page.title }}, tested · Orenth{% endblock %}
+{% block head_extra %}{% if not page.measured %}<meta name="robots" content="noindex">{% endif %}
+<style>
+  .learn-steps { list-style: none; margin: 0; padding: 0; }
+  .learn-steps li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--s2);
+                    padding: 10px 0; border-bottom: 1px solid var(--hairline);
+                    font-size: var(--t-sm); color: var(--ink-2); line-height: 1.6; }
+  .learn-steps li:last-child { border-bottom: 0; }
+  .learn-stamp { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3);
+                 white-space: nowrap; padding-top: 2px; }
+  .learn-steps .chip { align-self: start; justify-self: start; white-space: nowrap; }
+  .learn-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
+  .learn-figure svg { width: 100%; height: auto; display: block; }
+  @media (max-width: 560px) {
+    .learn-steps li { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow"><a href="{{ url_for('learn') }}">Price action, tested</a></span>
+  <h1>{{ page.title }}</h1>
+  <p>{{ page.concept.what }}</p>
+</div>
+
+<div class="plainbox">
+  <span class="eyebrow">The short answer</span>
+  {% if not page.measured %}
+    <p class="lead">Being tested. This fills in after the first nightly run.</p>
+  {% else %}
+    {% set ns = namespace(said=false) %}
+    {% for v in page.setups %}
+      {% set main = (v.lab.pooled|selectattr('rule', 'equalto', '2r')|list or v.lab.pooled)|first %}
+      {% if main %}
+        {% set ns.said = true %}
+        <p class="lead">{{ v.setup.label }}, on {{ main.interval_words }} prices with
+          {{ main.rule_words }}, all instruments together: a trade averaged
+          {{ kept(main) }} after costs, over {{ "{:,}".format(main.n) }} trades.
+          {% if main.verdict is none %}That is too few to say anything{% else %}It {{ main.words }}{% endif %}{% if main.diff_verdict is not none %},
+          and {{ main.diff_words }}{% endif %}.</p>
+      {% elif v.daily and v.daily.tested %}
+        {% set ns.said = true %}
+        <p class="lead">{{ v.setup.label }}, on daily prices of popular stocks and
+          coins: a trade averaged <span class="fig">{{ v.daily.kept|signed(2) }}R</span>
+          after costs. {% if v.daily.verdict is none %}Its margin of error is not
+          measured yet.{% else %}It {{ v.daily.words }}.{% endif %}</p>
+      {% endif %}
+    {% endfor %}
+    {% for c in page.claims if c.measured %}
+      {% set ns.said = true %}
+      <p class="prose"><b>{{ c.statement }}</b> Measured: {{ claim_measured(c) }}.
+        {% if c.measure != 'descriptive' %}Usually: {{ claim_usual(c) }}.{% endif %}
+        In words: it {{ c.words }}.</p>
+    {% endfor %}
+    {% if page.bias and page.bias.pooled and page.bias.pooled.rate %}
+      {% set ns.said = true %}
+      {% set b = page.bias.pooled %}
+      <p class="prose">On {{ "{:,}".format(b.days) }} past days it leaned one way on
+        {{ "{:,}".format(b.called) }} and was right on {{ rate(b.rate) }}. Always
+        guessing up was right on {{ b.up.rate|pct(0) }} of all {{ "{:,}".format(b.days) }}
+        days; a coin flip, half.</p>
+    {% endif %}
+    {% if not ns.said %}
+      <p class="lead">This idea is not a setup with a result of its own. The
+        measurements it rests on are on the other topics.</p>
+    {% endif %}
+  {% endif %}
+</div>
+
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>What the course teaches</h2></div>
+  <div class="card">
+    <ul class="learn-steps">
+      {% for stamp, line in page.concept.course %}
+        <li><span class="learn-stamp">{{ stamp }}</span><span>{{ line }}</span></li>
+      {% endfor %}
+      {% for v in page.setups %}
+        <li><span class="learn-stamp">{{ v.setup.video|join(', ') }}</span>
+          <span><b>{{ v.setup.label }}.</b> {{ v.setup.course_says }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="learn-source" style="margin-top:var(--s2)">Times are where each point
+      comes in the video. In Orenth's words, not the course's.</p>
+  </div>
+</section>
+
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The exact rule Orenth tests</h2></div>
+  <div class="card">
+    <ul class="learn-steps">
+      {% for v in page.setups %}
+        <li><span class="chip mute">The setup</span>
+          <span><b>{{ v.setup.label }}.</b> {{ v.setup.plain }}{% if v.stop %} The
+            stop goes {{ v.stop }}.{% endif %}</span></li>
+      {% endfor %}
+      {% for source, line in page.concept.rule %}
+        <li><span class="chip {{ 'mute' if source == 'course' else 'hold' }}">{{ 'As taught' if source == 'course' else "Orenth's choice" }}</span>
+          <span>{{ line }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="learn-source" style="margin-top:var(--s2)"><b>As taught</b> follows
+      the video. <b>Orenth's choice</b> is a detail the video leaves open, which
+      had to be decided to test it; a different choice could give a different
+      result.</p>
+  </div>
+</section>
+
+{% for v in page.setups %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>What was measured: {{ v.setup.label }}</h2></div>
+  {% if v.lab.measured %}
+    <p class="prose" style="margin-bottom:var(--s2)">Every time it appeared on
+      5- or 15-minute prices, a pretend trade with the course's stop, after costs,
+      beside random entries at the same times of day. All instruments
+      together:</p>
+    <div class="card pad0">{{ pooled_table(v.lab.pooled) }}</div>
+    <details class="card" style="margin-top:var(--s2)">
+      <summary>Every instrument ({{ v.lab.rows|length }})</summary>
+      <div class="tablewrap" style="margin-top:var(--s2)">
+        <table class="stack">
+          <thead><tr><th>Instrument</th><th class="r">Trades</th><th class="r">Hit rate</th>
+            <th class="r">Kept a trade</th><th class="r">Random entries</th>
+            <th>Later days</th><th>In words</th></tr></thead>
+          <tbody>
+          {% for r in v.lab.rows %}
+            <tr>
+              <td class="lead"><b>{{ r.name }}</b> <span class="soft">· {{ r.interval_words }},
+                {{ 'twice the risk' if r.rule == '2r' else 'next old high or low' }}</span></td>
+              <td class="r fig" data-label="Trades">{{ "{:,}".format(r.n) }}</td>
+              <td class="r fig" data-label="Hit rate">{{ r.hit|pct(0) }}</td>
+              <td class="r" data-label="Kept a trade" style="white-space:nowrap">{{ kept(r) }}</td>
+              <td class="r" data-label="Random entries">{{ versus(r) }}</td>
+              <td data-label="Later days">{% if r.stable is sameas true %}held{% elif r.stable is sameas false %}turned the other way{% else %}too few{% endif %}</td>
+              <td class="wide soft">{{ said(r) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="learn-source" style="margin-top:var(--s2)"><b>Later days</b>: whether
+        the last third of the days, read on its own, kept or lost money the same
+        way as the whole.</p>
+    </details>
+    {% if v.lab.k3 %}
+      <p class="prose" style="margin-top:var(--s2)">With wider swings (three bars
+        each side instead of two):
+        {% for k in v.lab.k3 %}{{ k.name }}, {{ k.interval_words }}: {{ "{:,}".format(k.n) }}
+          trades, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
+          ±{{ '%.2f'|format(k.margin) }}{% endif %}{{ '; ' if not loop.last else '.' }}{% endfor %}</p>
+    {% endif %}
+    {% if v.lab.tight or v.lab.no_control %}
+      <p class="prose" style="margin-top:var(--s1)">Left out and counted:
+        {{ v.lab.tight }} with a stop too close to trade, {{ v.lab.no_control }}
+        with no random entries to compare.</p>
+    {% endif %}
+  {% else %}
+    <div class="card"><p class="prose">Being tested on 5- and 15-minute prices. This
+      fills in after the first nightly run.</p></div>
+  {% endif %}
+  {% if v.daily %}
+    <p class="prose" style="margin-top:var(--s2)">{% if v.daily.tested %}On up to five
+      years of daily prices of the popular stocks and coins, with Orenth's own stop and
+      target, a trade averaged <span class="fig">{{ v.daily.kept|signed(2) }}R</span>{% if v.daily.margin is not none %}
+      ±{{ '%.2f'|format(v.daily.margin) }}{% endif %}{% if v.daily.verdict is not none %}:
+      it {{ v.daily.words }}{% endif %}.{% else %}The
+      daily test on popular stocks and coins has no result for it yet.{% endif %}
+      <a href="{{ url_for('backtest_page', name=v.daily.slug) }}">The daily test &rarr;</a></p>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if page.claims %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The claims, checked</h2></div>
+  {% for c in page.claims %}
+    <div class="card">
+      <p class="lead" style="margin:0 0 var(--s1)">{{ c.statement }}</p>
+      <p class="learn-source">In the video at {{ c.video|join(', ') }}.</p>
+      <ul class="list" style="margin-top:var(--s2)">
+        <li><b>Measured:</b> {{ c.how }}</li>
+        <li><b>Compared with:</b> {{ c.control_words }}</li>
+        {% if c.measured %}
+          <li><b>Result:</b> {{ claim_measured(c) }}{% if c.measure != 'descriptive' %};
+            usually {{ claim_usual(c) }}{% endif %}. It {{ c.words }}.</li>
+          {% for note in c.notes %}<li>{{ note }}</li>{% endfor %}
+        {% else %}
+          <li><b>Result:</b> being tested. This fills in after the first nightly run.</li>
+        {% endif %}
+      </ul>
+      {% if c.by_symbol %}
+        <details style="margin-top:var(--s2)">
+          <summary>Each instrument ({{ c.by_symbol|length }})</summary>
+          <div class="tablewrap">
+            <table class="stack">
+              <thead><tr><th>Instrument</th><th class="r">Measured</th><th class="r">Usually</th></tr></thead>
+              <tbody>
+              {% for r in c.by_symbol %}
+                <tr>
+                  <td class="lead"><b>{{ r.name }}</b></td>
+                  {% if c.measure == 'mean' %}
+                    <td class="r fig" data-label="Measured">{% if r.mean is not none %}{{ '%.2f'|format(r.mean) }}{% else %}—{% endif %}</td>
+                    <td class="r fig" data-label="Usually">{% if r.base is not none %}{{ '%.2f'|format(r.base) }}{% else %}—{% endif %}</td>
+                  {% else %}
+                    <td class="r" data-label="Measured">{{ rate(r.rate) }}</td>
+                    <td class="r" data-label="Usually">{{ rate(r.base) }}</td>
+                  {% endif %}
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      {% endif %}
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if page.bias and page.bias.measured %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>How the daily lean did</h2></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr><th>Instrument</th><th class="r">Days</th><th class="r">Leaned</th>
+          <th class="r">Right</th><th class="r">Closed up</th><th class="r">Reached a target</th></tr></thead>
+        <tbody>
+        {% for b in ([page.bias.pooled] if page.bias.pooled else []) + page.bias.rows %}
+          <tr>
+            <td class="lead"><b>{{ 'All together' if b.symbol == '_all' else b.name }}</b></td>
+            <td class="r fig" data-label="Days">{{ "{:,}".format(b.days) }}</td>
+            <td class="r fig" data-label="Leaned">{{ "{:,}".format(b.called) }}</td>
+            <td class="r" data-label="Right">{{ rate(b.rate) }}</td>
+            <td class="r" data-label="Closed up">{{ b.up.rate|pct(0) if b.up else '—' }}</td>
+            <td class="r" data-label="Reached a target">{{ b.target.rate|pct(0) if b.target else '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="prose" style="margin-top:var(--s2)"><b>Right</b> counts the days it
+    leaned one way and the 16:00 close was on that side. <b>Closed up</b> is how
+    often always guessing up would have been right, over all the days; a coin flip
+    is right half the time.</p>
+</section>
+{% endif %}
+
+{% if page.example %}
+{% set ex = page.example %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>One example, drawn from the prices</h2></div>
+  <div class="card learn-figure">
+    {{ ex.svg|safe }}
+    <p class="prose" style="margin-top:var(--s2)">{{ ex.setup }} on {{ ex.name }},
+      {{ ex.interval_words }} bars. It appeared on the bar of {{ ex.entry_at }}: a
+      {{ ex.side }} at {{ ex.entry }}, stop {{ ex.stop }}, target {{ ex.target }}.
+      The trade ended on the bar of {{ ex.exit_at }}, at
+      <span class="fig">{{ ex.r|signed(2) }}R</span>. Times are New York time.
+      One trade the lab found, not picked for how it turned out: one trade says
+      nothing about the next.</p>
+  </div>
+</section>
+{% endif %}
+
+{% if page.slug in ('risk-and-sizing', 'journal') and (links.size or links.survival or links.breakdown or links.trades) %}
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>Try it on your own numbers</h2></div>
+  <div class="card">
+    <ul class="list">
+      {% if page.slug == 'risk-and-sizing' %}
+        {% if links.size %}<li><a href="{{ links.size }}">Size a position from your account, risk and stop</a></li>{% endif %}
+        {% if links.survival %}<li><a href="{{ links.survival }}">See how long a losing run your risk can survive</a></li>{% endif %}
+      {% endif %}
+      {% if links.trades %}<li><a href="{{ links.trades }}">Log a paper trade in your journal</a></li>{% endif %}
+      {% if links.breakdown %}<li><a href="{{ links.breakdown }}">See which of your setups and habits made money</a></li>{% endif %}
+    </ul>
+  </div>
+</section>
+{% endif %}
+
+{% if page.has_lab or page.claims %}
+<details class="card" id="how-we-tested" style="margin-top:var(--s4)">
+  <summary>How this was measured, and what it cannot tell you</summary>
+  <ul class="list" style="margin-top:var(--s2)">
+    <li>Instruments: {{ page.universe|join(', ') }}, on 5- and 15-minute prices.
+      Times are New York time.</li>
+    {% for line in page.method %}<li>{{ line }}</li>{% endfor %}
+    {% if page.costs %}
+      <li>Costs charged a round trip:
+        {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
+    {% endif %}
+    {% if page.skipped_days.incomplete or page.skipped_days.roll %}
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
+        with too few bars and {{ page.skipped_days.roll }} futures contract-change
+        days.</li>
+    {% endif %}
+    {% if page.cells %}
+      <li>{{ "{:,}".format(page.cells) }} results got a verdict across the lab. About
+        1 in 20 can clear its margin of error by luck alone.</li>
+    {% endif %}
+  </ul>
+  <ul class="list" style="margin-top:var(--s2)">
+    {% for line in page.concept.limits %}<li>{{ line }}</li>{% endfor %}
+    {% for line in page.limits %}<li>{{ line }}</li>{% endfor %}
+  </ul>
+</details>
+{% elif page.concept.limits %}
+<div class="card" style="margin-top:var(--s4)">
+  <span class="eyebrow">What this cannot tell you</span>
+  <ul class="list">{% for line in page.concept.limits %}<li>{{ line }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<div class="card" style="margin-top:var(--s3)">
+  <p class="learn-source">{{ page.source }}{% if not in_app %}
+    <a href="{{ page.video.url }}" rel="nofollow noopener" target="_blank">The video is on YouTube.</a>{% endif %}
+    Past results do not promise future ones. This is software output, not
+    financial advice.</p>
+</div>
+
+<section style="margin-top:var(--s4)">
+  <div class="sechead"><h2>The other ideas</h2>
+    <a class="tail" href="{{ url_for('learn') }}">all of them &rarr;</a></div>
+  <ul class="list">
+    {% for t in page.others %}
+      <li><a href="{{ url_for('learn_topic', slug=t.slug) }}">{{ t.title }}</a></li>
+    {% endfor %}
+  </ul>
+</section>
+
+{% endblock %}

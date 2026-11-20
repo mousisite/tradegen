@@ -54,6 +54,7 @@ SUITES = [
     ("test_billing.py",      False, "paid plans: signed webhooks, allowances, checkout"),
     ("test_appstore.py",     False, "Pro bought in the iPhone app: Apple's signatures, owners, renewals, refunds"),
     ("test_growth.py",       False, "popular pages, sharing, invites, weekly email"),
+    ("test_learn.py",        False, "the Learn pages, the lab box on strategy tests, practice"),
     ("test_push.py",         False, "notifications to phones and browsers, and the installable app"),
     ("test_portfolio_risk.py", False, "open risk, breached stops, shorts, gaps and costs"),
     ("test_alert_loop.py",   False, "call changes, crossed stops, history, email, privacy"),

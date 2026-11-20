@@ -190,6 +190,7 @@
           {% if in_app %}
             <a href="{{ url_for('stocks_index') }}">Popular stocks</a>
             <a href="{{ url_for('backtests') }}">Strategy tests</a>
+            <a href="{{ url_for('learn') }}">Price action, tested</a>
             <a href="{{ url_for('record') }}">Track record</a>
           {% endif %}
         </nav>
@@ -246,6 +247,7 @@
   <a href="{{ url_for('privacy') }}">Privacy</a>{% if not in_app %} ·
   <a href="{{ url_for('stocks_index') }}">Popular stocks</a> ·
   <a href="{{ url_for('backtests') }}">Strategy tests</a> ·
+  <a href="{{ url_for('learn') }}">Price action, tested</a> ·
   <a href="{{ url_for('record') }}">Track record</a>{% if billing_on %} ·
   <a href="{{ url_for('pricing') }}">Pricing</a>{% endif %}{% endif %}
 </p>
@@ -303,6 +305,7 @@
       {% if in_app %}
         <a href="{{ url_for('stocks_index') }}">Popular stocks</a>
         <a href="{{ url_for('backtests') }}">Strategy tests</a>
+        <a href="{{ url_for('learn') }}">Price action, tested</a>
         <a href="{{ url_for('record') }}">Track record</a>
       {% endif %}
       <p class="fine">

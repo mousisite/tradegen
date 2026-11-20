@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% set active = 'stocks' %}
+{% block title %}Practice: call the next move · Orenth{% endblock %}
+{% block og_title %}Practice: call the next move · Orenth{% endblock %}
+{% block head_extra %}<meta name="robots" content="noindex">
+<style>
+  .learn-figure svg { width: 100%; height: auto; display: block; }
+  .learn-picks { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
+  .learn-picks .btn { flex: 1 1 96px; }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow"><a href="{{ url_for('learn') }}">Price action, tested</a></span>
+  <h1>Practice: call the next move</h1>
+  <p>A past chart, cut at the moment the Setup lab found one of the course's
+    setups. Say whether the price went up, down or nowhere much over the next
+    {{ ahead }} bars, then see what it did.</p>
+</div>
+
+{% if not item %}
+  <div class="plainbox">
+    <span class="eyebrow">Being tested</span>
+    <p class="lead">No charts yet. They come from the Setup lab, and fill in after
+      its first nightly run.</p>
+  </div>
+{% else %}
+  <div class="card learn-figure">
+    {{ chart|safe }}
+    {% if reveal %}
+      {% set right = reveal.pick == reveal.answer %}
+      <p class="lead" style="margin-top:var(--s2)">{{ 'Right.' if right else 'Not this time.' }}
+        You said {{ reveal.pick }}; the price went {{ reveal.answer if reveal.answer != 'unclear' else 'nowhere much' }}.</p>
+      <p class="prose">This was {{ name }}, {{ interval_words }} bars, at a
+        {{ setup_label }} setup. Times are New York time.</p>
+      <div class="learn-picks">
+        <a class="btn" href="{{ url_for('learn_practice', n=next_k) }}">Next chart</a>
+        {% if setup_topic %}<a class="btn quiet" href="{{ url_for('learn_topic', slug=setup_topic) }}">About this setup</a>{% endif %}
+      </div>
+    {% else %}
+      <form method="post" action="{{ url_for('learn_practice') }}">
+        <input type="hidden" name="item" value="{{ k }}">
+        <p class="prose" style="margin-top:var(--s2)">Over the next {{ ahead }} bars,
+          the price went:</p>
+        <div class="learn-picks">
+          {% for key, label in picks %}
+            <button class="btn{{ ' quiet' if key == 'unclear' }}" type="submit" name="pick" value="{{ key }}">{{ label }}</button>
+          {% endfor %}
+        </div>
+      </form>
+    {% endif %}
+  </div>
+
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">Your calls this visit</span>
+    {% if tally.n %}
+      <p class="lead">{{ tally.right }} right of {{ tally.n }}
+        <span class="soft">({{ (tally.right / tally.n)|pct(0) }})</span>.</p>
+      <p class="prose">Picking at random among the three would be right about one
+        time in three. Over a few charts, being right more often than that is
+        mostly luck; it takes many to tell.</p>
+      <form method="post" action="{{ url_for('learn_practice') }}" style="margin-top:var(--s2)">
+        <input type="hidden" name="reset" value="1">
+        <button class="btn quiet sm" type="submit">Start over</button>
+      </form>
+    {% else %}
+      <p class="prose">No calls yet.</p>
+    {% endif %}
+    <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)"><b>Up</b>
+      means the close {{ ahead }} bars after the cut was higher than at the cut by more
+      than half a usual bar's range (the average high-to-low of the bars before the
+      cut); <b>down</b> the same, lower; anything between is <b>unclear</b>. The tally
+      is kept in this browser only, not saved to any account. There are
+      {{ count }} charts.</p>
+  </div>
+{% endif %}
+
+{% endblock %}
