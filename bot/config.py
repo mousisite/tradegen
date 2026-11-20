@@ -52,8 +52,8 @@ DEFAULTS: Dict[str, Any] = {
     "cost_bps_other": 5.0,
     # Futures (a symbol ending =F) pay their own: one tick of slippage and a
     # commission of about $5 is 0.6bp on ES at 6,000, 0.25bp on NQ and 0.8bp
-    # on the micro contracts. Charged the 5bp "other" rate they paid about
-    # eight times too much, which sank every 5-minute futures test.
+    # on the micro contracts. Charged the 5bp "other" rate, they paid about
+    # eight times what a futures round trip costs.
     "cost_bps_futures": 1.0,
 
     # --- daily rules for the journal (0 or "" switches each off) ------------
