@@ -5525,6 +5525,23 @@ def _weekly_email_job():
         conn.close()
 
 
+def _lab_job():
+    """The Setup lab and the video's claims, once a day after New York's 17:00.
+
+    Checked every half hour; it measures only when due (setuplab.due), on the
+    house settings every public test runs on, and pauses between downloads.
+    """
+    from bot import setuplab as setuplab_mod
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        if not setuplab_mod.due(conn):
+            return {"checked": 0, "skipped": 1}
+        summary = setuplab_mod.run(conn, cfg=config_mod.load(app.config.get("CFG_PATH")))
+        return {"checked": summary["checked"], "errors": summary["errors"]}
+    finally:
+        conn.close()
+
+
 def _public_base_offline() -> str:
     """The public address outside a request, where request.url_root is not."""
     return ((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().rstrip("/")
@@ -5544,6 +5561,7 @@ def start_background_jobs():
         _weekly_email_job, interval_seconds=1800, name="orenth-weekly-email")
     BACKGROUND["plans"] = scheduler_mod.Scheduler(
         _recheck_plans_job, interval_seconds=3600, name="orenth-plans")
+    BACKGROUND["lab"] = scheduler_mod.Scheduler(_lab_job, interval_seconds=1800, name="orenth-lab")
     for job in BACKGROUND.values():
         job.start()
     # The first popular run soon after start rather than an hour later, but
@@ -5556,6 +5574,12 @@ def start_background_jobs():
     plans = threading.Timer(60, BACKGROUND["plans"].check_now)
     plans.daemon = True
     plans.start()
+    # The Setup lab looks ten minutes after start, so a lab that never ran,
+    # or missed its evening while the server was down, does not wait half an
+    # hour; it measures only when due.
+    lab = threading.Timer(600, BACKGROUND["lab"].check_now)
+    lab.daemon = True
+    lab.start()
     return BACKGROUND
 
 
