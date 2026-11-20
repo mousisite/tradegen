@@ -23,6 +23,7 @@ SUITES = [
     ("test_upstream.py",     True,  "caching, single-flight and backing off a throttled source"),
     ("test_indicators.py",   True,  "indicator maths against known values"),
     ("test_pivots.py",       True,  "pivot levels sit in the right units"),
+    ("test_structure.py",    False, "swings, breaks, sweeps, gaps and the liquidity chain, no peeking"),
     ("test_clock.py",        False, "New York time, trading days, sessions, day levels and gaps"),
     ("test_strategies.py",   True,  "the 34 strategies fire sanely and agree on direction"),
     ("test_options.py",      True,  "Black-Scholes, Greeks, implied volatility, parity"),
