@@ -55,11 +55,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 # --- the one rule ---------------------------------------------------------------
 
 def verdict(mean: Optional[float], se: Optional[float], n: int,
-            minimum: int = MIN_TRADES) -> Optional[int]:
+            minimum: int = MIN_TRADES, days: Optional[int] = None,
+            min_days: int = MIN_DAYS) -> Optional[int]:
     """+1 when the whole range of mean +/- 2 standard errors is above zero, -1
     when it is all below, 0 when it straddles zero, None when there are fewer
-    than `minimum` or no error was measured (public._verdict's rule)."""
+    than `minimum` or no error was measured (public._verdict's rule), or,
+    when `days` is given, when the trades came on fewer than `min_days`
+    separate trading days."""
     if mean is None or se is None or n is None or n < minimum:
+        return None
+    if days is not None and days < min_days:
         return None
     try:
         mean, se = float(mean), float(se)
@@ -520,10 +525,10 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
     diff_se = math.sqrt(dvar) / dn if dn and have_dvar else None
     return {"n": n, "wins": wins, "days": days, "longs": longs, "sum_r": sum_r,
             "sum_r_gross": gross, "mean": mean, "se": se,
-            "verdict": verdict(mean, se, n) if days >= MIN_DAYS else None,
+            "verdict": verdict(mean, se, n, days=days),
             "control_n": cn, "control_mean": (csum / cn) if cn else None,
             "diff": diff, "diff_se": diff_se,
-            "diff_verdict": verdict(diff, diff_se, dn) if days >= MIN_DAYS else None,
+            "diff_verdict": verdict(diff, diff_se, dn, days=days),
             "symbols": symbols}
 
 

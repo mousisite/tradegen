@@ -176,6 +176,9 @@ check("and says nothing below the minimum",
       and labstore.verdict(1.0, 0.01, 9, minimum=10) is None)
 check("or without a margin", labstore.verdict(0.5, None, 100) is None
       and labstore.verdict(0.5, float("nan"), 100) is None)
+check("or when the trades came on fewer than 10 separate days",
+      labstore.verdict(1.0, 0.01, 50, days=9) is None
+      and labstore.verdict(1.0, 0.01, 50, days=10) == 1)
 check("its words", labstore.words(1) == "kept money by more than its margin of error"
       and labstore.words(-1) == "lost money by more than its margin of error"
       and labstore.words(0) == "cannot be told apart from luck"
