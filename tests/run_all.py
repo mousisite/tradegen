@@ -26,6 +26,7 @@ SUITES = [
     ("test_structure.py",    False, "swings, breaks, sweeps, gaps and the liquidity chain, no peeking"),
     ("test_clock.py",        False, "New York time, trading days, sessions, day levels and gaps"),
     ("test_bias.py",         False, "the daily lean from hourly bars, rule by rule, read as of a time"),
+    ("test_labstore.py",     False, "the Setup lab's store and catalog, futures costs, daily-rule settings"),
     ("test_strategies.py",   True,  "the 34 strategies fire sanely and agree on direction"),
     ("test_options.py",      True,  "Black-Scholes, Greeks, implied volatility, parity"),
     ("test_quality.py",      True,  "Piotroski, Altman, Beneish and accruals against known values"),
