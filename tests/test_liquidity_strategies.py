@@ -283,6 +283,55 @@ check("every daily setup on trial takes trades on five years of daily bars",
 check("and the session sweep takes none there", counts["session_sweep"] == 0, counts)
 
 # ---------------------------------------------------------------------------
+head("THE PAGES SAY THEY ARE ON TRIAL")
+# ---------------------------------------------------------------------------
+for key in ("ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET", "STOCKBOT_PUBLIC_URL", "STOCKBOT_BEHIND_PROXY"):
+    _os.environ.pop(key, None)
+import web  # noqa: E402
+from bot import database as db  # noqa: E402
+from bot import public  # noqa: E402
+
+client, DB = harness.isolated_web("liquidity_pages")
+web.app.config["AUTH_MODE"] = None
+page = " ".join(client.get("/backtest/liquidity-model").data.decode("utf-8", "replace").split())
+check("/backtest/liquidity-model draws, with the on-trial note",
+      "Does Sweep, break and retest work?" in page
+      and "Measured here, not used in Orenth's calls until its record shows an edge" in page
+      and "34 other strategies decide the calls" in page, page[:200])
+page = client.get("/backtest/session-sweep").data.decode("utf-8", "replace")
+check("the session sweep's page says its intraday test shows there once run",
+      "Not in the daily test" in page and "5- and 15-minute prices is shown on this page "
+      "once it has run" in " ".join(page.split()))
+page = client.get("/backtest/rsi-reversion").data.decode("utf-8", "replace")
+check("a voting strategy's page has no such note", "Measured here, not used" not in page)
+
+
+def listed(trades):
+    """Store a test of the model on NVDA with this many separate trades, and
+    read the strategy tests page."""
+    conn = db.connect(DB)
+    try:
+        public.save_verdict(conn, {"symbol": "NVDA", "name": "NVIDIA", "action": "WAIT",
+                                   "at": int(time.time()),
+                                   "tests": {"liquidity_model": [trades, trades // 2, 3.0],
+                                             "rsi_reversion": [60, 30, 2.0]}})
+    finally:
+        conn.close()
+    return client.get("/backtests").data.decode("utf-8", "replace")
+
+
+page = listed(39)
+check("the strategy tests leave it off with fewer than 40 separate trades",
+      "Sweep, break and retest" not in page and "RSI reversion" in page)
+page = listed(40)
+row_at = page.find(">Sweep, break and retest</a>")
+check("and list it, marked on trial, once it has 40",
+      row_at > 0 and ">on trial</span>" in page[row_at:row_at + 200])
+check("saying how many decide the call and how many are on trial",
+      "34 strategies decide Orenth's calls; 10" in " ".join(page.split()))
+
+# ---------------------------------------------------------------------------
 head("WHEN THE STRUCTURE CANNOT BE READ")
 # ---------------------------------------------------------------------------
 real_series = liquidity.series
