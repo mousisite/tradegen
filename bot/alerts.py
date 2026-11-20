@@ -14,55 +14,125 @@ useless an hour later.
 An alert fires when its condition becomes true, not every time it is checked
 while it stays true: the last answer is kept on the alert (its state), so one
 that keeps watching speaks again only after the condition has cleared.
+
+The price-action kinds (the levels and shapes TJR's day-trading video
+teaches: yesterday's high and low, opening gaps, breaks of the last swing,
+gaps a move left, the London session's range) say what the price did, with
+the price and the New York time, and never what it will do. Those about an
+event on a finished bar keep the start time of the last bar they looked at
+as their state ("bar:<time>"), so each bar is looked at once: an event is
+told once, and one that happened between two checks is not missed.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from datetime import date
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from . import clock, liquidity
 from . import indicators as ind
 from . import sessions
 from .market import (DataError, fetch_bars, format_price, split_factor_since,
                      split_words, splits_since)
 
+# The groups the Monitor form lists the kinds under, in this order.
+GROUPS = ("Price", "Indicators", "Price action", "Calls")
+
 KINDS: Dict[str, Dict] = {
     "price_above": {"label": "Price rises above", "needs_threshold": True,
-                    "unit": "price"},
+                    "unit": "price", "group": "Price"},
     "price_below": {"label": "Price falls below", "needs_threshold": True,
-                    "unit": "price"},
+                    "unit": "price", "group": "Price"},
     "pct_up": {"label": "Rises by at least", "needs_threshold": True,
-               "unit": "percent"},
+               "unit": "percent", "group": "Price"},
     "pct_down": {"label": "Falls by at least", "needs_threshold": True,
-                 "unit": "percent"},
+                 "unit": "percent", "group": "Price"},
     "rsi_above": {"label": "RSI goes above", "needs_threshold": True,
-                  "unit": "level"},
+                  "unit": "level", "group": "Indicators"},
     "rsi_below": {"label": "RSI falls below", "needs_threshold": True,
-                  "unit": "level"},
+                  "unit": "level", "group": "Indicators"},
     "near_52w_high": {"label": "Comes within", "needs_threshold": True,
-                      "unit": "percent", "suffix": "of its 52-week high"},
+                      "unit": "percent", "suffix": "of its 52-week high",
+                      "group": "Price"},
     "near_52w_low": {"label": "Comes within", "needs_threshold": True,
-                     "unit": "percent", "suffix": "of its 52-week low"},
+                     "unit": "percent", "suffix": "of its 52-week low",
+                     "group": "Price"},
     "volume_spike": {"label": "Trades on more than", "needs_threshold": True,
-                     "unit": "multiple", "suffix": "its normal volume"},
+                     "unit": "multiple", "suffix": "its normal volume",
+                     "group": "Indicators"},
     "crosses_ma": {"label": "Closes above its 50-bar average",
-                   "needs_threshold": False, "unit": ""},
+                   "needs_threshold": False, "unit": "", "group": "Indicators"},
     "loses_ma": {"label": "Closes below its 50-bar average",
-                 "needs_threshold": False, "unit": ""},
+                 "needs_threshold": False, "unit": "", "group": "Indicators"},
+    # Price action, as the course reads a chart. None needs a value. "say"
+    # is the condition in the middle of a sentence, its capitals kept.
+    # "event": about something a finished bar did, told once per bar.
+    "takes_prior_high": {"label": "Trades above yesterday's high",
+                         "needs_threshold": False, "unit": "", "group": "Price action",
+                         "say": "trades above yesterday's high"},
+    "takes_prior_low": {"label": "Trades below yesterday's low",
+                        "needs_threshold": False, "unit": "", "group": "Price action",
+                        "say": "trades below yesterday's low"},
+    "sweeps_prior_high": {"label": "Takes yesterday's high, then closes back below it",
+                          "needs_threshold": False, "unit": "", "group": "Price action",
+                          "say": "takes yesterday's high, then closes back below it",
+                          "event": True},
+    "sweeps_prior_low": {"label": "Takes yesterday's low, then closes back above it",
+                         "needs_threshold": False, "unit": "", "group": "Price action",
+                         "say": "takes yesterday's low, then closes back above it",
+                         "event": True},
+    "gap_fills": {"label": "Today's opening gap fills", "needs_threshold": False,
+                  "unit": "", "group": "Price action",
+                  "say": "fills the gap its day opened with", "event": True},
+    "structure_breaks": {"label": "Closes past its last swing the other way "
+                                  "(a break of structure)",
+                         "needs_threshold": False, "unit": "", "group": "Price action",
+                         "say": "closes past its last swing the other way "
+                                "(a break of structure)", "event": True},
+    "back_in_gap": {"label": "Pulls back into its newest gap", "needs_threshold": False,
+                    "unit": "", "group": "Price action",
+                    "say": "pulls back into the newest gap its move left", "event": True},
+    "takes_session_range": {"label": "Trades outside London's range, 08:30 to 12:00 "
+                                     "New York",
+                            "needs_threshold": False, "unit": "", "group": "Price action",
+                            "say": "trades outside London's range between 08:30 and "
+                                   "12:00 New York time", "event": True},
     # Calls rather than prices: the app's own BUY / WAIT / AVOID for the
     # instrument, worked out with the standard settings.
     "call_changes": {"label": "Call changes (for example WAIT to BUY)",
-                     "needs_threshold": False, "unit": "", "call": True},
+                     "needs_threshold": False, "unit": "", "call": True,
+                     "group": "Calls"},
     "call_buy": {"label": "Call turns BUY", "needs_threshold": False, "unit": "",
-                 "call": True},
+                 "call": True, "group": "Calls"},
 }
 
 CALL_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("call"))
+EVENT_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("event"))
+PRICE_ACTION_KINDS = tuple(k for k, spec in KINDS.items()
+                           if spec.get("group") == "Price action")
+# Said at the end of every price-action message: what it is, and is not.
+FACT = "A fact about price, not a forecast."
+
+
+class NotApplicable(Exception):
+    """An alert that cannot mean anything on its instrument or bar size.
+
+    Its words are kept on the alert in place of an answer, as a failed check
+    is, so the Monitor page says why it never fires.
+    """
+
+
+def grouped() -> List[Tuple[str, List[Tuple[str, Dict]]]]:
+    """The kinds under their GROUPS, for the Monitor form's lists."""
+    return [(g, [(k, spec) for k, spec in KINDS.items() if spec.get("group") == g])
+            for g in GROUPS]
 
 # Tested on daily bars whatever bar size the alert was set on. A 52-week high
 # is a year of trading, and 252 five-minute bars are three days.
@@ -154,6 +224,9 @@ def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
     spec = KINDS.get(kind)
     if not spec:
         return "%s: unknown condition" % symbol
+    if spec.get("say"):
+        # Lower-cased, "London" and "New York" would read wrong.
+        return "%s %s" % (symbol, spec["say"])
     if not spec["needs_threshold"]:
         return "%s %s" % (symbol, spec["label"].lower())
     unit = spec["unit"]
@@ -377,7 +450,236 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
                         % (symbol, format_price(close[-1]), when, format_price(ma[-1])))
         return None
 
+    if kind in PRICE_ACTION_KINDS:
+        return _price_action(row, bars)[0]
+
     return None
+
+
+# --- Price action -----------------------------------------------------------------
+
+def _finite(*values) -> bool:
+    try:
+        return all(v is not None and math.isfinite(float(v)) for v in values)
+    except (TypeError, ValueError):
+        return False
+
+
+def _row_value(row, key):
+    try:
+        return row[key] if key in row.keys() else None
+    except (AttributeError, IndexError, KeyError):
+        return None
+
+
+def _live_moment(bars) -> Optional[int]:
+    """When the live price was set, if the data says."""
+    meta = getattr(bars, "meta", None) or {}
+    when = meta.get("regularMarketTime")
+    try:
+        return int(when) if when else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _yesterday(bars, s: Dict[str, np.ndarray]) -> Tuple[float, float]:
+    """(high, low) of the last whole trading day before the live price's.
+
+    The series give it for the day of the last finished bar. When the live
+    price is already in a newer bar of a newer day (a daily bar split off
+    while the market trades, or the first bar of a session), that last
+    finished day is yesterday itself, and the series would reach a day too
+    far back. NaN when the data holds no whole day before.
+    """
+    nan = float("nan")
+    n = len(bars.close)
+    if n == 0:
+        return nan, nan
+    live = _live_moment(bars)
+    kind = clock.kind_of(bars)
+    start = int(bars.timestamp[-1])
+    newer = live is not None and live >= start + clock.bar_seconds(bars)
+    if newer and kind == "daily":
+        return float(bars.high[-1]), float(bars.low[-1])
+    if newer and clock.trading_day(live, kind).toordinal() > int(s["ck_day"][-1]):
+        last = clock.day_table(bars)[-1]
+        if last.complete:
+            return float(last.high), float(last.low)
+    return float(s["ck_pdh"][-1]), float(s["ck_pdl"][-1])
+
+
+def _bar_when(bars, s: Dict[str, np.ndarray], j: int) -> str:
+    """'in the bar that opened at 10:00 New York time on 19 Nov', or 'on 19
+    Nov' for a daily bar (its trading day, whatever time it is stamped at)."""
+    if clock.kind_of(bars) == "daily":
+        day = date.fromordinal(int(s["ck_day"][j]))
+        return "on %d %s" % (day.day, clock._MONTHS[day.month - 1])
+    stamp = clock.label_ny(int(bars.timestamp[j]))
+    day, _, hm = stamp.rpartition(" ")
+    return "in the bar that opened at %s New York time on %s" % (hm, day)
+
+
+def _since(row, bars) -> Tuple[int, bool]:
+    """Where an event alert's last look ended: (time, True) for the start of
+    the last bar looked at, from its state, or (time, False) for the moment
+    it was set, or last checked, when it has no state yet (a new alert, or
+    one re-armed or edited)."""
+    state = _state(row) or ""
+    if state.startswith("bar:"):
+        try:
+            return int(state[4:]), True
+        except ValueError:
+            pass
+    created = int(_row_value(row, "created_ts") or 0)
+    checked = int(_row_value(row, "last_checked") or 0)
+    return max(created, checked), False
+
+
+def _first_of_day(cond: np.ndarray, day: np.ndarray) -> np.ndarray:
+    """True at the first bar of each trading day where cond holds."""
+    out = np.zeros(len(cond), dtype=bool)
+    seen = None
+    for j in np.flatnonzero(cond):
+        if day[j] != seen:
+            out[j] = True
+            seen = day[j]
+    return out
+
+
+def _price_action(row, bars) -> Tuple[Optional[Fired], Optional[str]]:
+    """A price-action alert against fresh bars: (what fired or None, the
+    state to keep). The state is None for the kinds that read the live price
+    (met and clear are kept by check()), "bar:<start time>" of the newest
+    finished bar for the others. Raises NotApplicable for a kind its
+    instrument or bar size cannot have."""
+    kind = row["kind"]
+    symbol = row["symbol"]
+    threshold = row["threshold"]
+    instrument = clock.instrument_of(bars)
+    daily = clock.kind_of(bars) == "daily"
+    if kind == "takes_session_range":
+        if instrument == "stock":
+            raise NotApplicable("%s trades only in the day session, so it has no "
+                                "London session." % symbol)
+        if daily:
+            raise NotApplicable("sessions need bars shorter than a day: set this "
+                                "alert on 5-minute, 15-minute or hourly bars.")
+    if kind == "gap_fills" and instrument == "coin":
+        raise NotApplicable("%s trades round the clock, so its day opens with no "
+                            "gap." % symbol)
+
+    def fire(value, message):
+        return Fired(int(row["id"]), symbol, kind, threshold, value,
+                     "%s %s" % (message, FACT), row["note"] or "", _owner(row), as_of(bars))
+
+    n = len(bars.close)
+    if n < 3:
+        return None, None
+    s = liquidity.series(bars)
+    fp = format_price
+
+    if kind in ("takes_prior_high", "takes_prior_low"):
+        high, low = _yesterday(bars, s)
+        price = float(bars.last_price)
+        up = kind == "takes_prior_high"
+        level = high if up else low
+        if not _finite(level, price):
+            return None, None
+        if (price > level) if up else (price < level):
+            return fire(price, "%s is at %s, %s yesterday's %s of %s."
+                        % (symbol, fp(price), "above" if up else "below",
+                           "high" if up else "low", fp(level))), None
+        return None, None
+
+    ts = np.asarray(bars.timestamp, dtype=np.int64)
+    step = clock.bar_seconds(bars)
+    since, from_state = _since(row, bars)
+    if from_state:
+        first = int(np.searchsorted(ts, since, side="right"))
+    else:
+        # A first look: bars finished after the alert was set (or last
+        # looked at), so an event from before is not news.
+        first = int(np.searchsorted(ts + step, since, side="right"))
+    state = "bar:%d" % int(ts[-1])
+
+    close = np.asarray(bars.close, dtype=float)
+    day = s["ck_day"]
+    with np.errstate(invalid="ignore"):
+        if kind == "sweeps_prior_high":
+            cond = _first_of_day((s["ck_day_hi"] > s["ck_pdh"]) & (close < s["ck_pdh"]), day)
+        elif kind == "sweeps_prior_low":
+            cond = _first_of_day((s["ck_day_lo"] < s["ck_pdl"]) & (close > s["ck_pdl"]), day)
+        elif kind == "gap_fills":
+            filled = s["ck_gap_filled"] == 1
+            prev = np.concatenate([[True], filled[:-1]])
+            new_day = np.concatenate([[False], day[1:] != day[:-1]])
+            cond = filled & (~prev | new_day) & np.isfinite(s["ck_gap_lo"])
+            cond[0] = False             # filled before the data starts, or on it
+        elif kind == "structure_breaks":
+            cond = s["st_flip"] != 0
+        elif kind == "back_in_gap":
+            trend = np.concatenate([[0], s["st_trend"][:-1]])
+            cond = (s["st_fvg_touch"] != 0) & (s["st_fvg_touch"] == trend)
+        elif kind == "takes_session_range":
+            cond = (s["ck_sess_take"] != 0) | (s["ck_sess_both"] == 1)
+        else:
+            return None, state
+    hits = [j for j in np.flatnonzero(cond) if j >= first]
+    if not hits:
+        return None, state
+    j = int(hits[-1])
+    when = _bar_when(bars, s, j)
+    c = float(close[j])
+
+    if kind in ("sweeps_prior_high", "sweeps_prior_low"):
+        up = kind == "sweeps_prior_high"
+        level = float(s["ck_pdh"][j] if up else s["ck_pdl"][j])
+        message = ("%s took yesterday's %s of %s and closed back %s it, at %s, %s."
+                   % (symbol, "high" if up else "low", fp(level),
+                      "below" if up else "above", fp(c), when))
+        value = c
+    elif kind == "gap_fills":
+        d = int(s["ck_gap_dir"][j])
+        level = float(s["ck_gap_lo"][j] if d > 0 else s["ck_gap_hi"][j])
+        message = ("%s traded back to the previous close of %s %s, filling the gap "
+                   "its day opened with." % (symbol, fp(level), when))
+        value = level
+    elif kind == "structure_breaks":
+        d = int(s["st_flip"][j])
+        level = float(s["st_ref_hi" if d > 0 else "st_ref_lo"][j - 1]) if j > 0 else float("nan")
+        message = ("%s closed at %s, %s its last swing %s%s, %s: on these bars the "
+                   "trend turned %s." % (symbol, fp(c), "above" if d > 0 else "below",
+                                         "high" if d > 0 else "low",
+                                         " of %s" % fp(level) if _finite(level) else "",
+                                         when, "up" if d > 0 else "down"))
+        value = c
+    elif kind == "back_in_gap":
+        d = int(s["st_fvg_touch"][j])
+        top = float(s["st_fvg_up_top" if d > 0 else "st_fvg_dn_top"][j - 1])
+        bot = float(s["st_fvg_up_bot" if d > 0 else "st_fvg_dn_bot"][j - 1])
+        zone = (" between %s and %s" % (fp(bot), fp(top))) if _finite(top, bot) else ""
+        message = ("%s came back into the gap%s that its %s left, %s, and closed at %s."
+                   % (symbol, zone, "rise" if d > 0 else "fall", when, fp(c)))
+        value = c
+    else:                                   # takes_session_range
+        src = clock.SESS_SOURCES[int(s["ck_sess_src"][j])] or "london"
+        hi = float(s["ck_lon_hi" if src == "london" else "ck_asia_hi"][j])
+        lo = float(s["ck_lon_lo" if src == "london" else "ck_asia_lo"][j])
+        which = "the London session's" if src == "london" else "the Asia session's"
+        d = int(s["ck_sess_take"][j])
+        if d == 0:
+            what = "past both ends of %s range, %s and %s," % (which, fp(lo), fp(hi))
+        elif d > 0:
+            what = "below %s low of %s" % (which, fp(lo))
+        else:
+            what = "above %s high of %s" % (which, fp(hi))
+        message = "%s traded %s %s, and closed at %s." % (symbol, what, when, fp(c))
+        if src != "london":
+            message += " London's prices were incomplete that day, so Asia's range was used."
+        value = c
+    if len(hits) > 1:
+        message += " It was the latest of %d since the last look." % len(hits)
+    return fire(value, message), state
 
 
 def _within_plan(conn, rows, limit_of: Callable[[int], Optional[int]]):
@@ -546,8 +848,17 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         if is_call and call is None:
             db.alert_failed(conn, int(row["id"]), "The call could not be worked out just now.")
             continue
+        is_event = row["kind"] in EVENT_KINDS
         try:
-            hit = _evaluate(row, bars, call)
+            if is_event:
+                hit, seen = _price_action(row, bars)
+            else:
+                hit = _evaluate(row, bars, call)
+        except NotApplicable as exc:
+            # Nothing went wrong: the condition cannot happen on this
+            # instrument or bar size, and the alert says so instead of firing.
+            db.alert_failed(conn, int(row["id"]), str(exc)[:200])
+            continue
         except Exception as exc:
             errors.append({"symbol": row["symbol"], "error": str(exc)[:120]})
             db.alert_failed(conn, int(row["id"]), str(exc)[:120])
@@ -556,6 +867,10 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         was = _state(row)
         if is_call:
             state = call
+        elif is_event:
+            # The last bar looked at: a bar is looked at once, so an event is
+            # told once, and none between two checks is missed.
+            state = seen or was
         else:
             state = "met" if hit else "clear"
             # Still true since the last look, so not news: an alert that keeps
@@ -831,10 +1146,69 @@ def suggest_for(symbol: str, plan=None, bars=None) -> List[Dict]:
         out.append({"kind": "near_52w_high", "threshold": 0.02,
                     "why": "Approaching the 52-week high, where breakouts and "
                            "rejections both happen."})
+        out.extend(_price_action_suggestions(bars))
     for item in out:
         # What the form sends: a percent as the whole number a person would
-        # type, since the form reads 5 as 5%.
-        item["form_value"] = (round(item["threshold"] * 100, 6)
-                              if KINDS[item["kind"]]["unit"] == "percent"
-                              else item["threshold"])
+        # type, since the form reads 5 as 5%; nothing for a kind with no value.
+        if item["threshold"] is None:
+            item["form_value"] = ""
+        else:
+            item["form_value"] = (round(item["threshold"] * 100, 6)
+                                  if KINDS[item["kind"]]["unit"] == "percent"
+                                  else item["threshold"])
+    return out
+
+
+# The most bars suggest_for reads the levels from: enough for yesterday and
+# the swings that matter now, and quick on sixty days of five-minute bars.
+SUGGEST_BARS = 1500
+
+
+def _price_action_suggestions(bars) -> List[Dict]:
+    """The course's levels worth being told about, for the bars an analysis
+    is on: a take of the nearer of yesterday's high and low, a break of the
+    last swing the other way, and today's opening gap filling while it is
+    open. Nothing when the bars cannot be read that way."""
+    try:
+        n = len(bars.close)
+        if n < 30:
+            return []
+        tail = bars
+        if n > SUGGEST_BARS:
+            k = SUGGEST_BARS
+            tail = dataclasses.replace(
+                bars, timestamp=bars.timestamp[-k:], open=bars.open[-k:],
+                high=bars.high[-k:], low=bars.low[-k:], close=bars.close[-k:],
+                volume=bars.volume[-k:], session_id=bars.session_id[-k:],
+                dividend_factor=None)
+        s = liquidity.series(tail)
+        high, low = _yesterday(tail, s)
+        price = float(bars.last_price)
+    except Exception:
+        return []
+    out: List[Dict] = []
+    if _finite(high, low, price):
+        up = abs(high - price) <= abs(price - low)
+        out.append({"kind": "sweeps_prior_high" if up else "sweeps_prior_low",
+                    "threshold": None,
+                    "why": "Yesterday's %s, %s, is the nearer of its high and low. This "
+                           "tells you if price trades past it and then closes back "
+                           "inside, the move the course watches for. It says what "
+                           "happened, not what comes next."
+                           % ("high" if up else "low", format_price(high if up else low))})
+    out.append({"kind": "structure_breaks", "threshold": None,
+                "why": "Tells you when a bar closes past the last swing the other way, "
+                       "which the course reads as the trend on these bars turning."})
+    if clock.kind_of(tail) != "daily" and _finite(s["ck_gap_lo"][-1], s["ck_gap_hi"][-1]) \
+            and not s["ck_gap_filled"][-1]:
+        live = _live_moment(bars)
+        today = (live is None or clock.trading_day(live, clock.kind_of(tail)).toordinal()
+                 == int(s["ck_day"][-1]))
+        if today:
+            d = int(s["ck_gap_dir"][-1])
+            prev = float(s["ck_gap_lo"][-1] if d > 0 else s["ck_gap_hi"][-1])
+            out.append({"kind": "gap_fills", "threshold": None,
+                        "why": "Today opened with a gap %s the previous close of %s. "
+                               "This tells you if price trades back to it."
+                               % ("up from" if d > 0 else "down from", format_price(prev))})
     return out
