@@ -340,6 +340,7 @@ try:
                  "/research?symbol=NVDA&interval=1d", "/ideas",
                  "/ideas?market=stocks&horizon=medium&risk=balanced", "/screener",
                  "/screener?preset=quality_value", "/portfolio", "/trades",
+                 "/tools/size", "/tools/survival", "/trades/breakdown",
                  "/monitor", "/strategies", "/settings", "/account", "/usage",
                  "/api/alerts/status", "/api/analyse?symbol=NVDA"):
         get(visitor, "visitor", path)
@@ -448,7 +449,8 @@ try:
                  "/research?symbol=NVDA&interval=1d", "/api/analyse?symbol=NVDA",
                  "/analyse?symbol=ZZZZ&interval=1d", "/analyse?symbol=BOOM&interval=1d",
                  "/ideas", "/screener", "/screener?go=1&symbols=AAPL", "/portfolio",
-                 "/trades", "/monitor", "/strategies", "/settings", "/account",
+                 "/trades", "/tools/size", "/tools/survival", "/trades/breakdown",
+                 "/monitor", "/strategies", "/settings", "/account",
                  "/pricing", "/usage", "/api/alerts/status", "/stocks", "/stock/nvda",
                  "/record", "/backtests", "/billing/done", "/no-such-page"):
         get(member, "free", path)

@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% set active = 'trades' %}
+{% from "_help.html" import help with context %}
+{% block title %}What your journal says · Orenth{% endblock %}
+{% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <span class="eyebrow">Your journal</span>
+  <h1>What your journal says</h1>
+  <p>Your closed trades, after costs, split by the setup you tagged, when you
+    entered, how you felt and whether you kept to your plan. Measured on your own
+    trades only; it says nothing about anyone else's.</p>
+</div>
+
+{% if not r.trades %}
+  <div class="card"><div class="blank">No closed trades yet. Once you close some,
+    this page splits their results by your tags.
+    <a href="{{ url_for('trades') }}">Open the journal</a></div></div>
+{% else %}
+
+{% set o = r.overall %}
+{% if r.trades < min_trust %}
+  <div class="notice" style="margin-bottom:var(--s3)">{{ r.trades }} closed
+    trade{{ '' if r.trades == 1 else 's' }} is not enough to separate skill from
+    luck. Thirty is a reasonable minimum before any of these numbers mean something,
+    and each group below has fewer still.</div>
+{% endif %}
+
+<div class="card">
+  <div class="figs">
+    <div class="f"><div class="k">Closed trades</div>
+      <div class="v fig">{{ r.trades }}</div>
+      <div class="n">{{ o.wins }} won</div></div>
+    <div class="f"><div class="k">Average per trade</div>
+      <div class="v fig {{ 'gain' if o.avg_r > 0 else 'loss' }}">{{ o.avg_r|signed(2) }}R</div>
+      <div class="n">{% if o.margin is not none %}give or take {{ '%.2f'|format(o.margin) }}R{% else %}too few to give a margin{% endif %}</div></div>
+    <div class="f"><div class="k">Green days {{ help('green_days') }}</div>
+      <div class="v fig">{{ r.green.green }} of {{ r.green.days }}</div>
+      <div class="n">{{ r.green.red }} down{% if r.green.even %} · {{ r.green.even }} even{% endif %}</div></div>
+    {% if r.breakeven %}
+    <div class="f"><div class="k">Break-even hit rate {{ help('breakeven_own') }}</div>
+      <div class="v fig">{{ r.breakeven.needed|pct }}</div>
+      <div class="n">you hit {{ r.breakeven.reached|pct }}</div></div>
+    {% endif %}
+    {% if r.best_day %}
+    <div class="f"><div class="k">Best day's share {{ help('best_day_share') }}</div>
+      <div class="v fig">{{ r.best_day.share|pct }}</div>
+      <div class="n">{{ r.best_day.best_r|signed(2) }}R of {{ r.best_day.total_r|signed(2) }}R</div></div>
+    {% endif %}
+  </div>
+  <p class="prose" style="margin-top:var(--s3)">
+    {% if r.breakeven %}With your average win of {{ '%.2f'|format(r.breakeven.avg_win) }}R
+      and average loss of {{ '%.2f'|format(r.breakeven.avg_loss) }}R, you need to win
+      {{ r.breakeven.needed|pct }} of the trades that won or lost to break even; you won
+      {{ r.breakeven.reached|pct }} of {{ r.breakeven.decided }}.{% endif %}
+    {% if r.best_day and r.best_day.share > 1 %}Your best day made more than all of
+      your profit: without it you would be down.{% elif r.best_day and r.best_day.share > 0.5 %}More
+      than half your profit came from one day.{% endif %}
+    Your average per trade, all together: {{ o.verdict }}.
+  </p>
+</div>
+
+{% for by, title, groups in r.splits %}
+<section>
+  <div class="sechead"><h2>{{ title }}{% if by == 'followed_plan' %} {{ help('followed_plan') }}{% endif %}</h2>
+    <span class="tail">{{ groups|length }} group{{ '' if groups|length == 1 else 's' }}</span></div>
+  <div class="card pad0">
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr><th>Group</th><th class="r">Trades</th><th class="r">Hit rate</th>
+          <th class="r">Average</th><th class="r">Total</th><th>What it says</th></tr></thead>
+        <tbody>
+        {% for g in groups %}
+          <tr>
+            <td><b>{{ g.label }}</b></td>
+            <td class="r fig" data-label="Trades">{{ g.trades }}</td>
+            <td class="r fig" data-label="Hit rate">{{ g.hit_rate|pct }}</td>
+            <td class="r fig {{ 'gain' if g.avg_r > 0 else 'loss' if g.avg_r < 0 }}" data-label="Average">{{ g.avg_r|signed(2) }}R
+              {% if g.margin is not none %}<div class="faint" style="font-size:var(--t-xs)">give or take {{ '%.2f'|format(g.margin) }}R</div>{% endif %}</td>
+            <td class="r fig" data-label="Total">{{ g.total_r|signed(2) }}R</td>
+            <td class="soft" data-label="What it says">{{ g.verdict|capitalize }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endfor %}
+
+<section id="limits">
+  <div class="sechead"><h2>Would a loss limit have stopped you? {{ help('loss_limit') }}</h2></div>
+  <div class="card">
+    <form method="get" action="{{ url_for('journal_breakdown') }}#limits" class="setgrid">
+      <div class="setfield">
+        <label for="limit">Loss limit, in R</label>
+        <input class="field fig" id="limit" name="limit" type="number" step="any" min="0"
+               inputmode="decimal" value="{{ '%g'|format(limit_r) }}">
+      </div>
+      <div class="setfield">
+        <label for="target">Profit target, in R <span class="faint">optional</span></label>
+        <input class="field fig" id="target" name="target" type="number" step="any" min="0"
+               inputmode="decimal" value="{{ '%g'|format(target_r) if target_r else '' }}">
+      </div>
+      <div class="setfield" style="align-self:end"><button class="btn quiet" type="submit">Check</button></div>
+    </form>
+    {% if problem %}<p class="prose" style="margin-top:var(--s2);color:var(--loss)">{{ problem }}</p>{% endif %}
+    <ul class="list" style="margin-top:var(--s3)">
+      {% for key, words in [('static', 'A fixed limit, ' ~ '%g'|format(limit_r) ~ 'R below where you started'),
+                            ('eod', 'One that trails your best end of day by ' ~ '%g'|format(limit_r) ~ 'R'),
+                            ('trailing', 'One that trails your best balance after any trade by ' ~ '%g'|format(limit_r) ~ 'R')] %}
+        {% set hit = limits[key] %}
+        <li>{{ words }}: {% if hit %}<b>hit</b> on {{ hit.ts|day }}, at {{ hit.balance|signed(2) }}R.{% else %}not hit.{% endif %}</li>
+      {% endfor %}
+      {% if target_r %}{% set hit = limits.target %}
+        <li>A profit target of {{ '%g'|format(target_r) }}R: {% if hit %}<b>reached</b> on {{ hit.ts|day }}.{% else %}not reached.{% endif %}</li>
+      {% endif %}
+    </ul>
+    <p class="prose" style="margin-top:var(--s2)">Walked through your closed trades in
+      the order they closed, after costs, from a start of 0R; you end at
+      {{ limits.balance|signed(2) }}R. Only closed trades are seen, so a loss that was
+      deeper while a trade was open is not counted.</p>
+  </div>
+</section>
+
+{% endif %}
+
+<p class="prose" style="margin-top:var(--s4)"><a href="{{ url_for('trades') }}">Back to the journal</a> ·
+  <a href="{{ url_for('survival_tool') }}{% if r.trades >= 20 %}?source=journal{% endif %}">How long your account lasts at each risk</a></p>
+
+{% endblock %}

@@ -1,6 +1,13 @@
 {% extends "base.html" %}
 {% set active = 'trades' %}
 {% block title %}Journal · Orenth{% endblock %}
+{% from "_journal_tags.html" import tick_style, setup_field, emotion_field, checklist_field with context %}
+{% block head_extra %}{{ tick_style() }}{% endblock %}
+
+{# A trade's tags as small chips: its setup, feeling and checklist, and a
+   daily rule it was logged against. #}
+{% macro tag_chips(t) %}{% set said = tags.tags_of(t) %}{% set broke = tags.broke_of(t) %}{% if said or broke %}
+  <div class="tags">{% for word in said %}<span class="chip mute">{{ word }}</span>{% endfor %}{% if broke %}<span class="chip hold" title="Logged after {{ broke|join(' and ') }} said to stop">broke a rule</span>{% endif %}</div>{% endif %}{% endmacro %}
 
 {# The call a trade was taken from, when it came from an analysis: logging one
    writes "from run #12 (BUY)" into the trade. Empty for any other trade. #}
@@ -24,6 +31,9 @@
 {% endif %}
 {% if said %}
   <div class="saved">{{ said }}</div>
+{% endif %}
+{% if request.args.get('reviewed') %}
+  <div class="saved">Your review is kept with the trade.</div>
 {% endif %}
 {% if request.args.get('changed') %}
   <div class="notice" style="margin-bottom:var(--s3)">That position had changed
@@ -71,8 +81,14 @@
       still open. A trade counts here once it is closed in full, at the R of
       the whole position.</p>
   {% endif %}
+  <p class="prose" style="margin-top:var(--s2)">
+    <a href="{{ url_for('journal_breakdown') }}">What your journal says</a>: these
+    results split by setup, session, feeling and whether you followed your plan.</p>
 </div>
 {% endif %}
+<p class="prose" style="margin-top:var(--s2)">Tools:
+  <a href="{{ url_for('size_tool') }}">how big a position</a> ·
+  <a href="{{ url_for('survival_tool') }}">how long an account lasts at each risk</a></p>
 
 <section>
   <div class="sechead"><h2>Log a trade by hand</h2>
@@ -138,7 +154,18 @@
           <div class="hint">The stop follows the best price since you opened, this
             far behind it, and only ever tightens. Leave it empty for a fixed stop.</div>
         </div>
+        <div class="setfield">
+          <label for="m-opened">When you entered</label>
+          <input class="field fig" id="m-opened" name="opened" type="datetime-local"
+                 value="{{ tags.entry_now }}" min="{{ tags.entry_min }}">
+          <input type="hidden" name="opened_shown" value="{{ tags.entry_now }}">
+          <div class="hint">New York time. Leave it as it is for now, or go back up
+            to 30 days. Your session and time of day are worked out from it.</div>
+        </div>
+        {{ setup_field(tags, 'm-setup') }}
+        {{ emotion_field(tags, 'm-emotion') }}
       </div>
+      <div style="margin-top:var(--s3)">{{ checklist_field(tags, 'm-check') }}</div>
       <button class="btn quiet" type="submit" style="margin-top:var(--s3)">Add to journal</button>
     </form>
   </div>
@@ -178,7 +205,9 @@
                 of {{ qty(p.size) }} still open</div>
               <div class="faint" style="font-size:var(--t-xs)">{{ qty(p.closed) }} closed
                 at {{ p.avg_exit|price }}{{ ' on average' if p.parts > 1 }},
-                {{ p.pnl|signed }}</div>{% endif %}</td>
+                {{ p.pnl|signed }}</div>{% endif %}
+              {{ tag_chips(t) }}
+              <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div></td>
             <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
               {{ 'Long' if long else 'Short' }}</span></td>
             <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
@@ -316,9 +345,41 @@
           {% set rr = ((t['target1'] - t['entry']) / (t['entry'] - t['stop']))
                       if t['target1'] and t['entry'] != t['stop'] else none %}
           {% set from_call = call_of(t) %}
-          <tr>
+          <tr id="t{{ t['id'] }}">
             <td><b>{{ t['symbol'] }}</b>{% if from_call %}
-              <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}</td>
+              <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}
+              {{ tag_chips(t) }}
+              {% if t['followed_plan'] or t['lesson'] %}
+                <div class="faint" style="font-size:var(--t-xs);margin-top:4px">{% if t['followed_plan'] %}Followed the plan:
+                  {{ tags.followed_labels.get(t['followed_plan'], '')|lower }}.{% endif %}
+                  {% if t['lesson'] %}{{ t['lesson'] }}{% endif %}</div>
+              {% endif %}
+              <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div>
+              {# The review: was the plan followed, and what it taught. The
+                 setup and feeling can be set or corrected here too. #}
+              <details style="margin-top:4px">
+                <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">{{ 'Change your review' if t['reviewed_ts'] else 'Review this trade' }}</summary>
+                <form method="post" action="{{ url_for('review_trade') }}" class="setgrid"
+                      style="margin-top:var(--s1);grid-template-columns:minmax(0,1fr)">
+                  <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                  <div class="setfield">
+                    <label for="fp{{ t['id'] }}">Did you follow your plan?</label>
+                    <select class="field" id="fp{{ t['id'] }}" name="followed_plan">
+                      <option value="" {{ 'selected' if not t['followed_plan'] }}>Not said</option>
+                      {% for key, label in tags.followed %}
+                        <option value="{{ key }}" {{ 'selected' if key == t['followed_plan'] }}>{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                  <div class="setfield">
+                    <label for="ls{{ t['id'] }}">What it taught you <span class="faint">optional</span></label>
+                    <textarea class="field" id="ls{{ t['id'] }}" name="lesson" maxlength="1000">{{ t['lesson'] or '' }}</textarea>
+                  </div>
+                  {{ setup_field(tags, 'su%d'|format(t['id']), t['setup'] or '') }}
+                  {{ emotion_field(tags, 'em%d'|format(t['id']), t['emotion'] or '') }}
+                  <div><button class="btn quiet sm" type="submit">Save the review</button></div>
+                </form>
+              </details></td>
             <td data-label="Side"><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
             <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>

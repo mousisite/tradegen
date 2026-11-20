@@ -227,7 +227,9 @@ PUBLIC_ENDPOINTS = {"signin", "google_start", "google_callback", "signout",
                     "billing_webhook", "stocks_index", "stock_page",
                     "stock_card", "share_page", "share_card", "join",
                     "email_stop", "backtests", "backtest_page", "record",
-                    "record_csv", "record_fingerprints"}
+                    "record_csv", "record_fingerprints",
+                    # The size and survival tools work on what is typed.
+                    "size_tool", "survival_tool"}
 
 SESSION_KEY = "stockbot_session"
 
@@ -310,7 +312,10 @@ def _moved_permanently():
 # ever for GET: nothing here can write, and every form on these pages posts to
 # an endpoint that is not on this list, so it sends them to sign up instead.
 DEMO_ENDPOINTS = {"analyse", "research", "ideas", "screener", "portfolio",
-                  "trades", "monitor", "strategies", "settings"}
+                  "trades", "monitor", "strategies", "settings",
+                  # The journal's breakdown and a trade's picture, of the
+                  # example's own trades.
+                  "journal_breakdown", "trade_picture"}
 
 
 @app.before_request
@@ -789,7 +794,8 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
     """Round-trip trading costs as fractions of the price, from the settings."""
     cfg = cfg or _cfg()
     return {"equity": float(cfg.get("cost_bps_equity", 2.0)) / 10000.0,
-            "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0}
+            "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0,
+            "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
 
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
@@ -1506,7 +1512,69 @@ def trades():
     said = session.pop(EXIT_SAID, "") if EXIT_SAID in session else ""
     return render_template("trades.html", open_trades=open_trades,
                            closed=closed, summary=summary, live=live,
-                           parts=parts, said=said)
+                           parts=parts, said=said, tags=_journal_lists())
+
+
+def _journal_lists() -> Dict:
+    """The journal's lists for its forms, and when a trade may be entered.
+
+    The entry time is a New York date and time, filled in with now; the
+    form says it back unchanged when it was not touched, so the trade is
+    logged at the moment it is sent rather than when the page was drawn.
+    """
+    from bot import journal as journal_mod
+    from bot import setups as setups_mod
+    now = int(time.time())
+    return {"setups": setups_mod.JOURNAL_SETUPS, "emotions": setups_mod.EMOTIONS,
+            "checklist": setups_mod.CHECKLIST, "followed": setups_mod.FOLLOWED,
+            "entry_now": journal_mod.entry_field(now),
+            "entry_min": journal_mod.entry_field(now - journal_mod.BACKDATE_DAYS * 86400),
+            "tags_of": journal_mod.tags_of, "broke_of": journal_mod.broke_rules_of,
+            "checklist_of": journal_mod.checklist_of,
+            "setup_labels": journal_mod.SETUP_LABELS,
+            "emotion_labels": journal_mod.EMOTION_LABELS,
+            "followed_labels": journal_mod.FOLLOWED_LABELS}
+
+
+def _tags_asked() -> Dict:
+    """The setup, feeling, checklist and entry time a log-a-trade form sends.
+
+    A checklist with nothing ticked counts as not used: a form cannot tell
+    a person who went through it and ticked nothing from one who skipped it.
+    """
+    from bot import journal as journal_mod
+    setup = (request.form.get("setup") or "").strip() or None
+    emotion = (request.form.get("emotion") or "").strip() or None
+    checklist = [k for k in request.form.getlist("checklist") if k] or None
+    journal_mod.check_tags(setup=setup, emotion=emotion, checklist=checklist)
+    typed = (request.form.get("opened") or "").strip()
+    opened = None
+    if typed and typed != (request.form.get("opened_shown") or "").strip():
+        opened = journal_mod.check_opened(journal_mod.parse_entry(typed))
+    return {"setup": setup, "emotion": emotion, "checklist": checklist,
+            "opened_ts": opened}
+
+
+def _rules_stop(conn, cfg: Dict, opened_ts: Optional[int]):
+    """The daily rules a trade about to be logged breaks: (page, broke_rule).
+
+    page is the "your rule says stop" page to show instead of logging it, or
+    None. When the person said to log it anyway (override=1), there is no
+    page, and broke_rule names the rules it broke, to keep with the trade.
+    """
+    from bot import journal as journal_mod
+    broken = journal_mod.rules_check(conn, uid(), cfg, opened_ts, costs=_costs(cfg))
+    if not broken:
+        return None, None
+    if request.form.get("override") == "1":
+        return None, ",".join(b["rule"] for b in broken)
+    # Every field the form sent, to send again with override=1.
+    fields = [(k, v) for k in request.form for v in request.form.getlist(k)
+              if k != "override"]
+    page = render_template("rule_stop.html", said=journal_mod.rules_words(broken),
+                           broken=broken, fields=fields, action=request.path,
+                           settings_url=url_for("settings") + "#rules")
+    return page, None
 
 
 def _keep_trail_bests(conn, open_trades, marks) -> None:
@@ -1957,7 +2025,7 @@ def simulate_trade():
     age = max(0, int(time.time()) - int(row["ts"] or 0))
     return render_template(
         "simulate.html", run=row, size=size, cfg=cfg, back=back, logged=logged,
-        words=charts_mod.bar_words(row["interval"] or "1d"),
+        words=charts_mod.bar_words(row["interval"] or "1d"), tags=_journal_lists(),
         # A plan's entry is the price when it was analysed; the journal logs
         # that price, so a plan older than this says the price may have moved.
         stale=age > (3600 if (row["interval"] or "1d") == "1d" else 900))
@@ -1977,13 +2045,20 @@ def take_trade():
         if _logged_from(conn, run_id) is not None:
             # Confirm pressed twice: the first press already logged it.
             return redirect(url_for("trades", logged=1))
+        # The plan's entry is the price when it was analysed, so its trade is
+        # logged now: no other entry time is taken from this form.
+        tags = _tags_asked()
+        stop_page, broke = _rules_stop(conn, _cfg(), None)
+        if stop_page is not None:
+            return stop_page
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
                           direction=size["direction"], entry=size["entry"],
                           stop=size["stop"], target1=size["target"],
                           target2=size["target2"], quantity=size["quantity"],
                           risk_amount=size["risk"], run_id=run_id, account="paper",
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
-                          user=uid(),
+                          user=uid(), setup=tags["setup"], emotion=tags["emotion"],
+                          checklist=tags["checklist"], broke_rule=broke,
                           **_trail_asked(row["symbol"], row["interval"] or "1d"))
         events_mod.bump(conn, "paper_trade")
     except (ValueError, KeyError) as exc:
@@ -2019,6 +2094,10 @@ def open_trade_manual():
             raise KeyError("symbol")
         symbol = market_mod.normalise_symbol(symbol, exact=exact)
         interval = request.form.get("interval") or "1d"
+        tags = _tags_asked()
+        stop_page, broke = _rules_stop(conn, _cfg(), tags["opened_ts"])
+        if stop_page is not None:
+            return stop_page
         db_mod.open_trade(
             conn,
             symbol=symbol, interval=interval,
@@ -2028,6 +2107,8 @@ def open_trade_manual():
             risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid(),
+            setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
+            broke_rule=broke, opened_ts=tags["opened_ts"],
             **_trail_asked(symbol, interval))
         events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError, DataError) as exc:
@@ -2055,6 +2136,289 @@ def delete_trade():
     finally:
         conn.close()
     return redirect(url_for("trades"))
+
+
+@app.route("/trades/review", methods=["POST"])
+def review_trade():
+    """Keep the review of a closed trade: was the plan followed, and the lesson.
+
+    The course's habit of going over every win and loss (0:27:33), kept with
+    the trade so the breakdown can say what following the plan was worth.
+    """
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        trade_id = int(_form_number("trade_id", "The trade"))
+        db_mod.review_trade(
+            conn, trade_id, request.form.get("followed_plan"),
+            request.form.get("lesson", ""), user=uid(),
+            setup=request.form.get("setup") if "setup" in request.form else None,
+            emotion=request.form.get("emotion") if "emotion" in request.form else None)
+    except ValueError as exc:
+        return render_template("error.html", symbol="", message=str(exc)), 400
+    finally:
+        conn.close()
+    return redirect(url_for("trades", reviewed=trade_id) + "#t%d" % trade_id)
+
+
+def _trade_picture(trade) -> Dict:
+    """A journal trade drawn on its prices: entry, stop, target and exit.
+
+    On the trade's own bars when they reach back to its entry, else hourly,
+    else daily, and the page says which. Intraday bars are labelled in New
+    York time. The trade's prices are in the shares it opened with; the
+    bars are in today's, so after a split its prices are turned into
+    today's to sit on them, and the page says so.
+    """
+    import inspect
+    from bot import clock as clock_mod
+    from bot import journal as journal_mod
+    symbol, own = trade["symbol"], trade["interval"] or "1d"
+    opened = int(trade["ts_opened"])
+    closed = int(trade["ts_closed"]) if trade["ts_closed"] else None
+    out = {"wide": "", "narrow": "", "note": "", "used": own, "split_words": "",
+           "entered": clock_mod.label_ny(opened), "left": "",
+           "own_words": charts_mod.bar_words(own)}
+    if closed:
+        out["left"] = clock_mod.label_ny(closed)
+    bars, unreachable, short = None, False, False
+    for interval in journal_mod.picture_intervals(own):
+        try:
+            got = market_mod.fetch_bars(symbol, interval)
+        except DataError:
+            unreachable = True
+            continue
+        if len(got.timestamp) < 10 or int(got.timestamp[0]) > opened:
+            short = True
+            continue
+        bars, out["used"] = got, interval
+        break
+    if bars is None:
+        out["note"] = ("Its prices could not be read just now. Try again in a minute."
+                       if unreachable and not short else
+                       "Prices from when it was entered are no longer available, even "
+                       "as daily bars.")
+        return out
+    words = charts_mod.bar_words(out["used"])
+    if out["used"] != own:
+        out["note"] = ("Drawn on %s bars: %s bars from when it was entered are no longer "
+                       "available." % (words, out["own_words"]))
+
+    split = 1.0
+    if not (symbol.endswith("-USD") or symbol.endswith("=F")):
+        try:
+            split = market_mod.split_factor_since(symbol, opened, bars)
+        except DataError:
+            split = 1.0
+    if split != 1.0:
+        out["split_words"] = market_mod.split_words(split)
+
+    ts = [int(t) for t in bars.timestamp]
+    n = len(ts)
+    first = journal_mod.bar_at(ts, opened)
+    last = journal_mod.bar_at(ts, closed) if closed else n - 1
+    direction = int(trade["direction"])
+    levels = {"Entry": float(trade["entry"]) / split, "Stop": float(trade["stop"]) / split}
+    if trade["target1"]:
+        levels["Target"] = float(trade["target1"]) / split
+    exit_price = None
+    if closed and trade["exit_price"]:
+        exit_price = float(trade["exit_price"]) / split
+        levels["Exit"] = exit_price
+    intraday = words != "daily"
+    drawn = {"levels": levels, "interval": out["used"],
+             "as_of": alerts_mod.as_of(bars) if not closed else "",
+             "last": float(bars.last_price) if not closed else None}
+    if intraday:
+        drawn["day_label"] = clock_mod.label_ny
+    # Where the person went in and out, on charts that can mark a point.
+    if "marks" in inspect.signature(charts_mod.trade_chart).parameters:
+        marks = [(ts[first], levels["Entry"], direction, "Entry")]
+        if exit_price is not None:
+            marks.append((ts[last], exit_price, -direction, "Exit"))
+        drawn["marks"] = marks
+
+    def draw(before, after, most, **size):
+        start, end = journal_mod.picture_window(n, first, last, before, after, most)
+        cut = slice(start, end)
+        return charts_mod.trade_chart(bars.timestamp[cut], bars.open[cut], bars.high[cut],
+                                      bars.low[cut], bars.close[cut], bars.volume[cut],
+                                      bars=end - start, **size, **drawn)
+    try:
+        out["wide"] = draw(40, 15, 160)
+        out["narrow"] = draw(15, 6, 50, width=340, height=260) or out["wide"]
+    except Exception:
+        app.logger.exception("Could not draw the picture of trade %s", trade["id"])
+        out["wide"] = out["narrow"] = ""
+    if not out["wide"]:
+        out["note"] = (out["note"] + " " if out["note"] else "") + (
+            "There are too few prices around it to draw.")
+    return out
+
+
+@app.route("/trades/<int:trade_id>/picture")
+def trade_picture(trade_id: int):
+    """See the trade: its chart with entry, stop, target and exit, from prices.
+
+    Drawn from the market's own bars rather than an uploaded screenshot, so
+    nothing is stored. Only your own trades; a visitor sees the example's.
+    """
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        try:
+            row = _own_trade(conn, trade_id)
+        except ValueError:
+            abort(404)
+        parts = db_mod.trade_parts(row, db_mod.exits_for(conn, [trade_id]).get(trade_id, []))
+    finally:
+        conn.close()
+    from bot import journal as journal_mod
+    return render_template("trade_picture.html", t=row, parts=parts,
+                           pic=_trade_picture(row), tags=journal_mod.tags_of(row),
+                           broke=journal_mod.broke_rules_of(row),
+                           followed=journal_mod.FOLLOWED_LABELS.get(
+                               row["followed_plan"] or "", ""))
+
+
+@app.route("/trades/breakdown")
+def journal_breakdown():
+    """What your journal says: results after costs by setup, session, feeling and more.
+
+    Each group's margin of error from ten trades; below thirty closed trades
+    the page says nothing yet separates skill from luck. The loss-limit
+    check walks the same trades against a limit the person types.
+    """
+    from bot import journal as journal_mod
+    cfg = _cfg()
+    limit_r, target_r, problem = 5.0, None, ""
+    try:
+        typed = _arg_number("limit", "The loss limit")
+        if typed is not None:
+            if not 0 < typed <= 100:
+                raise ValueError("The loss limit must be more than 0 and at most 100R.")
+            limit_r = typed
+        target_r = _arg_number("target", "The profit target")
+        if target_r is not None and not 0 < target_r <= 1000:
+            raise ValueError("The profit target must be more than 0R.")
+    except ValueError as exc:
+        problem = str(exc)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
+    try:
+        found = journal_mod.review(conn, uid(), _costs(cfg))
+    finally:
+        conn.close()
+    limits = journal_mod.loss_limit_check(found["items"], limit_r, target_r)
+    return render_template("journal_breakdown.html", r=found, limits=limits,
+                           limit_r=limit_r, target_r=target_r, problem=problem,
+                           min_margin=journal_mod.MIN_MARGIN,
+                           min_trust=journal_mod.MIN_TRUST)
+
+
+def _arg_number(name: str, label: str) -> Optional[float]:
+    """A number from the address (a tool's GET form), None when empty."""
+    raw = (request.args.get(name) or "").strip().replace(",", "")
+    if not raw:
+        return None
+    try:
+        value = float(raw.rstrip("%"))
+    except ValueError:
+        raise ValueError("%s must be a number." % label)
+    if not math.isfinite(value):
+        raise ValueError("%s must be an ordinary number." % label)
+    return value
+
+
+@app.route("/tools/size")
+def size_tool():
+    """How many shares, coins or contracts a stop allows, and what that risks.
+
+    Open to everyone. The course sizes futures by a fixed number of
+    contracts (5:39:53-5:44:07); the second part shows what that risks of an
+    account at a few stop sizes. Nothing is stored: the form is a GET.
+    """
+    from bot import journal as journal_mod
+    cfg = _cfg()
+    asked = {k: (request.args.get(k) or "").strip() for k in (
+        "account", "risk", "entry", "stop", "target", "kind", "contract", "point_value",
+        "cost", "fc_contract", "fc_count")}
+    kind = asked["kind"] if asked["kind"] in journal_mod.KINDS else "shares"
+    default_cost = {"shares": cfg.get("cost_bps_equity", 2.0),
+                    "coins": cfg.get("cost_bps_crypto", 20.0),
+                    "futures": cfg.get("cost_bps_futures", 1.0)}
+    result, problem = None, ""
+    account = float(cfg["account_size"])
+    try:
+        typed = _arg_number("account", "The account")
+        if typed is not None:
+            if typed <= 0:
+                raise ValueError("The account must be more than zero.")
+            account = typed
+        risk = _arg_number("risk", "The risk")
+        risk = float(cfg["risk_per_trade_pct"]) if risk is None else risk
+        entry = _arg_number("entry", "The entry")
+        stop = _arg_number("stop", "The stop")
+        if entry is not None or stop is not None:
+            if entry is None or stop is None:
+                raise ValueError("Give both an entry and a stop.")
+            cost = _arg_number("cost", "The cost")
+            result = journal_mod.size(
+                account, risk, entry, stop, kind, asked["contract"],
+                _arg_number("point_value", "The dollars per point"),
+                float(default_cost[kind] if cost is None else cost),
+                _arg_number("target", "The target"))
+    except ValueError as exc:
+        problem, result = str(exc), None
+    fixed, fixed_problem = None, ""
+    try:
+        count = _arg_number("fc_count", "The number of contracts")
+        count = 3 if count is None else count
+        if count != int(count) or not 1 <= count <= 1000:
+            raise ValueError("The number of contracts must be a whole number from 1.")
+        fixed = journal_mod.fixed_contracts(account if account > 0 else 10000.0,
+                                            asked["fc_contract"] or "MES", int(count))
+    except ValueError as exc:
+        fixed_problem = str(exc)
+    return render_template("tools_size.html", asked=asked, kind=kind, result=result,
+                           problem=problem, fixed=fixed, fixed_problem=fixed_problem,
+                           contracts=journal_mod.CONTRACTS, cfg=cfg,
+                           default_cost=default_cost, account=account)
+
+
+@app.route("/tools/survival")
+def survival_tool():
+    """What risking 0.5% to 10% a trade does to an account over 100 trades.
+
+    Open to everyone, from a hit rate and an average win and loss typed in,
+    or, signed in with 20 or more closed trades, from your own journal.
+    """
+    from bot import journal as journal_mod
+    asked = {k: (request.args.get(k) or "").strip() for k in ("source", "hit", "win", "loss")}
+    user = getattr(g, "user", None)
+    own, closed = None, 0
+    if user is not None:
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            items = journal_mod.closed_results(conn, user.id, _costs())
+            closed = len(items)
+            if asked["source"] == "journal" and closed >= journal_mod.SURVIVAL_MIN:
+                own = journal_mod.survival(rs=[i["r"] for i in items])
+        finally:
+            conn.close()
+    result, problem = own, ""
+    if own is None:
+        try:
+            hit = _arg_number("hit", "The hit rate")
+            win = _arg_number("win", "The average win")
+            loss = _arg_number("loss", "The average loss")
+            hit, win, loss = (45.0 if hit is None else hit, 1.5 if win is None else win,
+                              1.0 if loss is None else loss)
+            result = journal_mod.survival(p=hit / 100.0, win=win, loss=loss)
+        except ValueError as exc:
+            problem = str(exc)
+    return render_template("tools_survival.html", asked=asked, result=result,
+                           problem=problem, closed=closed,
+                           enough=closed >= journal_mod.SURVIVAL_MIN,
+                           minimum=journal_mod.SURVIVAL_MIN,
+                           wanted_journal=asked["source"] == "journal")
 
 
 @app.route("/strategies")
@@ -3964,6 +4328,8 @@ Sitemap: %s/sitemap.xml
 # rather than letting a robot discover one 302 at a time.
 PUBLIC_PAGES = [("/", "weekly", "1.0"), ("/signin", "monthly", "0.6"),
                 ("/privacy", "yearly", "0.3"), ("/terms", "yearly", "0.3")]
+PUBLIC_PAGES.append(("/tools/size", "monthly", "0.5"))
+PUBLIC_PAGES.append(("/tools/survival", "monthly", "0.5"))
 
 
 def _public_base() -> str:
@@ -4930,11 +5296,21 @@ def settings():
         numbers = ("account_size", "risk_per_trade_pct", "max_position_pct",
                    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
                    "target_atr_multiple", "min_conviction", "strong_conviction",
-                   "alert_check_minutes")
+                   "alert_check_minutes", "cost_bps_futures", "daily_loss_limit_r",
+                   "max_trades_per_day")
         try:
             for key in numbers:
                 if request.form.get(key) not in (None, ""):
                     cfg[key] = float(request.form[key])
+            # The journal's daily rules: an empty time switches that rule off,
+            # and the three are checked here, since a person's own settings
+            # are not otherwise checked before they are saved.
+            if request.form.get("last_entry_time") is not None:
+                cfg["last_entry_time"] = request.form["last_entry_time"].strip()
+            rules = ("cost_bps_futures", "daily_loss_limit_r", "max_trades_per_day",
+                     "last_entry_time")
+            config_mod.validate(dict(config_mod.DEFAULTS, **{k: cfg[k] for k in rules}))
+            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
             raw_horizon = (request.form.get("horizon_bars") or "").strip()
             if raw_horizon:
                 cfg["horizon_bars"] = ("auto" if raw_horizon.lower() == "auto"
@@ -4942,7 +5318,7 @@ def settings():
             if request.form.get("interval"):
                 cfg["interval"] = request.form["interval"]
             for flag in ("allow_shorts", "require_positive_expectancy",
-                         "use_llm_sentiment"):
+                         "use_llm_sentiment", "calm_candles"):
                 if request.form.get(flag) is not None:
                     cfg[flag] = request.form[flag] == "1"
 

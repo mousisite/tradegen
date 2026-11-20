@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% set active = 'trades' %}
 {% block title %}Review a paper trade · Orenth{% endblock %}
+{% from "_journal_tags.html" import tick_style, setup_field, emotion_field, checklist_field with context %}
+{% block head_extra %}{{ tick_style() }}{% endblock %}
 {% block content %}
 
 {# Everything here is read from the saved analysis and your settings: no
@@ -107,6 +109,17 @@
       {{ 'high' if long else 'low' }} since the trade opened, this far behind
       it, and only ever tightens from {{ size.stop|price }}. The ATR is
       measured on {{ words }} bars when you confirm.</p>
+  </div>
+
+  {# Kept with the trade, so the journal's breakdown can compare Orenth's
+     calls with your own ideas, and calm trades with hurried ones. #}
+  <div class="card" style="margin-top:var(--s3)">
+    <span class="eyebrow">For your journal</span>
+    <div class="setgrid">
+      {{ setup_field(tags, 't-setup', 'orenth_call', 'take') }}
+      {{ emotion_field(tags, 't-emotion', '', 'take') }}
+    </div>
+    <div style="margin-top:var(--s2)">{{ checklist_field(tags, 't-check', 'take') }}</div>
   </div>
 {% endif %}
 

@@ -578,6 +578,7 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
         if reward <= 0:
             raise ValueError("The target must be on the winning side of the entry.")
         out["target_r"] = reward
+        rows = [r for r in rows if abs(r["reward"] - reward) > 1e-9]
         rows.append({"reward": reward, "needed": breakeven_for(reward, cost_r), "target": True})
     out["breakeven"] = sorted(rows, key=lambda r: r["reward"])
 
