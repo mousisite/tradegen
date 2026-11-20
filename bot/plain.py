@@ -331,7 +331,8 @@ HELP: Dict[str, Dict[str, str]] = {
     "costs": {"name": "trading costs", "text": (
         "Every past trade is charged a round trip of costs: {equity}% of the "
         "price for a stock or fund and {crypto}% for a coin, as set in "
-        "Settings, or {other}% for anything else (a basis point is a hundredth "
+        "Settings, {futures}% for a futures contract, or {other}% for anything "
+        "else (a basis point is a hundredth "
         "of a percent). In R that is the cost divided by the distance to the "
         "stop, so the closer the stop, the more of each trade it eats.")},
     "atr": {"name": "ATR", "text": (
@@ -449,6 +450,7 @@ def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
         "equity": "%g" % (float(setting("cost_bps_equity")) / 100.0),
         "crypto": "%g" % (float(setting("cost_bps_crypto")) / 100.0),
         "other": "%g" % (float(setting("cost_bps_other")) / 100.0),
+        "futures": "%g" % (float(setting("cost_bps_futures")) / 100.0),
         "news": "%d" % round(float(setting("sentiment_weight")) * 100),
     }
     return {key: {"name": h["name"], "text": h["text"].format(**filled)}
