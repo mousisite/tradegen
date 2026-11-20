@@ -43,6 +43,7 @@ required.
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
 | **Strategies** | Leaderboard of all 34 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
+| **Price action, tested** | `/learn`: the ideas a popular day-trading course teaches, each in plain words beside what the Setup lab measured, and a practice page for calling the next move |
 
 **Screenshots.** Drag a chart onto the page, click to browse, or press Ctrl+V
 after snipping with Win+Shift+S. It reads the ticker and the timeframe off the
@@ -139,6 +140,13 @@ otherwise. Each links to where the work happens.
 | 23 | Usage | `bot/usage.py` | What people actually do, read from rows the app already wrote. Operator only |
 | 24 | Find something | `bot/ideas.py` | Pick stocks or crypto and how long you hold; it back-tests a list and shows only what cleared the bar. Refuses to pad the list |
 | 25 | Plain English | `bot/plain.py` | The same answer without the jargon, above the technical one. A test fails if jargon leaks in |
+| 26 | Setup lab | `bot/setuplab.py`, `bot/structure.py`, `bot/liquidity.py`, `bot/labstore.py` | The price-action setups taught in TJR's free day-trading video, found in 5- and 15-minute prices of eight futures, funds, coins and stocks, each traded with the course's own stop and two targets, after costs, beside random entries at the same half hour of other days, with a margin of error that counts one day's trades together. Nightly |
+| 27 | Claims tested | `bot/claims.py`, `bot/clock.py` | The video's checkable claims (London takes Asia's range, yesterday's high then its low, the 9:50 window, gaps that fill, related markets that disagree) measured against what happens anyway, with a margin and a verdict, or "too few to say" |
+| 28 | Price-structure panel | `bot/levelview.py`, `bot/bias.py` | On an analysis, what price is doing in plain words: the trend, the last break of structure, highs or lows taken, live gaps, the 50% line, yesterday's and the sessions' levels, and the daily lean beside its measured record. Times in New York time |
+| 29 | Price-action alerts | `bot/alerts.py` | Yesterday's high or low taken, taken and closed back, today's gap filled, a break of structure, a pullback into a gap, London's range taken. Facts with prices and times, never forecasts |
+| 30 | Journal review and rules | `bot/journal.py`, `bot/database.py` | Tags for setup, feelings and the pre-trade checklist, a review after each trade, results broken down by each, and your own daily limits on losses, trades and time |
+| 31 | Size and survival tools | `bot/journal.py` | Position size for shares, coins or a futures contract from account, risk and stop; and how often a risk per trade survives a long losing run, from your own trades or typed-in figures |
+| 32 | Learn | `bot/learn.py`, `bot/setups.py` | `/learn`: each idea from the video in plain words, what the course teaches with timestamps, the exact rule Orenth codes with its own choices marked, and what the lab measured. Every number comes from the store; the copy states none |
 | — | Screenshot reading | `bot/vision.py` | Identifies the instrument and timeframe from a chart image. Needs a key |
 
 ---
@@ -777,6 +785,18 @@ bot/
   alerts.py         thirteen alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
+
+  structure.py      swing highs and lows, breaks of structure, sweeps, gaps, the 50% line
+  clock.py          New York time, trading days, sessions, yesterday's and the week's levels
+  liquidity.py      the course's chain: taken, broken, pulled back, turned
+  bias.py           the daily lean, read from hourly and 4-hour bars
+  setups.py         every setup, claim and Learn topic from the video, named once
+  labstore.py       where the lab's results are kept, and the one verdict rule
+  setuplab.py       the Setup lab: every setup on intraday prices, against random entries
+  claims.py         the video's claims, each against what happens anyway
+  levelview.py      the analysis page's price-structure panel and daily lean
+  journal.py        journal tags, breakdowns, daily rules, size and survival
+  learn.py          the Learn pages' words, and what they read from the lab
 ```
 
 ---
