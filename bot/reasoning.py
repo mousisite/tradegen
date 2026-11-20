@@ -387,7 +387,8 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         out["Measured risk"] = block
 
     if plan is not None:
-        from .strategies import REGISTRY
+        # The strategies that decide the call; those on trial have no say.
+        from .strategies import voting_names
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}
         if plan.entry:
@@ -395,7 +396,7 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
             block["stop"] = "%.4g" % plan.stop
             block["first target"] = "%.4g" % plan.target1
             block["reward to risk"] = "%.2f" % (plan.reward_risk or 0)
-        out["Technical plan (%d-strategy engine)" % len(REGISTRY)] = block
+        out["Technical plan (%d-strategy engine)" % len(voting_names())] = block
 
     if calibration is not None and calibration.hit_rate is not None:
         side = getattr(calibration, "direction", 0)
