@@ -29,12 +29,62 @@ print("WHAT PEOPLE TYPE")
 print("=" * 72)
 
 check("an email is cleaned", codes.clean_email("  Ann@Example.COM ") == "ann@example.com")
-for bad in ("", "ann", "ann@", "@example.com", "ann@example"):
+for bad in ("", "ann", "ann@", "@example.com", "ann@example",
+            # Spellings a mail server delivers to ann@example.com, or to
+            # somebody else, that would each have been filed as a new person.
+            "ann(1)@example.com", "x:ann@example.com", "y<ann@example.com",
+            "\"ann@example.com", "ann\\@example.com", "ann,bob@example.com",
+            "ann;bob@example.com", "[ann@example.com", "ann>@example.com",
+            "=?utf-8?q?ann?=@example.com", "ann\x01@example.com",
+            "ann\u200b@example.com", "ann@\uff45xample.com",
+            # Endings that can never be an inbox, a phone account's included.
+            "phone15551234567@users.invalid", "example@orenth.invalid",
+            "ann@mail.test", "ann@mail.example", "ann@my.localhost"):
     try:
         codes.clean_email(bad)
-        check("%r is refused" % bad, False)
+        check("%a is refused" % bad, False)
     except codes.CodeError:
-        check("%r is refused" % bad, True)
+        check("%a is refused" % bad, True)
+
+for good in ("ann.lee+stocks@example.com", "o'neil@example.co.uk", "a_b-c@x.io",
+             "jos\u00e9@example.com", "ann@xn--e1afmkfd.com"):
+    check("%a is still an address" % good, codes.clean_email(good) == good)
+
+
+class FakeSMTP:
+    sent = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def starttls(self, **k):
+        pass
+
+    def login(self, *a):
+        pass
+
+    def send_message(self, msg, from_addr=None, to_addrs=None):
+        self.sent.append(to_addrs)
+
+
+_real_smtp = codes.smtplib.SMTP
+codes.smtplib.SMTP = FakeSMTP
+_os.environ.update({"SMTP_HOST": "smtp.example.com", "SMTP_USER": "u",
+                    "SMTP_PASSWORD": "p", "MAIL_FROM": "Orenth <hi@example.com>"})
+try:
+    codes.send_mail("x:ann@example.com", "s", "b")
+finally:
+    codes.smtplib.SMTP = _real_smtp
+    for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM"):
+        _os.environ.pop(key, None)
+check("an email goes to exactly the address given, never one read out of it",
+      FakeSMTP.sent == [["x:ann@example.com"]], FakeSMTP.sent)
 
 check("a number is reduced to E.164",
       codes.clean_phone("+1 (555) 123-4567") == "+15551234567")
@@ -89,6 +139,71 @@ try:
 except codes.CodeError:
     check("a code works only once", True)
 
+# The second of two codes lets the person in, and the first goes with it.
+codes.send_email_code(conn, "two@example.com", "2.2.2.9", SECRET, fake_send)
+older = sent["two@example.com"]
+codes.send_email_code(conn, "two@example.com", "2.2.2.9", SECRET, fake_send)
+codes.check_email_code(conn, "two@example.com", sent["two@example.com"], SECRET)
+check("a right code is not counted as a wrong guess",
+      conn.execute("SELECT SUM(attempts) FROM login_codes WHERE "
+                   "target='two@example.com'").fetchone()[0] == 0)
+try:
+    codes.check_email_code(conn, "two@example.com", older, SECRET)
+    check("an older code stops working once a newer one is used", False)
+except codes.CodeError as exc:
+    check("an older code stops working once a newer one is used",
+          "expired" in str(exc), exc)
+
+# Guesses sent at the same moment: each reads the count before any writes it.
+# The stand-in holds every guess at that point until all of them are there.
+import threading  # noqa: E402
+
+codes.send_email_code(conn, "rush@example.com", "2.2.2.8", SECRET, fake_send)
+TOGETHER = 8
+gate = threading.Barrier(TOGETHER, timeout=20)
+judged, real_hash, judged_lock = [], codes._hash, threading.Lock()
+real_check_guesses = codes._check_guesses
+
+
+def counting_hash(*args):
+    with judged_lock:
+        judged.append(1)
+    return real_hash(*args)
+
+
+arrived = threading.local()
+
+
+def waiting_check(*args):
+    real_check_guesses(*args)
+    if not getattr(arrived, "yes", False):
+        arrived.yes = True
+        gate.wait()
+
+
+def guess():
+    k = db.connect(DB)
+    try:
+        codes.check_email_code(k, "rush@example.com", "000000"
+                               if sent["rush@example.com"] != "000000" else "111111", SECRET)
+    except codes.CodeError:
+        pass
+    finally:
+        k.close()
+
+
+codes._hash, codes._check_guesses = counting_hash, waiting_check
+try:
+    threads = [threading.Thread(target=guess) for _ in range(TOGETHER)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+finally:
+    codes._hash, codes._check_guesses = real_hash, real_check_guesses
+check("eight guesses sent at once still get only five tries",
+      len(judged) == codes.MAX_ATTEMPTS, len(judged))
+
 codes.send_email_code(conn, "bob@example.com", "2.2.2.2", SECRET, fake_send)
 for _ in range(codes.MAX_ATTEMPTS):
     try:
@@ -119,8 +234,10 @@ codes.send_email_code(conn, "dan@example.com", "4.4.4.9", SECRET, fake_send)
 try:
     codes.send_email_code(conn, "dan@example.com", "4.4.4.8", SECRET, fake_send)
     check("one address cannot be sent endless codes", False)
-except codes.CodeError:
+except codes.CodeError as exc:
     check("one address cannot be sent endless codes", True)
+    check("and is not told that codes were sent, which a failed email was not",
+          "were sent" not in str(exc) and "Google" not in str(exc), exc)
 
 for n in range(10):
     try:
@@ -205,6 +322,25 @@ except codes.CodeError:
 codes.check_phone_code(conn, "+15551234567", "424242", fake_twilio)
 check("the right texted code is accepted", True)
 
+
+
+def twilio_says_no(path, data):
+    if path == "VerificationCheck":
+        raise codes.CodeError("That number could not be sent a code.")
+    return {"status": "pending"}
+
+
+codes.send_phone_code(conn, "+15551230077", "6.6.6.7", twilio_says_no)
+try:
+    codes.check_phone_code(conn, "+15551230077", "123456", twilio_says_no)
+    check("a texted code that cannot be checked lets nobody in", False)
+except codes.CodeError as exc:
+    check("a texted code that cannot be checked is not blamed on the number",
+          "run out or could not be checked" in str(exc) and "number" not in str(exc), exc)
+check("nor counted as a wrong guess",
+      conn.execute("SELECT SUM(attempts) FROM login_codes WHERE target='+15551230077'")
+      .fetchone()[0] == 0)
+
 saved_cap = codes.PHONE_PER_HOUR
 codes.PHONE_PER_HOUR = conn.execute(
     "SELECT COUNT(*) FROM login_codes WHERE channel='phone'").fetchone()[0]
@@ -231,6 +367,7 @@ again = A.upsert_phone_user(conn, "+15551234567")
 check("a phone number always reaches the same account", first.id == again.id)
 check("which is shown by its number, not a placeholder address",
       first.contact == "+15551234567" and first.display == "+15551234567")
+check("with a digit, not the plus, on its picture", first.initial == "1", first.initial)
 check("whose placeholder address can never be delivered to",
       first.email.endswith("@users.invalid"))
 try:
