@@ -713,18 +713,18 @@ try:
     check("a background run fetches each index once, and a refusal leaves only it out",
           asked == ["SPY", "BTC-USD"] and fetched["SPY"] is live
           and fetched["BTC-USD"] is None, asked)
-    conn.execute("DELETE FROM calls WHERE symbol='NVDA'")
-    conn.commit()
+    # As another stock: NVDA has calls from above, and a call is never removed.
+    snap = dict(snap, symbol="ORCL")
     check("the call after the close is written down", public.record_call(conn, snap))
     then = int(stamps[-40]) + 7 * 3600                    # an older call, after its close
     public.record_call(conn, dict(snap, at=then, price=float(close[-40]),
                                   stop=float(close[-40]) * 0.95,
                                   target=float(close[-40]) * 1.08, price_day=None))
-    public.mark_calls(conn, "NVDA", live)
+    public.mark_calls(conn, "ORCL", live)
     check("and an older one is scored on the real bars",
-          public.settle_calls(conn, "NVDA", live) == 1
-          and row(conn, "NVDA", "outcome")[0] is None, row(conn, "NVDA", "outcome")[:])
-    dated = conn.execute("SELECT price_day FROM calls WHERE symbol='NVDA' AND at=?",
+          public.settle_calls(conn, "ORCL", live) == 1
+          and row(conn, "ORCL", "outcome")[0] is None, row(conn, "ORCL", "outcome")[:])
+    dated = conn.execute("SELECT price_day FROM calls WHERE symbol='ORCL' AND at=?",
                          (then,)).fetchone()[0]
     check("dated by the session of the bar its price came from",
           dated == int((stamps[-40] - 18000) // DAY), dated)
@@ -1091,6 +1091,19 @@ try:
     check("scoring a call, leaving it out, or dating it later does not change it",
           rescored[1]["outcome"] == "right" and rescored[2]["excluded"] == "a reason"
           and public.fingerprint_text(rescored) == text_mon)
+    allowed = []
+    for sql in ["UPDATE calls SET %s WHERE symbol='KO'" % part for part in (
+            "symbol='KO.L'", "at=at+1", "action='AVOID'", "price=price+1e-9",
+            "stop=stop-0.01", "target=71.0", "horizon=11")] + [
+            "DELETE FROM calls WHERE symbol='KO'"]:
+        try:
+            fp.execute(sql)
+            allowed.append(sql)
+        except sqlite3.DatabaseError:
+            pass
+    fp.commit()
+    check("the database refuses to change what a call said, or to remove one",
+          not allowed, allowed)
     try:
         fp.execute("UPDATE record_fingerprints SET sha256='0' WHERE day='2026-03-09'")
         edited = True

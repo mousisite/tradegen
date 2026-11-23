@@ -120,6 +120,15 @@ CREATE TABLE IF NOT EXISTS calls (
     excluded    TEXT,
     UNIQUE (symbol, day)
 );
+-- What a call said when it was written down, the columns its day's
+-- fingerprint is taken over, and that it is there at all. Its score, its
+-- session and why it is left out are filled in later.
+CREATE TRIGGER IF NOT EXISTS calls_never_edited
+BEFORE UPDATE OF symbol, at, action, price, stop, target, horizon ON calls
+BEGIN SELECT RAISE(ABORT, 'what a call said is never changed'); END;
+CREATE TRIGGER IF NOT EXISTS calls_never_removed
+BEFORE DELETE ON calls
+BEGIN SELECT RAISE(ABORT, 'a call is never removed'); END;
 -- A fingerprint of each UTC day's calls, taken once the day is over: the
 -- SHA-256 of the parts of them that never change (fingerprint_text). Written
 -- once and never changed or removed, which the triggers hold to: a second
