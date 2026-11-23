@@ -41,7 +41,7 @@
               <option value="{{ key }}" {{ 'selected' if key == universe }}>{{ label }}</option>
             {% endfor %}
           </select>
-          <div class="hint">Ignored if you list your own instruments below.</div>
+          <div class="hint">Ignored if you list your own instruments.</div>
         </div>
         <div class="setfield">
           <label for="symbols">Or your own list</label>
@@ -118,7 +118,7 @@
         {% for c in result.passed %}
           <tr>
             <td><b>{{ c.symbol }}</b>
-              <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
+              <div class="faint" style="font-size:var(--t-xs)">{{ c.name|truncate(34, true, '…', 0) }}</div></td>
             <td class="r fig" data-label="Price">{{ c.price|price }}</td>
             <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}" data-label="Today">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>

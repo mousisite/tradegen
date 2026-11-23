@@ -18,7 +18,7 @@
 
 <div class="call {{ 'buy' if long else 'sell' }}">
   <span class="word">{{ 'Long' if long else 'Short' }}</span>
-  <span class="line"><b>{{ run['symbol'] }}</b>{% if run['name'] and run['name'] != run['symbol'] %}, {{ run['name'] }}{% endif %}.
+  <span class="line"><b>{{ run['symbol'] }}</b>{% if run['name'] and run['name'] != run['symbol'] %}, {{ run['name'] }}{% endif %}{{ '' if run['name'] and run['name'].endswith('.') and run['name'] != run['symbol'] else '.' }}
     From your {{ run['action'] }} call on {{ words }} bars, analysed {{ run['ts']|ago }}.</span>
 </div>
 
