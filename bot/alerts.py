@@ -149,6 +149,10 @@ LATE = 7 * 86400
 FACT = "A fact about price, not a forecast."
 
 
+# Said of a check that went wrong in a way the data source did not.
+CHECK_BROKE = "something went wrong on Orenth's side. It is tried again at the next check."
+
+
 class NotApplicable(Exception):
     """An alert that cannot mean anything on its instrument or bar size.
 
@@ -1107,8 +1111,11 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             db.alert_failed(conn, int(row["id"]), str(exc)[:200])
             continue
         except Exception as exc:
-            errors.append({"symbol": row["symbol"], "error": str(exc)[:120]})
-            db.alert_failed(conn, int(row["id"]), str(exc)[:120])
+            # Nothing a person could act on: the detail is for the log, and
+            # they read that it did not work.
+            log.warning("alert %d could not be checked", int(row["id"]), exc_info=True)
+            errors.append({"symbol": row["symbol"], "error": CHECK_BROKE})
+            db.alert_failed(conn, int(row["id"]), CHECK_BROKE)
             continue
 
         was = _state(row)

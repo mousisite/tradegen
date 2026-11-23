@@ -160,6 +160,10 @@ aid = add("ES=F", "sweeps_prior_high", since=TS[SWEEP1 - 3])
 FEED["ES=F"] = None                                   # nothing that can be read
 alerts.check(conn)
 check("a check that failed is said on the alert", row(aid)["last_error"] is not None)
+FEED["ES=F"] = object()                               # nor this, by the program itself
+alerts.check(conn)
+check("in words, not the program's own", row(aid)["last_error"] == alerts.CHECK_BROKE,
+      row(aid)["last_error"])
 FEED["ES=F"] = clock.head(ES, SWEEP1 + 4)
 said = told(aid)
 check("what happened while the first checks failed is told once one works",
