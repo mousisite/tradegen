@@ -518,7 +518,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     elif blocked:
         mode = "WAIT"
         why = "Price is sitting into %s, only %s away." % (
-            blocker.label(), format_price(abs(blocker.price - price)))
+            # Three figures: "0.25987 away" is no more use than "0.26 away".
+            blocker.label(), format_price(float("%.3g" % abs(blocker.price - price))))
     elif edge:
         # Direction decides the label. Calling a short "BUY" while building a
         # trade whose target sits below the entry is how someone clicks the
@@ -560,11 +561,15 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # Rounded before anything is worked out from them, so the size, the money
     # at risk and the reward to risk are those of the prices shown, which are
     # also the ones the review page and the journal size from.
-    entry = _round_price(entry, price, atr_value)
+    #
+    # The levels are looked up from the entry as it was found. An entry at a
+    # level, rounded to the far side of it, took that same level for the next
+    # one beyond it, and the stop lost the level it should sit behind.
     stop, stop_rationale = build_stop(entry, direction, atr_value, levels, cfg)
-    stop = _round_price(stop, price, atr_value)
     target1, target2, target_rationale = build_targets(entry, stop, direction,
                                                        atr_value, levels, cfg)
+    entry = _round_price(entry, price, atr_value)
+    stop = _round_price(stop, price, atr_value)
     target1 = _round_price(target1, price, atr_value)
     target2 = _round_price(target2, price, atr_value)
 
@@ -669,7 +674,7 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
                     "the market's own drift."
                     % ("Buying" if direction > 0 else "Shorting", baseline))
 
-    if action != "AVOID" and _foreign(bars):
+    if action != "AVOID" and _foreign(bars) and not position.get("error"):
         risks.append("This is priced in %s, and the size treats your account as if "
                      "it were in %s too. If your account is in another currency, "
                      "convert it before trading the size shown."

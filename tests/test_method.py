@@ -2054,6 +2054,19 @@ check("the money at risk is that of the rounded prices the review page uses",
 check("and whole shares are written whole",
       sized.position["quantity_text"] == "%d" % sized.position["quantity"]
       and sized.position["unit_text"] == "units", sized.position["quantity_text"])
+from bot.levels import Level as _Level  # noqa: E402
+
+_ctx = S.build_context(base_bars)
+_atr = float(_ctx.atr[-1])
+for nudge in (0.0004, 0.0006):             # rounded down, and up, onto its own side
+    near_at = float(np.floor((base_bars.last_price - 0.31 * _atr) * 1000) / 1000) + nudge
+    at_level = decision.decide(
+        _ctx, base_bars, [], 0.3, S.classify_regime(_ctx, len(base_bars) - 1), calib(), FLAT,
+        [_Level(near_at, "support", 2, "swing low", 0.5),
+         _Level(near_at - 1.5 * _atr, "support", 5, "swing low", 0.9)], calm)
+    check("an entry at a level (%+.4f) keeps its stop behind the next level below" % nudge,
+          at_level.entry == round(near_at, 3) and "5 touches" in at_level.stop_rationale,
+          (at_level.entry, near_at, at_level.stop_rationale))
 check("a dollar price says nothing about currency", not any("priced in" in r for r in sized.risks)
       and not sized.position["account_in"])
 yen = dataclasses.replace(base_bars, currency="JPY")
