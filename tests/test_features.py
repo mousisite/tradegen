@@ -820,6 +820,32 @@ sign_in(stranger, alice)
 stranger.get("/", headers=BROWSER)
 check("nor is a signed-in person's dashboard", count("landing_view") == before + 1)
 
+# A longer write has the database just then: the look is not counted, which is
+# what was chosen, and not reported as something broken.
+import logging
+noted = []
+
+
+class Noted(logging.Handler):
+    def emit(self, record):
+        noted.append((record.levelname, record.getMessage(), record.exc_info))
+
+
+writer, listening, was_ms = db.connect(DB), Noted(), events.BUSY_MS
+writer.execute("BEGIN IMMEDIATE")
+logging.getLogger("bot.events").addHandler(listening)
+events.BUSY_MS = 50
+try:
+    r = web.app.test_client().get("/", headers=BROWSER)
+finally:
+    events.BUSY_MS = was_ms
+    logging.getLogger("bot.events").removeHandler(listening)
+    writer.rollback()
+    writer.close()
+check("a look while the database is busy is let go, with a line in the log and no fault",
+      r.status_code == 200 and count("landing_view") == before + 1
+      and [n[0] for n in noted] == ["WARNING"] and noted[0][2] is None, noted)
+
 # A sign-up through the emailed code, as a person would do it.
 _os.environ.update(MAIL)
 outbox = {}
