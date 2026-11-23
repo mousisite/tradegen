@@ -28,7 +28,8 @@ import sys
 import threading
 import time
 import webbrowser
-from typing import Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -850,9 +851,10 @@ def _cfg() -> Dict:
     if user is not None and not user.is_local:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            cfg.update(accounts_mod.settings_for(conn, user.id))
+            own = accounts_mod.settings_for(conn, user.id)
         finally:
             conn.close()
+        cfg = config_mod.with_personal(cfg, own)
     return cfg
 
 
@@ -1928,7 +1930,7 @@ def _mark_to_market(open_trades):
     if not open_trades:
         return out
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
     workers = min(8, len(open_trades))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_mark_one, t): t["id"] for t in open_trades}
@@ -5471,6 +5473,10 @@ def portfolio():
                            summary=summary, shocks=shocks)
 
 
+# Saved theses on one page of Monitor.
+THESES_SHOWN = 20
+
+
 @app.route("/monitor")
 def monitor():
     """Alerts, watchlist, saved theses and the automated routines."""
@@ -5478,8 +5484,16 @@ def monitor():
     try:
         alert_rows = db_mod.alert_list(conn, user=uid())
         watch_rows = db_mod.watchlist(conn, user=uid())
-        thesis_rows = db_mod.thesis_list(conn, limit=20, user=uid())
+        # The record is of every thesis. The list shows a page of them, since
+        # each open one needs a price.
+        outcomes = [dict(r) for r in conn.execute(
+            "SELECT outcome FROM theses WHERE user_id=?", (uid(),))]
+        start = min(max(0, request.args.get("theses", 0, type=int)),
+                    max(0, len(outcomes) - 1))
+        thesis_rows = db_mod.thesis_list(conn, limit=start + THESES_SHOWN,
+                                         user=uid())[start:]
         events = db_mod.event_list(conn, uid(), limit=15)
+        events_total = db_mod.event_count(conn, uid())
     finally:
         conn.close()
 
@@ -5487,19 +5501,34 @@ def monitor():
                  for r in alert_rows]
 
     # Price each open thesis so the page can say how it is doing, and propose
-    # the outcome the price supports. One quote per distinct symbol.
-    judged = []
+    # the outcome the price supports. One quote per distinct symbol, several
+    # at once: one after another, a slow source held up the whole page, which
+    # is the one a notification opens.
+    def quote(sym):
+        try:
+            return sym, market_mod.fetch_bars(sym, "1d")
+        except Exception:
+            # One unpriceable symbol must not take the whole page down.
+            return sym, None
+
+    wanted = sorted({r["symbol"] for r in thesis_rows
+                     if not (r["outcome"] and r["closed_price"])})
     bars_of = {}
+    if wanted:
+        with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
+            bars_of = dict(pool.map(quote, wanted))
+    judged = []
     for row in thesis_rows:
         sym = row["symbol"]
-        if sym not in bars_of:
-            try:
-                bars_of[sym] = market_mod.fetch_bars(sym, "1d")
-            except Exception:
-                # One unpriceable symbol must not take the whole page down.
-                bars_of[sym] = None
-        price, split = _thesis_price(row, bars_of[sym])
         stored = _stored_thesis(row)
+        if row["outcome"] and row["closed_price"]:
+            # Judged at the price it was closed at, the one shown as Now.
+            # What the price did afterwards is no part of it.
+            judged.append({"row": row, "now": float(row["closed_price"]),
+                           "review": thesis_mod.review(stored, float(row["closed_price"])),
+                           "proposed": None, "quoted": None, "split_words": ""})
+            continue
+        price, split = _thesis_price(row, bars_of[sym])
         look = (thesis_mod.review(stored, price) if price else
                 {"usable": False, "reason": "Could not price %s today." % sym})
         proposed = (thesis_mod.suggested_outcome(stored, price)
@@ -5511,17 +5540,19 @@ def monitor():
                        "split_words": (market_mod.split_words(split)
                                        if split != 1.0 else "")})
 
-    board = thesis_mod.scoreboard([dict(r) for r in thesis_rows])
+    board = thesis_mod.scoreboard(outcomes)
 
     return render_template("monitor.html", alerts=described, watchlist=watch_rows,
                            theses=judged, board=board,
+                           theses_total=len(outcomes), theses_from=start,
+                           theses_page=THESES_SHOWN,
                            outcomes=thesis_mod.OUTCOMES, kinds=alerts_mod.KINDS,
                            workflows=workflows_mod.WORKFLOWS,
                            # This person's own last routine. A report holds
                            # their alerts, positions and watchlist.
                            last_run=(None if g.demo else
                                      app.config.get("LAST_WORKFLOW_BY_USER", {}).get(uid())),
-                           events=events,
+                           events=events, events_total=events_total,
                            loop=({k: v for k, v in ALERTS.status().items()
                                   if k in ("running", "interval", "last_run")}
                                  if ALERTS is not None else None),
@@ -5603,8 +5634,10 @@ def add_alert():
     # something that says it worked.
     back = _safe_back(request.form.get("back"), "")
     if back:
-        return redirect(back + ("alert_set=1" if back.endswith("?")
-                                else "&alert_set=1"))
+        # Once, however many have been set from that page already.
+        page, _, query = back.partition("?")
+        kept = [p for p in query.split("&") if p and p != "alert_set=1"]
+        return redirect("%s?%s" % (page, "&".join(kept + ["alert_set=1"])))
     return redirect(url_for("monitor"))
 
 
@@ -5656,7 +5689,8 @@ def check_alerts():
         result = _check_and_tell(conn, user=uid())
     finally:
         conn.close()
-    return redirect(url_for("monitor", checked=result["checked"],
+    return redirect(url_for("monitor", checked=result["alerts"],
+                            stops=result["stops"] or None,
                             fired=len(result["fired"])))
 
 
@@ -6017,22 +6051,16 @@ def settings():
         cfg = _cfg()
         numbers = ("account_size", "risk_per_trade_pct", "max_position_pct",
                    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
-                   "target_atr_multiple", "min_conviction", "strong_conviction",
+                   "target_atr_multiple", "min_conviction",
                    "alert_check_minutes", "cost_bps_futures", "daily_loss_limit_r",
                    "max_trades_per_day")
         try:
             for key in numbers:
                 if request.form.get(key) not in (None, ""):
                     cfg[key] = float(request.form[key])
-            # The journal's daily rules: an empty time switches that rule off,
-            # and the three are checked here, since a person's own settings
-            # are not otherwise checked before they are saved.
+            # The journal's daily rules: an empty time switches that rule off.
             if request.form.get("last_entry_time") is not None:
                 cfg["last_entry_time"] = request.form["last_entry_time"].strip()
-            rules = ("cost_bps_futures", "daily_loss_limit_r", "max_trades_per_day",
-                     "last_entry_time")
-            config_mod.validate(dict(config_mod.DEFAULTS, **{k: cfg[k] for k in rules}))
-            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
             raw_horizon = (request.form.get("horizon_bars") or "").strip()
             if raw_horizon:
                 cfg["horizon_bars"] = ("auto" if raw_horizon.lower() == "auto"
@@ -6043,6 +6071,10 @@ def settings():
                          "use_llm_sentiment", "calm_candles"):
                 if request.form.get(flag) is not None:
                     cfg[flag] = request.form[flag] == "1"
+            # Every setting, a person's own too: those went unchecked into
+            # every size and plan made from them.
+            config_mod.validate(config_mod.lift_strong(cfg))
+            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
 
             if personal:
                 conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -6075,10 +6107,11 @@ def settings():
                 start_alert_loop(cfg)
             else:
                 ALERTS.set_interval(float(minutes) * 60.0)
-                if not ALERTS.running:
-                    ALERTS.start()
+                # Whatever it was doing: one still finishing a round after
+                # being told to stop counts as running, and carries on.
+                ALERTS.start()
             return redirect(url_for("settings", saved="1"))
-        except ValueError:
+        except (ValueError, OverflowError):
             error = "Every numeric field needs a number."
         except RuntimeError as exc:
             error = str(exc)
@@ -6833,18 +6866,21 @@ def not_found(_exc):
 
 @app.errorhandler(405)
 def wrong_method(exc):
+    # An old bookmark or a typed address, such as /signout, that is now a
+    # button. The web server's own page for this is bare, with no way back.
     if request.path.startswith("/api/"):
-        page = jsonify({"error": "That address does not take this kind of "
-                                 "request."})
+        response = jsonify({"error": "That address is not used this way."})
     else:
-        page = app.make_response(render_template(
+        response = app.make_response(render_template(
             "error.html", symbol="",
-            message="There is nothing to open at this address: it is only used "
-                    "by a button on one of Orenth's pages. Go back and use the "
-                    "button there."))
-    page.status_code = 405
-    page.headers["Allow"] = ", ".join(sorted(exc.valid_methods or ()))
-    return page
+            message=("That address only works from a button on the site. Go "
+                     "back and use the button there."
+                     if request.method in ("GET", "HEAD") else
+                     "That page is for reading, and nothing can be sent to it.")))
+    response.status_code = 405
+    if getattr(exc, "valid_methods", None):
+        response.headers["Allow"] = ", ".join(sorted(exc.valid_methods))
+    return response
 
 
 @app.errorhandler(413)
@@ -6970,26 +7006,44 @@ def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True,
     in its own words. skip_closed leaves what cannot have changed, a stock
     whose market has been closed since its last good check, for the open.
     """
-    result = alerts_mod.check(conn, user=user, call_of=_call_now,
-                              limit_of=_alert_limits(conn),
-                              skip_closed=skip_closed, now=now)
-    crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed, now=now)
-               if stops else {"checked": 0, "fired": [], "errors": [], "skipped": 0})
-    fired = list(result["fired"]) + list(crossed["fired"])
-    if fired:
-        # To the phones and browsers people switched on, from push_mod's own
-        # thread: a push service that is slow or down must never hold up a
-        # check or a page, and its failure is kept on each device instead.
-        try:
-            push_mod.deliver_later(app.config.get("DB_PATH"), fired,
-                                   _public_base_offline())
-        except Exception:
-            app.logger.exception("Could not hand fired alerts to the notification sender")
-    if fired and codes_mod.email_ready():
-        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
+    fired: List[alerts_mod.Fired] = []
+    try:
+        result = alerts_mod.check(conn, user=user, call_of=_call_now,
+                                  limit_of=_alert_limits(conn),
+                                  skip_closed=skip_closed, now=now, fired=fired)
+        crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed,
+                                          now=now, fired=fired)
+                   if stops else {"checked": 0, "errors": [], "skipped": 0})
+    finally:
+        # Told even when the round broke off part-way, a database too busy
+        # for the stops, say: what fired is recorded, and its alerts switched
+        # off, so no later round would say it. The failure itself goes on to
+        # the caller, and the next round looks at what this one did not.
+        if fired:
+            _tell(fired)
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
+            "alerts": result["checked"], "stops": crossed["checked"],
             "errors": result["errors"] + crossed["errors"], "when": result["when"],
             "skipped": result.get("skipped", 0) + crossed.get("skipped", 0)}
+
+
+def _tell(fired) -> None:
+    """Hand what fired to the phones and browsers people switched on, and to
+    the inboxes that asked, each from a thread of its own: a push service or
+    a mail server that is slow or down must never hold up a check or a page.
+    Its failure is kept on each device, or on each event, instead.
+    """
+    path, site = app.config.get("DB_PATH"), _public_base_offline()
+    try:
+        push_mod.deliver_later(path, fired, site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the notification sender")
+    try:
+        if codes_mod.email_ready():
+            alerts_mod.deliver_later(path, fired, codes_mod.send_mail, _alert_address,
+                                     site=site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the mail sender")
 
 
 def _check_alerts_job(now: Optional[float] = None):
@@ -7038,9 +7092,12 @@ def alert_status():
     def number(name, kind):
         try:
             raw = request.args.get(name)
-            return kind(raw) if raw not in (None, "") else None
-        except ValueError:
+            value = kind(raw) if raw not in (None, "") else None
+        except (ValueError, OverflowError):
             return None
+        # A marker past what the database can hold, or not a number at all
+        # (nan, inf), is no marker: false for every comparison with one.
+        return value if value is None or abs(value) < 2 ** 62 else None
 
     after, since = number("after", int), number("since", float)
     if after is None and not since:

@@ -647,7 +647,8 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         view.warnings.append(
             "Stop breached on %s: it %s (%s, %s). The stop in the journal is a "
             "plan, not an order, so unless you placed a stop order with your "
-            "broker this position is still open. Close it or set a new stop."
+            "broker this position is still open. Close it in the journal once "
+            "you are out."
             % (p.symbol, where, result,
                "%.2fR" % p.open_r if p.open_r is not None else "R unknown"))
         if p.open_r is not None and p.open_r < -1.05:

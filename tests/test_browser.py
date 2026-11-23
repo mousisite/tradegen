@@ -1191,6 +1191,59 @@ def run(browser, site, base, check, head):
     ctx.close()
 
     # -----------------------------------------------------------------------
+    head("A FIRED ALERT, ON WHATEVER PAGE YOU ARE ON")
+    # -----------------------------------------------------------------------
+    ctx = context(390, signed_in=True)
+    page = ctx.new_page()
+    asked = []
+
+    def answer(route):
+        asked.append(route.request.url)
+        if len(asked) <= 5:
+            route.abort()
+        else:
+            route.fulfill(json={"new_fires": [{"id": 41, "at": time.time(), "symbol": "AAA",
+                                               "message": "AAA is 100, above the 90 you set.",
+                                               "as_of": "20 Nov"}],
+                                "cursor": 41, "now": time.time()})
+
+    try:
+        page.clock.install()
+        page.route("**/api/alerts/status*", answer)
+        page.goto(base + "/trades")
+        page.clock.run_for(5000)
+        for _ in range(4):
+            page.clock.run_for(45000)
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(200)
+        tried = len(asked)
+        page.clock.run_for(45000)
+        page.wait_for_timeout(200)
+        check("after five failed requests it asks less often",
+              tried == 5 and len(asked) == 5, (tried, len(asked)))
+        for _ in range(7):
+            page.clock.run_for(45000)
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(200)
+        check("but it goes on asking", len(asked) >= 6, len(asked))
+        page.clock.run_for(1000)
+        check("and what fired is shown", page.locator("#firebar").is_visible()
+              and "AAA is 100, above the 90 you set." in page.locator("#firetext").inner_text())
+        link = page.locator("#fireopen")
+        check("with a way to the list of what fired",
+              link.get_attribute("href") == "/monitor?told=41#told", link.get_attribute("href"))
+        link.tap()
+        page.wait_for_url(lambda url: "/monitor?told=41#told" in url)
+        page.wait_for_load_state()
+        top = page.locator("#told h3").bounding_box()["y"]
+        bar = page.locator("header").first.bounding_box()
+        check("which is what opens, under the bar at the top",
+              bar["height"] <= top < 844, (top, bar))
+    except Exception as exc:
+        check("a fired alert in the bar", False, exc)
+    ctx.close()
+
+    # -----------------------------------------------------------------------
     head("A PAPER TRADE: REVIEWED, LOGGED, HALF CLOSED")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)

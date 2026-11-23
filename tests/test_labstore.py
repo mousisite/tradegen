@@ -437,6 +437,13 @@ bad_values = [{"cost_bps_futures": -0.5}, {"cost_bps_futures": "cheap"},
               {"last_entry_time": "25:00"}, {"last_entry_time": "10:3"},
               {"last_entry_time": "ten thirty"}, {"last_entry_time": 1030},
               {"calm_candles": "yes"}]
+NAN, INF = float("nan"), float("inf")
+bad_values += [{key: value} for key in ("account_size", "stop_atr_multiple", "target_atr_multiple",
+                                        "max_position_pct", "min_conviction", "runner_atr_multiple")
+               for value in (NAN, INF, "1.0", None, True)]
+bad_values += [{"horizon_bars": INF}, {"horizon_bars": -7}, {"interval": "banana"},
+               {"interval": 5}, {"max_extension_atr": -4}, {"sentiment_weight": 9},
+               {"calibration_stride": 0}, {"min_bucket_samples": 0}]
 messages = {}
 let_through = []
 for change in bad_values:
@@ -446,6 +453,31 @@ for change in bad_values:
     except RuntimeError as exc:
         messages[str(list(change))] = str(exc)
 check("bad values are refused (%d of them)" % len(bad_values), not let_through, let_through)
+broken = harness.CFG_PATH + ".broken"
+for text, why in (('{"risk_per_trade_pct": "1.0"}', "a number in quotes"),
+                  ("[1, 2, 3]", "a file that is not a list of settings"),
+                  ('{"account_size": NaN}', "a NaN")):
+    with open(broken, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    try:
+        config.load(broken)
+        got = "loaded"
+    except RuntimeError as exc:
+        got = "said: %s" % exc
+    check("config.json with %s says so plainly" % why, got.startswith("said: "), got)
+_os.remove(broken)
+check("a person's saved settings that work are used as they are",
+      config.with_personal(config.DEFAULTS, {"stop_atr_multiple": 12.0, "target_atr_multiple": 20.0})
+      == dict(config.DEFAULTS, stop_atr_multiple=12.0, target_atr_multiple=20.0))
+mixed = config.with_personal(config.DEFAULTS, {
+    "account_size": NAN, "horizon_bars": 999999999, "stop_atr_multiple": 12.0,
+    "target_atr_multiple": 20.0, "risk_per_trade_pct": 2.0, "interval": "banana"})
+check("one that cannot work is left out, and only that one",
+      mixed == dict(config.DEFAULTS, stop_atr_multiple=12.0, target_atr_multiple=20.0,
+                    risk_per_trade_pct=2.0), mixed)
+careful = config.with_personal(config.DEFAULTS, {"min_conviction": 0.6})
+check("a least conviction above the hidden strong one is kept, never loosened",
+      careful["min_conviction"] == 0.6 and careful["strong_conviction"] == 0.6, careful)
 check("the time rule reads as minutes after midnight",
       config.clock_minutes("10:30") == 630 and config.clock_minutes("9:30") == 570
       and config.clock_minutes("24:00") is None and config.clock_minutes("") is None)

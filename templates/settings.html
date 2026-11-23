@@ -113,21 +113,22 @@
       <div class="setfield">
         <label for="stop_atr_multiple">Stop distance</label>
         <input class="field fig" id="stop_atr_multiple" name="stop_atr_multiple"
-               type="number" step="0.1" min="0.2" max="10" inputmode="decimal" value="{{ cfg.stop_atr_multiple }}">
+               type="number" step="any" min="0.2" max="10" inputmode="decimal" value="{{ cfg.stop_atr_multiple }}">
         <div class="hint">In ATR, the instrument's own volatility unit. Wider
           stops survive noise but risk more per unit.</div>
       </div>
       <div class="setfield">
         <label for="target_atr_multiple">First target</label>
         <input class="field fig" id="target_atr_multiple" name="target_atr_multiple"
-               type="number" step="0.1" min="0.2" max="20" inputmode="decimal" value="{{ cfg.target_atr_multiple }}">
+               type="number" step="any" min="0.2" max="20" inputmode="decimal" value="{{ cfg.target_atr_multiple }}">
         <div class="hint">Also in ATR. Together with the stop this sets your
           reward to risk.</div>
       </div>
       <div class="setfield">
         <label for="horizon_bars">Give it this long</label>
         <input class="field fig" id="horizon_bars" name="horizon_bars"
-               type="text" inputmode="numeric" value="{{ cfg.horizon_bars }}">
+               type="text" autocomplete="off" autocapitalize="none"
+               autocorrect="off" spellcheck="false" value="{{ cfg.horizon_bars }}">
         <div class="hint">Bars a setup gets to work before it is closed at
           whatever it is worth. <b>auto</b> scales it to the interval, which
           matters: a fixed 24 bars is two hours on 5-minute bars but five weeks
@@ -169,7 +170,7 @@
       <div class="setfield">
         <label for="last_entry_time">No new trades after</label>
         <input class="field fig" id="last_entry_time" name="last_entry_time"
-               type="text" inputmode="numeric" placeholder="10:30" autocomplete="off"
+               type="text" placeholder="10:30" autocomplete="off"
                value="{{ cfg.last_entry_time or '' }}">
         <div class="hint">A New York time, like 10:30. Leave it empty to switch it off.</div>
       </div>
@@ -188,17 +189,9 @@
       <div class="setfield">
         <label for="min_conviction">Minimum conviction</label>
         <input class="field fig" id="min_conviction" name="min_conviction"
-               type="number" step="0.01" min="0" max="1" inputmode="decimal"
+               type="number" step="any" min="0" max="1" inputmode="decimal"
                value="{{ cfg.min_conviction }}">
         <div class="hint">Below this Orenth proposes nothing at all.</div>
-      </div>
-      <div class="setfield">
-        <label for="strong_conviction">Buy at market above</label>
-        <input class="field fig" id="strong_conviction" name="strong_conviction"
-               type="number" step="0.01" min="0" max="1" inputmode="decimal"
-               value="{{ cfg.strong_conviction }}">
-        <div class="hint">Under this it will tell you to wait for a better
-          price instead of paying the spread now.</div>
       </div>
       <div class="setfield">
         <label for="require_positive_expectancy">Refuse losing setups</label>

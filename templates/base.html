@@ -217,7 +217,7 @@
 <div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
   <div class="inner">
     <span class="what" id="firetext"></span>
-    <a href="{{ url_for('monitor') }}">Open Monitor</a>
+    <a id="fireopen" href="{{ url_for('monitor') }}#told">Open Monitor</a>
     <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
   </div>
 </div>
@@ -569,6 +569,7 @@
   (function () {
     var bar = document.getElementById('firebar');
     var text = document.getElementById('firetext');
+    var link = document.getElementById('fireopen');
     var dismiss = document.getElementById('firedismiss');
     if (!bar || !window.fetch) { return; }
 
@@ -596,8 +597,13 @@
            + (first.message || first.symbol));
       line += ' (' + age(Math.max(0, now - first.at))
         + (first.as_of ? '; price as of ' + first.as_of : '') + ')';
-      text.textContent = line;
+      // To what fired. With its id, so it is a new address: a Monitor page
+      // already there would only be scrolled, and not show the new one.
+      link.href = '{{ url_for("monitor") }}?told=' + first.id + '#told';
+      // Shown first, filled a moment later: a screen reader speaks a region
+      // whose text changes while it is on the page, not one that appears.
       bar.hidden = false;
+      window.setTimeout(function () { text.textContent = line; }, 50);
       // A notice on the screen as well, for a browser that allowed them
       // before notifications came from the server. Where they are on for
       // this account (static/notify.js), the server's own notification has
@@ -605,12 +611,14 @@
       if (window.Notification && Notification.permission === 'granted'
           && !(window.OrenthNotify && window.OrenthNotify.mine())) {
         try {
-          new Notification('Orenth', { body: line });
+          // One tag for the same fire, so several open tabs show it once.
+          new Notification('Orenth', { body: line, tag: 'orenth-fire-' + first.id });
         } catch (e) {}
       }
     }
 
     var failures = 0;
+    var waits = 0;                             // turns to sit out
     function poll() {
       fetch('/api/alerts/status?after=' + encodeURIComponent(after), {
         headers: { 'Accept': 'application/json' }, credentials: 'same-origin'
@@ -624,15 +632,20 @@
         }
       }).catch(function () {
         // The server going away is the normal end of a session, not an error
-        // worth showing. Back off rather than retrying every few seconds.
+        // worth showing. After a few, ask every five minutes or so instead,
+        // so a phone that was offline for a while still hears.
         failures += 1;
+        if (failures >= 5) { waits = 6; }
       });
     }
 
     // Poll rarely. The check itself happens on the server; this only collects
     // the result, so a slow poll costs nothing but a little delay.
     window.setTimeout(poll, 4000);
-    window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
+    window.setInterval(function () {
+      if (waits > 0) { waits -= 1; } else { poll(); }
+    }, 45000);
+    window.addEventListener('online', function () { failures = 0; waits = 0; poll(); });
   })();
 
   // The service worker: keeps the public files and the offline page, and

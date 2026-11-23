@@ -666,8 +666,13 @@ def alert_note(hits) -> Note:
     if len(hits) > SHOWN:
         lines.append("And %d more on your Monitor page." % (len(hits) - SHOWN))
     title = "Orenth" if len(hits) == 1 else "Orenth: %d alerts" % len(hits)
+    # To the list of what fired, well down the Monitor page. The newest one's
+    # id makes each address a new one: a page already at that place in the
+    # list would only be scrolled, not loaded again, and not show this.
+    newest = max((int(getattr(h, "event_id", 0) or 0) for h in hits), default=0)
     return Note(title=title, body=_fit("\n".join(lines), BODY_BYTES),
-                url="/monitor", tag=_tag(hits))
+                url="/monitor%s#told" % ("?told=%d" % newest if newest else ""),
+                tag=_tag(hits))
 
 
 def switched_on_note() -> Note:

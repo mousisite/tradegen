@@ -127,6 +127,30 @@ r = c.post("/monitor/alert/delete", data={"alert_id": aid})
 check("alert delete", r.status_code == 302)
 r = c.post("/monitor/alert/delete", data={"alert_id": 99999})
 check("deleting a missing alert rejected", r.status_code == 400)
+# Set from an analysis, the marker in the address it returns to is there once.
+for back, want in (
+        ("/analyse?symbol=AAPL&interval=1d&alert_set=1",
+         "/analyse?symbol=AAPL&interval=1d&alert_set=1"),
+        ("/analyse?alert_set=1&symbol=AAPL&alert_set=1", "/analyse?symbol=AAPL&alert_set=1"),
+        ("/research/AAPL?", "/research/AAPL?alert_set=1"),
+        ("/research/AAPL", "/research/AAPL?alert_set=1")):
+    r = c.post("/monitor/alert/add", data={"symbol": "AAPL", "kind": "price_above",
+                                           "threshold": "99999", "back": back})
+    check("back to %s" % back, r.status_code == 302 and r.headers["Location"].endswith(want)
+          and r.headers["Location"].count("alert_set") == 1, str(r.headers.get("Location")))
+
+# An address that is only a button says so on a page of the site.
+r = c.get("/monitor/alerts/check")
+check("a typed address that is only a button gets a page, not the server's own",
+      r.status_code == 405 and "only works from a button" in r.data.decode("utf-8", "replace")
+      and 'href="/"' in r.data.decode("utf-8", "replace")
+      and "POST" in r.headers.get("Allow", ""), str(r.status_code))
+r = c.post("/pricing")
+check("and so does a page something is sent to", r.status_code == 405
+      and "nothing can be sent to it" in r.data.decode("utf-8", "replace"), str(r.status_code))
+r = c.get("/api/alerts/check-now")
+check("under /api/ it is data", r.status_code == 405 and r.is_json and r.get_json().get("error"),
+      str(r.status_code))
 r = c.post("/monitor/alert/bogus", data={"alert_id": 1})
 check("unknown alert action rejected", r.status_code == 404)
 

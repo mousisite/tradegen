@@ -7,8 +7,8 @@
   <h1>What to keep an eye on</h1>
   <p>Alerts, a watchlist, saved theses, and routines that do the checking for
     you.
-    {% if loop and loop.running %}The server checks your alerts every
-    {{ (loop.interval // 60)|int }} minutes, and your open positions' stops,
+    {% if loop and loop.running %}{% set mins = (loop.interval // 60)|int %}The server checks your alerts every
+    {{ 'minute' if mins <= 1 else '%d minutes'|format(mins) }}, and your open positions' stops,
     even when this page is closed{% if loop.last_run %}; it last looked
     {{ loop.last_run|ago }}{% endif %}. A stock waits while its market is
     closed, from an hour after the close until it opens again, because its
@@ -20,9 +20,11 @@
 {# Only numbers are read from the address. Any other text there would be the
    link's own words, said in the site's notice. #}
 {% set checked = request.args.get('checked', '')|int(-1) %}
+{% set stops = request.args.get('stops', '')|int(0) %}
 {% if checked >= 0 %}
   <div class="saved">
-    Checked {{ checked }} alert{{ '' if checked == 1 else 's' }}.
+    Checked {{ checked }} alert{{ '' if checked == 1 else 's' }}{% if stops > 0 %} and the
+    stop{{ '' if stops == 1 else 's' }} of {{ stops }} open position{{ '' if stops == 1 else 's' }}{% endif %}.
     {{ request.args.get('fired', '')|int(0) }} triggered.
   </div>
 {% endif %}
@@ -130,7 +132,9 @@
             of call, and the price action ones (yesterday's high and low, the
             opening gap, a break of the last swing, the newest gap and London's
             range). Those say what price did, with the New York time, not what
-            it will do.</div>
+            it will do.{% if current_user and not current_user.is_local %} A
+            change of call is worked out with Orenth's standard settings, not
+            with any you have changed for yourself.{% endif %}</div>
         </div>
         <div class="setfield">
           <label for="a-interval">Bars</label>
@@ -184,7 +188,7 @@
             <td class="soft" data-label="Last looked">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}
               {# A paused alert is not checked, so what is kept there is a note
                  about why it was paused (an alert moved to a coin's right id). #}
-              {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">{{ 'Could not check: ' if row['active'] }}{{ row['last_error'] }}</div>{% endif %}</td>
+              {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">{% if row['active'] %}Could not check{{ ' ' ~ (row['last_error_ts']|ago) if row['last_error_ts'] }}: {% endif %}{{ row['last_error'] }}</div>{% endif %}</td>
             <td class="soft wide" data-label="What happened">
               {% if row['trigger_note'] %}
                 {{ row['trigger_note'] }}
@@ -224,7 +228,8 @@
                     <label class="sr" for="e-th-{{ row['id'] }}">Value</label>
                     <input class="field fig sm" id="e-th-{{ row['id'] }}" name="threshold" type="number"
                            step="any" inputmode="decimal" style="max-width:110px"
-                           value="{{ (row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
+                           {# Ten figures, so 7% is 7 and not 7.000000000000001. #}
+                           value="{{ '%.10g'|format(row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
                   {% endif %}
                   <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
                   <input class="field sm" id="e-note-{{ row['id'] }}" name="note" type="text"
@@ -257,9 +262,12 @@
 
   {% include "_notify.html" %}
 
-  <div class="sechead" style="margin-top:var(--s4)">
+  {# Where a notification opens, with room for the bars above it. #}
+  <div class="sechead" id="told"
+       style="margin-top:var(--s4);scroll-margin-top:calc(136px + env(safe-area-inset-top, 0px))">
     <h3>What it has told you</h3>
-    <span class="count">{{ events|length }}</span>
+    <span class="count">{{ events_total }}</span>
+    {% if events_total > events|length %}<span class="tail">the latest {{ events|length }} are shown</span>{% endif %}
   </div>
   <div class="card pad0">
     {% if events %}
@@ -271,7 +279,7 @@
           <tr>
             <td class="soft" style="white-space:nowrap" data-label="When">{{ e['ts']|ago }}</td>
             <td class="lead">{% if e['kind'] == 'stop_breach' %}<span class="chip short">Stop crossed</span> {% endif %}{{ e['message'] }}</td>
-            <td class="soft" style="white-space:nowrap" data-label="Price as of">{{ e['as_of'] or '—' }}</td>
+            <td class="soft" data-label="Price as of">{{ e['as_of'] or '—' }}</td>
             <td class="soft" data-label="Email">{% if e['emailed'] %}sent{% elif e['email_error'] %}<span style="color:var(--loss)">failed: {{ e['email_error'] }}</span>{% else %}—{% endif %}</td>
           </tr>
         {% endfor %}
@@ -303,6 +311,9 @@
           <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
         {% endfor %}
       </select>
+      <label class="sr" for="w-note">Note, optional</label>
+      <input class="field" id="w-note" name="note" type="text" maxlength="200"
+             placeholder="note (optional)" autocomplete="off" style="flex:1 1 160px">
       <button class="btn quiet" type="submit">Watch</button>
     </form>
   </div>
@@ -342,11 +353,13 @@
   </div>
 </section>
 
-<section>
+<section id="theses">
   <div class="sechead">
     <h2>Saved theses</h2>
-    <span class="count">{{ theses|length }}</span>
-    <span class="tail">written down so they can be judged later</span>
+    <span class="count">{{ theses_total }}</span>
+    <span class="tail">{% if theses_total > theses|length and theses %}{{ theses_from + 1 }} to
+      {{ theses_from + theses|length }} of {{ theses_total }}, newest first{% else %}written down so
+      they can be judged later{% endif %}</span>
   </div>
 
   {% if board.closed or board.open %}
@@ -432,7 +445,7 @@
                     <select class="field sm" id="out-{{ row['id'] }}" name="outcome">
                       {% for key, meaning in outcomes.items() %}
                         <option value="{{ key }}"
-                          {{ 'selected' if key == t.proposed }}>{{ key }}</option>
+                          {{ 'selected' if key == (t.proposed or 'undecided') }}>{{ key }}</option>
                       {% endfor %}
                     </select>
                     <button class="btn quiet sm" type="submit">Close it out</button>
@@ -458,6 +471,13 @@
       </table>
     </div>
     <div style="padding:var(--s2) var(--s3) var(--s3)">
+      {% if theses_from or theses_from + theses|length < theses_total %}
+      <p class="prose">
+        {% if theses_from %}<a href="{{ url_for('monitor', theses=[theses_from - theses_page, 0]|max) }}#theses">Newer theses</a>{% endif %}
+        {% if theses_from and theses_from + theses|length < theses_total %}·{% endif %}
+        {% if theses_from + theses|length < theses_total %}<a href="{{ url_for('monitor', theses=theses_from + theses_page) }}#theses">Older theses</a>{% endif %}
+      </p>
+      {% endif %}
       <p class="prose">
         The outcome offered when you close one is the outcome the price supports,
         not the one you remember. You can pick a different one, but you have to

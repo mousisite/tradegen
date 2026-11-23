@@ -1,11 +1,12 @@
 """Alerts: conditions worth being told about.
 
 Checked on demand, and by the server's background loop (web.start_alert_loop),
-which keeps going when nobody has the page open. Nothing here starts a thread
-or sends mail itself: the loop calls check() and check_stops(), and deliver()
-emails what fired, through whatever sender it is handed. The loop asks them to
-leave alone what cannot have changed, a stock whose market has been closed
-since its last good check (sessions.py); a check someone asks for checks all.
+which keeps going when nobody has the page open. Nothing here knows how to
+send mail: the loop calls check() and check_stops(), and deliver_later()
+emails what fired from a thread of its own, through whatever sender it is
+handed. The loop asks them to leave alone what cannot have changed, a stock
+whose market has been closed since its last good check (sessions.py); a check
+someone asks for checks all.
 
 Each alert states its condition in plain terms and, when it fires, records the
 value that triggered it. An alert that says only "AAPL alert triggered" is
@@ -21,12 +22,24 @@ gaps a move left, the London session's range) say what the price did, with
 the price and the New York time, and never what it will do. Those about an
 event on a finished bar keep the start time of the last bar they looked at
 as their state ("bar:<time>"), so each bar is looked at once: an event is
-told once, and one that happened between two checks is not missed.
+told once, and one that happened between two checks is not missed. So do the
+moving-average and volume kinds.
+
+Three more states say when: "clear:<time>" on a price level that has not been
+reached, the moment from which bars are searched for one that traded past it
+and came back between two checks; "met:<day>:<level>" on a kind whose level
+moves every session, so the next session's is news; and "since:<time>" on an
+alert about finished bars that was switched on again, which looks at the bars
+that finish after that. Plain "met" and "clear", from before these, are read
+as before and told of nothing that the check that wrote them did not see.
 """
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
+import queue
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +54,8 @@ from . import indicators as ind
 from . import sessions
 from .market import (DataError, SymbolNotFound, fetch_bars, format_price, split_factor_since,
                      split_words, splits_since)
+
+log = logging.getLogger(__name__)
 
 # The groups the Monitor form lists the kinds under, in this order.
 GROUPS = ("Price", "Indicators", "Price action", "Calls")
@@ -108,15 +123,28 @@ KINDS: Dict[str, Dict] = {
     # instrument, worked out with the standard settings.
     "call_changes": {"label": "Call changes (for example WAIT to BUY)",
                      "needs_threshold": False, "unit": "", "call": True,
-                     "group": "Calls"},
+                     "group": "Calls",
+                     "say": "call changes (for example WAIT to BUY)"},
     "call_buy": {"label": "Call turns BUY", "needs_threshold": False, "unit": "",
-                 "call": True, "group": "Calls"},
+                 "call": True, "group": "Calls", "say": "call turns BUY"},
 }
 
 CALL_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("call"))
 EVENT_KINDS = tuple(k for k, spec in KINDS.items() if spec.get("event"))
 PRICE_ACTION_KINDS = tuple(k for k, spec in KINDS.items()
                            if spec.get("group") == "Price action")
+# About one finished bar, like the event kinds, and remembered the same way:
+# the last bar looked at. They differ in their first look, at the newest bar
+# only, whenever it finished.
+BAR_KINDS = ("crosses_ma", "loses_ma", "volume_spike")
+# Measured from a level that moves every session (the previous close, or
+# yesterday's high or low), so being told on Monday says nothing of Tuesday.
+SESSION_KINDS = ("pct_up", "pct_down", "takes_prior_high", "takes_prior_low")
+# Their first look, once re-armed, starts from the moment they were.
+LOOKING_KINDS = EVENT_KINDS + BAR_KINDS
+# An alert left unchecked for longer than this (a paid plan that lapsed and
+# came back) does not look further back than it for what it missed.
+LATE = 7 * 86400
 # Said at the end of every price-action message: what it is, and is not.
 FACT = "A fact about price, not a forecast."
 
@@ -266,15 +294,41 @@ def _day(ts: int) -> str:
     return time.strftime("%d %b", time.gmtime(ts)).lstrip("0")
 
 
-def _bar(bars, at_close: bool = False) -> str:
-    """The last completed bar in words, so a reading says which bar it is.
+def _whole(text: str, room: int = 190) -> str:
+    """A reason cut to what fits, at the end of a sentence when there is one.
+
+    Cut anywhere, a rate limit's reason ended "Try again in about 5". What
+    the database keeps of a reason is 200 characters.
+    """
+    text = str(text).strip()
+    if len(text) <= room:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s)", text[:room + 1])]
+    if ends:
+        return text[:ends[-1]]
+    return _words(text, room)
+
+
+def _words(text: str, room: int) -> str:
+    """Text cut to what fits between two words, with an ellipsis if it was."""
+    if len(text) <= room:
+        return text
+    cut = text[:room - 3]
+    if " " in cut and not text[room - 3].isspace():
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:") + "..."
+
+
+def _bar(bars, at_close: bool = False, j: int = -1) -> str:
+    """A completed bar in words, the last unless j is given, so a reading says
+    which bar it is.
 
     RSI, volume and the moving average are read from completed bars only. On
     a daily chart that can be yesterday's session, so a message in the
     present tense with no date would describe the wrong day.
     """
     try:
-        start = int(bars.timestamp[-1])
+        start = int(bars.timestamp[j])
     except (AttributeError, IndexError, TypeError, ValueError):
         return ""
     if (getattr(bars, "interval", "") or "1d") == "1d":
@@ -411,49 +465,182 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
                         % (symbol, format_price(price), gap * 100, where))
         return None
 
-    if kind == "volume_spike":
-        volume = np.asarray(bars.volume, dtype=float)
-        if len(volume) < 21 or not np.isfinite(volume[-1]):
-            return None
-        # The last completed bar against the 20 before it. An average that
-        # includes the bar itself needs a bigger spike to say the same thing.
-        normal = float(np.nanmean(volume[-21:-1]))
-        if not np.isfinite(normal) or normal <= 0:
-            return None
-        value = float(volume[-1]) / normal
-        if value >= threshold:
-            when = _bar(bars)
-            daily = (getattr(bars, "interval", "") or "1d") == "1d"
-            return fire(value, "%s traded %.1f times its normal volume%s, against "
-                               "the average of the 20 %s before."
-                        % (symbol, value, " " + when if when else "",
-                           "sessions" if daily else "bars"))
-        return None
-
-    if kind in ("crosses_ma", "loses_ma"):
-        ma = ind.sma(close, 50)
-        if len(ma) < 2 or not np.isfinite(ma[-1]) or not np.isfinite(ma[-2]):
-            return None
-        # A cross, not a state: the alert is about the moment it happened, so
-        # it requires the previous bar to have been on the other side.
-        was_above = close[-2] > ma[-2]
-        now_above = close[-1] > ma[-1]
-        when = _bar(bars)
-        when = " " + when if when else ""
-        if kind == "crosses_ma" and now_above and not was_above:
-            return fire(float(close[-1]),
-                        "%s closed at %s%s, back above its 50-bar average of %s."
-                        % (symbol, format_price(close[-1]), when, format_price(ma[-1])))
-        if kind == "loses_ma" and was_above and not now_above:
-            return fire(float(close[-1]),
-                        "%s closed at %s%s, losing its 50-bar average of %s."
-                        % (symbol, format_price(close[-1]), when, format_price(ma[-1])))
-        return None
+    if kind in BAR_KINDS:
+        return _bar_hit(row, bars, len(close) - 1)
 
     if kind in PRICE_ACTION_KINDS:
         return _price_action(row, bars)[0]
 
     return None
+
+
+def _bar_hit(row, bars, j: int) -> Optional[Fired]:
+    """A volume or moving-average alert against one finished bar, bar j."""
+    kind, symbol, threshold = row["kind"], row["symbol"], row["threshold"]
+    close = np.asarray(bars.close, dtype=float)
+    when = _bar(bars, j=j)
+    when = " " + when if when else ""
+
+    def fire(value, message):
+        return Fired(int(row["id"]), symbol, kind, threshold, value, message,
+                     row["note"] or "", _owner(row), as_of(bars))
+
+    if kind == "volume_spike":
+        volume = np.asarray(bars.volume, dtype=float)
+        if j < 20 or not np.isfinite(volume[j]):
+            return None
+        # The bar against the 20 before it. An average that includes the bar
+        # itself needs a bigger spike to say the same thing.
+        normal = float(np.nanmean(volume[j - 20:j]))
+        if not np.isfinite(normal) or normal <= 0:
+            return None
+        value = float(volume[j]) / normal
+        if value < threshold:
+            return None
+        daily = (getattr(bars, "interval", "") or "1d") == "1d"
+        return fire(value, "%s traded %.1f times its normal volume%s, against "
+                           "the average of the 20 %s before."
+                    % (symbol, value, when, "sessions" if daily else "bars"))
+
+    ma = ind.sma(close, 50)
+    if j < 1 or not np.isfinite(ma[j]) or not np.isfinite(ma[j - 1]):
+        return None
+    # A cross, not a state: the alert is about the moment it happened, so
+    # it requires the bar before to have been on the other side.
+    was_above = close[j - 1] > ma[j - 1]
+    now_above = close[j] > ma[j]
+    if kind == "crosses_ma" and now_above and not was_above:
+        return fire(float(close[j]),
+                    "%s closed at %s%s, back above its 50-bar average of %s."
+                    % (symbol, format_price(close[j]), when, format_price(ma[j])))
+    if kind == "loses_ma" and was_above and not now_above:
+        return fire(float(close[j]),
+                    "%s closed at %s%s, losing its 50-bar average of %s."
+                    % (symbol, format_price(close[j]), when, format_price(ma[j])))
+    return None
+
+
+def _bar_event(row, bars, now: float) -> Tuple[Optional[Fired], Optional[str]]:
+    """A volume or moving-average alert against every bar finished since its
+    last look: (what fired or None, the state to keep).
+
+    Looking at the newest bar alone missed one that finished between two
+    checks, which a check every five minutes and a round's own length make
+    of every so many five-minute bars. A first look, and the first after the
+    release that began keeping the bar, still reads the newest bar alone.
+    """
+    ts = getattr(bars, "timestamp", None)
+    n = len(bars.close)
+    was = _state(row) or ""
+    if ts is None or len(ts) != n or n == 0:
+        hit = _bar_hit(row, bars, n - 1) if n else None
+        return (None if was == "met" else hit), ("met" if hit else "clear")
+    if was.startswith(("bar:", "since:")):
+        first, state = _first_bar(row, bars)
+        first = max(first, int(np.searchsorted(np.asarray(ts), now - LATE)))
+    else:
+        # "met" is the newest bar already told, by the release before.
+        first, state = (n if was == "met" else n - 1), "bar:%d" % int(ts[-1])
+    hits = [h for h in (_bar_hit(row, bars, j) for j in range(first, n)) if h]
+    if not hits:
+        return None, state
+    hit = hits[-1]
+    if len(hits) > 1:
+        hit.message += " It was the latest of %d since the last look." % len(hits)
+    return hit, state
+
+
+def _traded_past(row, bars, now: float) -> Optional[Fired]:
+    """A price level traded and left again between two checks, or None.
+
+    The live price at each check never sees it, but the finished bars do.
+    Only bars that opened after the alert was last seen clear count ("clear:"
+    and that time, kept as its state): a bar that opened before it may have
+    traded past the level before the alert was set or while it was already
+    told. On daily bars that is told once the day is over.
+    """
+    state = _state(row) or ""
+    ts = getattr(bars, "timestamp", None)
+    if not state.startswith("clear:") or ts is None or len(ts) != len(bars.close):
+        return None
+    try:
+        since = max(int(state[6:]), int(now) - LATE)
+    except ValueError:
+        return None
+    starts = np.asarray(ts, dtype=np.int64)
+    if clock.instrument_of(bars) == "future" and clock.kind_of(bars) == "daily":
+        starts = starts - 6 * 3600      # its day opens at 18:00 the evening before
+    up = row["kind"] == "price_above"
+    level = float(row["threshold"])
+    reach = np.asarray(bars.high if up else bars.low, dtype=float)
+    past = np.flatnonzero((starts >= since) & ((reach > level) if up else (reach < level)))
+    if not len(past):
+        return None
+    j = int(past[np.argmax(reach[past]) if up else np.argmin(reach[past])])
+    extreme = float(reach[j])
+    return Fired(int(row["id"]), row["symbol"], row["kind"], row["threshold"], extreme,
+                 "%s traded at %s %s, %s the %s you set, and was last at %s."
+                 % (row["symbol"], format_price(extreme), _bar(bars, j=j),
+                    "above" if up else "below", format_price(level),
+                    format_price(bars.last_price)),
+                 row["note"] or "", _owner(row), as_of(bars))
+
+
+def _clear_state(row, bars, now: float, told: bool) -> str:
+    """The state of a price alert whose level is not met now: "clear:" and the
+    time from which a bar that traded past it would be news. Never back, so
+    each bar is looked at once. Seen clear for the first time (a new alert, one
+    edited or re-armed, or the price come back), that is the present."""
+    was = _state(row) or ""
+    try:
+        since = int(was[6:]) if was.startswith("clear:") else None
+    except ValueError:
+        since = None
+    if since is None or told:
+        return "clear:%d" % int(now)
+    ts = getattr(bars, "timestamp", None)
+    if ts is not None and len(ts):
+        since = max(since, int(ts[-1]) + 1)
+    return "clear:%d" % since
+
+
+def _session_key(row, bars, series) -> Optional[Tuple[int, float]]:
+    """(trading day, level) a session kind is measured from just now, or None
+    when the data does not say."""
+    live = _live_moment(bars)
+    if live is None:
+        return None
+    if row["kind"] in ("pct_up", "pct_down"):
+        level = bars.prev_close
+        day = (live + int(getattr(bars, "gmt_offset", 0) or 0)) // 86400
+    else:
+        level = _yesterday(bars, series)[0 if row["kind"] == "takes_prior_high" else 1]
+        day = clock.trading_day(live, clock.kind_of(bars)).toordinal()
+    return (int(day), float(level)) if _finite(level) else None
+
+
+def _session_state(was: Optional[str], key: Optional[Tuple[int, float]]
+                   ) -> Tuple[bool, str]:
+    """(already told, the state to keep) for a session kind that is met.
+
+    Told, unless the price is in a later trading day AND the level it is
+    measured from has moved: a level corrected during the day is not a new
+    day, and a weekend's futures, two dates measured from one close, are told
+    once. A plain "met", kept by the release before, counts as told.
+    """
+    fresh = "met" if key is None else "met:%d:%r" % key
+    if was == "met":
+        return True, fresh
+    if not (was or "").startswith("met:"):
+        return False, fresh
+    try:
+        _met, day, level = was.split(":")
+        day, level = int(day), float(level)
+    except ValueError:
+        return True, fresh
+    if key is None or key[0] <= day or abs(key[1] - level) <= 1e-6 * abs(level):
+        return True, was
+    return False, fresh
 
 
 # --- Price action -----------------------------------------------------------------
@@ -519,20 +706,71 @@ def _bar_when(bars, s: Dict[str, np.ndarray], j: int) -> str:
     return "in the bar that opened at %s New York time on %s" % (hm, day)
 
 
-def _since(row, bars) -> Tuple[int, bool]:
+def _since(row) -> Tuple[int, bool]:
     """Where an event alert's last look ended: (time, True) for the start of
     the last bar looked at, from its state, or (time, False) for the moment
-    it was set, or last checked, when it has no state yet (a new alert, or
-    one re-armed or edited)."""
+    it was switched on again, set, or last checked, when no bar is kept (a
+    new alert, or one re-armed, resumed or edited)."""
     state = _state(row) or ""
-    if state.startswith("bar:"):
-        try:
-            return int(state[4:]), True
-        except ValueError:
-            pass
+    for word, looked in (("bar:", True), ("since:", False)):
+        if state.startswith(word):
+            try:
+                return int(state[len(word):]), looked
+            except ValueError:
+                pass
     created = int(_row_value(row, "created_ts") or 0)
     checked = int(_row_value(row, "last_checked") or 0)
     return max(created, checked), False
+
+
+def _bar_ends(bars) -> np.ndarray:
+    """When each bar was over.
+
+    An intraday bar and a coin's day last their whole length. Any other daily
+    bar is stamped at its session's open, or its market's midnight, and over
+    at that session's close, not 24 hours on: counted so, an alert set in the
+    evening took the session that had just closed for one still to come.
+    """
+    ts = np.asarray(bars.timestamp, dtype=np.int64)
+    step = clock.bar_seconds(bars)
+    instrument = clock.instrument_of(bars)
+    if step != clock.DAY or instrument == "coin" or not len(ts):
+        return ts + step
+    meta = getattr(bars, "meta", None) or {}
+    gmt = int(getattr(bars, "gmt_offset", 0) or 0)
+    offsets = np.full(len(ts), gmt, dtype=np.int64)
+    new_york = meta.get("exchangeTimezoneName") == sessions.NEW_YORK or (
+        not meta.get("exchangeTimezoneName") and gmt in (-18000, -14400))
+    if new_york:
+        offsets = clock.offsets(ts)
+    try:
+        closes = (int(meta["currentTradingPeriod"]["regular"]["end"]) + gmt) % clock.DAY
+    except (KeyError, TypeError, ValueError):
+        closes = 16 * 3600 if new_york else None
+    if instrument == "future":
+        # Its data gives a whole day as its hours; it pauses at 17:00 New York.
+        offsets, closes = clock.offsets(ts), 17 * 3600
+    if closes is None:
+        return ts + step
+    ends = (ts + offsets) // clock.DAY * clock.DAY - offsets + closes
+    return np.where(ends > ts, ends, ts + step)
+
+
+def _first_bar(row, bars) -> Tuple[int, str]:
+    """The first bar an alert about finished bars has not looked at, and the
+    state to keep once it has looked at the rest."""
+    ts = np.asarray(bars.timestamp, dtype=np.int64)
+    since, from_state = _since(row)
+    if from_state:
+        # Never back: bars that end earlier than the last look (a source
+        # answering with stale data) must not make it look again at bars
+        # it has told about.
+        return (int(np.searchsorted(ts, since, side="right")),
+                "bar:%d" % max(int(ts[-1]), since))
+    # A first look: bars finished after the alert was set (or last looked
+    # at), so an event from before is not news.
+    return (int(np.searchsorted(_bar_ends(bars), since, side="right")),
+            "bar:%d" % int(ts[-1]))
 
 
 def _first_of_day(cond: np.ndarray, day: np.ndarray) -> np.ndarray:
@@ -593,21 +831,7 @@ def _price_action(row, bars, series: Optional[Dict[str, np.ndarray]] = None
                            "high" if up else "low", fp(level))), None
         return None, None
 
-    ts = np.asarray(bars.timestamp, dtype=np.int64)
-    step = clock.bar_seconds(bars)
-    since, from_state = _since(row, bars)
-    if from_state:
-        first = int(np.searchsorted(ts, since, side="right"))
-        # Never back: bars that end earlier than the last look (a source
-        # answering with stale data) must not make it look again at bars
-        # it has told about.
-        state = "bar:%d" % max(int(ts[-1]), since)
-    else:
-        # A first look: bars finished after the alert was set (or last
-        # looked at), so an event from before is not news.
-        first = int(np.searchsorted(ts + step, since, side="right"))
-        state = "bar:%d" % int(ts[-1])
-
+    first, state = _first_bar(row, bars)
     close = np.asarray(bars.close, dtype=float)
     day = s["ck_day"]
     with np.errstate(invalid="ignore"):
@@ -730,14 +954,16 @@ def _waits(row, now: float) -> bool:
     """
     if "last_error" in row.keys() and row["last_error"]:
         return False
-    if not row["last_checked"] or _state(row) is None:
+    state = _state(row)
+    if not row["last_checked"] or state is None or state.startswith("since:"):
         return False
     return not sessions.can_change(row["symbol"], int(row["last_checked"]), now)
 
 
 def check(conn, only_active: bool = True, user=None, call_of=None,
           limit_of: Optional[Callable[[int], Optional[int]]] = None,
-          skip_closed: bool = False, now: Optional[float] = None) -> Dict:
+          skip_closed: bool = False, now: Optional[float] = None,
+          fired: Optional[List[Fired]] = None) -> Dict:
     """Check alerts against fresh data and record anything that fired.
 
     With no user this checks every alert in the database, which is what the
@@ -753,11 +979,14 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
     skip_closed leaves alone an alert whose market has been closed since its
     last good check, which is what the loop wants; how many is "skipped". A
     person who asks for a check gets every one. `now` is the time the round is
-    judged at, the present unless given.
+    judged at, the present unless given. fired is a list to put what fired in
+    as it is recorded, so a caller whose round breaks off still has it to
+    tell: an alert that fired once is switched off, and will not say it again.
     """
     from . import database as db
 
     now = time.time() if now is None else now
+    fired = [] if fired is None else fired
     rows = [r for r in db.alert_list(conn, active_only=only_active, user=user)]
     if call_of is None:
         # Nothing here can work out a call, so a call alert is not checked at
@@ -786,7 +1015,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         due = [r for r in rows if not _waits(r, now)]
         skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+        return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
     # One fetch per symbol and bar size, shared by every alert on it.
@@ -804,8 +1033,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
     with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
         for key, result in pool.map(grab, wanted):
             if isinstance(result, Exception):
-                errors.append({"symbol": key[0], "error": str(result)[:120]})
-                failed[key] = str(result)[:120]
+                failed[key] = _whole(result)
+                errors.append({"symbol": key[0], "error": failed[key]})
             else:
                 data[key] = result
                 sessions.note(key[0], result, now)
@@ -831,7 +1060,6 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             except Exception:
                 calls[key] = None
 
-    fired: List[Fired] = []
     structure: Dict = {}
     for row in rows:
         key = (row["symbol"], _bars_for(row))
@@ -855,7 +1083,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         if is_call and call is None:
             db.alert_failed(conn, int(row["id"]), "The call could not be worked out just now.")
             continue
-        is_event = row["kind"] in EVENT_KINDS
+        is_event = row["kind"] in LOOKING_KINDS
+        session_key = None
         try:
             if row["kind"] in PRICE_ACTION_KINDS:
                 # The structure is read once per download, however many
@@ -863,8 +1092,12 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                 if key not in structure:
                     structure[key] = liquidity.series(bars)
                 hit, seen = _price_action(row, bars, structure[key])
+            elif row["kind"] in BAR_KINDS:
+                hit, seen = _bar_event(row, bars, now)
             else:
                 hit = _evaluate(row, bars, call)
+            if hit and row["kind"] in SESSION_KINDS:
+                session_key = _session_key(row, bars, structure.get(key))
         except NotApplicable as exc:
             # Nothing went wrong: the condition cannot happen on this
             # instrument or bar size, and the alert says so instead of firing.
@@ -882,25 +1115,39 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             # The last bar looked at: a bar is looked at once, so an event is
             # told once, and none between two checks is missed.
             state = seen or was
+        elif hit and row["kind"] in SESSION_KINDS:
+            # Still true since the last look, so not news, unless that was
+            # another session: its level is not this one's.
+            told, state = _session_state(was, session_key)
+            hit = None if told else hit
+        elif row["kind"] in ("price_above", "price_below"):
+            if hit:
+                state = "met"
+                # Still true since the last look, so not news: an alert that keeps
+                # watching speaks again only after its condition has cleared.
+                hit = None if was == "met" else hit
+            else:
+                # Not past the level now, but it may have traded past it and
+                # come back since the last look.
+                hit = _traded_past(row, bars, now)
+                state = _clear_state(row, bars, now, told=hit is not None)
         else:
             state = "met" if hit else "clear"
-            # Still true since the last look, so not news: an alert that keeps
-            # watching speaks again only after its condition has cleared.
             if hit and was == "met":
                 hit = None
         if hit is None:
-            db.alert_checked(conn, int(row["id"]), state=state)
+            db.alert_checked(conn, int(row["id"]), state=state, was=was)
             continue
         # Two checks can overlap (the loop, "Check them all now", a routine).
         # Only the one that moves the alert on from what it read tells anyone.
         if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
                              state=state, was=was):
             continue
+        fired.append(hit)
         if hit.user_id is not None:
             hit.event_id = db.event_add(conn, hit.user_id, hit.kind, hit.symbol,
                                         hit.message, hit.value, hit.as_of,
                                         alert_id=hit.alert_id)
-        fired.append(hit)
 
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time()), "skipped": skipped}
@@ -965,7 +1212,8 @@ MISSING_WAIT = 3600.0
 
 
 def check_stops(conn, user=None, skip_closed: bool = False,
-                now: Optional[float] = None) -> Dict:
+                now: Optional[float] = None,
+                fired: Optional[List[Fired]] = None) -> Dict:
     """Tell the owner, once, when an open journal position crosses its stop.
 
     A stop in the journal is a plan, not an order: nothing closes the trade.
@@ -975,11 +1223,13 @@ def check_stops(conn, user=None, skip_closed: bool = False,
     for the same position.
 
     skip_closed leaves alone a position whose stop was checked and whose
-    market has been closed since, as check() does for alerts.
+    market has been closed since, and fired is a list to put crossings in as
+    they are recorded, both as for check().
     """
     from . import database as db
 
     now = time.time() if now is None else now
+    fired = [] if fired is None else fired
     sql, args = db._own("SELECT * FROM trades WHERE status='open' "
                         "AND breach_noticed IS NULL", [], user)
     rows = list(conn.execute(sql, args))
@@ -1000,7 +1250,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                if sessions.can_change(r["symbol"], looked.get(int(r["id"])), now)]
         skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+        return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
     def bar_size(row) -> str:
@@ -1022,12 +1272,11 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             with _STOPS_LOCK:
                 _STOPS_MISSING.pop(key, None)
         except Exception as exc:
-            errors.append({"symbol": key[0], "error": str(exc)[:120]})
+            errors.append({"symbol": key[0], "error": _whole(exc)})
             if isinstance(exc, SymbolNotFound):
                 with _STOPS_LOCK:
                     _STOPS_MISSING[key] = (tries + 1, now)
 
-    fired: List[Fired] = []
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))
         if bars is None:
@@ -1081,18 +1330,18 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                          % (read.trail.words(), "up" if side > 0 else "down",
                             format_price(read.initial)))
             message = ("%s is at %s, past %s of %s on your %s position.%s "
-                       "The journal does not close it for you: close it, or set a "
-                       "new stop on purpose." % (row["symbol"], said, kind,
-                                                 format_price(stop), side_word, moved))
+                       "The journal does not close it for you: close it there once "
+                       "you are out." % (row["symbol"], said, kind,
+                                         format_price(stop), side_word, moved))
         else:
             when = time.strftime("%d %b", time.gmtime(read.touched_at)).lstrip("0")
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
-                       "as hit and does not close it for you: close it, or set a "
-                       "new stop on purpose." % (row["symbol"],
-                                                 format_price(read.touched), when, kind,
-                                                 format_price(read.touched_stop),
-                                                 side_word, said))
+                       "as hit and does not close it for you: close it there once "
+                       "you are out." % (row["symbol"],
+                                         format_price(read.touched), when, kind,
+                                         format_price(read.touched_stop),
+                                         side_word, said))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
         # Two checks at once (the loop and "Check them all now") both read the
@@ -1103,21 +1352,27 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         conn.commit()
         if cur.rowcount == 0:
             continue
+        fired.append(hit)
         if hit.user_id is not None:
             hit.event_id = db.event_add(conn, hit.user_id, "stop_breach", hit.symbol,
                                         message, price, hit.as_of, trade_id=hit.trade_id)
-        fired.append(hit)
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time()), "skipped": skipped}
 
 
-def deliver(conn, fired: List[Fired], send, address_of) -> Dict:
+# What the alert history says of an email that failed.
+NOT_SENT = "it could not be sent just now"
+
+
+def deliver(conn, fired: List[Fired], send, address_of, site: str = "") -> Dict:
     """Email each person what fired for them this round, in one message.
 
     send(to, subject, body) is the mail function; address_of(user_id) returns
-    an address for someone who asked for alert emails, or None. The outcome,
-    sent or the error, is written against each event, so a failure is on
-    record rather than silent.
+    an address for someone who asked for alert emails, or None. site is the
+    address the pages are at, for the link in the body. The outcome, sent or
+    not, is written against each event, so a failure is on record rather than
+    silent; its cause goes to the log, since the mail function's words are
+    for the sign-in page.
     """
     from . import database as db
 
@@ -1131,31 +1386,101 @@ def deliver(conn, fired: List[Fired], send, address_of) -> Dict:
         if not to:
             continue
         events = [h.event_id for h in hits if h.event_id is not None]
-        subject = ("Orenth: %s" % hits[0].message[:60] if len(hits) == 1
+        subject = ("Orenth: %s" % _words(hits[0].message, 60) if len(hits) == 1
                    else "Orenth: %d alerts" % len(hits))
         body = "\n\n".join("%s\n(price as of %s)" % (h.message, h.as_of or "unknown")
                             for h in hits)
-        body += ("\n\nSee them all on your Monitor page. You get these because "
-                 "you asked for alert emails; switch them off on the Monitor page.\n")
+        body += ("\n\nSee them all on your Monitor page%sYou get these because "
+                 "you asked for alert emails; switch them off on the Monitor page.\n"
+                 % (":\n%s/monitor\n\n" % site.rstrip("/") if site else ". "))
         try:
             send(to, subject, body)
+        except Exception as exc:
+            from .scheduler import _ADDRESS
+            log.warning("an alert email could not be sent: %s: %s (%s)",
+                        type(exc).__name__, _ADDRESS.sub("[address]", str(exc)),
+                        _ADDRESS.sub("[address]", str(exc.__cause__ or "no cause given")))
+            db.event_emailed(conn, events, error=NOT_SENT)
+            failed += 1
+        else:
             db.event_emailed(conn, events)
             sent += 1
-        except Exception as exc:
-            db.event_emailed(conn, events, error=str(exc) or type(exc).__name__)
-            failed += 1
     return {"sent": sent, "failed": failed}
+
+
+# Rounds of emails waiting to be sent, and the thread that sends them. A mail
+# server that does not answer is waited on for up to a minute a person, which
+# must hold up neither the next round of checks nor a page.
+_MAIL: "queue.Queue" = queue.Queue(maxsize=500)
+_MAIL_LOCK = threading.Lock()
+_MAILER: Dict[str, Optional[threading.Thread]] = {"thread": None}
+
+
+def deliver_later(db_path: Optional[str], fired: List[Fired], send, address_for,
+                  site: str = "") -> bool:
+    """deliver(), from the mail thread; returns at once.
+
+    address_for(conn) returns deliver's address_of, reading the thread's own
+    connection. Returns whether anything was queued.
+    """
+    hits = [h for h in fired if h.user_id is not None]
+    if not hits:
+        return False
+    with _MAIL_LOCK:
+        thread = _MAILER["thread"]
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(target=_send_mail, name="orenth-alert-mail",
+                                      daemon=True)
+            _MAILER["thread"] = thread
+            thread.start()
+    try:
+        _MAIL.put_nowait((db_path, hits, send, address_for, site))
+    except queue.Full:
+        log.warning("%d alert emails dropped, the mail queue is full", len(hits))
+        return False
+    return True
+
+
+def _send_mail() -> None:
+    from . import database as db
+    while True:
+        db_path, hits, send, address_for, site = _MAIL.get()
+        try:
+            conn = db.connect(db_path)
+            try:
+                deliver(conn, hits, send, address_for(conn), site=site)
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("a round of alert emails failed")
+        finally:
+            _MAIL.task_done()
+
+
+def mail_idle(timeout: float = 10.0) -> bool:
+    """Wait until every queued email has been tried. For tests."""
+    end = time.time() + timeout
+    with _MAIL.all_tasks_done:
+        while _MAIL.unfinished_tasks:
+            left = end - time.time()
+            if left <= 0:
+                return False
+            _MAIL.all_tasks_done.wait(left)
+    return True
 
 
 def suggest_for(symbol: str, plan=None, bars=None) -> List[Dict]:
     """Alerts worth setting for an instrument, given a plan if there is one.
 
     Suggestions are concrete rather than generic: if a plan says wait for a
-    price, the obvious alert is that exact price.
+    price, the obvious alert is that exact price. A BUY or a SHORT waits for
+    nothing: its entry is the price now, and an alert there fires at once.
     """
     out: List[Dict] = []
     if plan is not None and getattr(plan, "entry", None):
-        if plan.direction > 0:
+        if (getattr(plan, "action", "") or "").upper() != "WAIT":
+            pass
+        elif plan.direction > 0:
             out.append({"kind": "price_below", "threshold": plan.entry,
                         "why": "Tells you when price reaches the entry the plan "
                                "is waiting for."})

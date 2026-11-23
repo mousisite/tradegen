@@ -64,13 +64,17 @@
     {% endif %}
     <form method="post" action="{{ url_for('save_thesis') }}" data-working
           data-working-title="Saving this thesis"
-          data-working-note="Keeping the case as it stands today, so it can be judged later.">
+          data-working-note="Keeping the case as it stands today, so it can be judged later."
+          style="display:flex;gap:var(--s1);flex-wrap:wrap">
       <input type="hidden" name="symbol" value="{{ r.symbol }}">
       {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
       <input type="hidden" name="interval" value="{{ a.bars.interval }}">
       {% if with_news is defined and not with_news %}<input type="hidden" name="news" value="0">{% endif %}
       {% if with_options is defined and not with_options %}<input type="hidden" name="options" value="0">{% endif %}
       <button class="btn sm" type="submit">Save this thesis</button>
+      <label class="sr" for="t-note">Note to keep with the thesis, optional</label>
+      <input class="field sm" id="t-note" name="note" type="text" maxlength="200"
+             placeholder="note (optional)" autocomplete="off" style="max-width:200px">
     </form>
   </div>
 </div>

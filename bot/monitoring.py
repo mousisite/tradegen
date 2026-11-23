@@ -12,10 +12,12 @@ that caused it.
 Two rules are enforced here rather than left to configuration, because getting
 them wrong is worse than having no monitoring at all:
 
-  Personal data never leaves. Trades, holdings, saved theses and email
-  addresses are not error-report material. `send_default_pii` stays off,
-  request bodies are never read, and anything that looks like a credential,
-  or a header saying where the visitor is, is stripped before sending. Page
+  As little personal data as possible leaves. `send_default_pii` stays off,
+  form contents are never read, and cookies, anything that looks like a
+  credential and a header saying where the visitor is are stripped before
+  sending. What is left is the error, the page address, the browser's own
+  description and the values the failing code was working with, which can
+  include an email or network address; the privacy page says the same. Page
   loads that worked are sent only when SENTRY_TRACES_RATE asks for a sample
   of them, and then with no query string at all; the privacy page says so
   whenever it is on.

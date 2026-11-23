@@ -661,10 +661,10 @@ are checked every time, and so is an alert that is new, edited, re-armed or
 whose last check failed. "Check them all now" and the routines check
 everything. The usage page counts the checks skipped.
 
-**Nothing runs when the window is closed.** The interface says so in those
-words rather than letting you believe a level is being watched overnight.
-Making that true means hosting the app somewhere that stays up, which this
-deliberately does not pretend to be.
+**It runs for as long as the server does.** Hosted somewhere that stays up, it
+watches day and night, whether or not anyone has a page open. On your own
+computer nothing is checked while the app is closed, and the pages there say
+so rather than letting you believe a level is being watched overnight.
 
 ---
 
@@ -912,7 +912,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         thirteen alert conditions and the checker
+  alerts.py         21 alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 

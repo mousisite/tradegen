@@ -749,7 +749,7 @@ try:
           payload)
     check("with a sound and a thread", payload["aps"]["sound"] == "default"
           and payload["aps"]["thread-id"])
-    check("and the page to open, beside aps", payload["url"] == "/monitor")
+    check("and the page to open, beside aps", payload["url"] == "/monitor#told")
     row = device_rows(alice.id)[0]
     check("the device says when it last worked", row["last_ok_ts"] and not row["last_error"])
     _os.environ["APNS_BUNDLE_ID"] = "app.orenth.beta"
@@ -1305,7 +1305,8 @@ try:
     note = json.loads(decrypt(body, ua_key, ua_auth))
     message = result["fired"][0].message
     check("readable only by that browser, saying what fired and when the price was set",
-          note == {"title": "Orenth", "url": "/monitor", "tag": "alert-%d" % level,
+          note == {"title": "Orenth", "tag": "alert-%d" % level,
+                   "url": "/monitor?told=%d#told" % result["fired"][0].event_id,
                    "body": "%s (price as of %s)" % (message, result["fired"][0].as_of)},
           note)
     check("in the alert email's own words", note["body"].startswith(message)
@@ -1346,6 +1347,9 @@ try:
     push._web_post = Recorder(201)
     web._check_and_tell(conn, user=nobody.id)
     push.wait_idle(10)
+    sign_in(grace)
+    check("the page it opens has the list it names",
+          'id="told"' in c.get(note["url"].split("#")[0]).data.decode("utf-8"))
     check("nothing is sent for someone with no device on", not push._web_post.calls)
     db.alert_delete(conn, quiet, user=nobody.id)
 
