@@ -1025,16 +1025,29 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
-    # One fetch per symbol and bar size, shared by every alert on it.
+    # One fetch per symbol and bar size, shared by every alert on it, and the
+    # splits since the oldest level on it, for _after_splits: asked for there,
+    # one alert after another, a first round over many took minutes.
     wanted = {(r["symbol"], _bars_for(r)) for r in rows}
+    levels: Dict = {}
+    for r in rows:
+        if r["kind"] in ("price_above", "price_below") and r["threshold"]:
+            key = (r["symbol"], _bars_for(r))
+            levels[key] = min(levels.get(key, now), _level_set(r))
     data, errors = {}, []
 
     def grab(key):
         symbol, interval = key
         try:
-            return key, fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
+            bars = fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
         except (DataError, Exception) as exc:
             return key, exc
+        if key in levels:
+            try:
+                splits_since(symbol, levels[key], bars)
+            except Exception:
+                pass                    # asked again, and said, alert by alert
+        return key, bars
 
     failed: Dict = {}
     with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
@@ -1068,6 +1081,25 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                 calls[key] = None
 
     structure: Dict = {}
+    # Those looked at with nothing to say, written down many at a time.
+    quiet: List[tuple] = []
+    try:
+        _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
+    finally:
+        if quiet:
+            db.alerts_checked(conn, quiet)
+    return {"checked": len(rows), "fired": fired, "errors": errors,
+            "when": int(time.time()), "skipped": skipped}
+
+
+# How many quiet alerts are written down in one go.
+QUIET_AT_ONCE = 200
+
+
+def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now) -> None:
+    """Each alert against its prices: check()'s round, once they are in."""
+    from . import database as db
+
     for row in rows:
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
@@ -1146,7 +1178,10 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             if hit and was == "met":
                 hit = None
         if hit is None:
-            db.alert_checked(conn, int(row["id"]), state=state, was=was)
+            quiet.append((int(row["id"]), state, was, time.time()))
+            if len(quiet) >= QUIET_AT_ONCE:
+                db.alerts_checked(conn, quiet)
+                quiet.clear()
             continue
         # Two checks can overlap (the loop, "Check them all now", a routine).
         # Only the one that moves the alert on from what it read tells anyone.
@@ -1159,8 +1194,14 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                                         hit.message, hit.value, hit.as_of,
                                         alert_id=hit.alert_id)
 
-    return {"checked": len(rows), "fired": fired, "errors": errors,
-            "when": int(time.time()), "skipped": skipped}
+
+def _level_set(row) -> int:
+    """When a price alert's level was last known to be in that day's shares."""
+    try:
+        done = int(row["split_ts"] or 0)
+    except (KeyError, IndexError):
+        done = 0
+    return max(int(row["created_ts"] or 0), done)
 
 
 def _after_splits(conn, row, bars):
@@ -1179,12 +1220,7 @@ def _after_splits(conn, row, bars):
 
     if row["kind"] not in ("price_above", "price_below") or not row["threshold"]:
         return row
-    try:
-        done = int(row["split_ts"] or 0)
-    except (KeyError, IndexError):
-        done = 0
-    since = max(int(row["created_ts"] or 0), done)
-    later = splits_since(row["symbol"], since, bars)
+    later = splits_since(row["symbol"], _level_set(row), bars)
     if not later:
         return row
     factor = 1.0
@@ -1270,22 +1306,43 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         return interval if interval in LOOKBACK else "1d"
 
     data, errors = {}, []
-    for key in sorted({(r["symbol"], bar_size(r)) for r in rows}):
+    oldest: Dict = {}
+    for r in rows:
+        key = (r["symbol"], bar_size(r))
+        oldest[key] = min(oldest.get(key, now), int(r["ts_opened"]))
+    wanted = []
+    for key in sorted(oldest):
         tries, asked = missing.get(key, (0, 0.0))
-        if skip_closed and tries >= MISSING_TRIES and now - asked < MISSING_WAIT:
-            continue
+        if not (skip_closed and tries >= MISSING_TRIES and now - asked < MISSING_WAIT):
+            wanted.append(key)
+
+    def grab(key):
         try:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
-            data[key] = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
-            sessions.note(key[0], data[key], now)
-            with _STOPS_LOCK:
-                _STOPS_MISSING.pop(key, None)
+            bars = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
         except Exception as exc:
-            errors.append({"symbol": key[0], "error": _whole(exc)})
-            if isinstance(exc, SymbolNotFound):
+            return key, exc
+        try:
+            split_factor_since(key[0], oldest[key], bars)
+        except Exception:
+            pass                        # asked again, and said, position by position
+        return key, bars
+
+    # Several at once, as the alerts are: one after another, a thousand
+    # positions were a round of ten minutes.
+    with ThreadPoolExecutor(max_workers=min(8, len(wanted) or 1)) as pool:
+        for key, got in pool.map(grab, wanted):
+            if not isinstance(got, Exception):
+                data[key] = got
+                sessions.note(key[0], got, now)
                 with _STOPS_LOCK:
-                    _STOPS_MISSING[key] = (tries + 1, now)
+                    _STOPS_MISSING.pop(key, None)
+                continue
+            errors.append({"symbol": key[0], "error": _whole(got)})
+            if isinstance(got, SymbolNotFound):
+                with _STOPS_LOCK:
+                    _STOPS_MISSING[key] = (missing.get(key, (0, 0.0))[0] + 1, now)
 
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))

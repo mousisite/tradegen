@@ -1622,6 +1622,21 @@ def alert_checked(conn: sqlite3.Connection, alert_id: int,
     conn.commit()
 
 
+def alerts_checked(conn: sqlite3.Connection, rows) -> None:
+    """alert_checked for many at once: (id, state, was, when it was looked at).
+
+    One write to the disk for all of them. A round over five thousand alerts
+    was five thousand, each waited for.
+    """
+    conn.executemany(
+        "UPDATE alerts SET last_checked=?, last_error=NULL, last_error_ts=NULL, "
+        "state=CASE WHEN ? IS NOT NULL AND COALESCE(state, '') = ? THEN ? "
+        "ELSE state END WHERE id=?",
+        [(int(when), state, was or "", state, int(alert_id))
+         for alert_id, state, was, when in rows])
+    conn.commit()
+
+
 def alert_failed(conn: sqlite3.Connection, alert_id: int, error: str) -> None:
     """A check that could not be done, kept so the page can say why.
 
