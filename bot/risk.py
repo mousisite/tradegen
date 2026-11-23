@@ -21,6 +21,7 @@ from .market import Bars, DataError, fetch_bars
 
 TRADING_DAYS = 252
 COIN_DAYS = 365           # a coin trades every day, round the clock
+_STILL = 1e-12            # returns closer together than this are rounding, not moves
 
 
 @dataclass
@@ -146,7 +147,8 @@ def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskPr
     if len(tail):
         out.expected_shortfall = float(np.mean(tail))
 
-    equity = np.cumprod(1.0 + rets)
+    # From the first close, which can itself be the top of a fall.
+    equity = np.concatenate([[1.0], np.cumprod(1.0 + rets)])
     peak = np.maximum.accumulate(equity)
     drawdown = (equity - peak) / peak
     out.max_drawdown = float(np.min(drawdown))
@@ -174,7 +176,9 @@ def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskPr
                 var_b = float(np.var(b, ddof=1))
                 if var_b > 0:
                     out.beta = float(np.cov(a, b, ddof=1)[0][1] / var_b)
-                out.correlation_spy = float(np.corrcoef(a, b)[0][1])
+                # A price that never moves goes up and down with nothing.
+                if var_b > 0 and np.ptp(a) > _STILL:
+                    out.correlation_spy = float(np.corrcoef(a, b)[0][1])
         except (DataError, Exception):
             out.notes.append("Could not compare against %s." % benchmark)
 
@@ -328,6 +332,16 @@ def correlation_matrix(symbols: List[str], interval: str = "1d") -> Dict:
     if n < 30:
         return {"usable": False, "symbols": kept, "failed": failed,
                 "reason": "Fewer than 30 trading days in common."}
+
+    # A price that never moves has no correlation with anything: the sum
+    # divides nothing by nothing, and "nan" reached the page.
+    moving = [k for k in range(len(kept)) if np.ptp(returns[k]) > _STILL]
+    if len(moving) < len(kept):
+        failed += [s for k, s in enumerate(kept) if k not in moving]
+        kept, returns = [kept[k] for k in moving], returns[moving]
+        if len(kept) < 2:
+            return {"usable": False, "symbols": kept, "failed": failed,
+                    "reason": "Need at least two instruments whose price moves."}
     matrix = np.corrcoef(returns)
 
     pairs = []

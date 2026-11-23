@@ -154,8 +154,9 @@ class Contract:
     @property
     def tradable(self) -> bool:
         """Whether this contract could actually be traded near the quoted price."""
+        spread = self.spread_pct        # 0.0 when bid and ask agree: the best there is
         return (self.quality == "ok" and self.open_interest >= 10
-                and (self.spread_pct or 1.0) <= 0.25)
+                and spread is not None and spread <= 0.25)
 
 
 @dataclass
@@ -248,10 +249,18 @@ def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
                   expiry=chosen["timestamp"], expiry_date=chosen["date"],
                   days=chosen["days"], rate=rate, expirations=expirations)
 
+    # Whether these are live quotes: the market is open, and somebody is
+    # bidding for something. Just after the open Yahoo can still be sending a
+    # chain without one bid in it, and its last prices are all there is.
+    state = (quote.get("marketState") or "").upper()
+    bids = any(float(row.get("bid") or 0.0) > 0
+               for side in ("calls", "puts") for row in block.get(side, []))
+    live = state == "REGULAR" and bids
+
     for side, is_call in (("calls", True), ("puts", False)):
         for row in block.get(side, []):
             contract = _build(row, chain.spot, years, rate, is_call,
-                              chosen["timestamp"], chosen["days"])
+                              chosen["timestamp"], chosen["days"], live)
             (chain.calls if is_call else chain.puts).append(contract)
 
     chain.calls.sort(key=lambda c: c.strike)
@@ -262,7 +271,11 @@ def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
             "This expiry is within two days. Prices are dominated by time decay "
             "and pinning, so read direction from a later one.")
     stale = sum(1 for c in chain.all if c.quality == "stale")
-    if chain.all and stale / len(chain.all) > 0.6:
+    if chain.all and stale / len(chain.all) > 0.6 and state == "REGULAR":
+        chain.notes.append(
+            "No live quotes came for these options just now, so these are last "
+            "traded prices, and may not be fillable.")
+    elif chain.all and stale / len(chain.all) > 0.6:
         chain.notes.append(
             "The market is closed, so these are last traded prices rather than "
             "live quotes. The volatility read is still meaningful; the prices "
@@ -277,7 +290,7 @@ def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
 
 
 def _build(row: Dict, spot: float, years: float, rate: float, is_call: bool,
-           expiry: int, days: int) -> Contract:
+           expiry: int, days: int, live: bool = False) -> Contract:
     bid = float(row.get("bid") or 0.0)
     ask = float(row.get("ask") or 0.0)
     last = float(row.get("lastPrice") or 0.0)
@@ -304,10 +317,12 @@ def _build(row: Dict, spot: float, years: float, rate: float, is_call: bool,
         iv=vendor, in_the_money=bool(row.get("inTheMoney")))
 
     # Grade the quote. "stale" means the market is shut: there is no bid, but
-    # the last trade is a real price that can still be analysed.
+    # the last trade is a real price that can still be analysed. While others
+    # are being bid for, no bid means nobody wants this one, and its last
+    # trade may be from any day.
     if bid > 0 and ask > 0:
         c.quality = "wide" if (c.spread_pct or 0) > 0.5 else "ok"
-    elif last > 0:
+    elif last > 0 and not live:
         c.quality = "stale"
     else:
         c.quality = "no-bid"

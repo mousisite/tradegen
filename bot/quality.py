@@ -201,6 +201,23 @@ def _safe(numerator, denominator):
     return numerator / denominator
 
 
+def _years_compared(year: int, prior: Optional[int] = None) -> str:
+    """Which financial year a score is of, for its scale line."""
+    if prior is None:
+        return "fiscal %d" % year
+    return "fiscal %d against %d" % (year, prior)
+
+
+# What each of the nine tests is about, for naming those that could not be run.
+_TEST_SUBJECTS = {
+    "Profitable": "profit", "Cash generative": "cash flow",
+    "Returns improving": "returns", "Profit backed by cash": "cash against profit",
+    "Debt not rising": "debt", "Liquidity improving": "liquidity",
+    "No dilution": "share count", "Margins improving": "gross margin",
+    "Assets working harder": "sales against assets",
+}
+
+
 # ---------------------------------------------------------------------------
 # Piotroski F-Score
 # ---------------------------------------------------------------------------
@@ -273,7 +290,9 @@ def piotroski(history: Dict, sector: str = "") -> Score:
         "Returns improving",
         None if (roa_now is None or roa_before is None) else roa_now > roa_before,
         "Return on assets %s"
-        % ("%.1f%% against %.1f%% last year" % (roa_now * 100, roa_before * 100)
+        % ("%.1f%% against %.1f%% %s"
+           % (roa_now * 100, roa_before * 100,
+              "the year before" if prior == year - 1 else "in %d" % prior)
            if (roa_now is not None and roa_before is not None) else "not comparable"),
         "%d against %d" % (year, prior)))
 
@@ -357,6 +376,7 @@ def piotroski(history: Dict, sector: str = "") -> Score:
     scored = "%d of %d" % (passed, len(known))
     if not out.reliable:
         out.scale = "0 to %d, the tests that could be measured" % len(known)
+    out.scale += "; " + _years_compared(year, prior)
 
     # Judged on the share of the tests that could be measured: three passed
     # of six is not three of nine. With all nine the steps are 8, 6 and 4.
@@ -371,8 +391,11 @@ def piotroski(history: Dict, sector: str = "") -> Score:
         out.verdict = ("Weak. Most measures of financial strength went the "
                        "wrong way (%s)." % scored)
     if not out.reliable:
-        out.verdict += (" Scored out of %d rather than 9, because %s was not "
-                        "reported." % (len(known), " and ".join(out.missing)))
+        out.verdict += (" Scored out of %d rather than 9, because %d of them "
+                        "could not be measured (%s)."
+                        % (len(known), len(out.missing),
+                           ", ".join(_TEST_SUBJECTS.get(name, name.lower())
+                                     for name in out.missing)))
     return out
 
 
@@ -481,6 +504,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
     }
     z = 1.2 * a + 1.4 * b + 3.3 * c + 0.6 * d + 1.0 * e
     out.value = z
+    out.scale += "; " + _years_compared(year)
 
     if z > 8:
         out.verdict = (
@@ -605,6 +629,7 @@ def beneish_m(history: Dict, sector: str = "") -> Score:
     m = (-4.84 + 0.920 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi
          + 0.115 * depi - 0.172 * sgai + 4.679 * tata - 0.327 * lvgi)
     out.value = m
+    out.scale += "; " + _years_compared(year, prior)
 
     if m > -1.78:
         # How far each ratio moves the score from where an unchanged company
@@ -685,6 +710,7 @@ def accruals(history: Dict, sector: str = "") -> Score:
 
     ratio = (net_income - cfo) / average_assets
     out.value = ratio
+    out.scale += "; " + _years_compared(year)
     out.inputs = {"net income": net_income, "operating cash flow": cfo,
                   "average assets": average_assets}
 

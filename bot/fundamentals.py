@@ -36,7 +36,7 @@ class Metric:
     key: str
     label: str
     value: Optional[float]
-    unit: str = ""            # "ratio" | "pct" | "usd" | "x" | ""
+    unit: str = ""            # "ratio" | "pct" | "percent" | "usd" | "x" | ""
     source: str = ""
     note: str = ""
     currency: str = ""        # shown after an amount of money; empty for dollars
@@ -51,6 +51,8 @@ class Metric:
         v = self.value
         if self.unit == "pct":
             return "%.1f%%" % (v * 100)
+        if self.unit == "percent":          # sent as 154 for 154%
+            return "%.*f%%" % (0 if abs(v) >= 10 else 1, v)
         if self.unit == "usd":
             money = (" " + self.currency) if self.currency else ""
             for cut, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
@@ -237,7 +239,7 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
     _put(m, "operating_cashflow", "Operating cash flow", g(fin, "operatingCashflow"), "usd")
     _put(m, "total_cash", "Cash", g(fin, "totalCash"), "usd")
     _put(m, "total_debt", "Total debt", g(fin, "totalDebt"), "usd")
-    _put(m, "debt_to_equity", "Debt to equity", g(fin, "debtToEquity"))
+    _put(m, "debt_to_equity", "Debt to equity", g(fin, "debtToEquity"), "percent")
     _put(m, "current_ratio", "Current ratio", g(fin, "currentRatio"))
     _put(m, "quick_ratio", "Quick ratio", g(fin, "quickRatio"))
 
@@ -304,12 +306,30 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
             out.notes.append("SEC data unavailable: the filed figures could not be "
                              "read this time.")
 
-    missing = [k for k in ("revenue", "net_margin", "roe", "pe") if out.get(k) is None]
-    if missing:
-        out.notes.append(
-            "Not reported for this instrument: %s. Funds, ETFs and some foreign "
-            "listings do not publish company fundamentals." % ", ".join(missing))
+    # Only once Yahoo has answered: figures that were not fetched are not
+    # figures that were not published, and that has been said above.
+    if mods:
+        _note_missing(out)
     return out
+
+
+def _note_missing(out: Fundamentals) -> None:
+    """Say which of the main figures are missing, by name, and why."""
+    missing = [k for k in ("revenue", "net_margin", "roe", "pe") if out.get(k) is None]
+    margin = out.get("net_margin")
+    if "pe" in missing and margin is not None and margin < 0:
+        missing.remove("pe")
+        out.notes.append("It has no price to earnings ratio because it lost money "
+                         "over the last year.")
+    if not missing:
+        return
+    note = ("Not reported for this instrument: %s."
+            % ", ".join(out.metrics[k].label.replace(" (trailing)", "").lower()
+                        for k in missing))
+    if "revenue" in missing:
+        note += (" Funds, coins and some foreign listings do not publish company "
+                 "figures.")
+    out.notes.append(note)
 
 
 def _statements(mods: Dict, module: str, key: str) -> List[Dict]:
