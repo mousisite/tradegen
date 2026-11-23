@@ -443,7 +443,7 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 
 .btn {
   min-height: 46px; display: inline-flex; align-items: center; justify-content: center;
-  gap: 7px; padding: 0 22px; cursor: pointer;
+  gap: 7px; padding: 0 22px; cursor: pointer; text-align: center;
   background: var(--accent-btn); color: #fff;
   border: 1px solid var(--accent-btn); border-radius: var(--r-sm);
   font: 500 var(--t-sm) var(--sans);
