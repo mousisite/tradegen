@@ -98,6 +98,14 @@ def share_count(f: Fundamentals, price: float) -> Dict:
     return {"value": listed, "source": "Yahoo Finance"}
 
 
+def _average_growth(growth: float, terminal_growth: float, years: int) -> float:
+    """The yearly rate that a path fading from one rate to the other comes to."""
+    total = 1.0
+    for year in range(1, years + 1):
+        total *= 1.0 + growth + (terminal_growth - growth) * (year - 1) / max(years - 1, 1)
+    return total ** (1.0 / years) - 1.0
+
+
 @dataclass
 class Assumption:
     """One input to a model, and where it came from."""
@@ -117,7 +125,14 @@ class Valuation:
     low: Optional[float] = None
     high: Optional[float] = None
     upside: Optional[float] = None
+    # What the price implies: the first year's growth, which then fades, the
+    # yearly average that comes to, and whether it is the most the search
+    # could say ("this or less") rather than an answer.
     implied_growth: Optional[float] = None
+    implied_average: Optional[float] = None
+    implied_at_limit: bool = False
+    # A check beside the models, which is never a value on its own.
+    only_a_check: bool = False
     assumptions: List[Assumption] = field(default_factory=list)
     sensitivity: List[Dict] = field(default_factory=list)
     workings: List[Dict] = field(default_factory=list)
@@ -150,9 +165,14 @@ def discounted_cash_flow(f: Fundamentals, price: float,
     cash = f.get("total_cash") or 0.0
     debt = f.get("total_debt") or 0.0
 
-    if not fcf or fcf <= 0:
-        v.reason = ("This model needs positive free cash flow, and none was "
-                    "reported. Companies that burn cash cannot be valued this "
+    if fcf is None:
+        v.reason = ("The cash flow model needs free cash flow, and none is "
+                    "reported for this instrument. That is normal for funds, "
+                    "coins and banks.")
+        return v
+    if fcf <= 0:
+        v.reason = ("The cash flow model needs positive free cash flow, and this "
+                    "is not. Companies that burn cash cannot be valued this "
                     "way; their worth depends on what happens when they stop.")
         return v
     if norm.get("note"):
@@ -190,8 +210,9 @@ def discounted_cash_flow(f: Fundamentals, price: float,
 
     v.assumptions = [
         Assumption("fcf", "Starting free cash flow", fcf, norm["source"], False),
-        Assumption("growth", "Growth for %d years" % years, growth, growth_src),
-        Assumption("terminal_growth", "Growth thereafter", terminal_growth, "your input"),
+        Assumption("growth", "Growth in year 1, fading to the long-run rate by year %d"
+                   % years, growth, growth_src),
+        Assumption("terminal_growth", "Growth thereafter", terminal_growth, "assumed"),
         Assumption("discount", "Discount rate", discount, discount_src),
         Assumption("shares", "Shares outstanding", shares, counted["source"], False),
     ]
@@ -213,6 +234,11 @@ def discounted_cash_flow(f: Fundamentals, price: float,
     terminal_pv = terminal / ((1.0 + discount) ** years)
     enterprise = total_pv + terminal_pv
     equity = enterprise + cash - debt
+    if equity <= 0:
+        v.reason = ("Its debt is larger than the value the cash flow model puts on "
+                    "the whole business, so the model leaves nothing for the "
+                    "shares and cannot price them.")
+        return v
     per_share = equity / shares
 
     v.fair_value = per_share
@@ -234,7 +260,7 @@ def discounted_cash_flow(f: Fundamentals, price: float,
         row = {"growth": growth + g_adj, "values": []}
         for d_adj in (-0.02, -0.01, 0.0, 0.01, 0.02):
             d = discount + d_adj
-            g = max(0.0, growth + g_adj)
+            g = growth + g_adj
             if terminal_growth >= d:
                 row["values"].append(None)
                 continue
@@ -245,10 +271,17 @@ def discounted_cash_flow(f: Fundamentals, price: float,
                 sub_total += sub_flow / ((1.0 + d) ** year)
             term = sub_flow * (1.0 + terminal_growth) / (d - terminal_growth)
             sub_total += term / ((1.0 + d) ** years)
-            row["values"].append((sub_total + cash - debt) / shares)
+            left = (sub_total + cash - debt) / shares
+            # Debt above the value leaves nothing for the shares, which is not
+            # a price of less than nothing.
+            row["values"].append(left if left > 0 else None)
         grid.append(row)
     v.sensitivity = grid
 
+    if any(val is None for row in grid for val in row["values"]):
+        v.notes.append("A dash in the table is where the model leaves nothing for "
+                       "the shares, because the debt is larger than the value it "
+                       "puts on the cash.")
     spread = [val for row in grid for val in row["values"] if val]
     if spread:
         v.low, v.high = min(spread), max(spread)
@@ -303,11 +336,13 @@ def reverse_dcf(f: Fundamentals, price: float, years: int = 10,
 
     low, high = -0.30, 1.00
     if value_at(high) < target_enterprise:
-        v.reason = ("Even 100% annual growth for %d years does not justify this "
-                    "price on cash flow alone. The market must be valuing "
-                    "something this model cannot see." % years)
+        v.reason = ("Even growth that starts at 100%% a year and fades over %d "
+                    "years does not justify this price on cash flow alone. The "
+                    "market must be valuing something this model cannot see."
+                    % years)
         return v
 
+    v.implied_at_limit = value_at(low) > target_enterprise
     implied = None
     for _ in range(90):
         mid = 0.5 * (low + high)
@@ -321,24 +356,38 @@ def reverse_dcf(f: Fundamentals, price: float, years: int = 10,
     # "what is it worth?". Reporting the current price as a fair value would
     # drag any blended estimate toward the market's own opinion, which is the
     # one thing an independent valuation must not do.
+    if v.implied_at_limit:
+        implied = -0.30
+    average = _average_growth(implied, terminal_growth, years)
     v.usable = True
-    v.implied_growth = implied
+    v.implied_growth, v.implied_average = implied, average
+    solved = "the lowest tried" if v.implied_at_limit else "solved"
     v.assumptions = [
         Assumption("price", "Current price", price, "live market", False),
-        Assumption("implied_growth", "Growth the price implies", implied, "solved"),
+        Assumption("implied_growth", "Growth the price implies in year 1, fading "
+                   "to the long-run rate by year %d" % years, implied, solved),
+        Assumption("implied_average", "The same as a yearly average", average, solved),
         Assumption("discount", "Discount rate", discount, "CAPM"),
         Assumption("terminal_growth", "Growth thereafter", terminal_growth, "assumed"),
     ]
 
     actual = f.get("revenue_growth")
-    verdict = ("At %.2f the market is assuming free cash flow grows about %.1f%% "
-               "a year for %d years." % (price, implied * 100, years))
+    if v.implied_at_limit:
+        verdict = ("At %.2f the price is below what this model gives even when free "
+                   "cash flow starts out shrinking by 30%% a year, the lowest it "
+                   "tries." % price)
+    else:
+        verdict = ("At %.2f the market is assuming free cash flow growth that starts "
+                   "at about %.1f%% a year and moves to %.1f%% by year %d, about "
+                   "%.1f%% a year on average."
+                   % (price, implied * 100, terminal_growth * 100, years,
+                      average * 100))
     if actual is not None:
         verdict += (" The business most recently grew revenue %.1f%%." % (actual * 100))
-        if implied > actual + 0.08:
+        if average > actual + 0.08:
             verdict += (" The price needs materially faster growth than the "
                         "company is currently delivering.")
-        elif implied < actual - 0.05:
+        elif average < actual - 0.05:
             verdict += (" The price assumes less growth than the company is "
                         "currently delivering, which is where value can hide.")
         else:
@@ -370,14 +419,21 @@ def multiples(f: Fundamentals, price: float) -> Valuation:
         value = f.get(key)
         if value is None:
             continue
+        comparable = True
         if key == "fcf_yield":
             cheap = value > benchmark
             comment = ("above" if cheap else "below") + " the 4% that usually marks fair value"
+        elif value <= 0:
+            # A loss, or debts above assets: not a low price for something good.
+            comparable = cheap = False
+            comment = "%s, so it says nothing about the price" % (
+                "negative" if value < 0 else "zero")
         else:
             cheap = value < benchmark
             comment = ("below" if cheap else "above") + " a typical %.0f%s" % (benchmark, unit)
         rows.append({"key": key, "label": label, "value": value, "unit": unit,
-                     "benchmark": benchmark, "cheap": cheap, "comment": comment})
+                     "benchmark": benchmark, "cheap": cheap, "comment": comment,
+                     "comparable": comparable})
 
     if not rows:
         v.reason = ("No valuation ratios were reported. This is normal for "
@@ -386,9 +442,13 @@ def multiples(f: Fundamentals, price: float) -> Valuation:
 
     v.usable = True
     v.workings = rows
+    v.only_a_check = True
     cheap_count = sum(1 for r in rows if r["cheap"])
-    v.notes.append("%d of %d ratios look cheap against a typical benchmark."
-                   % (cheap_count, len(rows)))
+    compared = sum(1 for r in rows if r["comparable"])
+    if compared:
+        v.notes.append("%d of %d ratio%s look%s cheap against a typical benchmark."
+                       % (cheap_count, compared, "" if compared == 1 else "s",
+                          "s" if compared == 1 else ""))
     v.notes.append(
         "Benchmarks here are broad market rules of thumb, not sector-specific. "
         "A software business at 30 times earnings and a utility at 30 times "
@@ -412,19 +472,23 @@ def combine(models: List[Valuation], price: float) -> Dict:
     A blended average of disagreeing models hides the disagreement, which is
     usually the most informative thing in the whole exercise.
     """
-    usable = [m for m in models if m.usable and m.fair_value]
-    if not usable:
+    usable = [m for m in models if m.usable and m.fair_value and m.fair_value > 0]
+    # A flat multiple of the earnings may stand beside a model. Alone it would
+    # call every share above 25 times earnings dear, and a fund's too.
+    if all(m.only_a_check for m in usable):
         refused = next((m.reason for m in models
                         if m.reason.startswith("Not calculated")), "")
+        first = next((m.reason for m in models if m.reason), "")
         return {"usable": False,
-                "reason": refused or "No model produced a value from the available data.",
+                "reason": refused or first
+                or "No model produced a value from the available data.",
                 "models": models}
 
     values = [m.fair_value for m in usable]
     lo, hi = min(values), max(values)
     spread = (hi / lo) if lo > 0 else None
 
-    agreement = "tight"
+    agreement = "single" if len(values) == 1 else "tight"
     if spread and spread > 2.5:
         agreement = "wide"
     elif spread and spread > 1.5:
@@ -439,6 +503,9 @@ def combine(models: List[Valuation], price: float) -> Dict:
     elif agreement == "loose":
         lines.append("The models give a range of %.2f to %.2f. Treat the midpoint "
                      "as a rough centre, not a target." % (lo, hi))
+    elif agreement == "single":
+        lines.append("Only one model gave a value, %.2f, so there is no second "
+                     "opinion to set beside it." % lo)
     else:
         lines.append("The models broadly agree, between %.2f and %.2f." % (lo, hi))
 

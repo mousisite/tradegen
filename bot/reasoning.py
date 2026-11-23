@@ -361,13 +361,18 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
     if valuation and valuation.get("usable"):
         block = {"modelled range": "%.2f to %.2f" % (valuation["low"], valuation["high"]),
                  "midpoint": "%.2f" % valuation["midpoint"],
-                 "agreement between models": valuation.get("agreement", "")}
+                 "agreement between models": (
+                     "none, only one model gave a value"
+                     if valuation.get("agreement") == "single"
+                     else valuation.get("agreement", ""))}
         if valuation.get("upside") is not None:
             block["gap to price"] = "%.1f%%" % (valuation["upside"] * 100)
         for model in valuation.get("models", []):
-            if getattr(model, "implied_growth", None) is not None:
-                block["growth the current price implies"] = \
-                    "%.1f%% a year for a decade" % (model.implied_growth * 100)
+            if getattr(model, "implied_average", None) is not None:
+                block["free cash flow growth the current price implies"] = (
+                    "%s%.1f%% a year on average over ten years, starting at %.1f%%"
+                    % ("below " if model.implied_at_limit else "",
+                       model.implied_average * 100, model.implied_growth * 100))
         out["Valuation models"] = block
 
     if risk_profile is not None:
