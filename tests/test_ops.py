@@ -346,6 +346,20 @@ conn.close()
 
 check("the operator can see it", c.get("/usage").status_code == 200)
 
+# The chart of analyses per day: a week of nothing is a week of empty bars,
+# not two busy days side by side.
+_quiet = __import__("sqlite3").connect(":memory:")
+_quiet.execute("CREATE TABLE runs (ts INTEGER, user_id INTEGER)")
+check("no analyses at all is no chart", usage.by_day(_quiet, 30) == [])
+_now = int(__import__("time").time())
+_quiet.executemany("INSERT INTO runs VALUES (?, 1)", [(_now - 8 * 86400,), (_now,), (_now,)])
+_days = usage.by_day(_quiet, 30)
+check("every day of the window has a bar, the quiet ones at zero",
+      len(_days) == 31 and [d["runs"] for d in _days if d["runs"]] == [1, 2]
+      and [d["runs"] for d in _days[-9:]] == [1, 0, 0, 0, 0, 0, 0, 0, 2]
+      and all(b["day"] - a["day"] == 86400 for a, b in zip(_days, _days[1:])), _days[-9:])
+_quiet.close()
+
 _os.environ["GOOGLE_CLIENT_ID"] = "x.apps.googleusercontent.com"
 _os.environ["GOOGLE_CLIENT_SECRET"] = "y"
 web.app.config["AUTH_MODE"] = None

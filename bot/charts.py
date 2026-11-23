@@ -453,7 +453,8 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
         return pad_top + plot_h * (1 - (v - axis_low) / span)
 
     slot = plot_w / len(pairs)
-    bar_w = max(6.0, slot * 0.62)
+    # Never wider than its slot: a year of days would be drawn over each other.
+    bar_w = min(slot, max(6.0, slot * 0.62))
     zero_y = y_at(0.0)
     if fmt is None:
         fmt = _money if money else (lambda v: "%.1f%%" % (v * 100))
