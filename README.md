@@ -561,9 +561,10 @@ a perfectly plausible Altman score that is wrong by the exchange rate, and the
 filing contains no rate to correct it with. Every model refuses on those, and
 names the currencies it found.
 
-**Models applied outside their domain.** No Altman Z for a bank: the
-coefficients were fitted on manufacturers, and a balance sheet that is mostly
-other people's money by design reads as distressed however healthy it is.
+**Models applied outside their domain.** No scores for a bank or an insurer:
+Altman's coefficients were fitted on manufacturers, and a balance sheet that is
+mostly other people's money by design reads as distressed however healthy it is.
+The cash flow and margin tests of the other three do not fit one either.
 
 **Partial evidence.** A Piotroski score computed from seven available tests
 says "6 of 7" and names the two it could not measure, rather than grading out
@@ -598,10 +599,11 @@ decades of filings, and can be looked up.
 
 Three things they deliberately will not do:
 
-**Score a bank on Altman.** The coefficients were fitted on manufacturers, and
+**Score a bank.** Altman's coefficients were fitted on manufacturers, and
 a balance sheet that is mostly other people's money by design reads as
-distressed however healthy it is. A number there would mislead, so none is
-given.
+distressed however healthy it is. The other three models' cash flow, debt and
+margin tests do not fit a lender either. A number there would mislead, so none
+is given.
 
 **Rescale a partial score.** If only seven of the nine Piotroski tests can be
 measured, it says "6 of 7" and names what was missing, rather than quietly

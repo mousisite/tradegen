@@ -456,7 +456,8 @@ def _read_verdict(symbol: str) -> Optional[Dict]:
         verdict = _accounts_hold_up(symbol)
     except Exception as exc:
         verdict = _unreadable(exc)
-    failed = verdict is not None and verdict.get("ok") is None
+    failed = (verdict is not None and verdict.get("ok") is None
+              and not verdict.get("unjudged"))
     with _VERDICT_LOCK:
         _VERDICTS[symbol] = (time.time() + (VERDICT_RETRY if failed else VERDICT_TTL),
                              verdict)
@@ -546,13 +547,18 @@ def _accounts_hold_up(symbol: str) -> Optional[Dict]:
     distress = models["altman"]
     earnings = models["accruals"]
 
+    if not (strength.usable or distress.usable or earnings.usable):
+        # Nothing ran: a bank, whose accounts these models were not made for,
+        # or accounts too thin for any of them. That is neither sound nor bad.
+        return {"ok": None, "reasons": [], "unjudged": True, "strength": None}
+
     reasons = []
-    if strength.usable and strength.value <= 3:
+    if quality_mod.strength_band(strength) == "weak":
         reasons.append("its finances got worse in most ways last year")
     if distress.usable and distress.value < 1.81:
         reasons.append("the balance sheet scores in the distress range")
     if earnings.usable and earnings.value > 0.10:
-        reasons.append("reported profit is running well ahead of cash")
+        reasons.append(quality_mod.cash_gap_words(earnings))
 
     return {"ok": not reasons, "reasons": reasons,
             "strength": strength.value if strength.usable else None}
@@ -891,6 +897,9 @@ def _shortlist(scan: Dict, horizon: str, risk: str, partial: bool = False,
             verdict = verdicts[candidate["symbol"]]
             if verdict is None:
                 candidate["accounts"] = "not filed"
+                kept.append(candidate)
+            elif verdict.get("unjudged"):
+                candidate["accounts"] = "not judged"
                 kept.append(candidate)
             elif verdict.get("ok") is None:
                 # Asked and not answered: kept, and labelled for what it is.
