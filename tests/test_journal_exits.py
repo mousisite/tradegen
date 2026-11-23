@@ -325,6 +325,26 @@ check("cash taken from a position still open is kept apart, after costs",
 
 
 # ---------------------------------------------------------------------------
+head("EACH INSTRUMENT PAYS WHAT THE ANALYSIS CHARGES IT")
+# ---------------------------------------------------------------------------
+# The journal knows only the symbol, so it must file each one as the prices
+# source does: a coin in any currency, a currency pair and an index.
+PAID = web._costs(web.config_mod.DEFAULTS)
+for symbol, kind in (("AAPL", "equity"), ("BRK-B", "equity"), ("BAC-PL", "equity"),
+                     ("REI-UN.TO", "equity"), ("BTC-USD", "crypto"), ("ETH-EUR", "crypto"),
+                     ("BTC-GBP", "crypto"), ("TAO22974-USD", "crypto"), ("EURUSD=X", "other"),
+                     ("^GSPC", "other"), ("ES=F", "other"), ("MC.PA", "equity"),
+                     ("USD", "equity"), ("BTC", "equity")):
+    want = web.config_mod.cost_bps_for_symbol(symbol, kind, web.config_mod.DEFAULTS)
+    got = db._cost_of({"symbol": symbol}, PAID) * 10000.0
+    check("%s pays %g bp, as in its analysis" % (symbol, want), close(got, want, 1e-6), got)
+check("a caller that knows no other rate charges the stock rate, as before",
+      close(db._cost_of({"symbol": "^GSPC"}, {"equity": 0.0002}), 0.0002))
+from bot import journal as journal_mod  # noqa: E402
+check("the journal's own costs are the same ones",
+      journal_mod.costs_from(web.config_mod.DEFAULTS) == PAID)
+
+# ---------------------------------------------------------------------------
 head("WHAT AN OLDER VERSION READS AND WRITES")
 # ---------------------------------------------------------------------------
 # The previous version's own code for these, as it was: it knows the trades

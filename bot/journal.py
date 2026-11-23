@@ -380,6 +380,7 @@ def costs_from(cfg: Dict) -> Dict[str, float]:
     """Round-trip costs as fractions of the price, from a person's settings."""
     return {"equity": float(cfg.get("cost_bps_equity", 2.0)) / 10000.0,
             "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0,
+            "other": float(cfg.get("cost_bps_other", 5.0)) / 10000.0,
             "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
 
 

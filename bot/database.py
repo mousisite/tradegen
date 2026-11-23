@@ -1050,16 +1050,38 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
     return list(conn.execute(sql, args))
 
 
+# What Yahoo prices a coin in: the part of its symbol after the last dash, as
+# in BTC-USD or ETH-EUR. A share's class or kind after a dash is never one of
+# these (BRK-B, BAC-PL, REI-UN.TO).
+_COIN_QUOTES = {"USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "KRW", "CNY",
+                "INR", "BTC", "ETH"}
+
+
+def _cost_kind(symbol: str) -> str:
+    """Which cost an instrument pays, from its symbol: the analysis's own split.
+
+    "futures" (=F), "other" (a currency pair =X, an index ^), "crypto" (a coin
+    in any currency) or "equity". The journal keeps no asset class, only the
+    symbol, and Yahoo's symbols say these plainly.
+    """
+    if symbol.endswith("=F"):
+        return "futures"
+    if symbol.endswith("=X") or symbol.startswith("^"):
+        return "other"
+    base, dash, quote = symbol.rpartition("-")
+    return "crypto" if dash and base and quote in _COIN_QUOTES else "equity"
+
+
 def _cost_of(row, costs: Dict[str, float]) -> float:
     """A trade's round-trip cost as a fraction of the price.
 
-    A futures contract (Yahoo's symbol ends =F) pays costs["futures"] when
-    the caller gives one, and the stock rate otherwise, as it always did.
+    A future, or a currency pair or an index, pays costs["futures"] or
+    costs["other"] when the caller gives one, and the stock rate otherwise.
     """
-    symbol = row["symbol"]
-    if symbol.endswith("=F") and "futures" in costs:
-        return float(costs["futures"])
-    return float(costs.get("crypto" if symbol.endswith("-USD") else "equity", 0.0))
+    kind = _cost_kind(row["symbol"])
+    if kind in ("futures", "other") and kind not in costs:
+        kind = "equity"
+    return float(costs.get(kind, 0.0))
 
 
 # The longest lesson kept; a longer one is cut, not refused.
@@ -1127,9 +1149,9 @@ def journal_summary(conn: sqlite3.Connection, account: str = "paper",
     instruments and position sizes, which is what makes it the honest measure
     of whether a process works.
 
-    costs maps "equity" and "crypto" to a round-trip cost as a fraction of the
-    price. Given them, every figure is after costs, which is what the account
-    would really show; the before-cost expectancy is kept beside it.
+    costs maps "equity" and "crypto" (and "futures" and "other", where known)
+    to a round-trip cost as a fraction of the price. Given them, every figure
+    is after costs, which is what the account would really show; the before-cost expectancy is kept beside it.
 
     A trade counts once it is closed in full, at the R of the whole position:
     each part's R weighted by its share of it. The drawdown is walked exit by
