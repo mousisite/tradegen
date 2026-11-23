@@ -397,6 +397,9 @@ def subscription(conn: sqlite3.Connection, user_id: int,
             continue
         found = {"until": (until + 999) // 1000, "product": product,
                  "test": env == SANDBOX, "renews": int(auto_renew) != 0,
+                 # A renewal failed and Pro is on only until Apple stops
+                 # waiting for the payment: until is that day, not a renewal.
+                 "grace": int(status) == STATUS_GRACE and int(grace) > int(expires),
                  "retrying": until <= now}
         if best is None or found["until"] > best["until"]:
             best = found
@@ -606,7 +609,10 @@ def move_to(conn: sqlite3.Connection, verifier: Verifier, user_id: int, jws: str
     The transaction must be the subscription's current one, still running,
     read by this person's iPhone from its own entitlements: so it is someone
     signed in on a phone with that Apple ID asking. A subscription moves at
-    most once in MOVE_EVERY_DAYS. Returns {"outcome", "previous"}: previous
+    most once in MOVE_EVERY_DAYS, except back to the account it was moved
+    away from, which may be the one that pays and is told by email how to take
+    it back. The account that gave it up then waits as anyone does, so a
+    subscription cannot be passed to and fro. Returns {"outcome", "previous"}: previous
     is the account it moved away from, to be told, or None. Raises
     VerificationError for anything Apple did not sign for this app.
     """
@@ -629,13 +635,17 @@ def move_to(conn: sqlite3.Connection, verifier: Verifier, user_id: int, jws: str
         previous = row["user_id"]
         if previous == user_id:
             return {"outcome": ALREADY_HERE, "previous": None}
-        if previous is not None and row["moved_ms"] \
+        going_back = row["moved_from"] == user_id
+        if previous is not None and row["moved_ms"] and not going_back \
                 and now - row["moved_ms"] < MOVE_EVERY_DAYS * DAY_MS:
             return {"outcome": TOO_SOON, "previous": None,
                     "after": (row["moved_ms"] + MOVE_EVERY_DAYS * DAY_MS) // 1000}
+        # Back home, moved_from goes on naming home, not the account it left,
+        # or that one could take it straight back in its turn.
         c.execute("UPDATE apple_subs SET user_id=?, moved_from=?, moved_ms=?, updated=? "
                   "WHERE environment=? AND original_tx_id=?",
-                  (user_id, previous, now, int(time.time()), env, otid))
+                  (user_id, user_id if going_back else previous, now,
+                   int(time.time()), env, otid))
         _refresh_locked(c, user_id)
         if previous is not None:
             _refresh_locked(c, int(previous))
