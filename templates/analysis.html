@@ -286,7 +286,7 @@
         {% endif %}
         {% if b.flip_words %}<div class="prose">{{ b.flip_words }}{{ help('flip_level') }}</div>{% endif %}
         <div class="prose"><b>How this read did before.</b>
-          {% for w in b.record_words %}{{ w }} {% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
+          {% for w in b.record_words %}{{ w }}{{ ' ' if not loop.last }}{% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
         <p class="prose faint" style="font-size:var(--t-xs)">The rules are Orenth's own
           reading of the course's method, not a forecast, and the lean does not change the
           call above.</p>

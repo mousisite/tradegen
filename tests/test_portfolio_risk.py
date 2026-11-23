@@ -481,7 +481,7 @@ check("and so does the figure beside it", "0.00 open" not in html)
 holdings = html[html.index("<h2>Holdings</h2>"):]
 holdings = holdings[:holdings.index("</table>")]
 check("on a phone each holding is a card, every figure under its column's name",
-      '<table class="stack">' in holdings
+      '<table class="stack tight five">' in holdings
       and _re.findall(r'data-label="([^"]+)"', cells("KNOWN")[1])
       == [h for h in _re.findall(r"<th[^>]*>(.*?)</th>", holdings) if h != "Instrument"],
       _re.findall(r'data-label="([^"]+)"', cells("KNOWN")[1]))
