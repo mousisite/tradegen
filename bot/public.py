@@ -19,6 +19,8 @@ from __future__ import annotations
 import bisect
 import calendar
 import csv
+import datetime
+import functools
 import hashlib
 import io
 import json
@@ -721,12 +723,15 @@ HOW_WORDS = {"target": "rose to the target", "stop": "fell to the stop",
 
 # A call counts in the scores only once this many days have passed since it
 # was made, by when every call made that day has had its full ten trading
-# days, with room for two holidays and the next check. Before that, the calls
-# already settled are mostly quick stop-outs, because the stop sits nearer
-# than the target: on random prices, a daily AVOID read eleven days into the
-# record was right on 62% of the calls settled by then, and on 58% once every
-# call had settled.
+# days. Before that, the calls already settled are mostly quick stop-outs,
+# because the stop sits nearer than the target: on random prices, a daily
+# AVOID read eleven days into the record was right on 62% of the calls settled
+# by then, and on 58% once every call had settled.
 MATURE_DAYS = 17
+# Two holidays, or one and a weekend after it, can put a stock call's last
+# session 18 days on: that call counts only this long after that session has
+# closed, by when the checks have scored it (_counts_at).
+SETTLE_WAIT = 2 * MAX_AGE
 
 # Instruments that are one test, not two: both hold the S&P 500, and a call
 # on one settles exactly as the call on the other does.
@@ -763,6 +768,40 @@ def _blank_error(bars, row, start: int, now: float) -> Optional[str]:
 
 def _is_coin(symbol: str) -> bool:
     return symbol.endswith("-USD")
+
+
+@functools.lru_cache(maxsize=4096)
+def _hours(day: datetime.date) -> Optional[Tuple[int, int]]:
+    from .sessions import us_session
+    return us_session(day)
+
+
+@functools.lru_cache(maxsize=4096)
+def _nth_close(first: datetime.date, sessions: int) -> int:
+    """When the last of this many New York sessions, the first of them on or
+    after a date, closes."""
+    day, shut = first, 0
+    while sessions > 0:
+        hours = _hours(day)
+        if hours is not None:
+            sessions, shut = sessions - 1, hours[1]
+        day += datetime.timedelta(days=1)
+    return shut
+
+
+def _counts_at(r) -> int:
+    """When a call is old enough to count in the scores: MATURE_DAYS after it
+    was made and, for a stock, once the market has been through every session
+    of its window, holidays allowed for."""
+    at = int(r["at"])
+    due = at + MATURE_DAYS * 86400
+    if _is_coin(r["symbol"]):
+        return due
+    day = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).date()
+    hours = _hours(day)
+    if hours is not None and hours[0] <= at:        # that day's session had begun
+        day += datetime.timedelta(days=1)
+    return max(due, _nth_close(day, int(r["horizon"] or 10)) + SETTLE_WAIT)
 
 
 def record_call(conn: sqlite3.Connection, snap: Dict) -> bool:
@@ -1281,18 +1320,21 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     kind is set against the baseline, how often a buy at any of these calls
     worked, which is what saying the same thing every day would have scored.
 
-    The scores count only calls made at least MATURE_DAYS ago, by when every
-    one has had its full window. Newer calls already settled are counted
+    The scores count only calls made at least MATURE_DAYS ago that have had
+    their full window (_counts_at). Newer calls already settled are counted
     apart, as "early": they are mostly the ones whose stop was touched first.
     costs are round-trip fractions by asset kind, e.g. {"equity": 0.0002}.
     """
     ensure_schema(conn)
     costs = costs or {}
-    cutoff = int(now or time.time()) - MATURE_DAYS * 86400
+    now = int(now or time.time())
     rows = [_dated(r) for r in conn.execute("SELECT * FROM calls ORDER BY at, id")]
     counted = [r for r in rows if not r["excluded"]]
     excluded = [r for r in rows if r["excluded"]]
-    mature = [r for r in counted if r["at"] <= cutoff]
+    for r in counted:
+        r["counts"] = (r["at"] + MATURE_DAYS * 86400 <= now
+                       and _counts_at(r) <= now)
+    mature = [r for r in counted if r["counts"]]
     scored = [r for r in mature if r["outcome"]]
     decided = [r for r in scored if r["how"] != "flat"]
     buy_worked = sum(1 for r in decided if r["how"] in ("target", "up"))
@@ -1305,7 +1347,7 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     for action, label in CLASSES:
         group = [r for r in mature if r["action"] == action]
         waiting = sum(1 for r in counted if r["action"] == action
-                      and not (r["at"] <= cutoff and r["outcome"]))
+                      and not (r["counts"] and r["outcome"]))
         if group or waiting:
             stats = _stats(group, costs)
             # Chance level for this kind of call: what saying it every time
@@ -1324,10 +1366,10 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
             "first_at": first_at,
             "all": _tally(counted),
             "scored": len(scored),
-            "early": sum(1 for r in settled if r["at"] > cutoff),
+            "early": sum(1 for r in settled if not r["counts"]),
             "mature_days": MATURE_DAYS,
             "range_weeks": int(round(MIN_SPELLS * stock_window / 7.0)),
-            "counts_from": first_at + MATURE_DAYS * 86400 if first_at else None,
+            "counts_from": _counts_at(counted[0]) if counted else None,
             "classes": classes,
             "baseline": base,
             "buy_worked": (buy_worked / len(decided)) if decided else None,

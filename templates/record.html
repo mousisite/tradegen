@@ -50,8 +50,8 @@
       scores count calls made at least {{ rec.mature_days }} days ago, every
       one of which has had its full {{ method.days }} trading days.{% if rec.early %}
       {{ rec.early }} newer calls have settled already. They join the scores
-      once they are {{ rec.mature_days }} days old: the first to settle are
-      mostly the ones whose stop came quickly, so counting them now would
+      once they are {{ rec.mature_days }} days old, or a day or two later
+      around holidays: the first to settle are mostly the ones whose stop came quickly, so counting them now would
       favour calls that said not to buy.{% endif %}
       Each kind of call is scored on its own below, because they are not the
       same bet.
@@ -213,8 +213,8 @@
       not with 50%.</li>
     <li>A price that ended about where it started counts as neither.</li>
     <li>A call counts in the scores once it is {{ rec.mature_days }} days old,
-      when every call made that day has had its full {{ method.days }} trading
-      days. The calls that settle first are mostly the ones whose stop came
+      or a day or two later around holidays, when every call made that day has
+      had its full {{ method.days }} trading days. The calls that settle first are mostly the ones whose stop came
       quickly, so counting them sooner would favour calls that said not to
       buy.</li>
     <li>The 95% range is how far the right rate could be from its true value.

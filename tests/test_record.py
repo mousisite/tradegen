@@ -297,6 +297,38 @@ try:
     finally:
         young.close()
 
+    # Around two holidays a stock call's ten sessions take 18 days. A call made
+    # after the close of 17 December 2026 has its tenth on 4 January 2027:
+    # counted at 17 days, the ones already stopped out counted a day early.
+    for m, d, last, counts in ((12, 17, utc(2027, 1, 4, 21), utc(2027, 1, 5, 9)),
+                               (12, 24, utc(2027, 1, 11, 21), utc(2027, 1, 12, 9))):
+        made = utc(2026, m, d, 21, 40)
+        got = public._counts_at({"symbol": "KO", "at": made, "horizon": 10})
+        check("a call of %d December 2026 counts once its tenth session is over" % d,
+              got == counts and got > last > made + 17 * DAY, got - last)
+    check("and one written down after midnight, before the open, at the same time",
+          public._counts_at({"symbol": "KO", "at": utc(2026, 12, 18, 3), "horizon": 10})
+          == utc(2027, 1, 5, 9))
+    check("an ordinary one, and any coin's, at 17 days",
+          public._counts_at({"symbol": "KO", "at": utc(2026, 11, 3, 21, 40), "horizon": 10})
+          == utc(2026, 11, 20, 21, 40)
+          and public._counts_at({"symbol": "BTC-USD", "at": utc(2026, 12, 17, 1),
+                                 "horizon": 10}) == utc(2027, 1, 3, 1))
+    xmas = db.connect(_os.path.join(tempfile.mkdtemp(prefix="stockbot-test-xmas-"),
+                                    "data", "xmas.db"))
+    try:
+        made = utc(2026, 12, 17, 21, 40)
+        public.record_call(xmas, call("KO", "AVOID", 100.0, 2.0, made))
+        public.settle_calls(xmas, "KO", bars_at([utc(2026, 12, 18, 14, 30)], [90.0]))
+        rec = public.record(xmas, now=utc(2027, 1, 4, 12))
+        check("so one stopped out early waits with the rest of its day's calls",
+              (rec["scored"], rec["early"], rec["classes"][0]["waiting"]) == (0, 1, 1)
+              and rec["counts_from"] == utc(2027, 1, 5, 9), rec["scored"])
+        rec = public.record(xmas, now=utc(2027, 1, 5, 9))
+        check("and counts with them", (rec["scored"], rec["early"]) == (1, 0), rec["scored"])
+    finally:
+        xmas.close()
+
     # -----------------------------------------------------------------------
     head("CALLS THAT ARE ONE TEST ARE COUNTED AS ONE")
     # -----------------------------------------------------------------------
