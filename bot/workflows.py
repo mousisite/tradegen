@@ -161,30 +161,37 @@ class _Looks:
         return not billing_mod.is_pro(person, (person.email or "").lower() in admins)
 
     @staticmethod
-    def _item(symbol: str, interval: str, exact: bool = False) -> str:
+    def _item(symbol: str, exact: bool = False) -> str:
         # The same item the site counts (web._look_item), so a look taken
         # here and on a page is one look.
-        return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+        from . import billing as billing_mod
+        return billing_mod.look_item(symbol, exact)
 
-    def take(self, symbol: str, interval: str, exact: bool = False) -> str:
+    def take(self, symbol: str, exact: bool = False) -> str:
         """"new" or "seen" when the analysis may run, "free" when no limit
         applies, and "" when today's looks are used up."""
         if not self.limited:
             return "free"
         from . import billing as billing_mod
         taken = billing_mod.reserve_view(self.conn, self.user,
-                                         self._item(symbol, interval, exact))
+                                         self._item(symbol, exact))
         if not taken:
             self.refused.append(symbol)
         return taken
 
-    def give_back(self, symbol: str, interval: str, taken: str,
-                  exact: bool = False) -> None:
+    def give_back(self, symbol: str, taken: str, exact: bool = False) -> None:
         """Return a look taken for an analysis that failed, as the site does."""
         if taken == "new":
             from . import billing as billing_mod
             billing_mod.release_view(self.conn, self.user,
-                                     self._item(symbol, interval, exact))
+                                     self._item(symbol, exact))
+
+    def shown(self, symbol: str, found: str, exact: bool = False) -> None:
+        """Count the instrument the analysis turned out to be, as the site does."""
+        if self.limited:
+            from . import billing as billing_mod
+            billing_mod.show_view(self.conn, self.user, self._item(symbol, exact),
+                                  billing_mod.look_item(found, exact=True))
 
     def report(self, report: RunReport) -> None:
         """One step naming what was not analysed for want of a look."""
@@ -316,7 +323,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         # Saved as Yahoo's own symbol (LINK for Interlink Electronics, not the
         # Chainlink coin a bare LINK means), and analysed as saved.
         exact = bool(row["exact"])
-        taken = looks.take(symbol, interval, exact)
+        taken = looks.take(symbol, exact)
         if not taken:
             continue
         step("Analysing %s" % symbol)
@@ -327,11 +334,12 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                                     db_path=db_path, user=user, source="workflow",
                                     **_exactly(exact))
         except (DataError, Exception) as exc:
-            looks.give_back(symbol, interval, taken, exact)
+            looks.give_back(symbol, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
             failed += 1
             continue
+        looks.shown(symbol, result.bars.symbol, exact)
 
         done += 1
         db.watch_touch(conn, symbol, user=user)
@@ -471,7 +479,7 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
         # The screen lists Yahoo's own symbols, all of them companies: LINK
         # there is Interlink Electronics, never the coin.
         exact = needs_exact(candidate.symbol)
-        taken = looks.take(candidate.symbol, cfg["interval"], exact)
+        taken = looks.take(candidate.symbol, exact)
         if not taken:
             continue
         step("Analysing %s" % candidate.symbol)
@@ -480,10 +488,11 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
                                     with_news=False, record=True, db_path=db_path,
                                     user=user, source="workflow", **_exactly(exact))
         except Exception as exc:
-            looks.give_back(candidate.symbol, cfg["interval"], taken, exact)
+            looks.give_back(candidate.symbol, taken, exact)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))
             continue
+        looks.shown(candidate.symbol, result.bars.symbol, exact)
         done += 1
         status = "attention" if result.plan.action in ("BUY", "WAIT") else "ok"
         report.steps.append(Step(

@@ -10,6 +10,12 @@
     counts never leave this server.</p>
 </div>
 
+{% if plans_off %}
+  <p class="notice" role="alert"><b>Paid plans are off:</b> {{ plans_off }}
+    on the server, though the rest of Stripe is. Until that is put right,
+    everyone has Pro and nobody can buy it.</p>
+{% endif %}
+
 <div class="card">
   <div class="figs">
     <div class="f"><div class="k">Accounts</div>

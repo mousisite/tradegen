@@ -50,12 +50,20 @@
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
     {% if plan.pro %}
-      <p class="prose"><b>Pro.</b> No limits.{% if apple.pro %} Through
+      <p class="prose"><b>Pro.</b> As many stocks and coins a day as you like, and
+        as many alerts.{% if apple.pro %} Through
         Apple{% if apple.pro.test %}, from a test purchase{% endif %},
-        {% if apple.pro.renews %}renewing on{% else %}until{% endif %}
-        {{ apple.pro.until|day }}.{% elif apple.via == 'invite' %}
+        {% if apple.pro.renews and not apple.pro.grace %}renewing on{% else %}until{% endif %}
+        {{ apple.pro.until|day }}.{% elif apple.paid_said %} {{ apple.paid_said }}{% elif apple.via == 'invite' %}
         Free from invites until {{ apple.invite_until|day }}.{% endif %}</p>
       {% if apple.pro %}
+        {% if apple.pro.grace %}
+          <p class="notice" style="margin-top:var(--s2)">Apple could not take the
+            last payment. Pro stays on until that day while Apple tries
+            again{% if apple.pro.renews %}; to keep it after that, update the
+            payment method in your iPhone's Settings &gt; Apple
+            Account{% else %}, and then ends{% endif %}.</p>
+        {% endif %}
         <p class="fine">{{ apple_pro_said }}</p>
         {% if apple.twice %}
           <p class="notice" style="margin-top:var(--s2)">You are paying for Pro
@@ -68,15 +76,38 @@
       {# Stripe's own page, so never inside the iPhone app. #}
       {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
-          <button class="btn quiet" type="submit">Manage subscription</button>
+          <button class="btn quiet" type="submit">{{ 'Manage subscription'
+            if apple.via == 'web' else 'Receipts and billing' }}</button>
         </form>
+        {% if apple.via == 'web' %}
         <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
+        {% else %}
+        <p class="fine">What you paid on the website before, and anything
+          still billed there, on Stripe's page.</p>
+        {% endif %}
       {% endif %}
     {% else %}
-      <p class="prose"><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
+      <p class="prose" data-plan-free><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
         instruments looked at today.</p>
       <a class="btn" href="{{ url_for('pricing') }}" style="margin-top:var(--s2)">See Pro</a>
+      {% if plan.customer and not in_app %}
+        <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
+          <button class="btn quiet" type="submit">Receipts and billing</button>
+        </form>
+        <p class="fine">What you paid on the website before, and anything
+          still billed there, on Stripe's page.</p>
+      {% endif %}
     {% endif %}
+  </div>
+</section>
+{% elif plan.customer and not in_app %}
+<section>
+  <div class="sechead"><h2>Your plan</h2></div>
+  <div class="card">
+    <form method="post" action="{{ url_for('billing_portal') }}">
+      <button class="btn quiet" type="submit">Manage subscription</button>
+    </form>
+    <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
   </div>
 </section>
 {% endif %}

@@ -1258,6 +1258,25 @@ def run(browser, site, base, check, head):
                 check("Apply answers under the box, without leaving the page",
                       page.url == address and answer.inner_text().strip() != "",
                       (page.url, answer.inner_text()))
+                # A server in trouble answers with a page of its own.
+                ctx.route(base + "/billing/code", lambda route: route.fulfill(
+                    status=500, content_type="text/html",
+                    body="<html><body><h1>Trouble</h1></body></html>"))
+                page.locator("#code").fill("FRIEND11")
+                page.get_by_role("button", name="Apply").tap()
+                answer.wait_for(state="visible")
+                check("a page that is not the answer is never drawn under the box",
+                      "Could not check" in answer.inner_text()
+                      and "Trouble" not in page.locator("main").inner_text(),
+                      answer.inner_text())
+                ctx.unroute(base + "/billing/code")
+                # Signed out since, in another tab.
+                ctx.clear_cookies()
+                page.locator("#code").fill("FRIEND12")
+                with page.expect_navigation(url=lambda url: "/signin" in url):
+                    page.get_by_role("button", name="Apply").tap()
+                check("and Apply after the sign-in has ended goes to sign in, and back here",
+                      "next=" in page.url and "pricing" in page.url, page.url)
         except Exception as exc:
             check("the pricing page %s" % ("signed in" if member else "signed out"),
                   False, exc)
@@ -1329,6 +1348,44 @@ def run(browser, site, base, check, head):
             check("the subscribe screen when this Apple Account's Pro is another account's "
                   "(%s first)" % first, False, exc)
         ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("PRO THAT ARRIVES WHILE A PAGE IS OPEN IN THE APP")
+    # -----------------------------------------------------------------------
+    # A purchase recorded on a later page. The server here says Pro each time
+    # and goes on drawing Free, the one case that could send a page round.
+    arrived = {"transactions": [{"jws": "a.b.c", "transactionId": "8"}], "jws": ["a.b.c"]}
+    ctx = context(390, ua=APP_UA, signed_in=True)
+    ctx.add_init_script(FAKE_STORE.replace("__SETUP__", json.dumps(
+        {"answers": dict(answers, unfinished=arrived, finish={}), "first": ["unfinished"]})))
+    ctx.route(base + "/api/apple/transactions", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body='{"results": [{"outcome": "applied"}], "pro": true, "source": "apple"}'))
+    page = ctx.new_page()
+    drawn = []
+    page.on("request", lambda r: drawn.append(r.url) if r.is_navigation_request() else None)
+    try:
+        page.goto(base + "/settings")
+        before = page.locator("[data-go-pro]").count()
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("!document.querySelector('[data-go-pro]')")
+        page.wait_for_timeout(500)
+        check("any page loses its Go Pro button, and is not drawn again under someone typing",
+              before == 1 and len(drawn) == 1, (before, drawn))
+        del drawn[:]
+        page.goto(base + "/account")
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("performance.getEntriesByType('navigation')[0].type === 'reload'"
+                               " && document.readyState === 'complete'"
+                               " && window.__iapAsked.indexOf('unfinished') !== -1")
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("!document.querySelector('[data-go-pro]')")
+        page.wait_for_timeout(500)
+        check("the Account page, which says the plan, is drawn again, and only once",
+              len(drawn) == 2, drawn)
+    except Exception as exc:
+        check("Pro arriving while a page is open in the app", False, exc)
+    ctx.close()
 
     # -----------------------------------------------------------------------
     head("SIGNING IN INSIDE THE APP")

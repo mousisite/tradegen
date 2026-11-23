@@ -206,6 +206,12 @@ def main(argv=None) -> int:
     # App Review's own way in, and why its code would be refused, so a
     # rejection for "the demo account does not work" names its cause here.
     print("    review sign-in %s" % web.review_status())
+    # Pro sold on the website, through Stripe. One missing setting switches
+    # it off for everybody, which is never left to be noticed by itself.
+    print("    paid plans     %s" % web.billing_mod.describe())
+    if web.billing_mod.half_set():
+        monitoring.note("Paid plans are off, though partly set up: %s"
+                        % web.billing_mod.half_set())
     # Pro sold in the iPhone app, through Apple.
     print("    app purchases  %s" % web.apple_store_mod.describe())
     print("    alert checks   %s"

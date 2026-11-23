@@ -36,6 +36,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest import mock
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 _sys.path.insert(0, _os.path.dirname(HERE))
@@ -848,12 +849,14 @@ class Lifecycle(StoreBase):
         self.send(self.at("DID_FAIL_TO_RENEW", now_ms() - 3000, "GRACE_PERIOD", status=4, purchase=purchase,
                           renewal={"isInBillingRetryPeriod": True, "gracePeriodExpiresDate": grace_end}))
         self.assertEqual(st.pro_until_ms(self.conn, self.ann), grace_end)
+        self.assertTrue(st.subscription(self.conn, self.ann)["grace"])
         self.send(self.at("GRACE_PERIOD_EXPIRED", now_ms() - 2000, status=3, purchase=purchase,
                           renewal={"isInBillingRetryPeriod": True}))
         self.assertFalse(self.pro(self.ann))
         recovered = now_ms() - 1000
         self.send(self.at("DID_RENEW", recovered, "BILLING_RECOVERY", txid="2001", purchase=recovered))
         self.assertTrue(self.pro(self.ann))
+        self.assertFalse(st.subscription(self.conn, self.ann)["grace"])
 
     def test_grace_date_counts_only_while_status_says_grace(self):
         # Renewal info can still name a grace end after grace is over; only
@@ -1015,7 +1018,12 @@ class Ownership(StoreBase):
         self.assertEqual(moved, {"outcome": st.MOVED, "previous": self.ann})
         self.assertTrue(self.pro(self.ben))
         self.assertFalse(self.pro(self.ann))
-        self.assertTrue(billing.is_pro(self.user(self.ben)) or not billing.ready())
+        # With billing on, as on the site: while it is off everyone has Pro.
+        with mock.patch.dict(_os.environ, {"STRIPE_SECRET_KEY": "sk_test_x",
+                                           "STRIPE_PRICE_ID": "price_x",
+                                           "STRIPE_WEBHOOK_SECRET": "whsec_x"}):
+            self.assertTrue(billing.is_pro(self.user(self.ben)))
+            self.assertFalse(billing.is_pro(self.user(self.ann)))
         self.assertEqual(self.user(self.ann).apple_until, 0)
         row = self.conn.execute("SELECT user_id, moved_from, moved_ms FROM apple_subs").fetchone()
         self.assertEqual((row["user_id"], row["moved_from"]), (self.ben, self.ann))
@@ -1029,16 +1037,24 @@ class Ownership(StoreBase):
     def test_moving_back_and_forth_is_limited(self):
         self.app(self.ann, self.tx())
         self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"], st.MOVED)
-        again = st.move_to(self.conn, self.v, self.ann, self.tx(), PRODUCTS)
-        self.assertEqual(again["outcome"], st.TOO_SOON)
-        self.assertGreater(again["after"], time.time() + 29 * 86400)
-        self.assertTrue(self.pro(self.ben))
         self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"],
                          st.ALREADY_HERE)
-        # A month on, it may move again.
+        # The account it left may have it straight back, as its email says.
+        back = st.move_to(self.conn, self.v, self.ann, self.tx(), PRODUCTS)
+        self.assertEqual(back, {"outcome": st.MOVED, "previous": self.ben})
+        self.assertTrue(self.pro(self.ann))
+        self.assertFalse(self.pro(self.ben))
+        # And then Ben waits: it cannot be passed to and fro.
+        again = st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)
+        self.assertEqual(again["outcome"], st.TOO_SOON)
+        self.assertGreater(again["after"], time.time() + 29 * 86400)
+        self.assertTrue(self.pro(self.ann))
+        # A month on, it may move again, and back home once more.
         self.conn.execute("UPDATE apple_subs SET moved_ms=?", (now_ms() - 31 * DAY,))
         self.conn.commit()
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"], st.MOVED)
         self.assertEqual(st.move_to(self.conn, self.v, self.ann, self.tx(), PRODUCTS)["outcome"], st.MOVED)
+        self.assertEqual(st.move_to(self.conn, self.v, self.ben, self.tx(), PRODUCTS)["outcome"], st.TOO_SOON)
         self.assertTrue(self.pro(self.ann))
 
     def test_only_the_running_transaction_can_move_it(self):
@@ -1679,11 +1695,17 @@ class Routes(WebBase):
         self.assertIn("moved to another", subject)
         self.assertIn(self.ann.email, body)
         self.assertNotIn(self.ben.email, body)
-        # Moving it straight back is refused for 30 days, and nobody is emailed.
+        # What that email says to do works at once, and tells the other one.
+        self.assertIn("Moving it back here does not wait", body)
         back = self.post(ann, "/api/apple/move", {"jws": self.tx(token)}).get_json()
-        self.assertEqual((back["outcome"], back["pro"]), ("too_soon", False))
-        self.assertGreater(back["after"], time.time())
-        self.assertEqual(len(self.mails), 1)
+        self.assertEqual((back["outcome"], back["pro"]), ("moved", True))
+        self.assertEqual(len(self.mails), 2)
+        self.assertEqual(self.mails[1][0], self.ben.email)
+        # Moving it away again is refused for 30 days, and nobody is emailed.
+        again = self.post(ben, "/api/apple/move", {"jws": self.tx(token)}).get_json()
+        self.assertEqual((again["outcome"], again["pro"]), ("too_soon", False))
+        self.assertGreater(again["after"], time.time())
+        self.assertEqual(len(self.mails), 2)
         forged = Chain(name="Forger").sign({"transactionId": "1"})
         r = self.post(ann, "/api/apple/move", {"jws": forged})
         self.assertEqual(r.status_code, 400)
@@ -1799,14 +1821,18 @@ class Notifications(WebBase):
         from bot import monitoring
         real = monitoring.note
         monitoring.note = lambda message, **context: notes.append((message, context))
-        web._APPSTORE_REFUSED.clear()
+        web._REFUSED.clear()
         try:
-            for _ in range(4):
-                self.send("a.b.c")
+            with self.assertLogs(web.app.logger, level="WARNING") as logs:
+                for _ in range(30):
+                    self.send("a.b.c")
         finally:
             monitoring.note = real
         self.assertEqual(len(notes), 1)
         self.assertIn("APPLE_APP_ID", notes[0][0])
+        # However many anyone posts, a few lines an hour and one count.
+        self.assertEqual(len(logs.output), web.REFUSALS_SAID)
+        self.assertEqual(len(web._REFUSED), 1)
 
 
 class DeepJSON(WebBase):
@@ -1910,7 +1936,7 @@ class Pages(WebBase):
         client = self.make_apple_pro(self.ann)
         page = self.text(client.get("/pricing", headers=IN_APP))
         self.assertIn("You have Pro through Apple", page)
-        self.assertIn("It renews on", page)
+        self.assertIn("It renews on", re.sub(r"\s+", " ", page))
         self.assertIn('data-iap-manage>Manage subscription', page)
         self.assertNotIn("data-iap-shop", page)
         self.assertFalse(self.leaks(page), self.leaks(page))
@@ -2044,6 +2070,23 @@ class Pages(WebBase):
         self.assertNotIn("keeps billing through Apple", page)
         pricing = self.text(client.get("/pricing", headers=IN_APP))
         self.assertIn("will not renew", pricing)
+
+    def test_a_failed_renewal_is_not_called_a_renewal(self):
+        # Apple's grace period: the date is when Pro stops, not a renewal.
+        client = self.make_apple_pro(self.ann)
+        conn = db.connect(WEB_DB)
+        conn.execute("UPDATE apple_subs SET status=4, expires_ms=?, grace_until_ms=? "
+                     "WHERE user_id=?", (now_ms() - DAY, now_ms() + 15 * DAY, self.ann.id))
+        conn.execute("UPDATE users SET apple_until=? WHERE id=?",
+                     (int(time.time()) + 15 * 86400, self.ann.id))
+        conn.commit()
+        conn.close()
+        for path in ("/pricing", "/account"):
+            page = " ".join(self.text(client.get(path, headers=IN_APP)).split())
+            self.assertIn("Apple could not take the last payment", page, path)
+            self.assertIn("update the payment method", page, path)
+            self.assertNotIn("renews on", page, path)
+            self.assertNotIn("renewing on", page, path)
 
     def test_paying_twice_is_said(self):
         client = self.make_apple_pro(self.ann)

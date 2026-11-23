@@ -166,6 +166,7 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
   font-size: var(--t-xs); font-weight: 500; letter-spacing: .08em;
   text-transform: uppercase; color: var(--ink-3);
 }
+h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label */
 
 /* ---------- shell ---------- */
 
@@ -298,7 +299,10 @@ h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0;
 .plan form .coderow .field::placeholder { text-transform: none; letter-spacing: normal;
                                           font-family: var(--sans); }
 .plan form .coderow .btn { width: auto; }
-.codeslot { display: contents; }   /* its message spaces like the form's rows */
+/* Its message spaces like the form's rows, and empty it takes no row. A box of
+   its own rather than display: contents, which some screen readers skip. */
+.codeslot { margin-top: calc(-1 * var(--s2)); }
+.codeslot .codesaid { margin-top: var(--s2); }
 .codesaid { margin: 0; padding: 10px 12px; border-radius: var(--r-sm);
             font-size: var(--t-sm); line-height: 1.5; }
 .codesaid.ok { color: var(--gain); background: var(--gain-wash); }

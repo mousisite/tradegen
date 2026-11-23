@@ -247,8 +247,12 @@ check("an exact pick of a ticker that needs none is the plain one",
       heading(text(c.get("/analyse?symbol=LINK-USD&interval=1d&news=0&exact=1")))
       == ("LINK-USD", "Chainlink USD"))
 check("each kind counts its own free look",
-      web._look_item("LINK", "1d", True) != web._look_item("LINK", "1d")
-      and web._look_item("LINK", "1d", True) == workflows._Looks._item("LINK", "1d", True))
+      web._look_item("LINK", True) != web._look_item("LINK")
+      and web._look_item("LINK", True) == workflows._Looks._item("LINK", True))
+check("and the coin's is one look however it is written",
+      len({web._look_item(s) for s in ("link", "LINK-USD", "LINKUSDT", "link/usd",
+                                       "BINANCE:LINKUSDT")}) == 1
+      and web._look_item("LINK") == web._look_item("LINK-USD", True))
 
 del NEWS[:]
 c.get("/analyse?symbol=LTC&interval=1d&exact=1")

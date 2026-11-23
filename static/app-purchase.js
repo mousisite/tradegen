@@ -35,6 +35,7 @@
   // Transactions the server called invalid, so each page load this session
   // does not send them again. StoreKit still holds them for a later launch.
   var INVALID_KEY = 'orenth-iap-invalid';
+  var REDRAWN_KEY = 'orenth-iap-redrawn';
 
   function noop() {}
 
@@ -146,6 +147,22 @@
     if (!t || invalidList().indexOf(String(t.transactionId || '')) >= 0) { return; }
     deliver(t).catch(noop);
   }
+
+  // Pro that arrived after this page was drawn as Free. The Go Pro button goes,
+  // and the Account page, which says which plan it is, is drawn again. No
+  // other page is: something may be half typed in it. Once a session, so a
+  // server that still draws Free cannot send the page round and round.
+  watchers.push(function (out) {
+    if (!out || !out.pro) { return; }
+    var goPro = document.querySelector('[data-go-pro]');
+    if (goPro) { goPro.parentNode.removeChild(goPro); }
+    if (!document.querySelector('[data-plan-free]')) { return; }
+    try {
+      if (window.sessionStorage.getItem(REDRAWN_KEY)) { return; }
+      window.sessionStorage.setItem(REDRAWN_KEY, '1');
+    } catch (e) { return; }
+    location.reload();
+  });
 
   if (ready) {
     // Renewals, approvals and purchases elsewhere; the plugin holds any that
@@ -361,7 +378,7 @@
     }
     if (seen.indexOf('invalid') >= 0) {
       say('Apple took the payment, but Orenth could not confirm it with Apple just now. ' +
-        'It is tried again by itself the next time a page opens.');
+        'It is tried again the next time you open the app, or when you tap Restore Purchases.');
       return;
     }
     if (seen.indexOf('applied') >= 0 || seen.indexOf('stale') >= 0) {

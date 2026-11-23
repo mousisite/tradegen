@@ -397,11 +397,18 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
     # Inside the iPhone app no web price is shown, so Stripe is not asked.
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
+                           watch_shown=ideas_mod.WATCH_SHOWN, watch_calls=WATCH_SHOWN,
                            offer={} if _in_app() else billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
                            has_customer=bool(customer), fair=_fair_use(),
                            apple=_apple_plan()), status
+
+
+# What a plan paid on the website does next (billing.paid_until).
+PAID_SAID = {"renews": "Pro renews on %s.", "paid": "It is paid until %s.",
+             "ends": "The subscription is cancelled: Pro stays on until %s, and "
+                     "then ends."}
 
 
 def _apple_plan() -> Dict:
@@ -413,10 +420,12 @@ def _apple_plan() -> Dict:
     warning before an account is deleted. retrying: whether Apple may yet
     charge for Pro that has ended, so the website sells none meanwhile.
     via: how Pro was got otherwise, so the app can say why it sells nothing:
-    "web" (paid on the website), "invite" or "other".
+    "web" (paid on the website), "invite" or "other". paid_said: when what
+    was paid on the website renews or ends, in words, when that is known.
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
            "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "paid_said": "",
            "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
@@ -432,6 +441,9 @@ def _apple_plan() -> Dict:
     if billing_mod.ready() and billing_mod.is_pro(plain, _is_operator()):
         if plain.plan == "pro" and plain.plan_status in billing_mod.ACTIVE:
             out["via"] = "web"
+            what, when = billing_mod.paid_until(plain)
+            if what:
+                out["paid_said"] = PAID_SAID[what] % _day(when)
         elif plain.bonus_until > time.time():
             out["via"], out["invite_until"] = "invite", plain.bonus_until
         else:
@@ -479,17 +491,36 @@ def _just_signed_in(conn) -> bool:
     return age is not None and age < SIGNED_IN_JUST_NOW
 
 
-def _look_item(symbol: str, interval: str, exact: bool = False) -> str:
-    """What a free look is counted against: an instrument at a bar size.
+def _look_item(symbol: str, exact: bool = False) -> str:
+    """What a free look is counted against: an instrument, at any bar size.
 
     LINK exactly (Interlink Electronics) is not the bare LINK (the Chainlink
     coin), so each is its own look. The routines count the same way
     (workflows._Looks).
     """
-    return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+    return billing_mod.look_item(symbol, exact)
 
 
-def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
+# What was typed, and the instrument it turned out to be ("TESLA" is TSLA),
+# from analyses shown since the server started. Read only when today's looks
+# are used up, so typing the name of one already opened still opens it.
+_TURNED_OUT: Dict[str, str] = {}
+_TURNED_OUT_LOCK = threading.Lock()
+TURNED_OUT_KEPT = 2000
+
+
+def _opened_under(conn, item: str) -> str:
+    """The item by which this account already opened the instrument today: the
+    one asked for, or what its words turned out to mean. "" for neither."""
+    with _TURNED_OUT_LOCK:
+        meant = _TURNED_OUT.get(item, item)
+    for known in (item, meant):
+        if billing_mod.opened_today(conn, g.user.id, known):
+            return known
+    return ""
+
+
+def _allowance_left(symbol: str, exact: bool = False) -> bool:
     """Whether a free account may open this instrument now, taking the look if so.
 
     The look is taken before the analysis runs, in one transaction with the
@@ -499,14 +530,16 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     """
     if g.demo or _pro():
         return True
-    item = _look_item(symbol, interval, exact)
+    item = _look_item(symbol, exact)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _from_another_site() and not _just_signed_in(conn) \
-                and not billing_mod.opened_today(conn, g.user.id, item):
+                and not _opened_under(conn, item):
             g.allowance_refused = "elsewhere"
             return False
         taken = billing_mod.reserve_view(conn, g.user.id, item)
+        if not taken and _opened_under(conn, item):
+            taken = "seen"
     finally:
         conn.close()
     if taken == "new":
@@ -514,18 +547,29 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     return bool(taken)
 
 
-def _spend_view(symbol: str, interval: str, exact: bool = False) -> None:
-    """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
+def _spend_view(symbol: str, exact: bool = False, result=None, found: str = "") -> None:
+    """Counted once the analysis is on screen, so a mistyped ticker costs nothing.
+
+    result is that analysis: the look is counted against the instrument it
+    is of, whatever was typed to find it. Where the page was drawn from kept
+    research there is no analysis to hand, and found names the instrument.
+    """
     if g.demo or _pro():
         return
-    item = _look_item(symbol, interval, exact)
-    pending = g.get("views_pending") or set()
-    if item in pending:
-        pending.discard(item)       # shown, so the look taken for it stands
-        return
+    item = _look_item(symbol, exact)
+    found = found or getattr(getattr(result, "bars", None), "symbol", "") or ""
+    # The analysis names the instrument as Yahoo does, which is never read as
+    # anything else.
+    shown = _look_item(found, exact=True) if found else item
+    if shown != item and not exact:
+        with _TURNED_OUT_LOCK:
+            if len(_TURNED_OUT) >= TURNED_OUT_KEPT:
+                _TURNED_OUT.clear()
+            _TURNED_OUT[item] = shown
+    (g.get("views_pending") or set()).discard(item)   # shown, so it stands
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        billing_mod.count_view(conn, g.user.id, item)
+        billing_mod.show_view(conn, g.user.id, item, shown)
     finally:
         conn.close()
 
@@ -1463,7 +1507,7 @@ def analyse():
         cfg["allow_shorts"] = True
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     if g.demo:
@@ -1484,7 +1528,7 @@ def analyse():
         detail = _plainly(exc, said)
         return render_template("error.html", symbol="", message=(
             said if detail == said else "%s (%s)" % (said, detail))), 500
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     families = _family_rollup(result)
     # What price is doing (levels, the clock, the day's lean): a part that
@@ -3016,7 +3060,7 @@ def research():
                            "can look at any timeframe.")
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     cfg = _cfg()
@@ -3030,7 +3074,7 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, analysis)
 
     found = _cached_research(analysis, interval, cfg, with_news, with_options)
 
@@ -3149,7 +3193,7 @@ def save_thesis():
                                        "the thesis from there."), 400
     # Saving analyses the instrument, so it costs a free look as opening it
     # does. Without this a free account could research anything from here.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     if _rate_limited("thesis", THESES_PER_HOUR):
         return _too_often("saved theses")
@@ -3167,12 +3211,12 @@ def save_thesis():
                 hit = _RESEARCH_CACHE.get(_research_key(
                     symbol, interval, cfg, with_news, with_options))
         if hit and time.time() - hit[0] < SAVE_TTL and hit[1].thesis is not None:
-            t, price = hit[1].thesis, hit[1].price
+            t, price, found = hit[1].thesis, hit[1].price, hit[1].symbol
         else:
             # As the page does it, so it is the same case by today's figures;
             # the written reasoning is not part of a thesis.
             analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
-            price = analysis.bars.last_price
+            price, found = analysis.bars.last_price, analysis.bars.symbol
             t = engine.research(symbol, price, cfg, analysis=analysis,
                                 with_options=with_options,
                                 with_reasoning=False).thesis
@@ -3202,7 +3246,7 @@ def save_thesis():
                                        "Try again in a minute."), 500
     finally:
         conn.close()
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, found=found)
     return redirect(url_for("research", symbol=symbol, interval=interval,
                             exact=1 if exact else None,
                             news=None if with_news else 0,
@@ -3719,9 +3763,7 @@ def apple_notifications():
             return jsonify({"received": True})
         # Their Apple Account is gone and nothing else opens this one. The
         # subscription stops first, as when they delete it themselves.
-        customer = billing_mod.customer_of(conn, user_id)
-        if customer and billing_mod.ready():
-            billing_mod.close_customer(customer)
+        billing_mod.end_subscription(conn, user_id)
         accounts_mod.delete_user(conn, user_id)
         app.logger.info("Deleted account %d: its Apple Account was deleted and "
                         "nothing else could open it", user_id)
@@ -4185,8 +4227,23 @@ CODE_ERROR = ("That code does not work, or it has run out. Check the "
 # Codes are passed on by word of mouth, so they are words someone chose and
 # can be guessed, and every check is a call to Stripe.
 CODE_CHECKS_PER_HOUR = 10
+CODE_REFUSED = ("Payments would not take that code for this purchase. Nothing "
+                "was charged. Empty the box to pay full price.")
 CODE_TOO_OFTEN = ("Too many codes were tried in the last hour. Wait a while, "
                   "or empty the box to pay full price.")
+# Every other request that makes this server ask Stripe, per account an hour
+# (a network gets three times this), each counted on its own: without it, one
+# account in a loop could use up what Stripe allows and hold up real buyers.
+STRIPE_ASKS_PER_HOUR = 30
+STRIPE_TOO_OFTEN = ("That was asked for many times in the last hour. Wait a "
+                    "while, then try again. Nothing was charged.")
+
+
+def _code_said(status: int = 200, **said):
+    """The line under the discount box, marked as that and nothing else, so
+    the page never draws some other page there."""
+    return (render_template("_codesaid.html", **said), status,
+            {"X-Orenth-Part": "code"})
 
 
 @app.route("/billing/code", methods=["POST"])
@@ -4202,14 +4259,19 @@ def billing_code():
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
-        return render_template("_codesaid.html", code_error=CODE_TOO_OFTEN), 429
+        return _code_said(429, code_error=CODE_TOO_OFTEN)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        found = billing_mod.promotion(code)
+        customer = billing_mod.customer_of(conn, g.user.id)
+    finally:
+        conn.close()
+    try:
+        found = billing_mod.promotion(code, customer=customer)
     except billing_mod.BillingError as exc:
-        return render_template("_codesaid.html", code_error=str(exc)), 502
+        return _code_said(502, code_error=str(exc))
     if code and not found:
-        return render_template("_codesaid.html", code_error=CODE_ERROR), 400
-    return render_template("_codesaid.html", applied=found)
+        return _code_said(400, code_error=CODE_ERROR)
+    return _code_said(applied=found)
 
 
 @app.route("/billing/checkout", methods=["POST"])
@@ -4235,42 +4297,87 @@ def billing_checkout():
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
+    if _rate_limited("checkout", STRIPE_ASKS_PER_HOUR):
+        return _pricing_page(STRIPE_TOO_OFTEN, 429, code=code)
+    found = None
+
+    def checkout(as_customer: str) -> str:
+        return billing_mod.checkout_url(
+            g.user, _public_base(), as_customer,
+            price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
+            promotion=found["id"] if found else "")
+
     try:
-        found = billing_mod.promotion(code)
+        found = billing_mod.promotion(code, customer=customer)
         if code and not found:
             return _pricing_page(code=code, code_error=CODE_ERROR, status=400)
         if request.form.get("apply"):
             return _pricing_page(code=code, applied=found)
-        url = billing_mod.checkout_url(
-            g.user, _public_base(), customer,
-            price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
-            promotion=found["id"] if found else "")
+        try:
+            url = checkout(customer)
+        except billing_mod.BillingRefused:
+            # A customer Stripe no longer has would be refused for ever. Only
+            # then is a new one started: for any other refusal it would be a
+            # second customer for the same person.
+            if not customer or not billing_mod.customer_gone(customer):
+                raise
+            app.logger.warning("Stripe no longer has the customer of account %d; "
+                               "checkout starts a new one", g.user.id)
+            url = checkout("")
     except billing_mod.BillingError as exc:
+        if found and isinstance(exc, billing_mod.BillingRefused):
+            # Stripe alone knows some limits a code can have, such as first
+            # purchases only, and it is the code it most likely refused.
+            return _pricing_page(code=code, code_error=CODE_REFUSED, status=400)
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)
 
 
 @app.route("/billing/done")
 def billing_done():
-    """Where Stripe sends a buyer back. Asks Stripe directly, not the browser."""
-    upgraded = False
+    """Where Stripe sends a buyer back. Asks Stripe directly, not the browser.
+
+    Anyone can open this address, so it speaks of a payment only when Stripe
+    knows of one by this person, or cannot be asked.
+    """
     session_id = (request.args.get("session_id") or "").strip()
-    if billing_mod.ready() and session_id and not g.demo:
+    if g.demo and session_id.startswith("cs_"):
+        # Signed out while paying: the account it belongs to is not known yet.
+        return redirect(url_for("signin", next=url_for("billing_done",
+                                                       session_id=session_id)))
+    state = "no"
+    asking = billing_mod.key_set() and session_id and not g.demo
+    if asking and _rate_limited("checkout_done", STRIPE_ASKS_PER_HOUR):
+        # Not asked again for a while, which is not a no: Stripe's own message
+        # may settle it meanwhile.
+        state = "waiting"
+    elif asking:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             with events_mod.counting_upgrades(conn):
-                upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
+                state = billing_mod.checkout_state(conn, session_id, g.user.id)
         except billing_mod.BillingError:
-            upgraded = False
+            app.logger.warning("Stripe could not confirm the checkout of account %d "
+                               "just now", g.user.id)
+            state = "waiting"
         finally:
             conn.close()
-    return render_template("billing_done.html", upgraded=upgraded)
+    if state == "no":
+        # The pricing page says which plan they have.
+        return redirect(url_for("pricing" if billing_mod.ready() else "index"))
+    # Stripe's own message may have made them Pro before this page asked.
+    return render_template("billing_done.html", session_id=session_id,
+                           upgraded=state == "pro" or (billing_mod.ready() and _pro()))
 
 
 @app.route("/billing/portal", methods=["POST"])
 def billing_portal():
-    """Stripe's own page for cancelling, changing card and receipts."""
-    if not billing_mod.ready() or g.demo or _in_app():
+    """Stripe's own page for cancelling, changing card and receipts.
+
+    Open to whoever already pays for as long as Stripe can be asked, even if
+    another setting went missing and nothing is on sale.
+    """
+    if not billing_mod.key_set() or g.demo or _in_app():
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -4278,7 +4385,9 @@ def billing_portal():
     finally:
         conn.close()
     if not customer:
-        return redirect(url_for("pricing"))
+        return redirect(url_for("pricing" if billing_mod.ready() else "account"))
+    if _rate_limited("portal", STRIPE_ASKS_PER_HOUR):
+        return render_template("error.html", message=STRIPE_TOO_OFTEN, symbol=""), 429
     try:
         url = billing_mod.portal_url(customer, _public_base() + url_for("account"))
     except billing_mod.BillingError as exc:
@@ -4286,14 +4395,47 @@ def billing_portal():
     return redirect(url, code=303)
 
 
+# Signed messages refused, by whose they claim to be and why: when the hour
+# being counted began, and how many since. One that keeps happening (a wrong
+# STRIPE_WEBHOOK_SECRET, APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once
+# an hour, and anyone posting rubbish fills neither the log nor memory.
+_REFUSED: Dict[str, Tuple[float, int]] = {}
+_REFUSED_LOCK = threading.Lock()
+REFUSALS_SAID = 3
+
+
+def _refusals(kind: str) -> int:
+    """Count one more refusal of this kind; how many this hour."""
+    now = time.time()
+    with _REFUSED_LOCK:
+        since, tries = _REFUSED.get(kind, (now, 0))
+        if now - since >= 3600:
+            since, tries = now, 0
+        _REFUSED[kind] = (since, tries + 1)
+    return tries + 1
+
+
 @app.route("/billing/webhook", methods=["POST"])
 def billing_webhook():
-    """Stripe telling the server a plan changed. Signed, so it can be believed."""
-    if not billing_mod.ready():
+    """Stripe telling the server a plan changed. Signed, so it can be believed.
+
+    Believed with only the signing secret set, so the plans on record stay
+    right while another setting is missing.
+    """
+    secret = (os.environ.get("STRIPE_WEBHOOK_SECRET") or "").strip()
+    if not secret:
         abort(404)
     payload = request.get_data()
     if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
-                              os.environ["STRIPE_WEBHOOK_SECRET"]):
+                              secret):
+        tries = _refusals("stripe")
+        if tries <= REFUSALS_SAID:
+            app.logger.warning("A message to Stripe's webhook address was refused: "
+                               "its signature does not check out")
+        if tries == REFUSALS_SAID:
+            from bot import monitoring
+            monitoring.note("Messages to Stripe's webhook address keep failing their "
+                            "check; STRIPE_WEBHOOK_SECRET may be wrong")
         return jsonify({"error": "bad signature"}), 400
     try:
         event = safejson.loads(payload.decode("utf-8"))
@@ -4303,6 +4445,11 @@ def billing_webhook():
     try:
         with events_mod.counting_upgrades(conn):
             outcome = billing_mod.handle(conn, event)
+    except billing_mod.BillingError:
+        # Nothing was recorded, and Stripe sends it again, for days if need be.
+        app.logger.warning("Stripe sent word of a plan ending and could not be "
+                           "asked what is still running; it will send it again")
+        return jsonify({"error": "try again later"}), 503
     finally:
         conn.close()
     return jsonify({"received": True, "outcome": outcome})
@@ -4335,21 +4482,13 @@ APPSTORE_JWS_PER_POST = 20
 APPSTORE_STATE_PER_HOUR = 240
 APPSTORE_POSTS_PER_HOUR = 60
 APPSTORE_MOVES_PER_HOUR = 5
-# Notifications refused by kind of failure, so one that keeps happening (a
-# wrong APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once an hour.
-_APPSTORE_REFUSED: Dict[str, list] = {}
-_APPSTORE_REFUSED_LOCK = threading.Lock()
 
 
 def _appstore_refused(status: str) -> None:
-    app.logger.warning("An App Store notification was refused: %s", status)
-    now = time.time()
-    with _APPSTORE_REFUSED_LOCK:
-        seen = [t for t in _APPSTORE_REFUSED.get(status, []) if now - t < 3600]
-        seen.append(now)
-        _APPSTORE_REFUSED[status] = seen
-        loud = len(seen) == 3
-    if loud:
+    tries = _refusals("app store: " + status)
+    if tries <= REFUSALS_SAID:
+        app.logger.warning("An App Store notification was refused: %s", status)
+    if tries == REFUSALS_SAID:
         from bot import monitoring
         monitoring.note("App Store notifications keep failing their check; "
                         "APPLE_APP_ID or APPLE_BUNDLE_ID may be wrong",
@@ -4509,7 +4648,7 @@ def apple_move():
 
     JSON {"jws": one transaction the phone read just now from its current
     entitlements}. Only the subscription's running transaction moves it, at
-    most once in 30 days, and the account it leaves is told by email when it
+    most once in 30 days unless it goes back to the account it left, and the account it leaves is told by email when it
     has an address that can be written to; who it was is kept either way.
     """
     refused = _appstore_post_refused()
@@ -4566,7 +4705,8 @@ def _tell_pro_moved(person) -> None:
         "If that was you, there is nothing to do. If it was not, check who can "
         "use that Apple Account. To bring Pro back, open Orenth on that iPhone "
         "signed in to this account, go to Pricing and tap Move Pro to this "
-        "account. A subscription can move once every 30 days.\n" % (address, when))
+        "account. Moving it back here does not wait; moving it anywhere else "
+        "waits 30 days.\n" % (address, when))
     try:
         codes_mod.send_mail(address, "Your Orenth Pro moved to another account", body)
     except codes_mod.CodeError:
@@ -4611,6 +4751,14 @@ def account():
         conn.close()
     plan = {"on": billing_mod.ready(), "pro": _pro(), "customer": ""}
     invite = {}
+    if not plan["on"] and billing_mod.key_set():
+        # A setting is missing and nothing is on sale, but whoever already
+        # pays must still find the way to cancel.
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            plan["customer"] = billing_mod.customer_of(conn, uid())
+        finally:
+            conn.close()
     if plan["on"]:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
@@ -4648,10 +4796,7 @@ def delete_account():
     try:
         # Stop the subscription first, or a deleted account keeps being
         # charged. If Stripe cannot be reached, nothing is deleted.
-        customer = billing_mod.customer_of(conn, uid())
-        if customer and billing_mod.ready():
-            billing_mod.close_customer(customer)
-            cancelled = True
+        cancelled = billing_mod.end_subscription(conn, uid())
         _end_apple_sign_in(conn, uid())
         accounts_mod.delete_user(conn, uid())
     except billing_mod.BillingError:
@@ -4786,6 +4931,7 @@ def usage():
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
                            storage=storage, counts=counts, offsite=offsite,
+                           plans_off=billing_mod.half_set(),
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 
@@ -5984,7 +6130,7 @@ def api_analyse():
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
     # The same allowance as the pages, or the API is a way round it.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
@@ -5998,7 +6144,7 @@ def api_analyse():
             answer.headers["Retry-After"] = str(wait)
             return answer
         return jsonify({"error": str(exc)}), 404
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     from bot import report as report_mod
     import json as _json
@@ -6317,13 +6463,13 @@ def share():
     interval = request.form.get("interval") or "1d"
     if not symbol or interval not in dict(INTERVALS):
         abort(400)
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     try:
         result = cached_analysis(symbol, interval, _cfg(), record=False, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
     snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))
     conn = db_mod.connect(app.config.get("DB_PATH"))
