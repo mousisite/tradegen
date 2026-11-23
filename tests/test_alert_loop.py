@@ -1178,6 +1178,13 @@ try:
         web.ALERTS.stop()
         web.ALERTS = real_loop
     check("checks a minute apart are every minute", "checks your alerts every minute, and" in page)
+    for sent in ({}, {"alert_id": "abc"}, {"alert_id": "9" * 30}):
+        r = c.post("/monitor/alert/pause", data=sent)
+        said = r.data.decode("utf-8", "replace")
+        check("an alert number of %s is answered with a sentence" % (
+                  str(sent.get("alert_id"))[:5]),
+              r.status_code == 400 and "invalid literal" not in said
+              and "&#39;alert_id&#39;" not in said, (r.status_code, said[-600:]))
     check("a call alert says whose settings it is worked out with",
           "Orenth's standard settings" in page.replace("&#39;", "'"))
 

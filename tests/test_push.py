@@ -1159,6 +1159,8 @@ try:
     page = c.get("/settings").data.decode("utf-8", "replace")
     check("the Settings page lists the devices", "Chrome on Android" in page
           and 'action="/settings/notifications/remove"' in page)
+    r = c.post("/settings/notifications/remove", data={"device_id": "9" * 30})
+    check("a number no device can have is not an error", r.status_code == 302, r.status_code)
     r = c.post("/settings/notifications/remove", data={"device_id": alice_ids[0]})
     check("and removes one from there", r.status_code == 302 and not device_rows(alice.id))
 
@@ -1262,7 +1264,11 @@ try:
     first = signs_in(ann)
     check("the same person signing in again ends the first sign-in", not alive(first))
     check("and keeps their own device on", len(device_rows(ann.id)) == 1)
-    c.post("/api/push/subscribe", json={"kind": "web", "check": True,
+    # Before any page has told the server of it again.
+    c.post("/signout")
+    check("which signing out of the new sign-in switches off", not device_rows(ann.id))
+    signs_in(ann)
+    c.post("/api/push/subscribe", json={"kind": "web",
                                         "subscription": subscription(FCM + "shared")})
     second = signs_in(ben)
     check("someone else signing in there ends it too", not alive(second))

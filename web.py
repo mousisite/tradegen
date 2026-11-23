@@ -3955,8 +3955,10 @@ def _open_session(user) -> None:
             conn, user.id, request.headers.get("User-Agent", ""))
         if old:
             # Their own device, when it is the same person signing in
-            # again, stays on.
-            push_mod.forget_session(conn, _session_ref(old), keep_for=user.id)
+            # again, stays on, as this sign-in's: signing out of it is what
+            # must switch it off.
+            push_mod.forget_session(conn, _session_ref(old), keep_for=user.id,
+                                    keep_as=_session_ref(token))
             accounts_mod.end_session(conn, old)
         # A friend's link they arrived through, credited once the account
         # exists. accept() ignores it for anyone who was not brand new.
@@ -5697,7 +5699,7 @@ def alert_action(action):
         return render_template("error.html", message="Unknown action.", symbol=""), 404
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        alert_id = int(request.form["alert_id"])
+        alert_id = _row_id(request.form.get("alert_id"))
         if action == "delete":
             db_mod.alert_delete(conn, alert_id, user=uid())
         elif action == "pause":
@@ -5976,7 +5978,7 @@ def push_remove():
     if g.demo:
         abort(404)
     try:
-        device = int(request.form.get("device_id") or "")
+        device = _row_id(request.form.get("device_id"))
     except ValueError:
         return render_template("error.html", symbol="",
                                message="No device was named."), 400
