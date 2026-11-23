@@ -379,7 +379,7 @@ def _identify():
         conn.close()
 
     if g.user is not None:
-        return None
+        return _sent_from_elsewhere()
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
     if request.method in ("GET", "HEAD") and request.endpoint in DEMO_ENDPOINTS:
@@ -402,6 +402,39 @@ def _identify():
         return redirect(url_for("signin", next=_referrer_path()))
     # full_path always ends in "?" when there is no query string.
     return redirect(url_for("signin", next=request.full_path.rstrip("?")))
+
+
+# Posts that rightly come from elsewhere (Apple's sign-in, the servers of Apple
+# and Stripe, an inbox's unsubscribe button), and those that look at where they
+# came from themselves and answer in their own way.
+ELSEWHERE_ENDPOINTS = {"apple_callback", "apple_notifications",
+                       "appstore_notifications", "billing_webhook", "email_stop",
+                       "signout", "code_start", "app_finish", "apple_native",
+                       "learn_practice", "push_subscribe", "push_unsubscribe",
+                       "push_test", "apple_transactions", "apple_move"}
+
+
+def _sent_from_elsewhere():
+    """Refuse a change the browser says another site sent, or None.
+
+    On the live site the sign-in cookie (SameSite=Lax) never comes with such a
+    request. A copy run on somebody's own machine asks for no sign-in, so any
+    page open in the same browser could delete its trades or rewrite its
+    settings by posting to its address; and a cookie is sent from a sister
+    site under the same domain. Only what the browser itself says is gone by:
+    a program that says nothing is not a page somebody was tricked into.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS") \
+            or request.endpoint in ELSEWHERE_ENDPOINTS:
+        return None
+    fetched = request.headers.get("Sec-Fetch-Site", "")
+    if fetched not in ("cross-site", "same-site") and (fetched or _from_this_site()):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That request came from another site."}), 403
+    return render_template("error.html", symbol="",
+                           message="That was sent from another site, so nothing was "
+                                   "changed. Use the button on this site."), 403
 
 
 def _referrer_path() -> str:
