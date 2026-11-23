@@ -25,6 +25,16 @@ from . import screener as screener_mod
 from .market import DataError, fetch_bars, format_price, needs_exact
 
 
+# A routine answers inside one page request, which Cloudflare drops after 100
+# seconds while the server carries on. So one run of the watchlist routine
+# analyses this many instruments and starts no more after this long, and says
+# which were left; they come first next time. The morning review reads only
+# prices, so it takes more.
+WATCH_MOST = 25
+WATCH_SECONDS = 60.0
+MORNING_MOST = 60
+
+
 @dataclass
 class Step:
     """One thing a workflow did, and what came of it."""
@@ -290,10 +300,18 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
             "re-analysed automatically.", "ok"))
         return
 
+    # Longest since its last analysis first, so a list too long for one run is
+    # got through in turn rather than its start being done again each time.
+    rows = sorted(rows, key=lambda r: (r["last_run"] or 0, r["symbol"]))
+    started, done = time.time(), 0
+    left: List[str] = []
     changed = 0
     looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
+        if done >= WATCH_MOST or time.time() - started > WATCH_SECONDS:
+            left.append(symbol)
+            continue
         # Saved as Yahoo's own symbol (LINK for Interlink Electronics, not the
         # Chainlink coin a bare LINK means), and analysed as saved.
         exact = bool(row["exact"])
@@ -313,6 +331,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                                      str(exc)[:140], "failed"))
             continue
 
+        done += 1
         db.watch_touch(conn, symbol, user=user)
         # What this person was told before this run, for the same instrument
         # and bar size, so only genuine changes get reported. An hourly look
@@ -339,7 +358,15 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                 {"symbol": symbol, "interval": interval, "exact": exact}))
 
     looks.report(report)
-    looked = len(rows) - len(looks.refused)
+    if left:
+        shown = ", ".join(left[:8]) + (" and %d more" % (len(left) - 8)
+                                       if len(left) > 8 else "")
+        report.steps.append(Step(
+            "Left for next time",
+            "Not analysed this time: %s. One run takes up to %d instruments, or "
+            "about a minute. Run it again and these come first."
+            % (shown, WATCH_MOST), "attention"))
+    looked = len(rows) - len(looks.refused) - len(left)
     if not looked:
         report.headline = ("Nothing on the watchlist was analysed: today's free "
                            "looks are used up.")
@@ -351,6 +378,9 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         report.headline += (" %d more %s not analysed, for want of a free look."
                             % (len(looks.refused),
                                "was" if len(looks.refused) == 1 else "were"))
+    if left:
+        report.headline += (" %d more %s left for the next run."
+                            % (len(left), "was" if len(left) == 1 else "were"))
 
 
 def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
@@ -361,6 +391,12 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
     rows = db.watchlist(conn, user=user)
     if rows:
         step("Re-checking the watchlist")
+        if len(rows) > MORNING_MOST:
+            report.steps.append(Step(
+                "Watchlist", "Prices were checked for the first %d of your %d watched "
+                "instruments, in alphabetical order. One review takes no more."
+                % (MORNING_MOST, len(rows)), "attention"))
+            rows = rows[:MORNING_MOST]
         # Prices only here. A full re-analysis of a long watchlist would make a
         # morning check take minutes, so the deeper pass is its own routine.
         def grab(row):

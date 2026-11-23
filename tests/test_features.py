@@ -922,6 +922,74 @@ check("a company's debt to equity is shown as the percent it is",
       fundamentals_mod.Metric("debt_to_equity", "Debt to equity", 154.49, "points").display()
       == "154%")
 
+print()
+print("=" * 72)
+print("A ROUTINE FITS IN ONE REQUEST")
+print("=" * 72)
+conn = db.connect(DB)
+rae = A.upsert_email_user(conn, "rae@example.com")
+for n in range(40):
+    db.watch_add(conn, "ZZL%02d" % n, "1d", user=rae.id)
+conn.close()
+workflows.engine.analyse = routine_analyse
+try:
+    report = run_routine("watchlist", rae)
+    first = list(analysed)
+    check("a long watchlist is analysed up to a limit",
+          first == ["ZZL%02d" % n for n in range(workflows.WATCH_MOST)], len(first))
+    held_back = [s for s in report.steps if s.label == "Left for next time"]
+    check("and says how many were left, and which",
+          "15 more were left for the next run" in report.headline
+          and held_back and "ZZL25" in held_back[0].detail
+          and "and 7 more" in held_back[0].detail, (report.headline, held_back))
+    check("and counts only what was analysed",
+          report.headline.startswith("None of the 25 watched instruments changed."))
+    run_routine("watchlist", rae)
+    check("run again, it starts with the ones that were left",
+          analysed[:15] == ["ZZL%02d" % n for n in range(25, 40)], analysed[:15])
+
+    def slow_analyse(symbol, *a, **k):
+        time.sleep(0.1)
+        return routine_analyse(symbol, *a, **k)
+
+    workflows.WATCH_SECONDS, seconds = 0.05, workflows.WATCH_SECONDS
+    workflows.engine.analyse = slow_analyse
+    report = run_routine("watchlist", rae)
+    workflows.WATCH_SECONDS, workflows.engine.analyse = seconds, routine_analyse
+    check("out of time, it starts no more and says so",
+          len(analysed) == 1 and "39 more were left" in report.headline, report.headline)
+
+    # The button on the page.
+    sign_in(c, rae)
+    web._RATE.clear()
+    web._CACHE[("kept",)] = (time.time(), None, {})
+    real_run, runs = workflows.run, []
+    workflows.run = lambda name, *a, **k: runs.append(name) or workflows.RunReport(
+        name, 0, 0, headline="Done.")
+    try:
+        check("the routine runs from its button",
+              c.post("/workflow/positions").status_code == 302 and runs == ["positions"])
+        check("and leaves everyone's kept analyses alone", ("kept",) in web._CACHE)
+        web._ROUTINES.add(rae.id)
+        r = c.post("/workflow/watchlist")
+        check("while one is running, another is not started beside it",
+              r.status_code == 409 and runs == ["positions"]
+              and "still running" in text(r), r.status_code)
+        web._ROUTINES.discard(rae.id)
+        for _n in range(web.ROUTINES_PER_HOUR):
+            r = c.post("/workflow/positions")
+        check("past the hour's routines, one more is refused in words",
+              r.status_code == 429 and "run routines a lot" in text(r)
+              and len(runs) == web.ROUTINES_PER_HOUR - 1, (r.status_code, len(runs)))
+        check("and nothing is left marked as running", rae.id not in web._ROUTINES)
+    finally:
+        workflows.run = real_run
+        web._ROUTINES.clear()
+        web._CACHE.pop(("kept",), None)
+        web._RATE.clear()
+finally:
+    workflows.engine.analyse = real_routine[0]
+
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)
 

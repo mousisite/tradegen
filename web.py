@@ -5294,11 +5294,37 @@ def watch(action):
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
 
 
+# A routine is up to a minute of analysis, or a screen's worth of requests.
+ROUTINES_PER_HOUR = 20
+# Whose routine is running, so pressing the button again does not start a
+# second one beside the first.
+_ROUTINES: set = set()
+_ROUTINES_LOCK = threading.Lock()
+
+
 @app.route("/workflow/<name>", methods=["POST"])
 def run_workflow(name):
     if name not in workflows_mod.WORKFLOWS:
         return render_template("error.html", message="No routine called %r." % name,
                                symbol=""), 404
+    if _rate_limited("routine", ROUTINES_PER_HOUR):
+        return _too_often("run routines")
+    me = uid()
+    with _ROUTINES_LOCK:
+        if me in _ROUTINES:
+            return render_template(
+                "error.html", symbol="",
+                message="A routine of yours is still running. What it found will "
+                        "be on the Monitor page when it is done."), 409
+        _ROUTINES.add(me)
+    try:
+        return _run_routine(name)
+    finally:
+        with _ROUTINES_LOCK:
+            _ROUTINES.discard(me)
+
+
+def _run_routine(name):
     cfg = _cfg()
     # Alerts the way the loop checks them: a call worked out, the fire kept
     # in the person's history and emailed if they asked. Crossed stops are
@@ -5309,10 +5335,9 @@ def run_workflow(name):
     # Kept per person. One shared slot showed whoever ran a routine last to
     # everybody's Monitor page, visitors included.
     app.config.setdefault("LAST_WORKFLOW_BY_USER", {})[uid()] = report
-    # A workflow can change what every analysis would say, so drop the caches.
-    with _CACHE_LOCK:
-        _CACHE.clear()
-        _RESEARCH_CACHE.clear()
+    # The shared caches are left alone: a routine's analyses are its own, and
+    # emptying them made everyone else's pages, the example's included, be
+    # worked out again each time anybody pressed a button.
     return redirect(url_for("monitor"))
 
 
