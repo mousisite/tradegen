@@ -165,11 +165,18 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
     try:
         # Bounded, because this runs inside the research page's request: the
         # SDK's own default is ten minutes, three times. Longer than the other
-        # calls, because this answer is the longest one asked for.
+        # calls, because this answer is the longest one asked for. Not asked
+        # twice: an answer too slow once would be too slow again, be paid for
+        # again, and take the page past the 100 seconds Cloudflare allows it.
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
-                                     timeout=40.0, max_retries=1)
+                                     timeout=40.0, max_retries=0)
+        # Some thinking rather than as much as it likes, so that the answer
+        # comes inside that time. Another model chosen by the owner may not
+        # take the setting, so it is sent to the default only.
+        paced = ({"output_config": {"effort": "medium"}}
+                 if chosen == DEFAULT_MODEL else {})
         response = client.messages.create(
-            model=chosen, max_tokens=_MAX_TOKENS,
+            model=chosen, max_tokens=_MAX_TOKENS, **paced,
             messages=[{"role": "user", "content": prompt}])
         text = "".join(b.text for b in response.content
                        if getattr(b, "type", "") == "text").strip()
@@ -369,7 +376,10 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
                     "%.1f%%" % (cagr[key] * 100))
         rev = (sec_history.get("table") or {}).get("revenue") or []
         if rev:
-            block["Revenue by fiscal year (as filed)"] = ", ".join(
+            # Named when it is not dollars, or a yen figure is told as dollars.
+            unit = (rev[-1].get("unit") or "USD").split("/")[0]
+            block["Revenue by fiscal year (as filed%s)"
+                  % ("" if unit == "USD" else ", in " + unit)] = ", ".join(
                 "FY%s %s" % (r["fy"], big_number(r["value"])) for r in rev[-5:])
         derived = sec_history.get("derived") or {}
         margins = [(y, derived[y]["net_margin"]) for y in sorted(derived)
