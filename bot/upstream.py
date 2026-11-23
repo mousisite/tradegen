@@ -55,15 +55,20 @@ PROBE_FOR = 30.0
 # is a message.
 THRESHOLD = 3
 
-# Most answers kept at once. One parsed price history can be over a megabyte,
-# the server has half a gigabyte, and the cache is only here to collapse the
-# repeats of a single page view, which never need more than a few dozen.
-MAX_ENTRIES = 100
+# Most answers kept at once, and the most they may come to, in bytes. A parsed
+# price history is some fifty kilobytes for a year of days and over three
+# megabytes for two years of a coin's hours, and the server has half a
+# gigabyte. By number alone, a hundred of the small ones a round of alerts
+# reads pushed out, in seconds, what the pages being drawn were about to ask
+# for again, and a hundred of the large ones took most of the server.
+MAX_ENTRIES = 600
+MAX_BYTES = 48 * 1024 * 1024
 
 _lock = threading.Lock()
 # Told when a request sent to see whether the source is back has settled.
 _settled = threading.Condition(_lock)
 _cache: Dict[str, Tuple[float, object]] = {}
+_sizes: Dict[str, int] = {}             # about how much each of those holds
 # One entry per question being asked right now: an event set when the answer
 # is in, and the error, when asking failed.
 _inflight: Dict[str, Dict] = {}
@@ -322,14 +327,28 @@ def _store(key: str, result: object) -> None:
     """Keep an answer and let go of what can no longer be served. Lock held."""
     now = time.time()
     _cache[key] = (now, result)
+    _sizes[key] = _size(result)
     # Expired entries used to stay until four hundred others pushed them out,
     # which at a megabyte or more each could outgrow the whole server.
     for old in [k for k, (at, _) in _cache.items() if now - at >= _max_ttl]:
         if old != key:
             del _cache[old]
-    while len(_cache) > MAX_ENTRIES:
-        del _cache[min((k for k in _cache if k != key),
-                       key=lambda k: _cache[k][0])]
+    for gone in [k for k in _sizes if k not in _cache]:
+        del _sizes[gone]
+    total = sum(_sizes.values())
+    while len(_cache) > 1 and (len(_cache) > MAX_ENTRIES or total > MAX_BYTES):
+        oldest = min((k for k in _cache if k != key), key=lambda k: _cache[k][0])
+        del _cache[oldest]
+        total -= _sizes.pop(oldest, 0)
+
+
+def _size(result: object) -> int:
+    """About how many bytes an answer holds: a price history's bars are six
+    lists of numbers, and any other answer is taken as an ordinary one."""
+    try:
+        return 220 * len(result["chart"]["result"][0]["timestamp"]) + 5000
+    except (KeyError, IndexError, TypeError):
+        return 60000
 
 
 def stats() -> Dict:
@@ -355,6 +374,7 @@ def reset() -> None:
     global _max_ttl
     with _lock:
         _cache.clear()
+        _sizes.clear()
         _inflight.clear()
         _breakers.clear()
         _max_ttl = 0.0
