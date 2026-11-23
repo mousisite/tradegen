@@ -12,7 +12,8 @@
     shares, coins or futures contracts. Nothing you type is kept.</p>
 </div>
 
-<form method="get" action="{{ url_for('size_tool') }}" class="card">
+{# The answer is under the form, off the bottom of a phone: open there. #}
+<form method="get" action="{{ url_for('size_tool') }}#result" class="card">
   <div class="setgrid">
     <div class="setfield">
       <label for="account">Account</label>
@@ -77,11 +78,11 @@
 </form>
 
 {% if problem %}
-  <div class="notice" style="margin-top:var(--s3)">{{ problem }}</div>
+  <div class="notice" id="result" style="margin-top:var(--s3)">{{ problem }}</div>
 {% endif %}
 
 {% if result %}
-<section>
+<section{% if not problem %} id="result"{% endif %}>
   <div class="sechead"><h2>{{ 'Long' if result.direction > 0 else 'Short' }}: the size</h2></div>
   <div class="card">
     {% if result.fits %}

@@ -13,6 +13,12 @@
   }
 </style>{% endif %}{% endblock %}
 
+{# The source and its day. The day stays in one piece: on a phone it broke
+   across two lines at a hyphen, "2026-11-" and "23". #}
+{% macro cited(e) -%}
+{{ e.source }}{% if e.as_of %} · <span style="white-space:nowrap">{{ e.as_of }}</span>{% endif %}
+{%- endmacro %}
+
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
     {% if v >= 0 %}<i class="up" style="width:{{ (v * 50)|round(1) }}%"></i>
@@ -197,8 +203,8 @@
           {% for e in p.evidence %}
             <div class="tiny faint" style="margin-top:6px;font-size:var(--t-xs)">
               <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
-              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
-              {% else %}{{ e.cite() }}{% endif %}
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -217,8 +223,8 @@
           {% for e in p.evidence %}
             <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
               <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
-              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
-              {% else %}{{ e.cite() }}{% endif %}
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -264,8 +270,8 @@
           {% for e in p.evidence %}
             <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
               <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
-              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
-              {% else %}{{ e.cite() }}{% endif %}
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
             </div>
           {% endfor %}
         </div>

@@ -69,7 +69,7 @@
           if view.concentration else '—' }}</div>
       <div class="n">effective positions</div></div>
     <div class="f"><div class="k">Weighted beta</div>
-      <div class="v fig">{{ "%.2f"|format(view.portfolio_beta)
+      <div class="v fig">{{ "%.2f"|format(view.portfolio_beta|round(2) + 0)
           if view.portfolio_beta is not none else '—' }}</div></div>
   </div>
 </div>
@@ -118,7 +118,7 @@
             <td class="r fig" data-label="Still at risk">{% if p.breached %}<span class="chip short">Past stop</span>{% elif not known %}—{% else %}{{ p.risk_remaining|money }}{% endif %}</td>
             <td class="r fig soft" data-label="Weight">{{ (p.notional|abs / view.gross_exposure)|pct
                 if known and view.gross_exposure else '—' }}</td>
-            <td class="r fig soft" data-label="Beta">{{ "%.2f"|format(p.beta) if p.beta is not none else '—' }}</td>
+            <td class="r fig soft" data-label="Beta">{{ "%.2f"|format(p.beta|round(2) + 0) if p.beta is not none else '—' }}</td>
             <td class="soft" data-label="Sector">{{ p.sector or ('Crypto' if p.asset_class == 'crypto' else '—') }}</td>
           </tr>
         {% endfor %}
@@ -202,18 +202,18 @@
   </div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr><th>Market move</th><th class="r">Your change</th>
           <th class="r">Of the account</th><th>Worst hit</th></tr></thead>
         <tbody>
         {% for pct, s in shocks.items() %}
           <tr>
-            <td class="fig">{{ (pct)|pct }}</td>
+            <td class="fig" data-label="Market move">{{ (pct)|pct }}</td>
             {% set tone = 'loss' if s.total_change < 0 else 'gain' if s.total_change > 0 else '' %}
-            <td class="r fig {{ tone }}">{{ s.total_change|money }}</td>
-            <td class="r fig {{ tone }}">{{ "%.1f%%"|format(s.pct_of_account)
+            <td class="r fig {{ tone }}" data-label="Your change">{{ s.total_change|money }}</td>
+            <td class="r fig {{ tone }}" data-label="Of the account">{{ "%.1f%%"|format(s.pct_of_account)
                 if s.pct_of_account is not none else '—' }}</td>
-            <td class="soft say">{% if s.rows and s.rows[0].change < 0 %}{{ s.rows[0].symbol }}
+            <td class="soft say" data-label="Worst hit">{% if s.rows and s.rows[0].change < 0 %}{{ s.rows[0].symbol }}
               <span class="fig loss">{{ s.rows[0].change|money }}</span>{% if s.rows[0].assumed %}
               <span class="faint">(beta assumed 1)</span>{% endif %}{% else %}—{% endif %}</td>
           </tr>

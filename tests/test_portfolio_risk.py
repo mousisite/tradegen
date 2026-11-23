@@ -239,6 +239,9 @@ v = whole({"AAA": 100.0}, [held(1, "AAA", direction=-1, stop=110)], {"AAA": 0.6}
 check("a portfolio short on balance is said to move against the market",
       any("Weighted beta is -0.60, so the portfolio tends to move 60% as much as the "
           "market, in the opposite direction." == o for o in v.observations), v.observations)
+v = whole({"AAA": 100.0}, [held(1, "AAA")], {"AAA": -0.003})
+check("a beta that rounds to nothing is 0.00, with no minus sign",
+      any(o.startswith("Weighted beta is 0.00,") for o in v.observations), v.observations)
 v = whole({"AAA": 100.0}, [held(1, "AAA")], {"AAA": 0.6})
 check("and one that is long is not",
       any(o.endswith("60% as much as the market.") for o in v.observations), v.observations)

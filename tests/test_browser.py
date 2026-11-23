@@ -814,6 +814,28 @@ APP_NOTCH = r"""
 }
 """
 
+# Two things to tap that share some of the same screen: a tap there does one
+# or the other, whichever is on top.
+SHARED_TAPS = r"""
+() => {
+  const taps = [...document.querySelectorAll('td a, td button, td select, td input, td summary')]
+    .map(el => [el, el.getBoundingClientRect()])
+    .filter(([el, r]) => r.width > 1 && r.height > 1 && el.type !== 'hidden' &&
+            (el.tagName === 'SUMMARY' || !el.closest('details:not([open])')));
+  const out = [];
+  for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
+    const a = taps[i][1], b = taps[j][1];
+    const x = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const y = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    if (x > 1 && y > 1) {
+      out.push(taps[i][0].textContent.trim().slice(0, 20) + ' | ' +
+               taps[j][0].textContent.trim().slice(0, 20));
+    }
+  }
+  return out;
+}
+"""
+
 # The longest figure a card might have to hold, in the first figure of the
 # portfolio's: it wraps in its column rather than widen the page.
 LONG_FIGURE = r"""
@@ -1242,6 +1264,61 @@ def run(browser, site, base, check, head):
         check("inside the app, nothing on any page (%d of them, the offline page among them) "
               "sits under the status bar, the notch or the home bar, and scrolled, the page "
               "passes under the top bar" % pages, not unclear, unclear[:4])
+
+    # -----------------------------------------------------------------------
+    head("THE ANALYSE PAGE AND THE TABLES, BY TOUCH")
+    # -----------------------------------------------------------------------
+    conn = site.db.connect(site.DB)
+    try:
+        new = site.A.upsert_google_user(conn, {"email": "new@example.com", "sub": "g-new",
+                                               "name": "New Person", "email_verified": True})
+        token = site.A.start_session(conn, new.id, "browser suite")
+    finally:
+        conn.close()
+    ctx = context(390)
+    ctx.add_cookies([session_cookie(site, base, token)])
+    page = ctx.new_page()
+    _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+    try:
+        page.goto(base + "/")
+        page.wait_for_timeout(500)
+        check("with nothing to read first, the page still opens with its tab bar: the search "
+              "box takes the cursor only where there is a keyboard",
+              page.evaluate("getComputedStyle(document.querySelector('.tabbar')).visibility")
+              == "visible")
+        zone = page.evaluate("""(() => {
+            const z = document.getElementById('drop'), r = z.getBoundingClientRect();
+            const words = [...z.querySelectorAll('span')].map(s => s.getBoundingClientRect())
+              .filter(w => w.width > 0);
+            return {lines: z.getClientRects().length,
+                    held: words.every(w => w.left >= r.left && w.right <= r.right
+                                           && w.top >= r.top && w.bottom <= r.bottom),
+                    above: document.getElementById('shotform').previousElementSibling
+                             .getBoundingClientRect().bottom <= r.top}; })()""")
+        check("the screenshot box is one box, round its own words, under the ones above",
+              zone == {"lines": 1, "held": True, "above": True}, zone)
+    except Exception as exc:
+        check("the Analyse page of a new account", False, exc)
+    finally:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+    ctx.close()
+    ctx = context(390, signed_in=True)
+    page = ctx.new_page()
+    try:
+        shared_taps = []
+        for path in ("/screener?preset=quality_value", "/settings", "/monitor", "/trades"):
+            page.goto(base + path)
+            shared_taps += ["%s %s" % (path, s) for s in page.evaluate(SHARED_TAPS)]
+        check("no two links or buttons in a table share a spot to tap", not shared_taps,
+              shared_taps[:4])
+        page.goto(base + "/portfolio")
+        tall = page.evaluate("""[...document.querySelectorAll('.figs .f .v')]
+            .filter(v => v.getBoundingClientRect().height > 1.5 * parseFloat(
+                getComputedStyle(v).lineHeight)).map(v => v.textContent.trim())""")
+        check("a position worth millions is given on one line", not tall, tall)
+    except Exception as exc:
+        check("tapping in the tables", False, exc)
+    ctx.close()
 
     # -----------------------------------------------------------------------
     head("A TICKER, TYPED")

@@ -201,8 +201,8 @@
     {# Focused straight away only when nothing above it needs reading first:
        focusing a box further down scrolls the page past the list. #}
     <input class="field" id="symbol" type="text" name="symbol"
-           placeholder="AAPL, NVDA, BTC-USD, Tesla…" data-suggest="submit"
-           {{ 'autofocus' if not att.any }} autocomplete="off" autocapitalize="characters"
+           placeholder="AAPL, BTC-USD, Tesla…" data-suggest="submit"
+           {{ 'data-autofocus' if not att.any }} autocomplete="off" autocapitalize="characters"
            autocorrect="off" spellcheck="false" enterkeyhint="go" required>
     <label class="sr" for="interval">Bar interval</label>
     <select class="field" id="interval" name="interval">
@@ -212,6 +212,16 @@
     </select>
     <button class="btn" type="submit">Analyse</button>
   </form>
+  {# Only where there is a keyboard to type with. On a phone a box with the
+     cursor in it hides the bar along the bottom, so the page opened without
+     one, for a box that was off the screen. #}
+  {% if not att.any %}
+  <script>
+    if (window.matchMedia('(pointer: fine)').matches) {
+      document.querySelector('[data-autofocus]').focus({ preventScroll: true });
+    }
+  </script>
+  {% endif %}
   <div class="pills">
     {% for s in ['AAPL','NVDA','TSLA','MSFT','SPY','BTC-USD','ETH-USD'] %}
       <a data-working href="{{ url_for('analyse', symbol=s, interval=default_interval) }}">{{ s }}</a>
@@ -400,7 +410,7 @@
   <div class="card pad0" style="margin-top:var(--s3)">
     <div class="cardhead"><span class="eyebrow">Open positions</span></div>
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th>
           <th class="r">Stop</th><th class="r">Target</th><th class="r">At risk</th>
@@ -409,12 +419,12 @@
         {% for t in open_trades %}
           <tr>
             <td><b>{{ t['symbol'] }}</b></td>
-            <td><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
+            <td data-label="Side"><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
-            <td class="r fig">{{ t['entry']|price }}</td>
-            <td class="r fig loss">{{ t['stop_now']|price }}</td>
-            <td class="r fig gain">{{ t['target1']|price }}</td>
-            <td class="r fig soft">{{ t['at_risk']|money }}</td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
+            <td class="r fig loss" data-label="Stop">{{ t['stop_now']|price }}</td>
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}</td>
+            <td class="r fig soft" data-label="At risk">{{ t['at_risk']|money }}</td>
           </tr>
         {% endfor %}
         </tbody>

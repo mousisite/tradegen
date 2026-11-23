@@ -97,7 +97,7 @@
   <a href="{{ url_for('size_tool') }}">how big a position</a> ·
   <a href="{{ url_for('survival_tool') }}">how long an account lasts at each risk</a></p>
 
-<section>
+<section id="open">
   <div class="sechead">
     <h2>Open</h2>
     <span class="tail">{{ open_trades|length }} position{{ '' if open_trades|length == 1 else 's' }}</span>
@@ -250,7 +250,7 @@
   </div>
 </section>
 
-<section id="log" style="scroll-margin-top:72px">
+<section id="log">
   <div class="sechead"><h2>Log a trade by hand</h2>
     <span class="tail">for anything Orenth did not propose</span></div>
   <div class="card">
@@ -333,7 +333,7 @@
   </div>
 </section>
 
-<section id="closed" style="scroll-margin-top:72px">
+<section id="closed">
   <div class="sechead">
     <h2>Closed</h2>
     <span class="tail">{{ summary.trades }} trade{{ '' if summary.trades == 1 else 's' }}
@@ -368,7 +368,7 @@
               <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div>
               {# The review: was the plan followed, and what it taught. The
                  setup and feeling can be set or corrected here too. #}
-              <details style="margin-top:4px">
+              <details style="margin-top:12px">
                 <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">{{ 'Change your review' if t['reviewed_ts'] else 'Review this trade' }}</summary>
                 <form method="post" action="{{ url_for('review_trade') }}" class="setgrid"
                       style="margin-top:var(--s1);grid-template-columns:minmax(0,1fr)">

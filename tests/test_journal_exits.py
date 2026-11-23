@@ -927,6 +927,15 @@ try:
                                      "stop": "95", "quantity": "60", "interval": "1d",
                                      "trail": "5", "trail_kind": "pct"})
     tt = conn.execute("SELECT * FROM trades WHERE symbol='ZZT'").fetchone()
+    check("and the journal opens at the open trades, where it now is",
+          r.headers["Location"].endswith("/trades#open")
+          and '<section id="open">' in text(c.get("/trades")), r.headers["Location"])
+    wrong = flat(text(c.post("/trades/open", data={
+        "symbol": "ZZT", "direction": "long", "entry": "100", "stop": "120",
+        "interval": "1d"})))
+    check("what was wrong with one refused is a whole sentence",
+          ">For a long, the stop must sit below the entry.</p>" in wrong,
+          wrong[wrong.find("fig loss"):][:160])
     check("a trade logged by hand can trail from the start", r.status_code == 302
           and close(tt["trail_pct"], 0.05) and tt["trail_ts"] == tt["ts_opened"]
           and close(tt["trail_best"], 100.0), dict(tt) if tt else r.status_code)

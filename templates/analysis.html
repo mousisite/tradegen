@@ -523,7 +523,7 @@
   <div class="card pad0">
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Strategy</th><th>Family</th><th style="width:88px"><span class="sr">The score as a bar</span></th>
+        <thead><tr><th>Strategy</th><th>Family</th><th class="asbar" style="width:88px"><span class="sr">The score as a bar</span></th>
           <th class="r">Score</th><th class="r">Weight</th><th>What it sees</th></tr></thead>
         <tbody>
         {% for s in ranked[:12] %}
@@ -531,7 +531,7 @@
             <td>{{ s.name|strategy }}{% if s.name in trial_names %}
               <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}</td>
             <td class="soft">{{ s.family.replace('_',' ') }}</td>
-            <td>{{ lean(s.score) }}</td>
+            <td class="asbar">{{ lean(s.score) }}</td>
             <td class="r fig {{ 'gain' if s.score > 0 else 'loss' if s.score < 0 else 'soft' }}">
               {{ s.score|signed }}</td>
             <td class="r fig soft">{{ "%.2f"|format(s.weight) }}</td>

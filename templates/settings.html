@@ -27,7 +27,7 @@
       <div class="setfield">
         <label for="account_size">Account size</label>
         <input class="field fig" id="account_size" name="account_size" type="number"
-               step="any" min="1" inputmode="decimal" value="{{ cfg.account_size }}">
+               step="any" min="1" inputmode="decimal" value="{{ cfg.account_size|bare }}">
         {# The desktop version keeps everything on the machine it runs on;
            online it is stored with the account, and the hint has to say so. #}
         <div class="hint">{% if personal %}Used to size positions and to weigh
@@ -38,7 +38,7 @@
         <label for="risk_per_trade_pct">Risk per trade</label>
         <input class="field fig" id="risk_per_trade_pct" name="risk_per_trade_pct"
                type="number" step="any" min="0.01" max="10" inputmode="decimal"
-               value="{{ cfg.risk_per_trade_pct }}">
+               value="{{ cfg.risk_per_trade_pct|bare }}">
         <div class="hint">Percent of the account you lose if the stop is hit. One
           percent is a common ceiling.</div>
       </div>
@@ -46,7 +46,7 @@
         <label for="max_position_pct">Largest position</label>
         <input class="field fig" id="max_position_pct" name="max_position_pct"
                type="number" step="any" min="1" max="100" inputmode="decimal"
-               value="{{ cfg.max_position_pct }}">
+               value="{{ cfg.max_position_pct|bare }}">
         <div class="hint">Percent of the account in any one instrument. On small
           accounts this cap usually binds before the risk figure does.</div>
       </div>
@@ -65,7 +65,7 @@
         <label for="cost_bps_equity">Stocks and ETFs, round trip</label>
         <input class="field fig" id="cost_bps_equity" name="cost_bps_equity"
                type="number" step="any" min="0" inputmode="decimal"
-               value="{{ cfg.cost_bps_equity }}">
+               value="{{ cfg.cost_bps_equity|bare }}">
         <div class="hint">In basis points, hundredths of a percent, in and out
           combined. 2 is typical for a commission-free broker, paying only the
           spread.</div>
@@ -74,7 +74,7 @@
         <label for="cost_bps_crypto">Crypto, round trip</label>
         <input class="field fig" id="cost_bps_crypto" name="cost_bps_crypto"
                type="number" step="any" min="0" inputmode="decimal"
-               value="{{ cfg.cost_bps_crypto }}">
+               value="{{ cfg.cost_bps_crypto|bare }}">
         <div class="hint">20 means 0.1% taker fee on each side, which is normal
           on a retail exchange.</div>
       </div>
@@ -82,7 +82,7 @@
         <label for="cost_bps_futures">Futures, round trip</label>
         <input class="field fig" id="cost_bps_futures" name="cost_bps_futures"
                type="number" step="any" min="0" inputmode="decimal"
-               value="{{ cfg.cost_bps_futures }}">
+               value="{{ cfg.cost_bps_futures|bare }}">
         <div class="hint">For a contract such as ES=F. One tick of slippage and a
           commission of about five dollars come to about 0.6 on ES and 0.8 on the
           micro contracts.</div>
@@ -115,14 +115,14 @@
       <div class="setfield">
         <label for="stop_atr_multiple">Stop distance</label>
         <input class="field fig" id="stop_atr_multiple" name="stop_atr_multiple"
-               type="number" step="any" min="0.2" max="10" inputmode="decimal" value="{{ cfg.stop_atr_multiple }}">
+               type="number" step="any" min="0.2" max="10" inputmode="decimal" value="{{ cfg.stop_atr_multiple|bare }}">
         <div class="hint">In ATR, the instrument's own volatility unit. Wider
           stops survive noise but risk more per unit.</div>
       </div>
       <div class="setfield">
         <label for="target_atr_multiple">First target</label>
         <input class="field fig" id="target_atr_multiple" name="target_atr_multiple"
-               type="number" step="any" min="0.2" max="20" inputmode="decimal" value="{{ cfg.target_atr_multiple }}">
+               type="number" step="any" min="0.2" max="20" inputmode="decimal" value="{{ cfg.target_atr_multiple|bare }}">
         <div class="hint">Also in ATR. Together with the stop this sets your
           reward to risk.</div>
       </div>
@@ -192,7 +192,7 @@
         <label for="min_conviction">Minimum conviction</label>
         <input class="field fig" id="min_conviction" name="min_conviction"
                type="number" step="any" min="0" max="1" inputmode="decimal"
-               value="{{ cfg.min_conviction }}">
+               value="{{ cfg.min_conviction|bare }}">
         <div class="hint">Below this Orenth proposes nothing at all.</div>
       </div>
       <div class="setfield">

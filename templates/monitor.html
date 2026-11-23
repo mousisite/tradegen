@@ -49,13 +49,13 @@
   </div>
 
   {% if last_run %}
-    <div class="card" style="margin-top:var(--s3)">
+    <div class="card" id="ran" style="margin-top:var(--s3)">
       <span class="eyebrow">{{ last_run.name }} · {{ last_run.finished|ago }}
         · took {{ "%.0f"|format(last_run.seconds) }}s</span>
       <p class="prose" style="color:var(--ink);font-size:var(--t-base)">
         {{ last_run.headline }}</p>
       <div class="tablewrap" style="margin-top:var(--s2)">
-        <table>
+        <table class="stack">
           <thead><tr><th style="padding:0;border:0"><span class="sr">Result</span></th>
             <th style="padding:0;border:0"><span class="sr">What it found</span></th>
             <th style="padding:0;border:0"><span class="sr">Where to look</span></th></tr></thead>
@@ -87,7 +87,7 @@
   {% endif %}
 </section>
 
-<section>
+<section id="alerts">
   <div class="sechead">
     <h2>Alerts</h2>
     <span class="count">{{ alerts|length }}</span>
@@ -234,7 +234,7 @@
                     <input class="field fig sm" id="e-th-{{ row['id'] }}" name="threshold" type="number"
                            step="any" inputmode="decimal" style="max-width:110px"
                            {# Ten figures, so 7% is 7 and not 7.000000000000001. #}
-                           value="{{ '%.10g'|format(row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold'] }}">
+                           value="{{ '%.10g'|format(row['threshold'] * 100) if kinds[row['kind']].unit == 'percent' and row['threshold'] is not none and row['threshold'] < 1 else row['threshold']|bare }}">
                   {% endif %}
                   <label class="sr" for="e-note-{{ row['id'] }}">Note</label>
                   <input class="field sm" id="e-note-{{ row['id'] }}" name="note" type="text"
@@ -443,7 +443,7 @@
                    exact=exact_arg(row['symbol'])) }}">Review</a>
                 {% if not row['outcome'] %}
                   <form method="post" action="{{ url_for('close_thesis') }}"
-                        style="display:flex;gap:4px;align-items:center">
+                        style="display:flex;gap:var(--s1);align-items:center">
                     <input type="hidden" name="thesis_id" value="{{ row['id'] }}">
                     <input type="hidden" name="back" value="{{ url_for('monitor') }}">
                     <label class="sr" for="out-{{ row['id'] }}">Outcome for {{ row['symbol'] }}</label>
