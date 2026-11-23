@@ -5488,6 +5488,18 @@ def api_analyse():
 # Pages anyone can read, sharing, invites and the weekly email
 # ---------------------------------------------------------------------------
 
+# Whether a popular instrument's stored check is too old to be shown as today's.
+app.jinja_env.globals["stale_check"] = public_mod.stale
+
+
+def _at_one_address(endpoint: str, **values):
+    """To a public page's own address, from another spelling of it. Answered
+    under every spelling, /stock/NVDA was a second copy of /stock/nvda."""
+    query = request.query_string.decode("utf-8", "replace")
+    return redirect(url_for(endpoint, **values) + ("?" + query if query else ""),
+                    code=301)
+
+
 def _png(data: bytes, max_age: int):
     return Response(data, mimetype="image/png",
                     headers={"Cache-Control": "public, max-age=%d" % max_age})
@@ -5511,6 +5523,8 @@ def stock_page(sym):
     symbol = public_mod.from_slug(sym)
     if symbol is None:
         abort(404)
+    if sym != public_mod.slug(symbol):
+        return _at_one_address("stock_page", sym=public_mod.slug(symbol))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         snap = public_mod.verdict(conn, symbol)
@@ -5574,6 +5588,8 @@ def backtest_page(name):
     strategy = public_mod.strategy_from_slug(name)
     if strategy is None:
         abort(404)
+    if name != public_mod.strategy_slug(strategy):
+        return _at_one_address("backtest_page", name=public_mod.strategy_slug(strategy))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = public_mod.verdicts(conn)
@@ -5800,6 +5816,8 @@ app.jinja_env.globals["lab_box_data"] = _lab_box_data
 @app.route("/stock/<sym>/card.png")
 def stock_card(sym):
     symbol = public_mod.from_slug(sym)
+    if symbol and sym != public_mod.slug(symbol):
+        return _at_one_address("stock_card", sym=public_mod.slug(symbol))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         snap = public_mod.verdict(conn, symbol) if symbol else None

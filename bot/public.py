@@ -86,6 +86,10 @@ MIN_TRADES = 40
 MAX_AGE = 6 * 3600
 PAUSE = 3.0
 
+# A check older than this is not today's, whatever it said: its call is not
+# shown as today's and search engines are asked to wait for the next one.
+STALE_AFTER = 2 * 86400
+
 SHARES_PER_DAY = 30
 SHARE_REUSE = 3600
 
@@ -465,6 +469,14 @@ def verdict(conn: sqlite3.Connection, symbol: str) -> Optional[Dict]:
     row = conn.execute("SELECT data FROM public_verdicts WHERE symbol=?",
                        (symbol,)).fetchone()
     return json.loads(row["data"]) if row else None
+
+
+def stale(snap: Optional[Dict], now: Optional[float] = None) -> bool:
+    """Whether a popular instrument's stored check is days old: its newer
+    ones have all failed."""
+    if not snap or not snap.get("at"):
+        return False
+    return (time.time() if now is None else now) - snap["at"] > STALE_AFTER
 
 
 def verdicts(conn: sqlite3.Connection) -> List[Dict]:
