@@ -294,9 +294,63 @@ try:
     at_once("NOPE", 1)
     check("and a failure is not kept: the next request tries again",
           ran.count("NOPE") == 2, ran)
+
+    # Each holds megabytes, and only the count of forty ever pushed one out.
+    now = time.time()
+    web._CACHE["spent"] = (now - web.DEMO_TTL - 1, types.SimpleNamespace(run_id=None), {})
+    web._CACHE["usable"] = (now - web.DEMO_TTL + 60, types.SimpleNamespace(run_id=None), {})
+    at_once("FRESH", 1)
+    check("an analysis too old to be served again is dropped when one is kept",
+          "spent" not in web._CACHE, list(web._CACHE))
+    check("and one the example may still serve is not",
+          "usable" in web._CACHE and any(k[0] == "FRESH" for k in web._CACHE if len(k) == 5),
+          list(web._CACHE))
 finally:
     web.engine.analyse = real_analyse
     web._CACHE.clear()
+
+print()
+print("=" * 72)
+print("THE FRONT PAGE'S EXAMPLE WHEN IT CANNOT BE MADE")
+print("=" * 72)
+
+# Every visit started an analysis of its own, and nothing was logged.
+tried = []
+
+
+def failing_analyse(*_a, **_k):
+    tried.append(1)
+    raise RuntimeError("the example broke")
+
+
+def visits(count):
+    for _ in range(count):
+        web._example()
+        for _wait in range(100):
+            if not web._example_state["busy"]:
+                break
+            time.sleep(0.05)
+
+
+was = dict(web._example_state)
+said = Caught()
+web.app.logger.addHandler(said)
+web.engine.analyse = failing_analyse
+web._example_state.update(at=0.0, data=None, busy=False, failed=0.0)
+try:
+    visits(5)
+    check("five visits while it fails start one analysis", len(tried) == 1, tried)
+    check("and the log says it failed, and why",
+          any("front page example" in r.getMessage() and r.exc_info for r in said.records),
+          [r.getMessage() for r in said.records])
+    web._example_state["failed"] = time.time() - web.EXAMPLE_RETRY - 1
+    visits(2)
+    check("a while later it is tried again, once", len(tried) == 2, tried)
+finally:
+    web.engine.analyse = real_analyse
+    web.app.logger.removeHandler(said)
+    web._example_state.clear()
+    web._example_state.update(was)
 
 loop.stop()
 check("the alert loop stops cleanly", not loop.running)

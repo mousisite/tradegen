@@ -870,7 +870,12 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
                                 user=me, record=record, exact=exact)
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
-            _CACHE[key] = (time.time(), result,
+            now = time.time()
+            # One past every time limit is never served again, and an intraday
+            # coin's takes some 16 MB: forty left lying fill the server.
+            for old in [k for k, v in _CACHE.items() if now - v[0] >= DEMO_TTL]:
+                _CACHE.pop(old)
+            _CACHE[key] = (now, result,
                            {me: result.run_id} if result.run_id else {})
             # Keep the cache from growing without bound in a long session.
             if len(_CACHE) > 40:
@@ -1033,7 +1038,10 @@ def inject_globals():
 # a real analysis, labelled with how old it is.
 EXAMPLE_SYMBOL = "NVDA"
 EXAMPLE_TTL = 15 * 60
-_example_state = {"at": 0.0, "data": None, "busy": False}
+# How long a failed try is left before another: without it, while the source is
+# down every visit started an analysis of its own.
+EXAMPLE_RETRY = 120
+_example_state = {"at": 0.0, "data": None, "busy": False, "failed": 0.0}
 _example_lock = threading.Lock()
 
 
@@ -1063,10 +1071,16 @@ def _refresh_example() -> None:
         with _example_lock:
             _example_state["data"] = data
             _example_state["at"] = data["at"]
-    except Exception:
+    except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
-        # visitor. The page simply renders without it.
-        pass
+        # visitor. The page simply renders without it, and the log says why: a
+        # source that is down in a line, anything else as an error.
+        with _example_lock:
+            _example_state["failed"] = time.time()
+        if isinstance(exc, DataError):
+            app.logger.warning("The front page example had no prices: %s", exc)
+        else:
+            app.logger.exception("The front page example could not be refreshed")
     finally:
         with _example_lock:
             _example_state["busy"] = False
@@ -1078,7 +1092,8 @@ def _example():
     with _example_lock:
         data = _example_state["data"]
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
-        if stale and not _example_state["busy"]:
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
+        if stale and rested and not _example_state["busy"]:
             _example_state["busy"] = True
             threading.Thread(target=_refresh_example, daemon=True).start()
     if data is None:
