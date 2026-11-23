@@ -551,11 +551,11 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         entry, entry_rationale = choose_pullback_entry(ctx, bars, levels,
                                                        direction, atr_value)
         entry_type = "limit"
-        side = "holds" if direction > 0 else "rejects"
-        trigger = ("Wait for %s. Only take it if a %s candle closes back in your "
-                   "favour there and volume %s the move. A level that slices "
-                   "straight through is not support." % (
-                       fp(entry), bars.interval, side))
+        trigger = ("Wait for %s. Only take it if %s candle closes back in your "
+                   "favour there, on volume that backs the move. A level the "
+                   "price goes straight through is not %s." % (
+                       fp(entry), _a_bar(bars.interval),
+                       "support" if direction > 0 else "resistance"))
 
     # Rounded before anything is worked out from them, so the size, the money
     # at risk and the reward to risk are those of the prices shown, which are
@@ -622,10 +622,11 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     else:
         verdict_bits.append(
             "%s scoring like this one reached target before stop %.0f%% of the "
-            "time across %d comparable cases (95%% CI %.0f-%.0f%%)." % (
+            "time across %d comparable case%s (95%% range %.0f-%.0f%%)." % (
                 "Past %s setups" % ("long" if calib_side > 0 else "short")
                 if calib_side else "Setups",
                 calib.hit_rate * 100, calib.bucket_samples,
+                "" if calib.bucket_samples == 1 else "s",
                 (calib.ci_low or 0) * 100, (calib.ci_high or 0) * 100))
         # The odds belong to the house trade: entered at the close, stop and
         # target a fixed number of ATR away. Pairing its break-even with this
@@ -650,8 +651,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
                 "money historically on this instrument. The technical picture does "
                 "not override that." % calib.expectancy_r)
         elif calib.ci_low is not None and calib.ci_low <= breakeven <= (calib.ci_high or 1.0):
-            verdict_bits.append("The confidence interval straddles break-even, so "
-                                "no edge is proven. Treat this as a small or paper trade.")
+            verdict_bits.append("The 95% range takes in the break-even rate, so no "
+                                "edge is proven. Treat this as a small or paper trade.")
         elif calib.hit_rate > breakeven:
             verdict_bits.append("Measured hit rate clears the break-even line.")
 
@@ -700,8 +701,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         confirmations.append("Trend is confirmed by ADX %.0f. Favour holding for "
                              "the runner target." % ctx.adx[i])
 
-    invalidation = ("Thesis is dead on a %s close beyond %s. Exit, do not average down."
-                    % (bars.interval, fp(stop)))
+    invalidation = ("The idea is wrong on %s close beyond %s. Exit, do not average down."
+                    % (_a_bar(bars.interval), fp(stop)))
 
     return Plan(
         action=action, direction=direction, headline=headline,
@@ -720,6 +721,13 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         risks=risks, confirmations=confirmations,
         **odds(breakeven_rate=breakeven),
     )
+
+
+def _a_bar(interval: str) -> str:
+    """"a daily", "an hourly" or "a 15-minute", to go before candle or close."""
+    from .charts import bar_words
+    words = bar_words(interval)
+    return "%s %s" % ("an" if words[:1] in "aeh" else "a", words)
 
 
 def _no_edge_reason(calib: Calibration, matched: bool) -> str:

@@ -218,7 +218,7 @@ try:
           '</span> <span class="faint">daily check 2h ago at 182.4</span>' in flat(top))
     check("one she analysed herself shows her own call and its age",
           '<b class="fig">ZZOWN</b></a> <span class="chip hold">WAIT</span> <span '
-          'class="faint">your 1h analysis 2d ago at 12.5, market closed</span>' in flat(top))
+          'class="faint">your hourly analysis 2d ago at 12.5, market closed</span>' in flat(top))
     check("one never analysed says so, whatever anyone else ran",
           '<b class="fig">ZZNEW</b></a> <span class="faint">not analysed yet</span>'
           in flat(top))
@@ -1296,9 +1296,23 @@ try:
     report = run_routine("hunt", sol)
     check("one candidate is said as one",
           report.headline == "1 candidate passed the screen and was analysed.", report.headline)
-    refuse.add("ZZO9")
+    # The screen lists the largest first, and a routine analyses four of them.
+    # "The best few were analysed" was said of any number of them.
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO%d" % k) for k in (9, 8, 7, 6, 5)], scanned=12, notes=[])
     report = run_routine("hunt", sol)
-    check("and not as analysed when it was not",
+    check("several candidates are the largest, not the best",
+          report.headline == "5 candidates passed the screen; 4 of the largest were "
+                             "analysed.", report.headline)
+    refuse.update(("ZZO9", "ZZO8", "ZZO7"))
+    report = run_routine("hunt", sol)
+    check("and only the ones analysed are counted as analysed",
+          report.headline == "5 candidates passed the screen; 1 of the largest was "
+                             "analysed.", report.headline)
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO9")], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("and one not as analysed when it was not",
           report.headline == "1 candidate passed the screen, but none could be analysed "
                              "just now.", report.headline)
     refuse.clear()

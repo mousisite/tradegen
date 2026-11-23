@@ -184,7 +184,8 @@
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       {% if result.partial %}Not ranked until every instrument has been looked
       at.{% elif not result.complete %}Not ranked, because too much of the list
-      could not be read.{% else %}Ranked 1 to {{ result.passed_total }} by {{ result.ranked_as }}.
+      could not be read.{% elif result.passed_total == 1 %}Only one, so there
+      is nothing to rank it against.{% else %}Ranked 1 to {{ result.passed_total }} by {{ result.ranked_as }}.
       Number 1 is the best on that measure, not the safest and not a
       recommendation.{% endif %}
       "Worked before" counts how many times this same setup reached its target
@@ -298,9 +299,9 @@
 
 <p class="legal">
   {% if result.partial %}So far, analysed {{ result.scanned }} of
-  {{ result.asked_for }} instruments on {{ result.interval }} bars.
+  {{ result.asked_for }} instruments on {{ result.interval|bar_words }} bars.
   {% else %}Analysed {{ result.scanned }} of the {{ result.asked_for }} instruments
-  on its list, on {{ result.interval }} bars.{% if result.checked_at %} The
+  on its list, on {{ result.interval|bar_words }} bars.{% if result.checked_at %} The
   oldest price on it was read at {{ result.checked_at }}{% if result.age_minutes %},
   {{ result.age_minutes }} minute{{ '' if result.age_minutes == 1 else 's' }} ago,
   and prices have moved since{% endif %}.{% endif %}

@@ -1183,6 +1183,12 @@ def _strategy(name):
     return public_mod.strategy_label(str(name or ""))
 
 
+@app.template_filter("bar_words")
+def _bar_words(interval):
+    """1d as "daily", 15m as "15-minute": a bar size as a page says it."""
+    return charts_mod.bar_words(interval)
+
+
 # Whether a coin's newest finished day is one the source left blank.
 app.jinja_env.globals["blank_day"] = public_mod.blank_day
 # A call's past examples, said as the test on past prices they are, the same
@@ -2999,7 +3005,7 @@ def analyse_image():
         if used >= billing_mod.free_limits()["analyses_per_day"]:
             return _allowance_used()
     if _rate_limited("image", IMAGE_READS_PER_HOUR):
-        return _too_often("read screenshots")
+        return _too_often("sent screenshots")
 
     # Nothing a person uploads goes to another company's AI without their
     # explicit yes: the box on the Analyse page, ticked once and remembered,
@@ -5121,7 +5127,7 @@ def usage():
         return render_template(
             "error.html", symbol="",
             message="This page covers activity across every account, so it is "
-                    "limited to whoever runs this installation."), 403
+                    "limited to whoever runs this site."), 403
 
     try:
         days = max(1, min(365, int(request.args.get("days", "30"))))

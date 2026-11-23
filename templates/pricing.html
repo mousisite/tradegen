@@ -15,7 +15,7 @@
     <ul class="list">
       <li>{{ limits.analyses_per_day }} different stocks or coins analysed a day</li>
       <li>The top {{ limits.find_results }} in every Find list</li>
-      <li>{{ limits.alerts }} alert running at a time</li>
+      <li>{{ limits.alerts }} alert{{ '' if limits.alerts == 1 else 's' }} running at a time</li>
       <li>The full journal, portfolio and strategies</li>
       <li>Download your journal, saved theses and analysis history{{ ' from the website'
           if in_app }}, any time</li>

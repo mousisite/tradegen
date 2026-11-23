@@ -49,7 +49,7 @@
         {% set ns.said = true %}
         <p class="lead">{{ v.setup.label }}, on {{ main.interval_words }} prices with
           {{ main.rule_words }}, all instruments together: a trade averaged
-          {{ kept(main) }} after costs, over {{ "{:,}".format(main.n) }} trades.
+          {{ kept(main) }} after costs, over {{ "{:,}".format(main.n) }} trade{{ '' if main.n == 1 else 's' }}.
           {% if main.verdict is none %}That is too few to say anything{% else %}It {{ main.words }}{% endif %}{% if main.diff_verdict is not none %},
           and {{ main.diff_words }}{% endif %}.</p>
       {% elif v.daily and v.daily.tested %}
@@ -163,7 +163,7 @@
       <p class="prose" style="margin-top:var(--s2)">With wider swings (three bars
         each side instead of two) and a target twice the risk:
         {% for k in v.lab.k3 %}{{ k.name }}, {{ k.interval_words }}: {{ "{:,}".format(k.n) }}
-          trades, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
+          trade{{ '' if k.n == 1 else 's' }}, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
           ±{{ '%.2f'|format(k.margin) }}{% endif %}{{ '; ' if not loop.last else '.' }}{% endfor %}</p>
     {% endif %}
     {% if v.lab.left_out %}
@@ -317,9 +317,10 @@
         {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
     {% endif %}
     {% if page.skipped_days.incomplete or page.skipped_days.roll %}
-      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
-        with too few bars and {{ page.skipped_days.roll }} futures contract-change
-        days.</li>
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }}
+        day{{ '' if page.skipped_days.incomplete == 1 else 's' }} with too few bars and
+        {{ page.skipped_days.roll }} futures contract-change
+        day{{ '' if page.skipped_days.roll == 1 else 's' }}.</li>
     {% endif %}
     {% if page.cells %}
       <li>{{ "{:,}".format(page.cells) }} results got a verdict across the lab. About

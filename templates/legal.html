@@ -133,16 +133,15 @@
     alerts and the alerts that fired, saved theses, your settings (such as
     your account size and risk per trade), and the history of analyses you
     have run. For a free account, which stocks and coins it opened on each
-    day is kept too, which is how its daily allowance is counted. Only you can
-    see it. Other people signed into the same installation cannot read it, and
-    that separation is enforced by the database query rather than by the
-    interface hiding things.
+    day is kept too, which is how its daily allowance is counted. Orenth shows
+    it to you alone. No other account can read it, and that separation is
+    enforced by the database query rather than by the page hiding things.
   </p>
   <p class="prose">
     One thing is deliberately shared: the measured strategy record, which says
     how a given strategy has behaved on a given instrument. It contains no
     personal information, describes markets rather than people, and is what
-    makes the analysis better as more of it accumulates.
+    the Strategies page is made from.
   </p>
 
   <h2>Where data goes</h2>
@@ -165,19 +164,25 @@
     <table class="stack one" style="--col2: 'What is sent'; --col3: 'Why'">
       <thead><tr><th>Sent to</th><th>What is sent</th><th>Why</th></tr></thead>
       <tbody>
-        <tr><td>Yahoo Finance</td><td>The ticker</td><td>Prices, fundamentals, options</td></tr>
-        <tr><td>SEC EDGAR</td><td>The ticker</td><td>Filings and filed financials</td></tr>
+        <tr><td>Yahoo Finance</td><td>The ticker, and what you type in a ticker
+            box, as you type it</td><td>Prices, fundamentals, options, and the
+            suggestions under the box</td></tr>
+        <tr><td>SEC EDGAR</td><td>The company's number there</td><td>Filings and filed financials</td></tr>
         <tr><td>Google News</td><td>The company name</td><td>Headlines</td></tr>
         <tr><td>StockTwits</td><td>The ticker</td><td>Retail posts</td></tr>
-        <tr><td>Anthropic</td><td>Headlines, gathered figures and any chart
-            screenshot you upload, only if an API key is configured</td>
+        <tr><td>Anthropic</td><td>Headlines, StockTwits posts, gathered figures
+            and any chart screenshot you upload, only while this site has that
+            service switched on</td>
             <td>Sentiment, written reasoning, and reading which instrument a
               screenshot shows</td></tr>
         <tr><td>The email delivery service</td><td>Your email address and the code, if you sign in by email.
             If you turn on the weekly email or alert emails, those emails
             too: your name, what Orenth says about your watchlist, and the
-            alerts that fired and the stops your positions crossed</td>
-            <td>Delivering sign-in codes and the emails you turned on</td></tr>
+            alerts that fired and the stops your positions crossed.{% if iap_on %}
+            If Pro bought through Apple is moved away from your account, the
+            email that says so{% endif %}</td>
+            <td>Delivering sign-in codes and the emails you turned on{% if iap_on %},
+              and telling you that your Pro was moved{% endif %}</td></tr>
         <tr><td>Twilio</td><td>Your phone number, only if you sign in by text</td>
             <td>Sending and checking the code</td></tr>
         <tr><td>Apple, Google, Mozilla or Microsoft</td><td>A fired alert's or
@@ -199,6 +204,10 @@
             request your browser or the app makes, carries your network address
             and the description it gives of itself</td>
             <td>Showing your picture beside your name</td></tr>
+        <tr><td>Google Fonts</td><td>A request for the site's lettering, which,
+            as any request your browser or the app makes, carries your network
+            address and the description it gives of itself</td>
+            <td>Showing the pages in Orenth's typefaces</td></tr>
         <tr><td>Stripe</td><td>Your email address and account number, only if you subscribe{% if iap_on %} on the website{% endif %}</td>
             <td>Taking payment. Your card details go to Stripe directly and
               never reach Orenth.</td></tr>
@@ -262,9 +271,9 @@
       which is sent no code, the address typed, until its sign-in page
       opens), the checks and the page to go
       back to for a sign-in with Google{% if apple_native %} or Apple{% endif %}, or a note of what the
-      journal just recorded, until the journal shows it. If you answer
-      practice charts on the Learn pages, it also holds which ones and how
-      many you got right, until you start over or sign out. It is signed so
+      journal just recorded, until the journal shows it. If you use the Practice
+      page, it also holds which charts you answered and how many you got right,
+      until you press Start over there, sign out, or the cookie ends. It is signed so
       that it cannot be changed, but it is not encrypted.{% if apple_ready %}
       While you sign in with Apple on the website, a second cookie of
       Orenth's lasts ten minutes and holds only that sign-in's checks, the
@@ -356,13 +365,11 @@
     historical price data. Past behaviour is not a promise about the future, and
     a measured edge can stop existing without warning. The software says so in
     its own output: when a setup has no demonstrated edge it reports that rather
-    than inventing confidence, and by its own measurements most short-horizon
-    trading loses money once costs are charged.
+    than inventing confidence.
   </p>
   <p class="prose">
     <b>Day trading loses money for the large majority of retail participants.</b>
-    This tool's own back-tests agree with that finding. Never risk money you
-    cannot afford to lose.
+    Never risk money you cannot afford to lose.
   </p>
 
   <h2>Data accuracy</h2>

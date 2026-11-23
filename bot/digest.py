@@ -388,7 +388,7 @@ def compose(user, rows: List[Dict], picks: Optional[List[Dict]], base: str,
         lines.append("  None this week. Nothing on the popular list clears the "
                      "bar, so Orenth says wait. That is a normal answer.")
     lines += ["", "See them all: %s/stocks" % base, "",
-              "Not financial advice. Every figure is measured from past "
+              "Not financial advice. The test counts are measured from past "
               "prices, and the past can stop describing the future.", "",
               "You get this because you turned on the weekly email in your "
               "Orenth account.",

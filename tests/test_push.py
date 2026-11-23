@@ -288,7 +288,7 @@ const answer = (status, body) => Promise.resolve({
 const fine = (url) => answer(200, url.indexOf('/config') !== -1
   ? { web: { enabled: false }, apns: { enabled: true } } : { ok: true, known: true, removed: 1 });
 const FAILURES = {
-  'no connection': () => Promise.reject(new TypeError('Load failed')),
+  'no connection': () => Promise.reject(new TypeError('Load failed.')),
   'a 502 during a deploy': () => answer(502, {}),
   'a 429': () => answer(429, { error: 'Wait a while.' }),
 };
@@ -1622,6 +1622,9 @@ try:
         check("Turn off with no connection says it did not work, and stays On",
               off["before"] == "On" and off["failed"]["chip"] == "On"
               and off["failed"]["said"].startswith("That did not work"), off)
+        check("and ends that with one full stop, whatever the reason ended with",
+              off["failed"]["said"].endswith(".")
+              and not off["failed"]["said"].endswith(".."), off["failed"]["said"])
         check("and keeps the device, so it can be turned off again",
               off["failed"]["kept"] == phone, off["failed"])
         check("once the server is told, it says Off and forgets the device",

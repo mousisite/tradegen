@@ -139,7 +139,7 @@
                     {%- if w.public %}daily check {{ w.at|ago }} at {{ w.price|price }}
                       {%- if w.quote_day %}, the {{ w.quote_day }} close{% endif %}
                     {%- elif w.daily %}daily check {{ w.at|ago }} at {{ w.price|price }}
-                    {%- else %}your {{ w.run_interval }} analysis {{ w.at|ago }} at {{ w.price|price }}
+                    {%- else %}your {{ w.run_interval|bar_words }} analysis {{ w.at|ago }} at {{ w.price|price }}
                       {%- if w.closed %}, market closed{% endif %}
                     {%- endif %}</span>
                 {% else %}
@@ -218,12 +218,12 @@
     {% endfor %}
   </div>
   <p class="prose" style="margin-top:var(--s2)">
-    {% if default_interval == '1d' %}Daily bars are preselected because they are
-    the only interval where{% else %}The bar size you chose in Settings is
-    preselected. Daily bars are the only interval where{% endif %}
-    Orenth has measured positive expectancy. Shorter intervals lose to trading
-    costs before the strategy gets a say. That is an unhelpful thing for a
-    trading tool to admit, and it is what the back-tests found.
+    {% if default_interval == '1d' %}Daily bars are preselected because trading
+    costs take the least from them.{% else %}The bar size you chose in Settings is
+    preselected. Trading costs take the least from daily bars.{% endif %}
+    On shorter bars the stop sits closer to the price, so the same cost is a
+    bigger part of what each trade risks, and it can be more than the strategy
+    makes. Every analysis here takes it off before it says anything.
   </p>
 
   {# Screenshot route. The image only identifies the instrument; the analysis
@@ -250,10 +250,11 @@
         <span class="sub">Tap to pick one, or take a photo of a chart. It reads
           the ticker for you; the bar size is the one chosen above.</span>
       {% elif has_key %}
-        <span class="head" id="drophead">Or drop a chart screenshot here</span>
-        <span class="sub">Click to browse, drag an image in, or paste with
-          Ctrl+V. It reads the ticker for you; the bar size is the one chosen
-          above.</span>
+        {# The same in a phone's browser, which has no mouse or Ctrl key. #}
+        <span class="head" id="drophead">Or read a chart screenshot</span>
+        <span class="sub">Choose a picture<span class="hover-only">, drag one in,
+          or paste it</span>. It reads the ticker for you; the bar size is the one
+          chosen above.</span>
       {% else %}
         <span class="head">Screenshot reading needs an API key</span>
         <span class="sub">Add <b>ANTHROPIC_API_KEY</b> to the .env file in
@@ -452,7 +453,7 @@
           <tr>
             <td class="faint" data-label="When">{{ r['ts']|ago }}</td>
             <td class="lead"><b>{{ r['symbol'] }}</b></td>
-            <td class="fig soft" data-label="Bars">{{ r['interval'] }}</td>
+            <td class="fig soft" data-label="Bars">{{ r['interval']|bar_words }}</td>
             <td class="soft" data-label="Conditions">{{ (r['regime_trend'] or '—')|capitalize }}</td>
             <td class="r fig" data-label="Conviction">{{ r['conviction']|signed }}</td>
             <td data-label="Call">

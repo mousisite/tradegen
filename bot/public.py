@@ -1707,11 +1707,12 @@ def counts_line(snap: Dict, short: bool = False) -> str:
         return "Too few past examples to count."
     fall = bool(snap.get("fall"))
     if short and fall:
-        return ("In tests on past prices, a bet on a fall worked %d of %d times."
-                % (snap["worked"], snap["samples"]))
+        return ("In tests on past prices, a bet on a fall worked %d of %d time%s."
+                % (snap["worked"], snap["samples"], "" if snap["samples"] == 1 else "s"))
     if short:
         return ("Tested on past prices: it hit its target before its stop "
-                "%d of %d times." % (snap["worked"], snap["samples"]))
+                "%d of %d time%s." % (snap["worked"], snap["samples"],
+                                      "" if snap["samples"] == 1 else "s"))
     from .plain import counted
     line = counted(snap["samples"], snap["worked"], fall)
     if snap.get("separate"):

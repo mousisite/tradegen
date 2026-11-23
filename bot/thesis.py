@@ -292,11 +292,12 @@ def _fundamental_points(f, bull: Case, bear: Case, stamp: str) -> None:
         if side is not None:
             side.points.append(Point(
                 "Analysts see %s" % ("upside" if gap > 0 else "downside"),
-                "Average target of %.2f against %.2f today, from %d analysts. "
-                "Worth knowing, but targets follow prices at least as often as "
-                "they lead them." % (target, f.get("price"), int(count)),
+                "Average target of %.2f against %.2f today, from %s. "
+                "Worth knowing, but a target is an opinion, not a measurement."
+                % (target, f.get("price"), _items(int(count), "analyst")),
                 [Evidence("Mean analyst target", "%.2f" % target,
-                          "Yahoo Finance, %d analysts" % int(count), url, stamp, "weak")],
+                          "Yahoo Finance, %s" % _items(int(count), "analyst"),
+                          url, stamp, "weak")],
                 0.6))
 
 
@@ -476,7 +477,8 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
         composite, count, regime or "mixed")
     if expectancy is not None and samples:
         detail += (" %s scoring like this have returned %+.3fR on %d "
-                   "comparable historical cases." % (kind, expectancy, samples))
+                   "comparable historical case%s."
+                   % (kind, expectancy, samples, "" if samples == 1 else "s"))
 
     if composite > 0.25:
         bull.points.append(Point("Price action is constructive", detail,

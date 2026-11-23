@@ -53,7 +53,7 @@
       <ul class="list">{% for x in snap.points %}<li>{{ x }}</li>{% endfor %}</ul>
     {% endif %}
     <p class="prose faint" style="font-size:var(--t-xs)">
-      Price {{ '$' if snap.currency == 'USD' else snap.currency ~ ' ' if snap.currency }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
+      Price {{ '$' if snap.currency == 'USD' else snap.currency ~ ' ' if snap.currency }}{{ snap.price|price }} · {{ snap.interval|bar_words }} bars ·
       {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}{% endif %}
     </p>
   </div>

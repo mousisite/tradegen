@@ -388,8 +388,9 @@ def supertrend_follow(ctx: Context, i: int) -> Signal:
     freshness = 1.0 if bars_since <= 3 else max(0.45, 1.0 - (bars_since - 3) / 30.0)
     score = direction * min(0.45 + dist * 0.35, 1.0) * freshness
     return Signal("supertrend_follow", _clamp(score), 1.0,
-                  "supertrend %s for %d bars, %.1f ATR from band" % (
-                      "up" if direction > 0 else "down", bars_since, dist), TREND)
+                  "supertrend %s for %d bar%s, %.1f ATR from band" % (
+                      "up" if direction > 0 else "down", bars_since,
+                      "" if bars_since == 1 else "s", dist), TREND)
 
 
 def adx_di_cross(ctx: Context, i: int) -> Signal:
@@ -452,8 +453,9 @@ def parabolic_sar_flip(ctx: Context, i: int) -> Signal:
     dist = abs(price - sar) / atr_v
     freshness = 1.0 if bars_since <= 2 else max(0.35, 1.0 - (bars_since - 2) / 20.0)
     return Signal("parabolic_sar_flip", _clamp(direction * min(0.5 + dist * 0.3, 1.0) * freshness),
-                  1.0, "SAR %s for %d bars" % (
-                      "below price" if direction > 0 else "above price", bars_since), TREND)
+                  1.0, "SAR %s for %d bar%s" % (
+                      "below price" if direction > 0 else "above price", bars_since,
+                      "" if bars_since == 1 else "s"), TREND)
 
 
 def linreg_channel(ctx: Context, i: int) -> Signal:

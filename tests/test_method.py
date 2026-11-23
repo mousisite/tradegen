@@ -589,6 +589,15 @@ check("the counts still open the explanation, as the public page expects",
       out["sure"].startswith("In tests on past prices, this same setup came up 78 "
                              "times and worked 28 of them, reaching its target "
                              "before its stop."), out["sure"])
+check("one past example is said as one, won or lost",
+      plain.counted(1, 1) == "In tests on past prices, this same setup came up once and "
+      "worked that time, reaching its target before its stop."
+      and plain.counted(1, 0, fall=True) == "In tests on past prices, this same setup came "
+      "up once and a bet on the price falling did not work that time: it did not reach its "
+      "target before its stop.", (plain.counted(1, 1), plain.counted(1, 0, fall=True)))
+out, text = said(prob_samples=1, probability=1.0, prob_reliable=False)
+check("and needs no count of one time to come out even",
+      "1 times" not in out["sure"] and "too few times" in out["sure"], out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="no_signal", odds_direction=-1)
 check("any AVOID whose odds lean down says what worked means",

@@ -330,9 +330,9 @@ try:
           "the invite you arrived with, the email address or phone number a "
           "sign-in code was sent to" in page
           and "a note of what the journal just recorded" in page)
-    check("and the practice charts answered, which it keeps until they are cleared",
-          "which ones and how many you got right, until you start over or sign out"
-          in page)
+    # The Practice page's tally is in the same cookie, and the page did not say so.
+    check("and the Practice page's answers",
+          "which charts you answered and how many you got right" in page)
     check("and that it is signed, not encrypted",
           "signed so that it cannot be changed, but it is not encrypted" in page)
     check("with Apple off the website, no second cookie is spoken of",
@@ -642,6 +642,18 @@ try:
     row = row[:row.find("</tr>")]
     check("and the page names Google among the places data goes, for the picture",
           "a request for your profile picture each time a page shows it" in row, row)
+
+    # Every page asks Google for its lettering, signed in or not, and the page
+    # named no one it went to; nor the search box, nor the posts sent to be scored.
+    front = text(visitor.get("/"))
+    check("the pages load their lettering from Google, and the page names it",
+          ("fonts.googleapis.com" in front) == ("<td>Google Fonts</td>" in page))
+    check("and what is typed in a ticker box goes to Yahoo, which it says",
+          "what you type in a ticker box, as you type it" in page)
+    check("and that posts go to Anthropic to be scored, as headlines do",
+          "Headlines, StockTwits posts, gathered figures" in page)
+    check("and it claims no analysis is made better by the shared record, which "
+          "none reads", "makes the analysis better" not in page)
 
     # -----------------------------------------------------------------------
     head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")

@@ -11,7 +11,7 @@
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _about = "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
+{% set _about = "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Filed accounts on the research page cite the SEC filings they came from." %}
 {% set _blurb = page_blurb or _about %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
@@ -247,10 +247,10 @@
 <footer>
 <p class="legal">
   <b>Analysis software, not financial advice.</b>
-  Every figure here is measured from historical price data and can stop
-  describing the future at any moment. Day trading loses money for the large
-  majority of retail participants, and this tool's own measurements agree with
-  that. Never risk money you cannot afford to lose.
+  The odds and test results here are measured from historical price data and
+  can stop describing the future at any moment. Day trading loses money for the
+  large majority of retail participants. Never risk money you cannot afford to
+  lose.
   <br>
   {# Inside the iPhone app the bar along the bottom is the way round, and a
      website's row of links under every page is not an app's: only Terms and

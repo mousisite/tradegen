@@ -81,8 +81,10 @@
   </div>
   <div class="factline">
     <span><b>{{ r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
-    <span>{{ r.bars.interval }} bars</span>
-    <span>last <b>{{ r.bars.last_bar_time }}</b></span>
+    <span>{{ r.bars.interval|bar_words }} bars</span>
+    {# A daily bar is its day; a shorter one's time is the exchange's own. #}
+    <span>last bar <b>{{ r.bars.last_bar_time[:10] if r.bars.interval == '1d' else r.bars.last_bar_time }}</b>{% if r.bars.interval != '1d' %}
+      {{ 'exchange time' if r.bars.gmt_offset else 'UTC' }}{% endif %}</span>
     <span>{% if r.bars.market_open %}<b class="gain">market open</b>
           {% else %}market closed{% endif %}</span>
     <div><b>{{ r.regime.describe() }}</b>{{ help('regime') }}</div>
@@ -800,7 +802,7 @@
   {% if not demo and not in_app %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
                                        exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
   · {% endif %}Data from Yahoo Finance, Google News and StockTwits
-  {% if r.run_id %}· saved as run {{ r.run_id }}{% endif %}
+  {% if r.run_id and not demo %}· saved in your recent analyses{% endif %}
 </p>
 
 {% endblock %}

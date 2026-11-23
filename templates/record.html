@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
 {% if rec.scored %}
-  {% set page_blurb = "A forward test, scored in public: each trading day Orenth makes a call on " ~ popular_count ~ " popular stocks and coins, and scores it when the price reaches its stop or target, or after " ~ method.days ~ " trading days. " ~ rec.scored ~ " calls scored so far, each kind against what chance would score. Not financial advice." %}
+  {% set page_blurb = "A forward test, scored in public: each trading day Orenth makes a call on " ~ popular_count ~ " popular stocks and coins, and scores it when the price reaches its stop or target, or after " ~ method.days ~ " trading days. " ~ rec.scored ~ (" call" if rec.scored == 1 else " calls") ~ " scored so far, each kind against what chance would score. Not financial advice." %}
 {% endif %}
 {% block title %}Orenth's track record: how its calls turned out · Orenth{% endblock %}
 {% block og_title %}How Orenth's calls turned out · Orenth{% endblock %}
@@ -33,24 +33,25 @@
 {% elif not rec.scored %}
   <div class="plainbox">
     <span class="eyebrow">Collecting</span>
-    <p class="lead">{{ rec.total }} calls written down since {{ rec.first_at|day }}.</p>
+    <p class="lead">{{ rec.total }} call{{ '' if rec.total == 1 else 's' }} written down since {{ rec.first_at|day }}.</p>
     <p class="prose">The scores start on {{ rec.counts_from|day }}, once the
       first calls are {{ rec.mature_days }} days old and every one of them has
       had its full {{ method.days }} trading days.{% if rec.early %}
-      {{ rec.early }} newer calls have settled already, and are listed below.
-      They are not scored yet: the first to settle are mostly the ones whose
+      {{ rec.early }} newer call{{ ' has' if rec.early == 1 else 's have' }} settled already, and
+      {{ 'is' if rec.early == 1 else 'are' }} listed below,
+      but not scored yet: the first to settle are mostly the ones whose
       stop came quickly, so counting them now would favour calls that said
       not to buy.{% endif %}</p>
   </div>
 {% else %}
   <div class="plainbox">
     <span class="eyebrow">So far</span>
-    <p class="lead">{{ rec.scored }} calls scored, {{ rec.all.open }} still waiting.</p>
-    <p class="prose">{{ rec.total }} calls since {{ rec.first_at|day }}. The
+    <p class="lead">{{ rec.scored }} call{{ '' if rec.scored == 1 else 's' }} scored, {{ rec.all.open }} still waiting.</p>
+    <p class="prose">{{ rec.total }} call{{ '' if rec.total == 1 else 's' }} since {{ rec.first_at|day }}. The
       scores count calls made at least {{ rec.mature_days }} days ago, every
       one of which has had its full {{ method.days }} trading days.{% if rec.early %}
-      {{ rec.early }} newer calls have settled already. They join the scores
-      once they are {{ rec.mature_days }} days old, or a day or two later
+      {{ rec.early }} newer call{{ ' has' if rec.early == 1 else 's have' }} settled already. A call joins the scores
+      once it is {{ rec.mature_days }} days old, or a day or two later
       around holidays: the first to settle are mostly the ones whose stop came quickly, so counting them now would
       favour calls that said not to buy.{% endif %}
       Each kind of call is scored on its own below, because they are not the
@@ -106,9 +107,10 @@
        go, and the app's one screen would show it as bare text. #}
     <div class="sechead"><h2>The latest results</h2>
       {% if not in_app %}<a class="tail" href="{{ url_for('record_csv') }}">every call, as a file &rarr;</a>{% endif %}</div>
-    <p class="prose">The {{ rec.latest|length }} calls settled most recently,
-      including newer ones not yet in the scores. Each is dated by the trading
-      day of the price it was made at.</p>
+    <p class="prose">{% if rec.latest|length == 1 %}The call settled most
+      recently{% else %}The {{ rec.latest|length }} calls settled most recently,
+      including newer ones not yet in the scores{% endif %}. Each is dated by the
+      trading day of the price it was made at.</p>
     <div class="card pad0">
       <div class="tablewrap">
         <table class="stack">
@@ -232,8 +234,10 @@
       {{ rec.range_weeks }} weeks of the market; until then, no range is
       given. The average move after a kind of call has its range worked out
       the second way.</li>
-    <li>Moves are after trading costs: {{ method.equity }}% a round trip for
-      stocks, {{ method.crypto }}% for crypto.</li>
+    <li>The average and median moves of each kind of call are after trading
+      costs: {{ method.equity }}% a round trip for stocks,
+      {{ method.crypto }}% for crypto. The move beside each single call is the
+      price's own, before costs.</li>
     {% if splits %}<li>When a stock splits, a call made before the split is
       scored on its prices divided by the split, to match the history after
       it.</li>{% endif %}

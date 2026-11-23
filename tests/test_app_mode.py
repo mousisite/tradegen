@@ -248,11 +248,12 @@ try:
         inside = shown(text(member.get("/", headers=IN_APP)))
     finally:
         _os.environ.pop("ANTHROPIC_API_KEY", None)
-    check("in a browser the screenshot box says click, drag or paste",
-          "Click to browse, drag an image in, or paste with Ctrl+V" in on_web)
+    check("in a browser the screenshot box says choose, and with a mouse drag or paste",
+          'Choose a picture<span class="hover-only">, drag one in, or paste it</span>.'
+          in on_web)
     check("inside the app it says tap, or take a photo",
           "Tap to pick one, or take a photo of a chart." in inside
-          and "Ctrl+V" not in inside and "Click to browse" not in inside)
+          and "Ctrl+V" not in inside and "drag one in" not in inside)
 
     print()
     print("=" * 72)
