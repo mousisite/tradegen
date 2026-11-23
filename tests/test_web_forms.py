@@ -335,7 +335,11 @@ check("the default interval chosen in Settings is the one preselected there",
       and "The bar size you chose in Settings" in body)
 check("and the one the quick picks and the screenshot box use",
       "symbol=AAPL&amp;interval=1h" in body and "Daily bars are preselected because" not in body)
-c.post("/settings", data={"interval": "1wk"})
+r = c.post("/settings", data={"interval": "1wk"})
+check("one no analysis runs on is refused, and the one saved is kept",
+      r.status_code == 200 and b"The default interval must be one of" in r.data
+      and cfgmod.load(harness.CFG_PATH)["interval"] == "1h", r.status_code)
+c.post("/settings", data={"interval": "2m"})
 body = c.get("/").data.decode("utf-8", "replace")
 check("one the box does not offer leaves daily preselected",
       '<option value="1d" selected>' in body)
