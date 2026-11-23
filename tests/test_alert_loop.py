@@ -389,6 +389,26 @@ try:
     check("a stop that traded and came back is told, as the journal counts it",
           len(said) == 1 and "traded at 94" in said[0], said)
 
+    # A coin's hourly bar at 02:00 UTC on the 11th is the evening of the 10th
+    # in New York, which is the day the journal names.
+    evening = 1762826400
+
+    def dipped_late(interval="1h"):
+        b = daily([100.0] * 30, lows=[100.0] * 29 + [94.0], live=99.0, interval="1h")
+        b.timestamp = np.array([evening - (29 - k) * 3600 for k in range(30)], dtype=np.int64)
+        return b
+
+    SERIES["EVE"] = dipped_late
+    eve = db.open_trade(conn, "EVE", "1h", 1, entry=100.0, stop=95.0, target1=110.0,
+                        quantity=1, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (evening - 10 * 3600, eve))
+    conn.commit()
+    said = [f.message for f in alerts.check_stops(conn)["fired"] if f.trade_id == eve]
+    journal = web._touched_day({"interval": "1h"}, dipped_late(), evening)
+    check("on the day the journal says it was, an evening crossing included",
+          len(said) == 1 and "traded at 94 on 10 Nov, past" in said[0]
+          and journal == "10 Nov 2025", (said, journal))
+
     # Two checks at once both read the trade before either marks it.
     SERIES["OVL"] = lambda interval="1d": daily([100.0] * 30, live=90.0, interval=interval)
     ovl = db.open_trade(conn, "OVL", "1d", 1, entry=100.0, stop=95.0, target1=110.0,
