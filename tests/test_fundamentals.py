@@ -105,8 +105,7 @@ for sym in ["BTC-USD", "SPY"]:
     print("   %-8s metrics=%d  sec=%s  quality_reliable=%s" % (
         sym, sum(1 for m in f.metrics.values() if m.known),
         bool(f.sec_facts), q["reliable"]))
-    check("%s does not crash" % sym, True)
-    check("%s refuses a fake score" % sym, q["score"] is None or not q["reliable"] or sym == "SPY")
+    check("%s refuses a fake score" % sym, q["score"] is None or not q["reliable"])
 
 print()
 print("=" * 72)

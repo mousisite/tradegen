@@ -62,7 +62,7 @@ for sym in ["BTC-USD", "SPY"]:
     price = f.get("price") or float(fetch_bars(sym, "1d").last_price)
     d = V.discounted_cash_flow(f, price)
     print("      %-8s DCF usable=%-5s reason: %s" % (sym, d.usable, d.reason[:70]))
-    check("%s refuses rather than inventing" % sym, (not d.usable) or d.fair_value > 0)
+    check("%s refuses rather than inventing" % sym, not d.usable)
 
 print()
 print("=" * 72)

@@ -45,9 +45,10 @@ print("\nafter runs:", db.stats(conn))
 
 # Idempotency: saving the same snapshot again must not inflate the sample count.
 before = db.stats(conn)["strategy_stats"]
-db.save_strategy_stats(conn, "AAPL", "5m", rep)
+db.save_strategy_stats(conn, bars.symbol, bars.interval, rep)
 after = db.stats(conn)["strategy_stats"]
-print("re-saving stats changed row count by %d (expect 0 growth for same keys)" % (after - before))
+assert after == before, "re-saving the same stats added %d rows" % (after - before)
+print("re-saving stats added no rows: OK")
 
 print("\n--- journal ---")
 t1 = db.open_trade(conn, "AAPL", "5m", 1, entry=315.00, stop=313.50, target1=317.25,
