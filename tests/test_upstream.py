@@ -303,6 +303,126 @@ except upstream.Throttled:
           sent["n"] == 1, sent["n"])
 first.join()
 
+# An old answer stays in the cache until the next is stored. A waiter whose
+# fetch failed was handed it, so one person saw an error page and the other an
+# analysis built on prices hours old, shown as current.
+upstream.reset()
+upstream._cache["stale"] = (time.time() - 3 * 3600, "three hours old")
+
+
+def refuses_slowly():
+    time.sleep(0.4)
+    raise Refused("the source said no")
+
+
+got = []
+
+
+def asks_for_stale():
+    try:
+        got.append(upstream.cached("stale", refuses_slowly))
+    except Refused:
+        got.append("told it failed")
+
+
+threads = [threading.Thread(target=asks_for_stale) for _ in range(2)]
+for t in threads:
+    t.start()
+    time.sleep(0.1)
+for t in threads:
+    t.join()
+check("a waiter whose fetch failed is told so, not handed an expired answer",
+      got == ["told it failed"] * 2, got)
+
+print()
+print("=" * 72)
+print("A SOURCE THAT STOPS ANSWERING IS LEFT BE, AND TRIED AGAIN BY ONE")
+print("=" * 72)
+
+
+def refused_by(host):
+    try:
+        upstream.check(host)
+    except upstream.Throttled as exc:
+        return exc
+    return None
+
+
+# Timeouts never counted, so during an outage every request held a server
+# thread for its full time.
+upstream.reset()
+for _ in range(upstream.THRESHOLD):
+    upstream.note_failed(HOST)
+exc = refused_by(HOST)
+check("requests that got no answer close the door, as refusals do", exc is not None)
+check("and the words are about a source not answering, not a limit people share",
+      exc is not None and "not answering" in str(exc) and "rate limit" not in str(exc)
+      and "shared" not in str(exc), str(exc))
+check("the status page can say which it was", upstream.stats()["hosts"][HOST]["why"] == "down")
+
+upstream.reset()
+for _ in range(upstream.THRESHOLD):
+    upstream.note_throttled(HOST, 5.0, 503)
+exc = refused_by(HOST)
+check("a source that answers it is down is not called a rate limit",
+      exc is not None and "rate limiting" not in str(exc), str(exc))
+check("one second is one second", "1 second" in str(upstream.Throttled(HOST, 1))
+      and "1 seconds" not in str(upstream.Throttled(HOST, 1)))
+
+
+def wait_over():
+    """The wait is over, as if its seconds had passed."""
+    upstream._breakers[HOST]["open_until"] = time.time() - 1
+
+
+# After the wait three more requests used to be sent before the door shut.
+real_wait = upstream.PROBE_WAIT
+upstream.PROBE_WAIT = 0.3
+try:
+    wait_over()
+    check("after the wait one request may go", refused_by(HOST) is None)
+    check("and the next is held back until it is known what that one found",
+          upstream.refusing(HOST) and refused_by(HOST) is not None)
+    upstream.note_throttled(HOST, 5.0, 503)
+    check("one refusal then is enough to shut the door again",
+          refused_by(HOST) is not None and upstream.stats()["hosts"][HOST]["open_for"] > 0)
+
+    wait_over()
+    check("looking whether the door is open takes nobody's place",
+          not upstream.refusing(HOST) and not upstream.refusing(HOST))
+    upstream.PROBE_WAIT = 5.0
+    check("the next wait over, one goes again", refused_by(HOST) is None)
+    held = []
+    waiter = threading.Thread(target=lambda: held.append((refused_by(HOST), time.time())))
+    waiter.start()
+    time.sleep(0.2)
+    waiting = not held
+    answered = time.time()
+    upstream.note_ok(HOST)
+    waiter.join(timeout=10)
+    check("when it is answered, whoever was held back goes straight on",
+          waiting and held and held[0][0] is None and held[0][1] - answered < 2.0, held)
+    check("and the door is open to everyone", not upstream.refusing(HOST)
+          and refused_by(HOST) is None)
+
+    # A request that shows neither (an error of its own) lets another find out.
+    for _ in range(upstream.THRESHOLD):
+        upstream.note_failed(HOST)
+    wait_over()
+
+    def breaks():
+        raise ValueError("something else")
+
+    try:
+        upstream.cached("odd", breaks, host=HOST)
+    except ValueError:
+        pass
+    check("a first request that settles nothing does not keep the door shut",
+          refused_by(HOST) is None)
+finally:
+    upstream.PROBE_WAIT = real_wait
+    upstream.reset()
+
 print()
 print("=" * 72)
 print("OLD ANSWERS ARE LET GO")
@@ -340,6 +460,8 @@ print()
 print("=" * 72)
 print("A FAILING YAHOO HANDSHAKE IS TRIED ONCE, NOT ONCE PER CALLER")
 print("=" * 72)
+
+from types import SimpleNamespace  # noqa: E402
 
 from bot import yahoo
 
@@ -453,6 +575,64 @@ try:
     yahoo._ensure(force=True, seen="expired")
     check("a crumb another caller already renewed is not renewed again",
           not FakeSession.calls and yahoo._CRUMB == "renewed")
+
+    # A dropped connection's own text holds the address asked, with the session
+    # token in it, and a screen's notes showed it to visitors.
+    class Dropped(FakeSession):
+        error = yahoo.requests.ConnectionError(
+            "HTTPSConnectionPool(host='query1.finance.yahoo.com', port=443): Max retries "
+            "exceeded with url: /v7/finance/quote?crumb=sEcReT (Caused by [Errno 11001])")
+
+        def get(self, url, params=None, timeout=None, **_):
+            FakeSession.calls.append((url, timeout))
+            raise Dropped.error
+
+    pauses = []
+    real_time, yahoo.time = yahoo.time, SimpleNamespace(time=time.time, sleep=pauses.append)
+
+    def said_by_yahoo():
+        FakeSession.calls, pauses[:] = [], []
+        try:
+            yahoo.get("https://query1.finance.yahoo.com/v7/finance/quote", {"symbols": "AAPL"})
+        except yahoo.YahooError as exc:
+            return str(exc)
+        return ""
+
+    try:
+        fresh_handshake()
+        upstream.reset()
+        yahoo._SESSION, yahoo._CRUMB = Dropped(), "sEcReT"
+        yahoo._OBTAINED_AT = time.time()
+        said = said_by_yahoo()
+        check("a dropped connection is said in words, with no address or token",
+              said == "Yahoo could not be reached.", said)
+        check("with no pause after the last try", len(pauses) == len(FakeSession.calls) - 1,
+              (pauses, len(FakeSession.calls)))
+        Dropped.error = yahoo.requests.Timeout("read timed out")
+        check("and a slow one as slow", said_by_yahoo() == "Yahoo took too long to answer.")
+        said_by_yahoo()
+        check("three requests with no answer close the door, and the next is not sent",
+              "not answering" in said_by_yahoo() and not FakeSession.calls, FakeSession.calls)
+    finally:
+        yahoo.time = real_time
+
+    slowest = (sum(yahoo._TIMEOUT) * yahoo._TRIES + 0.5
+               + yahoo._TRIES * one * yahoo._HANDSHAKE_TIMEOUT)
+    check("callers wait longer than a Yahoo request can take", slowest < yahoo._WAIT, slowest)
+
+    asked_at = []
+    real_get, yahoo.get = yahoo.get, lambda url, params=None: asked_at.append(url) or {}
+    try:
+        for ask in (lambda: yahoo.quote_summary("AAPL#X", "price"),
+                    lambda: yahoo.options("AAPL?X=1")):
+            try:
+                ask()
+            except yahoo.YahooError:
+                pass
+    finally:
+        yahoo.get = real_get
+    check("a # or ? in a ticker stays part of it",
+          [a.rsplit("/", 1)[-1] for a in asked_at] == ["AAPL%23X", "AAPL%3FX=1"], asked_at)
 finally:
     yahoo.requests.Session = real_session
     yahoo._SESSION, yahoo._CRUMB = None, None
@@ -545,7 +725,6 @@ print("THE NEWS SEARCH SHARES YAHOO'S DOOR")
 print("=" * 72)
 # Yahoo's news search went round the breaker: a refusal there was not told to
 # it, and it kept asking while the price requests stood back.
-from types import SimpleNamespace  # noqa: E402
 from bot import sentiment  # noqa: E402
 
 real_get = sentiment.requests.get

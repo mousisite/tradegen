@@ -751,11 +751,7 @@ def _is_complete(scan: Dict) -> bool:
 
 def _source_refusing() -> bool:
     """Whether the data source's circuit breaker is open."""
-    try:
-        upstream.check(_SOURCE)
-    except upstream.Throttled:
-        return True
-    return False
+    return upstream.refusing(_SOURCE)
 
 
 def _scan(market: str, interval: str, cfg: Dict, limit: int,

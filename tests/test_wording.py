@@ -64,7 +64,9 @@ from bot import risk as risk_mod  # noqa: E402
 from bot import screener as screener_mod  # noqa: E402
 from bot import sec  # noqa: E402
 from bot import sentiment as sentiment_mod  # noqa: E402
+from bot import upstream as upstream_mod  # noqa: E402
 from bot import workflows as workflows_mod  # noqa: E402
+from bot import yahoo as yahoo_mod  # noqa: E402
 from bot.market import Bars  # noqa: E402
 
 # web.py reads .env when it is imported, and a developer's own copy may hold
@@ -193,6 +195,7 @@ def no_network(self, method, url, *a, **k):
     raise requests.ConnectionError("this suite is offline: %s" % url)
 
 
+real_screen = screener_mod.run
 STUBS = [(m, "fetch_bars", bars_for) for m in (market_mod, portfolio_mod, risk_mod,
                                                 options_mod, workflows_mod, alerts_mod)]
 STUBS += [(engine, "fetch_bars", lambda s, iv: bars_for(s, iv)),
@@ -380,6 +383,33 @@ try:
     status, page = SEEN[("visitor", "/screener?preset=quality_value")]
     check("a screen that failed says so plainly", status == 500
           and "The screen could not be finished." in page, status)
+    # A screen that could not reach the source comes back with notes rather
+    # than failing, and the notes once held the library's own error: the host,
+    # the address asked and the session token in it.
+    class Dropped:
+        @staticmethod
+        def get(*_a, **_k):
+            raise requests.ConnectionError(BOOM.replace("/NVDA", "/NVDA?crumb=sEcReT"))
+
+    kept = {k: getattr(yahoo_mod, k) for k in ("_SESSION", "_CRUMB", "_OBTAINED_AT")}
+    stub_run, screener_mod.run = screener_mod.run, real_screen
+    yahoo_mod._SESSION, yahoo_mod._CRUMB = Dropped(), "sEcReT"
+    yahoo_mod._OBTAINED_AT = time.time()
+    upstream_mod.reset()
+    try:
+        page = _html.unescape(text(get(visitor, "visitor", "/screener?preset=dividend")))
+    finally:
+        screener_mod.run = stub_run
+        for k, v in kept.items():
+            setattr(yahoo_mod, k, v)
+        upstream_mod.reset()
+    check("a screen that could not reach the source says so, with no address or token",
+          "Yahoo could not be reached." in page and "crumb" not in page
+          and "sEcReT" not in page and not leaks(page), leaks(page))
+    check("nor any word about an installation or the reader's own connection",
+          "this installation" not in yahoo_mod._NO_SESSION
+          and "internet connection" not in yahoo_mod._NO_SESSION)
+
     status, page = SEEN[("visitor", "/ideas?market=stocks&horizon=medium&risk=balanced")]
     check("a Find scan that cannot start says the server is busy", status == 503
           and "running as many scans as it can" in page, status)

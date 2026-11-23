@@ -171,7 +171,7 @@
       <p class="prose" style="margin-top:var(--s2)">
         <b>{{ host }}</b>:
         {% if state.open_for > 0 %}
-          <span class="loss">rate limited, not being asked for another
+          <span class="loss">{{ 'not answering' if state.why == 'down' else 'rate limited' }}, not being asked for another
             {{ "%.0f"|format(state.open_for) }} seconds</span>
         {% else %}
           answering normally{% if state.times_opened %}, throttled
