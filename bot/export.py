@@ -457,7 +457,7 @@ DATASETS = {
     },
     "strategies": {
         "label": "Measured strategy record",
-        "why": "Every back-test result the bot has accumulated. The slowest "
+        "why": "Every back-test result Orenth has accumulated. The slowest "
                "thing here to rebuild from scratch.",
         "rows": strategies,
         "count": _rows_in("strategy_stats", owned=False),
@@ -467,7 +467,7 @@ DATASETS = {
     },
     "runs": {
         "label": "Analysis history",
-        "why": "Every call the bot has made, so you can check it against what "
+        "why": "Every call Orenth has made, so you can check it against what "
                "happened afterwards.",
         "rows": runs,
         "count": _rows_in("runs"),
