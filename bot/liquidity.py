@@ -12,7 +12,7 @@ confirmation, continuation"; 3:38:30-3:42:47; 4:02:52-4:11:09; 6:24:12-6:30:28):
 4. and a candle turns back in the new direction there.
 
 series() adds the lq_* keys to structure.series() and clock.series(); events()
-says what happened lately in plain words, for the analysis page and alerts.
+says what happened lately in plain words, for the analysis page.
 As everywhere in this family of modules, the value at bar i uses bars 0..i
 only. The sign convention is the strategies': +1 means the setup expects the
 price to rise (lows were taken), -1 that it expects a fall.
@@ -97,6 +97,7 @@ def _chain(bars, s: Dict[str, np.ndarray], daily: bool) -> Dict[str, np.ndarray]
     C = np.asarray(bars.close, dtype=float).tolist()
     sw, sw_both = s["st_sweep"].tolist(), s["st_sweep_both"].tolist()
     sw_lvl, sw_eq = s["st_sweep_lvl"].tolist(), s["st_sweep_eq"].tolist()
+    sw_eq_lvl = s["st_sweep_eq_lvl"].tolist()
     pd_take, pd_both = s["ck_pd_take"].tolist(), s["ck_pd_both"].tolist()
     pdh, pdl = s["ck_pdh"].tolist(), s["ck_pdl"].tolist()
     se_take, se_both, se_lvl = (s["ck_sess_take"].tolist(), s["ck_sess_both"].tolist(),
@@ -138,10 +139,11 @@ def _chain(bars, s: Dict[str, np.ndarray], daily: bool) -> Dict[str, np.ndarray]
         ups: List = []
         dns: List = []
         clash = bool(sw_both[i] or pd_both[i] or se_both[i])
-        if sw[i] == 1:
-            ups.append((sw_lvl[i], _SRC_EQUAL if sw_eq[i] else _SRC_SWING))
-        elif sw[i] == -1:
-            dns.append((sw_lvl[i], _SRC_EQUAL if sw_eq[i] else _SRC_SWING))
+        if sw[i]:
+            side_list = ups if sw[i] == 1 else dns
+            side_list.append((sw_lvl[i], _SRC_SWING))
+            if sw_eq[i]:
+                side_list.append((sw_eq_lvl[i], _SRC_EQUAL))
         if pd_take[i] == 1:
             ups.append((pdl[i], _SRC_PRIOR))
         elif pd_take[i] == -1:
@@ -381,7 +383,9 @@ def events(bars, s: Dict[str, np.ndarray], since: Optional[int] = None,
             d = int(s["lq_take"][i])
             name = level_name(s, i)
             lvl = float(s["lq_take_lvl"][i])
-            back = bool(s["lq_take_back"][i])
+            # lq_take_back is against every level the bar took; the words
+            # are about the one they name.
+            back = close > lvl if d == 1 else close < lvl
             several = name.startswith("equal") or name[:1].isdigit()
             it = "them" if several else "it"
             add("take", d, lvl, name,

@@ -1091,7 +1091,7 @@ def _lq_int(ctx: Context, key: str, i: int) -> int:
 def _took_swings(ctx: Context, i: int, d: int, equal: bool) -> str:
     """'took the swing low at 412.30 and closed back above it', or the same
     for several levels or an equal pair taken on one bar."""
-    lvl = ctx.at("st_sweep_lvl", i)
+    lvl = ctx.at("st_sweep_eq_lvl" if equal else "st_sweep_lvl", i)
     count = max(1, _lq_int(ctx, "st_sweep_n", i))
     side = "low" if d > 0 else "high"
     if equal:
