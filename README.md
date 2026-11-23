@@ -129,7 +129,7 @@ otherwise. Each links to where the work happens.
 | 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
-| 15d | Export | `bot/export.py` | The journal, theses, measured strategy record and analysis history as CSV or JSON |
+| 15d | Export | `bot/export.py` | The journal, theses, watchlist, alerts, measured strategy record and analysis history as CSV or JSON |
 | 16 | Paper trading | `paper.py`, `bot/database.py` | Positions sized against your account, marked to market, closed with the R-multiple computed |
 | 17 | Automated workflows | `bot/workflows.py` | Four routines: check open positions, a morning sweep, hunt for setups, re-analyse the watchlist |
 | 18 | AI financial reasoning | `bot/reasoning.py` | Reasons over the facts already gathered, never over its own recollection. Needs a key |

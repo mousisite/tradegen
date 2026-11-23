@@ -187,6 +187,23 @@ check("a backup file is written", _os.path.exists(path))
 check("it verifies", backup_mod.verify(path))
 check("the csv exports are written alongside",
       any(f.endswith(".csv") for f in _os.listdir(folder)))
+# They are everybody's rows together, for the day this app is gone: without
+# whose each is, nobody's journal could be handed back.
+import csv as _csv
+
+whose = {}
+for f in _os.listdir(folder):
+    if f.endswith(".csv"):
+        with open(_os.path.join(folder, f), encoding="utf-8", newline="") as fh:
+            reader = _csv.DictReader(fh)
+            whose[f] = (reader.fieldnames, list(reader))
+check("each says whose every row is, except the record that is nobody's",
+      len(whose) >= 5 and all(("user_id" in names) != ("strategies" in f)
+                              for f, (names, _rows) in whose.items()),
+      {f: names for f, (names, _rows) in whose.items()})
+check("and the trade is its owner's",
+      [(r["user_id"], r["symbol"]) for f, (_n, rows) in whose.items() if "-trades-" in f
+       for r in rows] == [("1", "AAPL")])
 
 restored = db.connect(path)
 try:
@@ -328,6 +345,20 @@ check("small numbers are called out",
 conn.close()
 
 check("the operator can see it", c.get("/usage").status_code == 200)
+
+# The chart of analyses per day: a week of nothing is a week of empty bars,
+# not two busy days side by side.
+_quiet = __import__("sqlite3").connect(":memory:")
+_quiet.execute("CREATE TABLE runs (ts INTEGER, user_id INTEGER)")
+check("no analyses at all is no chart", usage.by_day(_quiet, 30) == [])
+_now = int(__import__("time").time())
+_quiet.executemany("INSERT INTO runs VALUES (?, 1)", [(_now - 8 * 86400,), (_now,), (_now,)])
+_days = usage.by_day(_quiet, 30)
+check("every day of the window has a bar, the quiet ones at zero",
+      len(_days) == 31 and [d["runs"] for d in _days if d["runs"]] == [1, 2]
+      and [d["runs"] for d in _days[-9:]] == [1, 0, 0, 0, 0, 0, 0, 0, 2]
+      and all(b["day"] - a["day"] == 86400 for a, b in zip(_days, _days[1:])), _days[-9:])
+_quiet.close()
 
 _os.environ["GOOGLE_CLIENT_ID"] = "x.apps.googleusercontent.com"
 _os.environ["GOOGLE_CLIENT_SECRET"] = "y"

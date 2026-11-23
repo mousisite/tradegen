@@ -23,6 +23,12 @@ from . import risk as risk_mod
 from .market import DataError, fetch_bars, split_factor_since, split_words
 
 
+# The most holdings compared with each other. Every one is read in turn and
+# is a row and a column of the table, so a very long list is a slow page and
+# a table nobody can read.
+COMPARE_MOST = 40
+
+
 @dataclass
 class Trail:
     """A trailing stop: how far behind the best price since opening it sits.
@@ -433,7 +439,8 @@ def build(rows, account: float, with_correlation: bool = True,
     (database.open_positions), so a position closed in part counts only the
     part still open. cost_bps maps an asset class ("equity", "crypto", other)
     to its round-trip cost in basis points; half of it is charged to get out
-    of each position.
+    of each position. "futures", where given, is a futures contract's, which
+    the data source files under other.
     """
     view = PortfolioView(account=account)
     if not rows:
@@ -463,7 +470,10 @@ def build(rows, account: float, with_correlation: bool = True,
     for p in positions:
         if p.price is None:
             continue
-        mark(p, costs.get(p.asset_class, costs.get("other", 0.0)))
+        kind = p.asset_class
+        if "futures" in costs and p.symbol.upper().endswith("=F"):
+            kind = "futures"
+        mark(p, costs.get(kind, costs.get("other", 0.0)))
 
     # Positions with no price are left out of every sum, and so are positions
     # logged without a size, whose cash figures cannot be known.
@@ -480,10 +490,11 @@ def build(rows, account: float, with_correlation: bool = True,
     view.exit_costs = sum(p.exit_cost for p in sized)
     view.gross_exposure = sum(abs(p.notional) for p in sized)
     view.net_exposure = sum(p.notional * p.direction for p in sized)
-    # An unpriced holding still holds money: its entry cost stays out of cash.
-    unpriced_cost = sum(p.entry * p.quantity for p in positions
-                        if p.price is None and p.sized)
-    view.cash = max(0.0, account - view.invested - unpriced_cost)
+    # What is left of the account is what was not paid out: a holding that has
+    # risen since was still bought at its entry, and one without a price still
+    # holds its money. Counted at today's value, cash fell when a holding rose.
+    paid = sum(p.entry * p.quantity for p in positions if p.sized)
+    view.cash = max(0.0, account - paid)
 
     for p in sized:
         key = p.sector or ("Crypto" if p.asset_class == "crypto" else "Unclassified")
@@ -497,15 +508,25 @@ def build(rows, account: float, with_correlation: bool = True,
         # perfectly even.
         view.concentration = sum(w * w for w in _name_weights(sized, view.gross_exposure).values())
 
-        # Signed: a short adds negative market exposure, not more of it.
-        betas = [(p.beta, p.notional * p.direction) for p in sized if p.beta is not None]
-        if betas:
-            view.portfolio_beta = sum(b * w for b, w in betas) / view.gross_exposure
+        # Signed: a short adds negative market exposure, not more of it. One
+        # with no measured beta is taken to move with the market, as what_if
+        # takes it, so this figure and the shock table agree; _assess names it.
+        if any(p.beta is not None for p in sized):
+            view.portfolio_beta = sum(
+                (p.beta if p.beta is not None else 1.0) * p.notional * p.direction
+                for p in sized) / view.gross_exposure
 
     if with_correlation and len({p.symbol for p in priced}) >= 2:
+        worth: Dict[str, float] = {}
+        for p in priced:
+            worth[p.symbol] = worth.get(p.symbol, 0.0) + abs(p.notional)
+        names = sorted(worth, key=lambda s: (-worth[s], s))[:COMPARE_MOST]
         try:
-            view.correlation = risk_mod.correlation_matrix(
-                sorted({p.symbol for p in priced}), "1d")
+            view.correlation = risk_mod.correlation_matrix(sorted(names), "1d")
+            if len(names) < len(worth):
+                view.correlation.setdefault("notes", []).append(
+                    "Compared between your %d largest holdings, of %d."
+                    % (len(names), len(worth)))
         except Exception:
             view.correlation = {}
 
@@ -642,12 +663,15 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     unbreached = [p for p in priced if not p.breached and p.sized]
     risk_pct = view.total_risk / account * 100
     if unbreached:
+        # A small position's costs round to nothing, and "about 0 in trading
+        # costs" says nothing; a short's stop is above it, not below.
+        costs = "{:,.0f}".format(sum(p.exit_cost for p in unbreached))
         view.observations.append(
-            "If every stop still ahead were hit from here, the positions above "
-            "their stops would lose a further %s, or %.1f%% of the account, "
-            "including about %s in trading costs to get out."
+            "If every stop still ahead were hit from here, the positions not yet "
+            "at their stops would lose a further %s, or %.1f%% of the account%s."
             % ("{:,.0f}".format(view.total_risk), risk_pct,
-               "{:,.0f}".format(sum(p.exit_cost for p in unbreached))))
+               "" if costs == "0" else
+               ", including about %s in trading costs to get out" % costs))
     if view.planned_risk:
         view.observations.append(
             "The plans put %s at risk on what is still open, entry to the stop "
@@ -696,10 +720,18 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
                 "exposures." % avg)
 
     if view.portfolio_beta is not None:
+        # A book that is short on balance gains when the market falls.
+        against = ", in the opposite direction" if view.portfolio_beta <= -0.005 else ""
         view.observations.append(
             "Weighted beta is %.2f, so the portfolio tends to move %.0f%% as "
-            "much as the market." % (view.portfolio_beta,
-                                     abs(view.portfolio_beta) * 100))
+            "much as the market%s." % (view.portfolio_beta,
+                                       abs(view.portfolio_beta) * 100, against))
+        assumed = sorted({p.symbol for p in sized if p.beta is None})
+        if assumed:
+            view.observations.append(
+                "No beta could be measured for %s, so %s counted as moving exactly "
+                "with the market." % (", ".join(assumed),
+                                      "it is" if len(assumed) == 1 else "they are"))
 
     if view.net_exposure < 0 and view.gross_exposure > 0:
         view.observations.append("Net exposure is short.")
@@ -770,12 +802,8 @@ def overlap(rows, symbol: str, interval: str = "1d",
     still change the decision.
 
     Bars have to be fetched per instrument, so the comparison is capped at the
-    largest few holdings and runs concurrently.
+    largest few holdings.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
-    from . import risk as risk_mod
-
     want = symbol.upper()
     out = {"usable": False, "warnings": [], "held": False, "pairs": [],
            "average": None, "compared": []}
@@ -821,8 +849,7 @@ def overlap(rows, symbol: str, interval: str = "1d",
             break
 
     out["compared"] = compare
-    with ThreadPoolExecutor(max_workers=4):
-        matrix = risk_mod.correlation_matrix([want] + compare, interval)
+    matrix = risk_mod.correlation_matrix([want] + compare, interval)
     if not matrix.get("usable"):
         out["note"] = matrix.get("reason", "Not enough shared history.")
         return out

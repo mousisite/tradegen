@@ -534,7 +534,7 @@ try:
     rows = export.trades(conn, user=alice.id)
     check("the export has the new columns",
           {"setup", "emotion", "checklist", "broke_rule", "followed_plan", "lesson",
-           "reviewed", "session"} <= set(export.TRADE_COLUMNS))
+           "reviewed_utc", "session"} <= set(export.TRADE_COLUMNS))
     first = next(r for r in rows if r["setup"] == "Sweep, break and retest")
     check("in words", first["setup"] == "Sweep, break and retest" and first["emotion"] == "Calm"
           and first["checklist"].startswith("8 of 8 ticked") and first["followed_plan"] == "Yes"

@@ -30,7 +30,7 @@
           {{ (p.touched_stop or p.stop)|price }} and is at {{ p.price|price }}
           {%- else -%}
           is at {{ p.price|price }}, past its {{ 'trailing ' if p.trail }}stop
-          of {{ p.stop|price }}{%- endif %}: {{ p.open_pnl|money }}{% if p.open_r is not none %}
+          of {{ p.stop|price }}{%- endif %}: {{ p.open_pnl|money if p.sized else 'size not logged' }}{% if p.open_r is not none %}
           ({{ p.open_r|signed }}R){% endif %}.</li>
       {% endfor %}
     </ul>
@@ -51,7 +51,7 @@
     <div class="f"><div class="k">Cash</div>
       <div class="v fig">{{ view.cash|money }}</div></div>
     <div class="f"><div class="k">Open P&amp;L</div>
-      <div class="v fig {{ 'gain' if view.open_pnl > 0 else 'loss' }}">
+      <div class="v fig {{ 'gain' if view.open_pnl > 0 else 'loss' if view.open_pnl < 0 else '' }}">
         {{ view.open_pnl|money }}</div></div>
     <div class="f"><div class="k">Still at risk</div>
       <div class="v fig loss">{{ view.total_risk|money }}</div>
@@ -62,7 +62,7 @@
     {% if view.breached %}
     <div class="f"><div class="k">Past their stop</div>
       <div class="v fig loss">{{ view.breached|length }}</div>
-      <div class="n">{{ view.breached_pnl|money }} open</div></div>
+      <div class="n">{% if view.breached|selectattr('sized')|list %}{{ view.breached_pnl|money }} open{% else %}size not logged{% endif %}</div></div>
     {% endif %}
     <div class="f"><div class="k">Concentration</div>
       <div class="v fig">{{ "%.1f"|format(1 / view.concentration)
@@ -93,7 +93,7 @@
     <span class="count">{{ view.positions|length }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th>Side</th><th class="r">Entry</th><th class="r">Now</th>
           <th class="r">Value</th><th class="r">Open P&amp;L</th><th class="r">R</th>
@@ -102,22 +102,24 @@
         </tr></thead>
         <tbody>
         {% for p in view.positions %}
+          {# Without a price or a logged size the money is unknown, not nothing. #}
+          {% set known = p.price is not none and p.sized %}
           <tr>
             <td><b>{{ p.symbol }}</b></td>
-            <td><span class="chip {{ 'long' if p.direction > 0 else 'short' }}">
+            <td data-label="Side"><span class="chip {{ 'long' if p.direction > 0 else 'short' }}">
               {{ 'Long' if p.direction > 0 else 'Short' }}</span></td>
-            <td class="r fig">{{ p.entry|price }}</td>
-            <td class="r fig">{{ p.price|price if p.price else '—' }}</td>
-            <td class="r fig">{{ p.notional|money }}</td>
-            <td class="r fig {{ 'gain' if p.open_pnl > 0 else 'loss' }}">
-              {{ p.open_pnl|money }}</td>
-            <td class="r fig {{ 'gain' if (p.open_r or 0) > 0 else 'loss' }}">
+            <td class="r fig" data-label="Entry">{{ p.entry|price }}</td>
+            <td class="r fig" data-label="Now">{{ p.price|price if p.price else '—' }}</td>
+            <td class="r fig" data-label="Value">{{ p.notional|money if known else '—' }}</td>
+            <td class="r fig {{ '' if not known else 'gain' if p.open_pnl > 0 else 'loss' if p.open_pnl < 0 else '' }}" data-label="Open P&amp;L">
+              {{ p.open_pnl|money if known else '—' }}</td>
+            <td class="r fig {{ 'gain' if (p.open_r or 0) > 0 else 'loss' if (p.open_r or 0) < 0 else '' }}" data-label="R">
               {{ p.open_r|signed if p.open_r is not none else '—' }}</td>
-            <td class="r fig">{% if p.breached %}<span class="chip short">Past stop</span>{% elif p.price is none %}—{% else %}{{ p.risk_remaining|money }}{% endif %}</td>
-            <td class="r fig soft">{{ (p.notional|abs / view.gross_exposure)|pct
-                if view.gross_exposure else '—' }}</td>
-            <td class="r fig soft">{{ "%.2f"|format(p.beta) if p.beta is not none else '—' }}</td>
-            <td class="soft">{{ p.sector or ('Crypto' if p.asset_class == 'crypto' else '—') }}</td>
+            <td class="r fig" data-label="Still at risk">{% if p.breached %}<span class="chip short">Past stop</span>{% elif not known %}—{% else %}{{ p.risk_remaining|money }}{% endif %}</td>
+            <td class="r fig soft" data-label="Weight">{{ (p.notional|abs / view.gross_exposure)|pct
+                if known and view.gross_exposure else '—' }}</td>
+            <td class="r fig soft" data-label="Beta">{{ "%.2f"|format(p.beta) if p.beta is not none else '—' }}</td>
+            <td class="soft" data-label="Sector">{{ p.sector or ('Crypto' if p.asset_class == 'crypto' else '—') }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -220,8 +222,7 @@
       </table>
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
-      {{ shocks.values()|list|first|attr('caveat') if false else
-         "Correlations move toward one in a real sell-off, so a genuine crash would hurt more than this straight-line estimate." }}
+      {{ (shocks.values()|list|first).caveat }}
     </p>
   </div>
 </section>

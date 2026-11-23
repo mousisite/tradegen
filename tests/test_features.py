@@ -1053,6 +1053,190 @@ finally:
 check("and with billing off nobody is",
       len(analysed) == 4 and looks_used(pat) == 0, (analysed, looks_used(pat)))
 
+print()
+print("=" * 72)
+print("ONE PERSON'S SCREEN DOES NOT SPEND EVERYBODY'S DATA")
+print("=" * 72)
+from bot import yahoo as yahoo_mod  # noqa: E402
+
+conn = db.connect(DB)
+quin = A.upsert_email_user(conn, "quin@example.com")
+conn.close()
+sign_in(c, quin)
+quoted, listed = [], []
+real_quotes = (yahoo_mod.quotes, yahoo_mod.predefined_screen)
+yahoo_mod.quotes = lambda symbols, *_a, **_k: quoted.append(list(symbols)) or [
+    {"symbol": s, "shortName": s, "regularMarketPrice": 10.0, "marketCap": 1e9}
+    for s in symbols]
+yahoo_mod.predefined_screen = lambda name, count=25: listed.append(name) or [{"symbol": "ZZU"}]
+web._RATE.clear()
+try:
+    long_list = " ".join("ZZ%03d" % n for n in range(300))
+    body = flat(text(c.get("/screener", query_string={"go": "1", "symbols": long_list})))
+    check("a typed list is cut to what one screen takes",
+          [len(q) for q in quoted] == [screener_mod.MAX_LISTED], [len(q) for q in quoted])
+    check("and the page says how many were not looked at",
+          "240 of the 300 instruments on your list were not looked at" in body)
+    del quoted[:]
+    c.get("/screener", query_string={"go": "1", "symbols": "zzq ZZQ,zzq"})
+    check("a name typed three times is asked for once", quoted == [["ZZQ"]], quoted)
+    body = text(c.get("/screener", query_string={
+        "go": "1", "universe": "anything, a link says so"}))
+    check("a list that is not on the form is never asked for, nor said back",
+          listed == ["most_actives"] and "a link says so" not in body, listed)
+    check("a debt filter is said back as the percent it is",
+          "Debt to equity at most 150%" in " ".join(re.sub(
+              r"<[^>]+>", " ", text(c.get("/screener", query_string={
+                  "go": "1", "symbols": "ZZNONE", "price_min": "999", "debt_max": "150"}))).split()))
+    done = sum(len(v) for k, v in web._RATE.items() if k == ("screen", "user:%d" % quin.id))
+    check("each screen is counted", done == 4, done)
+    for _n in range(web.SCREENS_PER_HOUR - done):
+        c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    before = len(quoted)
+    r = c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    check("past the hour's screens, one more is refused in words and asks for nothing",
+          r.status_code == 429 and "run screens a lot" in text(r) and len(quoted) == before,
+          (r.status_code, len(quoted) - before))
+    check("while the empty form still opens", c.get("/screener").status_code == 200)
+finally:
+    yahoo_mod.quotes, yahoo_mod.predefined_screen = real_quotes
+    web._RATE.clear()
+
+from bot import fundamentals as fundamentals_mod  # noqa: E402
+
+check("a company's debt to equity is shown as the percent it is",
+      fundamentals_mod.Metric("debt_to_equity", "Debt to equity", 154.49, "percent").display()
+      == "154%")
+
+print()
+print("=" * 72)
+print("A ROUTINE FITS IN ONE REQUEST")
+print("=" * 72)
+conn = db.connect(DB)
+rae = A.upsert_email_user(conn, "rae@example.com")
+for n in range(40):
+    db.watch_add(conn, "ZZL%02d" % n, "1d", user=rae.id)
+conn.close()
+workflows.engine.analyse = routine_analyse
+try:
+    report = run_routine("watchlist", rae)
+    first = list(analysed)
+    check("a long watchlist is analysed up to a limit",
+          first == ["ZZL%02d" % n for n in range(workflows.WATCH_MOST)], len(first))
+    held_back = [s for s in report.steps if s.label == "Left for next time"]
+    check("and says how many were left, and which",
+          "15 more were left for the next run" in report.headline
+          and held_back and "ZZL25" in held_back[0].detail
+          and "and 7 more" in held_back[0].detail, (report.headline, held_back))
+    check("and counts only what was analysed",
+          report.headline.startswith("None of the 25 watched instruments changed."))
+    run_routine("watchlist", rae)
+    check("run again, it starts with the ones that were left",
+          analysed[:15] == ["ZZL%02d" % n for n in range(25, 40)], analysed[:15])
+
+    def slow_analyse(symbol, *a, **k):
+        time.sleep(0.1)
+        return routine_analyse(symbol, *a, **k)
+
+    workflows.WATCH_SECONDS, seconds = 0.05, workflows.WATCH_SECONDS
+    workflows.engine.analyse = slow_analyse
+    report = run_routine("watchlist", rae)
+    workflows.WATCH_SECONDS, workflows.engine.analyse = seconds, routine_analyse
+    check("out of time, it starts no more and says so",
+          len(analysed) == 1 and "39 more were left" in report.headline, report.headline)
+
+    # One of anything is said as one, and a failure is not an answer.
+    conn = db.connect(DB)
+    sol = A.upsert_email_user(conn, "sol@example.com")
+    db.watch_add(conn, "ZZO1", "1d", user=sol.id)
+    db.open_trade(conn, "ZZO1", "1d", 1, 100.0, 95.0, 110.0, quantity=10, user=sol.id)
+    db.watch_add(conn, "LINK", "1d", user=sol.id, exact=True)
+    db.watch_add(conn, "BTC", "1d", user=sol.id)
+    # Saved as typed, before tickers were tidied on the way in.
+    conn.execute("UPDATE watchlist SET symbol='BTC', exact=0 WHERE user_id=? AND "
+                 "symbol LIKE 'BTC%'", (sol.id,))
+    conn.commit()
+    conn.close()
+    priced, real_bars = [], workflows.fetch_bars
+    real_check = workflows._check_positions
+    workflows.fetch_bars = lambda symbol, interval="1d", *a, **k: priced.append(symbol) or NS(
+        last_price=110.0, prev_close=100.0)
+    workflows._check_positions = lambda *a, **k: None
+    try:
+        report = run_routine("morning", sol)
+    finally:
+        workflows.fetch_bars, workflows._check_positions = real_bars, real_check
+    check("the morning review prices an entry as the instrument it opens",
+          sorted(priced) == ["BTC-USD", "LINK", "ZZO1"], priced)
+    check("and one trade is said as one",
+          "0 analyses recorded, 1 trade logged, 0 alerts set, 3 instruments watched."
+          in [s.detail for s in report.steps], [s.detail for s in report.steps])
+    conn = db.connect(DB)
+    for sym in ("LINK", "BTC"):
+        conn.execute("DELETE FROM watchlist WHERE user_id=? AND symbol=?", (sol.id, sym))
+    conn.commit()
+    conn.close()
+    report = run_routine("watchlist", sol)
+    check("one watched instrument is said as one",
+          report.headline == "The one watched instrument analysed did not change.",
+          report.headline)
+    conn = db.connect(DB)
+    for sym in ("ZZO2", "ZZO3"):
+        db.watch_add(conn, sym, "1d", user=sol.id)
+    conn.close()
+    refuse.add("ZZO2")
+    report = run_routine("watchlist", sol)
+    check("an analysis that failed is not counted as looked at",
+          report.headline == "None of the 2 watched instruments changed. "
+                             "1 more could not be analysed.", report.headline)
+    refuse.update(("ZZO1", "ZZO3"))
+    report = run_routine("watchlist", sol)
+    check("and when all of them fail it says so",
+          report.headline == "Nothing on the watchlist could be analysed this time.",
+          report.headline)
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO9")], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("one candidate is said as one",
+          report.headline == "1 candidate passed the screen and was analysed.", report.headline)
+    refuse.add("ZZO9")
+    report = run_routine("hunt", sol)
+    check("and not as analysed when it was not",
+          report.headline == "1 candidate passed the screen, but none could be analysed "
+                             "just now.", report.headline)
+    refuse.clear()
+
+    # The button on the page.
+    sign_in(c, rae)
+    web._RATE.clear()
+    web._CACHE[("kept",)] = (time.time(), None, {})
+    real_run, runs = workflows.run, []
+    workflows.run = lambda name, *a, **k: runs.append(name) or workflows.RunReport(
+        name, 0, 0, headline="Done.")
+    try:
+        check("the routine runs from its button",
+              c.post("/workflow/positions").status_code == 302 and runs == ["positions"])
+        check("and leaves everyone's kept analyses alone", ("kept",) in web._CACHE)
+        web._ROUTINES.add(rae.id)
+        r = c.post("/workflow/watchlist")
+        check("while one is running, another is not started beside it",
+              r.status_code == 409 and runs == ["positions"]
+              and "still running" in text(r), r.status_code)
+        web._ROUTINES.discard(rae.id)
+        for _n in range(web.ROUTINES_PER_HOUR):
+            r = c.post("/workflow/positions")
+        check("past the hour's routines, one more is refused in words",
+              r.status_code == 429 and "run routines a lot" in text(r)
+              and len(runs) == web.ROUTINES_PER_HOUR - 1, (r.status_code, len(runs)))
+        check("and nothing is left marked as running", rae.id not in web._ROUTINES)
+    finally:
+        workflows.run = real_run
+        web._ROUTINES.clear()
+        web._CACHE.pop(("kept",), None)
+        web._RATE.clear()
+finally:
+    workflows.engine.analyse, workflows.screener_mod.run = real_routine
+
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)
 

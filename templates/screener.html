@@ -60,9 +60,11 @@
               {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
             <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
                    step="any" value="{{ typed.get(key, '') }}"
-                   placeholder="{{ 'percent' if spec.unit == 'pct' else
+                   placeholder="{{ 'percent' if spec.unit in ('pct', 'points') else
                                    'dollars' if spec.unit == 'usd' else
-                                   'multiple' if spec.unit == 'x' else 'any' }}">
+                                   'multiple' if spec.unit == 'x' else 'any' }}"
+                   {% if spec.hint %}aria-describedby="h-{{ key }}"{% endif %}>
+            {% if spec.hint %}<div class="hint" id="h-{{ key }}">{{ spec.hint }}</div>{% endif %}
           </div>
         {% endfor %}
       </div>
@@ -120,8 +122,7 @@
             <td class="r fig" data-label="Price">{{ c.price|price }}</td>
             <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}" data-label="Today">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
-            <td class="r fig" data-label="Market cap">{{ c.market_cap|big
-                if c.market_cap else '—' }}</td>
+            <td class="r fig" data-label="Market cap">{{ c.size or '—' }}</td>
             <td class="r fig" data-label="P/E">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
             {% if result.deep %}
               <td class="r fig" data-label="ROE">{{ c.roe|pct if c.roe is not none else '—' }}</td>

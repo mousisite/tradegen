@@ -1,5 +1,5 @@
 """Verify screener and portfolio modules."""
-import sys, time
+import sys, threading, time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -116,8 +116,8 @@ print("   by sector: %s" % {k: "%.0f%%" % (val/v.gross_exposure*100)
 check("all positions priced", len(v.failed) == 0, str(v.failed))
 check("invested is positive", v.invested > 0)
 check("concentration between 0 and 1", 0 < (v.concentration or 0) <= 1)
-check("cash plus invested is about the account",
-      abs((v.cash + v.invested) - 100000) < 1 or v.invested > 100000)
+check("cash is the account less what was paid for the holdings",
+      abs(v.cash - (100000 - (300 * 30 + 480 * 12 + 210 * 40 + 85 * 60))) < 1, str(v.cash))
 check("correlation computed", bool(v.correlation.get("usable")))
 if v.correlation.get("usable"):
     print("   average correlation %.3f" % v.correlation["average"])
@@ -284,6 +284,11 @@ try:
     today = _re.findall(r'<td class="r fig([^"]*)"[^>]*>\s*0\.0%', flat)
     check("a move of 0.0% is not coloured as a loss",
           today and "loss" not in today[0] and "gain" not in today[0], str(today))
+    check("the debt box says it wants a percent, and the cash flow box dollars above a figure",
+          "As a percent: 150 means debt of one and a half times equity." in _text(body)
+          and _re.search(r'name="debt_max"[^>]*placeholder="percent"', body)
+          and "Free cash flow above" in _text(body)
+          and "Free cash flow positive" not in _text(body))
     check("and the page says when the quotes were read",
           _re.search(r"Quotes read at \d\d:\d\d UTC", _text(body)) is not None)
 
@@ -301,6 +306,7 @@ try:
                                "regularMarketChangePercent": 5.0,
                                "regularMarketVolume": 5e6, "marketCap": 2e9}]
     second = _text(_client.get("/screener?preset=momentum").data.decode("utf-8", "replace"))
+    momentum = second
     check("a visitor whose screen the source refused is told so",
           "Could not fetch quotes" in first
           and "Nothing could be screened just now" in first
@@ -308,10 +314,68 @@ try:
     check("and the next visitor gets a fresh try, not that failure for 15 minutes",
           "1 passed" in second and "Could not fetch quotes" not in second,
           second[second.find("Results"):second.find("Results") + 90])
+    check("a filter of a million is said as a million",
+          "Volume at least 1,000,000" in momentum and "e+" not in momentum)
+    check("and a market cap at its own size", "2.0B" in momentum)
+
+    # Shared for a quarter of an hour, in a store of its own: the one the data
+    # source's answers share keeps everything as long as any caller asks.
+    from bot import upstream as _up
+    lasted, real_cached = [], _up.cached
+    _up.cached = lambda *a, **k: lasted.append(k.get("ttl", _up.DEFAULT_TTL)) or real_cached(*a, **k)
+    ran, real_run = [], S.run
+    S.run = lambda **k: ran.append(1) or real_run(**k)
+    try:
+        _up.reset()
+        _client.get("/screener?preset=momentum")
+        check("a ready-made screen already run is not run again", not ran)
+        _web._DEMO_SCREENS.clear()
+        _client.get("/screener?preset=momentum")
+        check("nor does it make the shared store keep old prices longer",
+              len(ran) == 1 and lasted and max(lasted) <= _up.DEFAULT_TTL, str(lasted))
+
+        # Two visitors press it at once and part of it cannot be read: the one
+        # who waited is shown the same part, not an error page.
+        _web._DEMO_SCREENS.clear()
+        _up.reset()
+        going = threading.Event()
+
+        def part_read(**k):
+            going.set()
+            time.sleep(0.6)
+            found = real_run(**k)
+            found.unread = ["LATE"]
+            return found
+
+        S.run = part_read
+        answers = []
+        first_one = threading.Thread(target=lambda: answers.append(
+            _web.app.test_client().get("/screener?preset=momentum").status_code))
+        first_one.start()
+        going.wait(5)
+        answers.append(_web.app.test_client().get("/screener?preset=momentum").status_code)
+        first_one.join()
+        check("two visitors at once both see a part-read screen", answers == [200, 200], str(answers))
+        check("which is not kept", "momentum" not in _web._DEMO_SCREENS)
+    finally:
+        _up.cached, S.run = real_cached, real_run
 finally:
     (S.universe_symbols, _Y.quotes, _Y.quote_summary, S.fund.load,
      S.fund.quality_score) = _real
     _web.app.config["AUTH_MODE"] = None
+
+check("numbers are said as they were typed",
+      [f["value"] for f in S._describe({"volume_min": 1_000_000, "price_min": 12345,
+                                        "pe_max": 22, "debt_max": 20000})]
+      == ["1,000,000", "12,345", "22.0x", "20,000%"],
+      str(S._describe({"volume_min": 1_000_000, "price_min": 12345, "pe_max": 22,
+                       "debt_max": 20000})))
+check("and a market cap is said at its own size",
+      [S.Candidate("X", market_cap=v).size for v in
+       (None, 0, 400e3, 52e6, 999.7e6, 1.2e9, 999.97e9, 3.4e12)]
+      == ["", "", "under 1M", "52M", "1.0B", "1.2B", "1.00T", "3.40T"],
+      str([S.Candidate("X", market_cap=v).size for v in
+           (400e3, 52e6, 999.7e6, 1.2e9, 999.97e9, 3.4e12)]))
 
 print()
 print("%d failure(s)" % len(fails))

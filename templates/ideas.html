@@ -27,30 +27,30 @@
     <div class="setgrid">
       <div class="setfield">
         <label for="market">What do you trade?</label>
-        <select class="field" id="market" name="market">
+        <select class="field" id="market" name="market" aria-describedby="why-market">
           {% for key, spec in markets.items() %}
-            <option value="{{ key }}" {{ 'selected' if key == market }}>{{ spec.label }}</option>
+            <option value="{{ key }}" data-why="{{ spec.why }}" {{ 'selected' if key == market }}>{{ spec.label }}</option>
           {% endfor %}
         </select>
-        <div class="hint">{{ markets[market].why }}</div>
+        <div class="hint" id="why-market" aria-live="polite">{{ markets[market].why }}</div>
       </div>
       <div class="setfield">
         <label for="horizon">How long do you hold?</label>
-        <select class="field" id="horizon" name="horizon">
+        <select class="field" id="horizon" name="horizon" aria-describedby="why-horizon">
           {% for key, spec in horizons.items() %}
-            <option value="{{ key }}" {{ 'selected' if key == horizon }}>{{ spec.label }}</option>
+            <option value="{{ key }}" data-why="{{ spec.why }}" {{ 'selected' if key == horizon }}>{{ spec.label }}</option>
           {% endfor %}
         </select>
-        <div class="hint">{{ horizons[horizon].why }}</div>
+        <div class="hint" id="why-horizon" aria-live="polite">{{ horizons[horizon].why }}</div>
       </div>
       <div class="setfield">
         <label for="risk">How much risk do you want?</label>
-        <select class="field" id="risk" name="risk">
+        <select class="field" id="risk" name="risk" aria-describedby="why-risk">
           {% for key, spec in risks.items() %}
-            <option value="{{ key }}" {{ 'selected' if key == risk }}>{{ spec.label }}</option>
+            <option value="{{ key }}" data-why="{{ spec.why }}" {{ 'selected' if key == risk }}>{{ spec.label }}</option>
           {% endfor %}
         </select>
-        <div class="hint">{{ risks[risk].why }}</div>
+        <div class="hint" id="why-risk" aria-live="polite">{{ risks[risk].why }}</div>
       </div>
     </div>
     <button class="btn" type="submit" style="margin-top:var(--s3)">Find something</button>
@@ -109,7 +109,7 @@
     {% elif result.passed %}
       {{ result.passed_total }} worth a look right now.
     {% else %}
-      Nothing worth buying today.
+      {% if result.dropped %}Nothing to hold for months today.{% else %}Nothing worth buying today.{% endif %}
     {% endif %}
   </p>
   {% if result.refresh_note %}
@@ -123,7 +123,7 @@
     <p class="prose"><b>{{ result.risk_label }}.</b> {{ result.risk_note }}</p>
   {% endif %}
   {% if result.wrong_shape %}
-    <p class="prose">{{ result.wrong_shape }} more cleared the bar but did not
+    <p class="prose">{{ result.wrong_shape }}{{ ' more' if result.passed or result.dropped }} cleared the bar but did not
       match the risk you asked for. Switch to <b>Balanced</b> to see them.</p>
   {% endif %}
 </div>
@@ -141,7 +141,7 @@
         <thead><tr>
           <th class="r">#</th>
           <th>Instrument</th><th>Call</th><th class="r">Price</th>
-          <th class="r">Buy at</th><th class="r">Get out at</th>
+          <th class="r">Enter at</th><th class="r">Get out at</th>
           <th class="r">Gap risk</th>
           <th class="r">Worked before</th><th><span class="sr">Actions</span></th>
         </tr></thead>
@@ -153,7 +153,7 @@
             <td data-label="Call"><span class="chip {{ 'long' if r.action == 'BUY'
                  else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
             <td class="r fig" data-label="Price">{{ r.price|price }}</td>
-            <td class="r fig" data-label="Buy at">{{ r.entry|price if r.entry else '—' }}</td>
+            <td class="r fig" data-label="Enter at">{{ r.entry|price if r.entry else '—' }}</td>
             <td class="r fig loss" data-label="Get out at">{{ r.stop|price if r.stop else '—' }}</td>
             <td class="r fig {{ 'loss' if (r.gap_multiple or 0) > 2.5 }}" data-label="Gap risk">
               {{ "%.1fx"|format(r.gap_multiple) if r.gap_multiple else '—' }}</td>
@@ -217,7 +217,7 @@
   <div class="sechead">
     <h2>Left out on purpose</h2>
     <span class="count">{{ result.dropped|length }}</span>
-    <span class="tail">the chart looked fine, the accounts did not</span>
+    <span class="tail">the chart looked fine, a months hold did not</span>
   </div>
   <div class="card pad0">
     <div class="tablewrap">
@@ -237,9 +237,9 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       You asked for something to hold for months, so the filings were checked
-      as well as the chart. These had a setup worth taking on a shorter view
-      and something in the accounts that makes holding them for months a
-      different bet.
+      as well as the chart. These had a setup worth taking on a shorter view.
+      Either something in the accounts makes holding them for months a
+      different bet, or, for a coin, there are no accounts to check.
     </p>
   </div>
 </section>
@@ -287,8 +287,10 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       These have made money after costs on their own history, but today's
-      reading on them is to stand aside. Adding one to your watchlist means the
-      routines on the Monitor page will keep checking it for you.
+      reading on them is to stand aside. Adding one to your watchlist shows
+      its latest call on your front page, and "Re-analyse the watchlist" on
+      the Monitor page checks it again when you run it. To be told, set a
+      "Call turns BUY" alert there.
     </p>
   </div>
 </section>
@@ -313,5 +315,24 @@
 </p>
 
 {% endif %}
+
+<script>
+  // Under each box, what the choice in it means, as it is chosen rather than
+  // only once the form is sent. Again on the way back to the page, when the
+  // browser fills the boxes in as they were left.
+  (function () {
+    var boxes = document.querySelectorAll('select[aria-describedby^="why-"]');
+    function say(box) {
+      var chosen = box.options[box.selectedIndex];
+      var hint = document.getElementById(box.getAttribute('aria-describedby'));
+      var why = chosen && chosen.getAttribute('data-why');
+      if (hint && why && hint.textContent !== why) { hint.textContent = why; }
+    }
+    boxes.forEach(function (box) {
+      box.addEventListener('change', function () { say(box); });
+    });
+    window.addEventListener('pageshow', function () { boxes.forEach(say); });
+  })();
+</script>
 
 {% endblock %}

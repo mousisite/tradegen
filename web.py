@@ -698,16 +698,6 @@ def _expose_user():
                             or (apple_mod.native_ready() and _in_app())}
 
 
-def _in_app() -> bool:
-    """Whether this page is drawn inside the Orenth iPhone app.
-
-    The app's web view adds OrenthApp/<version> to its User-Agent. It only
-    ever chooses what to show, never what is allowed: anyone can send any
-    User-Agent.
-    """
-    return "OrenthApp/" in request.headers.get("User-Agent", "")
-
-
 # The iPhone app is this same site inside a native shell, and it says so by
 # adding this to its User-Agent. Knowing it changes only what is drawn: no
 # visit counting by a third party, no web prices or Stripe buttons (inside an
@@ -787,10 +777,17 @@ def _cfg() -> Dict:
     return cfg
 
 
+# Personal settings no analysis reads: the journal's daily rules, and how
+# candles are drawn, which is decided as each page is.
+_NOT_IN_ANALYSIS = ("daily_loss_limit_r", "max_trades_per_day", "last_entry_time",
+                    "calm_candles")
+
+
 def _settings_key(cfg: Dict) -> str:
     """A short fingerprint of everything that changes what an analysis says."""
     import hashlib
-    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS)
+    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS
+                    if k not in _NOT_IN_ANALYSIS)
     return hashlib.sha1(repr(picked).encode("utf-8")).hexdigest()[:12]
 
 
@@ -4106,8 +4103,9 @@ def appstore_notifications():
         return jsonify({"error": "No signedPayload."}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        status, outcome = apple_store_mod.handle_notification(
-            conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            status, outcome = apple_store_mod.handle_notification(
+                conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
     except sqlite3.Error:
         app.logger.exception("Could not store an App Store notification; Apple "
                              "will send it again")
@@ -4218,9 +4216,10 @@ def apple_transactions():
                                    "transactions." % APPSTORE_JWS_PER_POST}, 400)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        results = apple_store_mod.handle_app_transactions(
-            conn, apple_store_mod.verifier(), g.user.id, signed,
-            apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            results = apple_store_mod.handle_app_transactions(
+                conn, apple_store_mod.verifier(), g.user.id, signed,
+                apple_store_mod.product_ids())
         out = _apple_state(conn, mint=False)
     finally:
         conn.close()
@@ -4776,8 +4775,13 @@ def export_data(dataset, fmt):
     finally:
         conn.close()
 
+    body = built["body"]
+    if fmt == "csv":
+        # Marked as UTF-8, or Excel opens it as something older and an accent
+        # or a currency sign in a note comes out as two or three others.
+        body = "\ufeff" + body
     return Response(
-        built["body"], mimetype=built["mimetype"],
+        body, mimetype=built["mimetype"],
         headers={"Content-Disposition":
                  'attachment; filename="%s"' % built["filename"]})
 
@@ -4864,6 +4868,52 @@ def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
+# One screen is up to two requests to the data source for quotes and one a
+# company for fundamentals, all from a quota the whole site shares.
+SCREENS_PER_HOUR = 60
+# The example account's ready-made screens, by preset: when each was run, and
+# what it found. A store of their own, because the one the data source's
+# answers share holds everything as long as the longest any caller asks for.
+_DEMO_SCREENS: Dict[str, Tuple[float, screener_mod.ScreenResult]] = {}
+
+
+class _NotKept(Exception):
+    """A part-read screen, for whoever ran it and whoever waited for it."""
+
+    def __init__(self, found):
+        super().__init__("not kept")
+        self.found = found
+
+
+def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
+    """A ready-made screen, the same answer for every visitor.
+
+    Run once and shared rather than once per visit. Only a screen that read
+    everything is shared: one the data source refused is shown to the visitor
+    who ran it, and the next visitor gets a fresh try rather than that failure
+    for a quarter of an hour.
+    """
+    from bot import upstream as upstream_mod
+    kept = _DEMO_SCREENS.get(preset_key)
+    if kept is not None and time.time() - kept[0] < DEMO_TTL:
+        return kept[1]
+
+    def fresh():
+        found = screener_mod.run(symbols=None, universe=preset["universe"],
+                                 filters=dict(preset["filters"]), limit=40)
+        if not found.complete:
+            raise _NotKept(found)
+        _DEMO_SCREENS[preset_key] = (time.time(), found)
+        return found
+
+    try:
+        return upstream_mod.cached(
+            "demo-screen:" + preset_key, fresh,
+            # Longer than a screen can take, so a second visitor waits for
+            # the first one's answer rather than running the screen again.
+            wait=screener_mod.BUDGET + 30.0)
+    except _NotKept as part:
+        return part.found
 
 
 @app.route("/screener", methods=["GET"])
@@ -4874,6 +4924,10 @@ def screener():
 
     filters: Dict[str, float] = {}
     universe = request.args.get("universe") or "most_actives"
+    if universe not in screener_mod.UNIVERSES:
+        # Only the lists on the form: anything else would go to the data
+        # source, and back onto the page, as whoever wrote the link put it.
+        universe = "most_actives"
     symbols_raw = (request.args.get("symbols") or "").strip()
 
     if preset:
@@ -4911,37 +4965,14 @@ def screener():
                        "The example can run the ready-made screens. With an "
                        "account you can set your own filters.", examples=False)
     if g.demo and preset:
-        # A ready-made screen is the same answer for every visitor, so it is
-        # run once and shared rather than once per visit. Only a screen that
-        # read everything is shared: one the data source refused is shown to
-        # the visitor who ran it, and the next visitor gets a fresh try rather
-        # than that failure for a quarter of an hour.
-        from bot import upstream as upstream_mod
-
-        class _NotKept(Exception):
-            def __init__(self, found):
-                super().__init__("not kept")
-                self.found = found
-
-        def fresh():
-            found = screener_mod.run(symbols=None, universe=universe,
-                                     filters=filters, limit=40)
-            if not found.complete:
-                raise _NotKept(found)
-            return found
-
         try:
-            result = upstream_mod.cached(
-                "demo-screen:" + preset_key, fresh, ttl=DEMO_TTL,
-                # Longer than a screen can take, so a second visitor waits for
-                # the first one's answer rather than running the screen again.
-                wait=screener_mod.BUDGET + 30.0)
-        except _NotKept as kept:
-            result = kept.found
+            result = _demo_screen(preset_key, preset)
         except Exception as exc:
             return render_template("error.html", symbol="", message=_plainly(
                 exc, SCREEN_FAILED)), 500
     elif request.args.get("go") or preset:
+        if _rate_limited("screen", SCREENS_PER_HOUR):
+            return _too_often("run screens")
         symbols = [s.strip() for s in symbols_raw.replace(",", " ").split()
                    ] if symbols_raw else None
         try:
@@ -4966,13 +4997,15 @@ def portfolio():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         # What is held: a position closed in part counts only what is left.
-        rows = db_mod.open_positions(conn, limit=100, user=uid())
+        # All of it: SQLite reads a limit below zero as none.
+        rows = db_mod.open_positions(conn, limit=-1, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()
 
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
-        kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
+        kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")}
+        | {"futures": float(cfg.get("cost_bps_futures", 1.0))})
     # What the prices just read saw is kept, as the journal keeps it.
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -5449,11 +5482,37 @@ def watch(action):
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
 
 
+# A routine is up to a minute of analysis, or a screen's worth of requests.
+ROUTINES_PER_HOUR = 20
+# Whose routine is running, so pressing the button again does not start a
+# second one beside the first.
+_ROUTINES: set = set()
+_ROUTINES_LOCK = threading.Lock()
+
+
 @app.route("/workflow/<name>", methods=["POST"])
 def run_workflow(name):
     if name not in workflows_mod.WORKFLOWS:
-        return render_template("error.html", message="No routine called %r." % name,
+        return render_template("error.html", message="There is no routine by that name.",
                                symbol=""), 404
+    if _rate_limited("routine", ROUTINES_PER_HOUR):
+        return _too_often("run routines")
+    me = uid()
+    with _ROUTINES_LOCK:
+        if me in _ROUTINES:
+            return render_template(
+                "error.html", symbol="",
+                message="A routine of yours is still running. What it found will "
+                        "be on the Monitor page when it is done."), 409
+        _ROUTINES.add(me)
+    try:
+        return _run_routine(name)
+    finally:
+        with _ROUTINES_LOCK:
+            _ROUTINES.discard(me)
+
+
+def _run_routine(name):
     cfg = _cfg()
     # Alerts the way the loop checks them: a call worked out, the fire kept
     # in the person's history and emailed if they asked. Crossed stops are
@@ -5464,10 +5523,9 @@ def run_workflow(name):
     # Kept per person. One shared slot showed whoever ran a routine last to
     # everybody's Monitor page, visitors included.
     app.config.setdefault("LAST_WORKFLOW_BY_USER", {})[uid()] = report
-    # A workflow can change what every analysis would say, so drop the caches.
-    with _CACHE_LOCK:
-        _CACHE.clear()
-        _RESEARCH_CACHE.clear()
+    # The shared caches are left alone: a routine's analyses are its own, and
+    # emptying them made everyone else's pages, the example's included, be
+    # worked out again each time anybody pressed a button.
     return redirect(url_for("monitor"))
 
 

@@ -121,11 +121,10 @@ def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> 
         conn.row_factory = sqlite3.Row
         try:
             for name in export_mod.DATASETS:
-                built = export_mod.build(conn, name, "csv")
                 path = os.path.join(out_dir, "stockbot-%s-%s.csv" % (name, taken))
                 with open(path, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(built["body"])
-                print("  %-9s %s  (%d rows)" % (name, path, built["count"]))
+                    count = export_mod.write_csv(conn, name, fh)
+                print("  %-9s %s  (%d rows)" % (name, path, count))
         finally:
             conn.close()
 
