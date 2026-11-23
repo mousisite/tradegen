@@ -265,10 +265,13 @@ try:
     check("with a way to see the trade", "/trades/%d/picture" % t1 in page)
     check("and nothing unfinished on the page", ">None<" not in page and not NAN.search(page)
           and "undefined" not in page)
+    check("saying once that it is kept", "Your review is kept with the trade." in page
+          and "Your review is kept" not in text(c.get("/trades?reviewed=1")))
     r = c.post("/trades/review", data={"trade_id": str(t1), "followed_plan": "maybe"})
     check("a made-up answer is refused", r.status_code == 400)
     sign_in(c, bob)
     r = c.post("/trades/review", data={"trade_id": str(t1), "followed_plan": "no"})
+    check("and nothing thanks them for it", "Your review is kept" not in text(c.get("/trades")))
     check("nobody reviews someone else's trade", r.status_code == 400
           and conn.execute("SELECT followed_plan FROM trades WHERE id=?",
                            (t1,)).fetchone()[0] == "partly")
@@ -406,6 +409,47 @@ try:
     limited = flat(text(c.get("/trades/breakdown?limit=1.5&target=3")))
     check("the loss-limit check answers", "A fixed limit, 1.5R below where you started" in
           limited and "A profit target of 3R" in limited)
+    for typed in ("-5", "2000"):
+        page = flat(text(c.get("/trades/breakdown?limit=5&target=" + typed)))
+        check("a profit target of %sR is refused by its rule, and not then reported on" % typed,
+              "must be more than 0 and at most 1000R" in page
+              and "A profit target of" not in page)
+    check("no help sits inside a heading", not re.search(
+        r"<h2[^>]*>(?:(?!</h2>).)*<details", limited))
+    # 5 November 2026 at 20:30 in New York is the 6th in London.
+    evening = clock.ny(2026, 11, 5, 20, 30)
+    check("a journal date is the New York one", web._day_ny(evening) == "5 Nov 2026"
+          and web._day(evening) == "6 Nov 2026" and web._day_ny(None) == "-")
+    late = A.upsert_email_user(conn, "late@example.com")
+    tid = db.open_trade(conn, "ZZL", "1h", 1, 100.0, 98.0, quantity=2, user=late.id)
+    db.exit_trade(conn, tid, 98.0, 1, "stop", user=late.id)
+    db.exit_trade(conn, tid, 97.0, 1, "stop", user=late.id)
+    evening = ny_at(2, 23, 30)
+    conn.execute("UPDATE trades SET ts_closed=? WHERE id=?", (evening, tid))
+    conn.execute("UPDATE trade_exits SET ts=? WHERE trade_id=?", (evening, tid))
+    conn.commit()
+    sign_in(c, late)
+    there = (TODAY - timedelta(days=2)).strftime("%d %b %Y").lstrip("0")
+    page = flat(text(c.get("/trades/breakdown?limit=1")))
+    check("the breakdown dates a limit hit in New York", "<b>hit</b> on " + there in page
+          and "<b>hit</b> on " + web._day(evening) not in page, page[-1500:])
+    page = flat(text(c.get("/trades")))
+    check("and the journal each exit", page.count("stop, " + there) == 2, page[-3000:])
+    db.delete_trade(conn, tid)
+    sign_in(c, alice)
+    midnight = NOW - NOW % 86400 - 3 * 86400            # 00:00 UTC, the evening before there
+    coin = make_bars("ZZC-USD", "1d", midnight - 9 * 86400, 86400, 12)
+    check("a daily coin bar keeps its own day, and any other moment is New York's",
+          web._touched_day({"interval": "1d"}, coin, midnight) == web._day(midnight)
+          and web._touched_day({"interval": "1h"}, coin, midnight) == web._day_ny(midnight)
+          and web._day_ny(midnight) != web._day(midnight)
+          and web._touched_day({"interval": "1d"}, coin, midnight + 90 * 60)
+          == web._day_ny(midnight)
+          and web._touched_day({"interval": "1d"}, coin, None) == "")
+    check("a price is filled in without a feed's noise, and no coarser than it matters",
+          [web._plain_price(x) for x in (85.90824904048138, 101.0, 63012.341796875, 1.07345,
+                                         0.0000084213, 5000, None, float("nan"))]
+          == ["85.9082", "101", "63012.34", "1.07345", "0.0000084213", "5000", "", ""])
 
     # -----------------------------------------------------------------------
     head("FEWER THAN 30, AND NONE")
@@ -666,6 +710,82 @@ try:
         web.TRADES_PER_HOUR = limit
         web._RATE.clear()
     check("logging trades has an hourly budget", got == [302, 302, 429], got)
+
+    # -----------------------------------------------------------------------
+    head("A FORM SENT TWICE, AND NUMBERS NOTHING HAS")
+    # -----------------------------------------------------------------------
+    ivy = A.upsert_email_user(conn, "ivy@example.com")
+    sign_in(c, ivy)
+
+    def held():
+        return conn.execute("SELECT COUNT(*) FROM trades WHERE user_id=?",
+                            (ivy.id,)).fetchone()[0]
+
+    names = [re.search(r'name="form_id" value="([^"]+)"', text(c.get("/trades"))).group(1)
+             for _ in range(2)]
+    check("each journal page names its form", names[0] != names[1] and len(names[0]) > 10)
+    twice = dict(one, form_id=names[0], quantity="3", target="104")
+    got = [c.post("/trades/open", data=twice).status_code for _ in range(2)]
+    check("Add to journal pressed twice logs one trade", got == [302, 302] and held() == 1,
+          (got, held()))
+    c.post("/trades/open", data=dict(twice, entry="101"))
+    check("the same form sent again with another price is another trade", held() == 2, held())
+    c.post("/trades/open", data=dict(twice, form_id=names[1]))
+    check("and so is the same trade from a fresh form", held() == 3, held())
+    for _ in range(2):
+        c.post("/trades/open", data=one)
+    check("a form with no name is logged as it always was", held() == 5, held())
+    # Two presses at once: both get past the first look.
+    import threading
+    gate = threading.Barrier(2)
+    real_trail = web._trail_asked
+
+    def slow_trail(symbol, interval):
+        gate.wait(10)
+        return real_trail(symbol, interval)
+
+    answers = []
+
+    def press():
+        own = web.app.test_client()
+        sign_in(own, ivy)
+        answers.append(own.post("/trades/open",
+                                data=dict(twice, form_id="pressed-twice")).status_code)
+
+    web._trail_asked = slow_trail
+    try:
+        presses = [threading.Thread(target=press) for _ in range(2)]
+        for p in presses:
+            p.start()
+        for p in presses:
+            p.join()
+    finally:
+        web._trail_asked = real_trail
+    check("two presses at once log one", answers == [302, 302] and held() == 6,
+          (answers, held()))
+
+    huge = "99999999999999999999"
+    for path, form in (("/trades/close", {"price": "100"}),
+                       ("/trades/trail", {"trail": "5", "trail_kind": "pct"}),
+                       ("/trades/review", {"followed_plan": "yes"}), ("/trades/delete", {})):
+        r = c.post(path, data=dict(form, trade_id=huge))
+        check("%s with a number nothing has says there is no such trade" % path,
+              r.status_code == 400 and ("no such trade in your journal" in text(r)
+                                        or "not in your journal" in text(r)), r.status_code)
+        for bad in ({}, {"trade_id": "x"}):
+            r = c.post(path, data=dict(form, **bad))
+            check("and without one, that the form was incomplete", r.status_code == 400
+                  and "That form was incomplete. Go back and try again." in text(r),
+                  r.status_code)
+    r = c.post("/trades/take", data={"run_id": huge})
+    check("a plan nothing has is refused in words", r.status_code == 400
+          and "Something broke" not in text(r), r.status_code)
+    r = c.post("/trades/take", data={})
+    check("and one not named at all", r.status_code == 400
+          and "That form was incomplete." in text(r), r.status_code)
+    check("the review page and the picture are not found",
+          c.get("/trades/simulate?run_id=" + huge).status_code == 404
+          and c.get("/trades/%s/picture" % huge).status_code == 404)
 
     # -----------------------------------------------------------------------
     head("THE EXPORT")

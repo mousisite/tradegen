@@ -398,7 +398,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                    # tagged" and nothing else about it changes.
                    ("setup", "TEXT"), ("emotion", "TEXT"), ("followed_plan", "TEXT"),
                    ("checklist", "TEXT"), ("lesson", "TEXT"), ("broke_rule", "TEXT"),
-                   ("reviewed_ts", "INTEGER")],
+                   ("reviewed_ts", "INTEGER"),
+                   # The random name of the log-a-trade form it came from, so a
+                   # form sent twice is logged once. Empty for any other trade.
+                   ("form_id", "TEXT")],
         "trade_exits": [("split", "REAL")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
@@ -599,7 +602,7 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                trail_atr: Optional[float] = None, setup: Optional[str] = None,
                emotion: Optional[str] = None, checklist=None,
                broke_rule: Optional[str] = None, opened_ts: Optional[int] = None,
-               cap: Optional[int] = None) -> int:
+               cap: Optional[int] = None, form_id: Optional[str] = None) -> int:
     """Record a newly opened position, with a trailing stop if one is given.
 
     trail_pct is a share of the best price (0.05 for 5%); trail_dist is a
@@ -613,6 +616,7 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
     future. Each raises ValueError in words when it is not right.
 
     cap is the most positions this account may hold open, None for no limit.
+    form_id names the form it was typed into (already_logged).
     """
     import math
     from .journal import check_opened, check_tags
@@ -665,17 +669,36 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                status, ts_opened, entry, stop, target1, target2, quantity,
                risk_amount, strategy_note, notes, user_id, trail_pct, trail_dist,
                trail_atr, trail_ts, trail_best, trail_best_ts, setup, emotion,
-               checklist, broke_rule)
-           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               checklist, broke_rule, form_id)
+           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, account, sym, interval, direction, opened,
          float(entry), float(stop), target1, target2, quantity, risk_amount,
          strategy_note, notes, int(user), trail_pct, trail_dist,
          trail_atr if trail_dist is not None else None,
          now if trails else None, float(entry) if trails else None,
          now if trails else None, setup or None, emotion or None,
-         None if ticked is None else json.dumps(ticked), broke_rule or None))
+         None if ticked is None else json.dumps(ticked), broke_rule or None,
+         form_id or None))
     conn.commit()
     return int(cur.lastrowid)
+
+
+def already_logged(conn: sqlite3.Connection, form_id: Optional[str], symbol: str,
+                   direction: int, entry: float, stop: float, target1: Optional[float],
+                   quantity: Optional[float], opened_ts: Optional[int], user: int) -> bool:
+    """Whether this very form, with these very numbers, was logged already.
+
+    The numbers as well as the form: someone who goes back to a form they
+    sent and changes it is logging another trade.
+    """
+    if not form_id:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM trades WHERE user_id=? AND form_id=? AND symbol=? AND direction=? "
+        "AND entry=? AND stop=? AND target1 IS ? AND quantity IS ? "
+        "AND (? IS NULL OR ts_opened=?) LIMIT 1",
+        (int(user), form_id, _symbol(symbol), direction, float(entry), float(stop),
+         target1, quantity, opened_ts, opened_ts)).fetchone() is not None
 
 
 class TradeChanged(ValueError):

@@ -63,7 +63,7 @@
 
 {% for by, title, groups in r.splits %}
 <section>
-  <div class="sechead"><h2>{{ title }}{% if by == 'followed_plan' %} {{ help('followed_plan') }}{% endif %}</h2>
+  <div class="sechead"><div><h2 style="display:inline">{{ title }}</h2>{% if by == 'followed_plan' %}{{ help('followed_plan') }}{% endif %}</div>
     <span class="tail">{{ groups|length }} group{{ '' if groups|length == 1 else 's' }}</span></div>
   <div class="card pad0">
     <div class="tablewrap">
@@ -90,7 +90,7 @@
 {% endfor %}
 
 <section id="limits">
-  <div class="sechead"><h2>Would a loss limit have stopped you? {{ help('loss_limit') }}</h2></div>
+  <div class="sechead"><div><h2 style="display:inline">Would a loss limit have stopped you?</h2>{{ help('loss_limit') }}</div></div>
   <div class="card">
     <form method="get" action="{{ url_for('journal_breakdown') }}#limits" class="setgrid">
       <div class="setfield">
@@ -111,10 +111,10 @@
                             ('eod', 'One that trails your best end of day by ' ~ '%g'|format(limit_r) ~ 'R'),
                             ('trailing', 'One that trails your best balance after any trade by ' ~ '%g'|format(limit_r) ~ 'R')] %}
         {% set hit = limits[key] %}
-        <li>{{ words }}: {% if hit %}<b>hit</b> on {{ hit.ts|day }}, at {{ hit.balance|signed(2) }}R.{% else %}not hit.{% endif %}</li>
+        <li>{{ words }}: {% if hit %}<b>hit</b> on {{ hit.ts|day_ny }}, at {{ hit.balance|signed(2) }}R.{% else %}not hit.{% endif %}</li>
       {% endfor %}
       {% if target_r %}{% set hit = limits.target %}
-        <li>A profit target of {{ '%g'|format(target_r) }}R: {% if hit %}<b>reached</b> on {{ hit.ts|day }}.{% else %}not reached.{% endif %}</li>
+        <li>A profit target of {{ '%g'|format(target_r) }}R: {% if hit %}<b>reached</b> on {{ hit.ts|day_ny }}.{% else %}not reached.{% endif %}</li>
       {% endif %}
     </ul>
     <p class="prose" style="margin-top:var(--s2)">Walked through your closed trades in

@@ -22,6 +22,7 @@ import io
 import json
 import math
 import os
+import secrets
 import sqlite3
 import sys
 import threading
@@ -985,6 +986,31 @@ def _day(ts):
         return "-"
 
 
+@app.template_filter("day_ny")
+def _day_ny(ts):
+    """'5 Nov 2026', the New York date of a moment, as the journal counts its days."""
+    from bot import clock as clock_mod
+    try:
+        return clock_mod.ny_clock(ts)[0].strftime("%d %b %Y").lstrip("0")
+    except (TypeError, ValueError, OverflowError):
+        return "-"
+
+
+@app.template_filter("plain_price")
+def _plain_price(value):
+    """A price to fill a number box with: no separators, and no noise a feed left.
+
+    Finer than format_price shows, since an exit is recorded at what is in
+    the box, and a currency pair's fourth decimal can be a good part of an R.
+    """
+    number = _number(value)
+    if number is None:
+        return ""
+    size = abs(number)
+    digits = 2 if size >= 1000 else 4 if size >= 10 else 6 if size >= 0.1 else 12
+    return ("%.*f" % (digits, number)).rstrip("0").rstrip(".")
+
+
 @app.template_filter("ago")
 def _ago(ts):
     try:
@@ -1548,9 +1574,11 @@ def trades():
     # session rather than the address, so a link cannot put words here; and
     # looked for first, so a visitor's session is not touched.
     said = session.pop(EXIT_SAID, "") if EXIT_SAID in session else ""
+    note = session.pop(JOURNAL_NOTE, "") if JOURNAL_NOTE in session else ""
     return render_template("trades.html", open_trades=open_trades,
                            closed=closed, summary=summary, live=live,
-                           parts=parts, said=said, tags=_journal_lists(),
+                           parts=parts, said=said, note=note,
+                           form_id=secrets.token_urlsafe(12), tags=_journal_lists(),
                            page=page, pages=pages,
                            closed_from=(page - 1) * CLOSED_SHOWN + 1)
 
@@ -1645,8 +1673,10 @@ def _keep_trail_bests(conn, open_trades, marks) -> None:
             db_mod.stop_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
-# The session key for what the journal says once after an exit.
+# The session key for what the journal says once after an exit, and for the
+# word that picks its other notices: "logged", "reviewed" or "changed".
 EXIT_SAID = "journal_exit_said"
+JOURNAL_NOTE = "journal_note"
 
 
 def _exit_words(symbol: str, done: Dict, typed: float, typed_qty: Optional[float],
@@ -1744,8 +1774,25 @@ def _mark_one(trade):
             # Where and when the stop was traded through, in the same shares.
             "touched": read.touched, "touched_at": read.touched_at,
             "touched_stop": read.touched_stop,
+            "touched_day": _touched_day(trade, bars, read.touched_at),
             # The crossing to keep, when the stop trails (_keep_trail_bests).
             "crossed": read.crossing(time.time())}
+
+
+def _touched_day(trade, bars, when: Optional[int]) -> str:
+    """The day a stop was traded through, for the journal and the front page.
+
+    The New York date, as the journal counts its days. A daily bar is named
+    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
+    session opens, while it is still the evening before in New York.
+    """
+    if when is None:
+        return ""
+    times = getattr(bars, "timestamp", None)
+    a_bar = times is not None and int(when) in {int(t) for t in times}
+    if a_bar and portfolio_mod.trade_interval(trade) == "1d":
+        return _day(when)
+    return _day_ny(when)
 
 
 def _mark_to_market(open_trades):
@@ -1788,6 +1835,19 @@ def _form_number(name: str, label: str, required: bool = True) -> Optional[float
     if not math.isfinite(value):
         raise ValueError("%s must be an ordinary number." % label)
     return value
+
+
+def _row_id(raw) -> int:
+    """A trade's or an analysis's number as a form sends it, or a ValueError in words.
+
+    One outside what the database can number comes back as 0, which nothing
+    is numbered, so a mangled link reads as one to something not there.
+    """
+    try:
+        number = int((raw or "").strip())
+    except ValueError:
+        raise ValueError("That form was incomplete. Go back and try again.")
+    return number if 0 < number < 2 ** 63 else 0
 
 
 def _own_trade(conn, trade_id: int):
@@ -1844,7 +1904,7 @@ def close_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         price = _form_number("price", "The exit price")
         quantity = _form_number("quantity", "The size to close", required=False)
         # What the page showed still open: a size, or "all" for a trade
@@ -1886,7 +1946,8 @@ def close_trade():
                                          split)
     except db_mod.TradeChanged:
         # Most often Close pressed twice: the first press did the work.
-        return redirect(url_for("trades", changed=trade_id))
+        session[JOURNAL_NOTE] = "changed"
+        return redirect(url_for("trades"))
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -1905,7 +1966,7 @@ def trail_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         amount = _form_number("trail", "The trail")
         atr = request.form.get("trail_kind") == "atr"
         pct = None if atr else amount / 100.0
@@ -2064,7 +2125,7 @@ def simulate_trade():
     over an hour old fetches daily prices, to check for a share split since.
     """
     try:
-        run_id = int(request.args.get("run_id") or "")
+        run_id = _row_id(request.args.get("run_id"))
     except ValueError:
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2100,7 +2161,7 @@ def take_trade():
     """Open a paper position from a recorded plan, as the review page showed it."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        run_id = int(request.form["run_id"])
+        run_id = _row_id(request.form.get("run_id"))
         row = _own_run(conn, run_id)
         # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
@@ -2108,7 +2169,8 @@ def take_trade():
         size = _paper_size(row, _cfg(), _run_split(row))
         if _logged_from(conn, run_id) is not None:
             # Confirm pressed twice: the first press already logged it.
-            return redirect(url_for("trades", logged=1))
+            session[JOURNAL_NOTE] = "logged"
+            return redirect(url_for("trades"))
         # The plan's entry is the price when it was analysed, so its trade is
         # logged now: no other entry time is taken from this form.
         tags = _tags_asked()
@@ -2123,7 +2185,8 @@ def take_trade():
             conn.commit()
         conn.execute("BEGIN IMMEDIATE")
         if _logged_from(conn, run_id) is not None:
-            return redirect(url_for("trades", logged=1))
+            session[JOURNAL_NOTE] = "logged"
+            return redirect(url_for("trades"))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
                           direction=size["direction"], entry=size["entry"],
                           stop=size["stop"], target1=size["target"],
@@ -2134,14 +2197,15 @@ def take_trade():
                           checklist=tags["checklist"], broke_rule=broke,
                           cap=_trade_cap(), **trail)
         events_mod.bump(conn, "paper_trade")
-    except (ValueError, KeyError) as exc:
+    except ValueError as exc:
         conn.rollback()              # nothing else waits while the page is drawn
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    # The journal opens on its form for trades entered by hand, so it says
-    # first that the confirmed one went in, and where to find it.
-    return redirect(url_for("trades", logged=1))
+    # The journal says first that the confirmed one went in, and where to
+    # find it.
+    session[JOURNAL_NOTE] = "logged"
+    return redirect(url_for("trades"))
 
 
 @app.route("/trades/open", methods=["POST"])
@@ -2163,6 +2227,9 @@ def open_trade_manual():
         stop = float(request.form["stop"])
         target = request.form.get("target") or None
         qty = request.form.get("quantity") or None
+        target = float(target) if target else None
+        qty = float(qty) if qty else None
+        form_id = (request.form.get("form_id") or "")[:64]
         # The ticker an analysis would use, as the alert and watch forms do:
         # "btc" is Bitcoin, priced as BTC-USD, where it was the fund listed
         # as BTC. Picked from the suggestions with exact=1, BTC is that fund.
@@ -2177,23 +2244,36 @@ def open_trade_manual():
         if interval not in dict(INTERVALS):
             raise ValueError("Pick an interval from the list.")
         tags = _tags_asked()
+        same = (form_id, symbol, direction, entry, stop, target, qty, tags["opened_ts"],
+                uid())
+        if db_mod.already_logged(conn, *same):
+            # Add to journal pressed twice: the first press logged it.
+            return redirect(url_for("trades"))
         stop_page, broke = _rules_stop(conn, _cfg(), tags["opened_ts"])
         if stop_page is not None:
             return stop_page
+        trail = _trail_asked(symbol, interval)
+        # Looked at again in the transaction that writes it, for two presses
+        # at once, as Confirm does.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if db_mod.already_logged(conn, *same):
+            return redirect(url_for("trades"))
         db_mod.open_trade(
             conn,
             symbol=symbol, interval=interval,
             direction=direction, entry=entry, stop=stop,
-            target1=float(target) if target else None,
-            quantity=float(qty) if qty else None,
-            risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
+            target1=target, quantity=qty,
+            risk_amount=(abs(entry - stop) * qty) if qty else None,
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid(),
             setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
             broke_rule=broke, opened_ts=tags["opened_ts"], cap=_trade_cap(),
-            **_trail_asked(symbol, interval))
+            form_id=form_id, **trail)
         events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError, DataError) as exc:
+        conn.rollback()              # nothing else waits while the page is drawn
         message = str(exc)
         if isinstance(exc, KeyError):
             message = "Instrument, entry and stop are all required."
@@ -2212,8 +2292,14 @@ def delete_trade():
     """Remove a trade. A mistyped entry would otherwise skew every statistic."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        db_mod.delete_trade(conn, int(request.form["trade_id"]), user=uid())
-    except (KeyError, ValueError) as exc:
+        trade_id = _row_id(request.form.get("trade_id"))
+        try:
+            db_mod.delete_trade(conn, trade_id, user=uid())
+        except ValueError:
+            # Most often Delete pressed twice: the first press removed it.
+            raise ValueError("That trade is not in your journal. It may have been "
+                             "deleted already.")
+    except ValueError as exc:
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
@@ -2230,7 +2316,7 @@ def review_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         db_mod.review_trade(
             conn, trade_id, request.form.get("followed_plan"),
             request.form.get("lesson", ""), user=uid(),
@@ -2240,8 +2326,9 @@ def review_trade():
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
+    session[JOURNAL_NOTE] = "reviewed"
     page = _closed_page(request.form)
-    return redirect(url_for("trades", reviewed=trade_id, page=page if page > 1 else None)
+    return redirect(url_for("trades", page=page if page > 1 else None)
                     + "#t%d" % trade_id)
 
 
@@ -2350,6 +2437,7 @@ def trade_picture(trade_id: int):
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         try:
+            trade_id = _row_id(str(trade_id))
             row = _own_trade(conn, trade_id)
         except ValueError:
             abort(404)
@@ -2381,9 +2469,11 @@ def journal_breakdown():
             if not 0 < typed <= 100:
                 raise ValueError("The loss limit must be more than 0 and at most 100R.")
             limit_r = typed
-        target_r = _arg_number("target", "The profit target")
-        if target_r is not None and not 0 < target_r <= 1000:
-            raise ValueError("The profit target must be more than 0R.")
+        typed = _arg_number("target", "The profit target")
+        if typed is not None:
+            if not 0 < typed <= 1000:
+                raise ValueError("The profit target must be more than 0 and at most 1000R.")
+            target_r = typed
     except ValueError as exc:
         problem = str(exc)
     conn = db_mod.connect(app.config.get("DB_PATH"))

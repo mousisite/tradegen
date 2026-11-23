@@ -25,17 +25,17 @@
     whether the process works before real money is involved.</p>
 </div>
 
-{% if request.args.get('logged') %}
+{% if note == 'logged' %}
   <div class="saved">Logged as a paper trade: it is under Open below. Nothing
     was bought or sold.</div>
 {% endif %}
 {% if said %}
   <div class="saved">{{ said }}</div>
 {% endif %}
-{% if request.args.get('reviewed') %}
+{% if note == 'reviewed' %}
   <div class="saved">Your review is kept with the trade.</div>
 {% endif %}
-{% if request.args.get('changed') %}
+{% if note == 'changed' %}
   <div class="notice" style="margin-bottom:var(--s3)">That position had changed
     since the page was drawn, most likely because Close was pressed twice, so
     nothing more was closed. It is shown below as it stands now.</div>
@@ -91,21 +91,176 @@
     results split by setup, session, feeling and whether you followed your plan.</p>
 </div>
 {% endif %}
-<p class="prose" style="margin-top:var(--s2)">Tools:
+<p class="prose" style="margin-top:var(--s2)"><a href="#log">Log a trade by hand</a> · Tools:
   <a href="{{ url_for('size_tool') }}">how big a position</a> ·
   <a href="{{ url_for('survival_tool') }}">how long an account lasts at each risk</a></p>
 
 <section>
+  <div class="sechead">
+    <h2>Open</h2>
+    <span class="tail">{{ open_trades|length }} position{{ '' if open_trades|length == 1 else 's' }}</span>
+  </div>
+  <div class="card pad0">
+    {% if open_trades %}
+    <div class="tablewrap">
+      <table class="stack">
+        <thead><tr>
+          <th>Instrument</th><th>Side</th><th class="r">Entry</th>
+          <th class="r">Stop</th><th class="r">Target</th><th class="r">Now</th>
+          <th class="r">Open R</th><th>State</th><th class="r">Close it</th>
+          <th><span class="sr">Actions</span></th>
+        </tr></thead>
+        <tbody>
+        {% for t in open_trades %}
+          {% set m = live.get(t['id'], {}) %}
+          {% set p = parts[t['id']] %}
+          {% set long = t['direction'] > 0 %}
+          {% set sized = p.size is not none %}
+          {# The reward to risk it was planned at: the target's distance over
+             the stop's, the way an analysis works out its own. #}
+          {% set rr = ((t['target1'] - t['entry']) / (t['entry'] - t['stop']))
+                      if t['target1'] and t['entry'] != t['stop'] else none %}
+          {% set from_call = call_of(t) %}
+          <tr>
+            <td><b>{{ t['symbol'] }}</b>
+              <div class="faint" style="font-size:var(--t-xs)">{{ t['ts_opened']|ago }}{% if from_call %}
+                · from your {{ from_call }} call{% endif %}</div>
+              {% if p.parts %}<div class="faint" style="font-size:var(--t-xs)">{{ qty(p.left) }}
+                of {{ qty(p.size) }} still open</div>
+              <div class="faint" style="font-size:var(--t-xs)">{{ qty(p.closed) }} closed
+                at {{ p.avg_exit|price }}{{ ' on average' if p.parts > 1 }},
+                {{ p.pnl|signed }}</div>{% endif %}
+              {{ tag_chips(t) }}
+              <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div></td>
+            <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
+              {{ 'Long' if long else 'Short' }}</span></td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
+            {# The stop in force now. A trail moves it with the best price
+               since opening, and only ever tighter; the plan's R stays
+               measured from the stop it was opened with. #}
+            <td class="r fig loss" data-label="Stop">{{ (m.stop if m.stop is defined else t['stop'])|price }}
+              {% if m.trail %}<div class="faint" style="font-size:var(--t-xs)">{{ m.trail.words() }}
+                {{ 'under' if long else 'over' }} {{ m.best|price }}</div>
+              <div class="faint" style="font-size:var(--t-xs)">{% if m.moved %}{{ 'up' if long else 'down' }}
+                from {{ t['stop']|price }}{% else %}not moved yet{% endif %}</div>
+              {% elif t['trail_pct'] or t['trail_dist'] %}<div class="faint" style="font-size:var(--t-xs)">trailing</div>{% endif %}</td>
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}
+              {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
+            <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
+              {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
+                today, after a {{ m.split_words }} split</div>{% endif %}</td>
+            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' if (m.r or 0) < 0 }}" data-label="Open R">
+              {{ m.r|signed if m.r is not none else '—' }}</td>
+            <td data-label="State">
+              {% if m.status == 'past stop' %}<span class="chip short">Stopped</span>
+                {# Traded through and back: when, since the stop shown is today's. #}
+                {% if m.touched_at %}<div class="faint" style="font-size:var(--t-xs);margin-top:4px">crossed
+                  {{ m.touched_day }} at {{ m.touched|price }}</div>{% endif %}
+              {% elif m.status == 'past target' %}<span class="chip long">At target</span>
+              {% elif m.status == 'no data' %}<span class="chip mute">No data</span>
+              {% else %}<span class="chip mute">Running</span>{% endif %}
+            </td>
+            <td class="wide" data-label="Close it">
+              {# All of it, or a part when a size was logged. After a split the
+                 price can be typed in today's shares, as a broker shows it, or
+                 in the shares it was opened with; it is filled in in today's. #}
+              <form class="inline-form" action="{{ url_for('close_trade') }}" method="post"
+                    style="flex-wrap:wrap">
+                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <input type="hidden" name="left" value="{{ '%r'|format(p.left) if sized else 'all' }}">
+                {% if sized %}
+                <label class="sr" for="q{{ t['id'] }}">How much of {{ t['symbol'] }} to close, empty for all of it</label>
+                <input class="field fig" id="q{{ t['id'] }}" type="number" name="quantity"
+                       step="any" min="0" inputmode="decimal" placeholder="all">
+                {% endif %}
+                <label class="sr" for="px{{ t['id'] }}">Exit price for {{ t['symbol'] }}</label>
+                <input class="field fig" id="px{{ t['id'] }}" type="number" inputmode="decimal"
+                       name="price" step="any" required placeholder="price"
+                       value="{{ (m.quoted if m.split_words else m.price)|plain_price if m.price }}">
+                {% if m.split_words %}
+                <label class="sr" for="sh{{ t['id'] }}">Which shares the price{{ ' and size are' if sized else ' is' }} in: today's, or the ones you opened with</label>
+                <select class="field" id="sh{{ t['id'] }}" name="shares">
+                  <option value="today" selected>today's shares</option>
+                  <option value="opened">shares opened with</option>
+                </select>
+                {% endif %}
+                <label class="sr" for="why{{ t['id'] }}">Reason</label>
+                <select class="field" id="why{{ t['id'] }}" name="reason">
+                  <option value="target">target</option>
+                  <option value="stop">stop</option>
+                  <option value="manual" selected>manual</option>
+                </select>
+                <button class="btn quiet sm" type="submit">Close</button>
+              </form>
+              {% if m.status != 'past stop' %}
+              <details style="margin-top:6px;text-align:left">
+                <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">{{ 'Tighten the trail' if m.trail or t['trail_pct'] or t['trail_dist'] else 'Trail the stop' }}</summary>
+                <form method="post" action="{{ url_for('trail_trade') }}"
+                      style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+                  <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                  <label class="sr" for="tr{{ t['id'] }}">How far behind the {{ 'high' if long else 'low' }} the stop of {{ t['symbol'] }} trails</label>
+                  <input class="field fig sm" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
+                         min="0" required inputmode="decimal" placeholder="5"
+                         style="max-width:80px">
+                  <label class="sr" for="tk{{ t['id'] }}">Trail measured as</label>
+                  <select class="field sm" id="tk{{ t['id'] }}" name="trail_kind">
+                    <option value="pct">% of price</option>
+                    <option value="atr">times ATR</option>
+                  </select>
+                  <button class="btn quiet sm" type="submit">Trail</button>
+                </form>
+                <p class="faint" style="font-size:var(--t-xs);margin:4px 0 0;max-width:34ch">The
+                  stop follows the {{ 'high' if long else 'low' }} since you opened, this far
+                  behind it, and only ever tightens.</p>
+              </details>
+              {% endif %}
+            </td>
+            <td class="r">
+              <form method="post" action="{{ url_for('delete_trade') }}"
+                    onsubmit='return confirm({{ ("Delete the " ~ t["symbol"] ~ " trade? This cannot be undone.")|tojson }});'>
+                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <button class="btn quiet sm" type="submit"
+                        title="Delete this trade" aria-label="Delete the {{ t['symbol'] }} trade">
+                  Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% set ns = namespace(split=false) %}
+    {% for t in open_trades %}{% if (live.get(t['id']) or {}).get('split_words') %}{% set ns.split = true %}{% endif %}{% endfor %}
+    {% if ns.split %}
+      <p class="prose faint" style="padding:var(--s2) var(--s3) var(--s3);margin:0;font-size:var(--t-xs)">
+        A position opened before a share split is kept in the shares it was
+        opened with: its entry, stop, target and price. To close one, say which
+        shares the price you type is in: today's, as a broker shows them and as
+        it is filled in, or the shares you opened with. Either way it is written
+        in the shares you opened with.</p>
+    {% endif %}
+    {% else %}
+      <div class="blank">
+        Nothing open. When an analysis says buy or short, use
+        <b>Log this as a paper trade</b> on it, or add one by hand below.
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+<section id="log" style="scroll-margin-top:72px">
   <div class="sechead"><h2>Log a trade by hand</h2>
     <span class="tail">for anything the bot did not propose</span></div>
   <div class="card">
     <form method="post" action="{{ url_for('open_trade_manual') }}">
+      {# Names this form, so it is logged once when the button is pressed twice. #}
+      <input type="hidden" name="form_id" value="{{ form_id }}" autocomplete="off">
       <div class="setgrid">
         <div class="setfield">
           <label for="m-symbol">Instrument</label>
           <input class="field fig" id="m-symbol" name="symbol" type="text" data-suggest="fill"
                  placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
-                 autocorrect="off" spellcheck="false" enterkeyhint="go">
+                 autocorrect="off" spellcheck="false" enterkeyhint="next">
         </div>
         <div class="setfield">
           <label for="m-direction">Side</label>
@@ -173,159 +328,6 @@
       <div style="margin-top:var(--s3)">{{ checklist_field(tags, 'm-check') }}</div>
       <button class="btn quiet" type="submit" style="margin-top:var(--s3)">Add to journal</button>
     </form>
-  </div>
-</section>
-
-<section>
-  <div class="sechead">
-    <h2>Open</h2>
-    <span class="tail">{{ open_trades|length }} position{{ '' if open_trades|length == 1 else 's' }}</span>
-  </div>
-  <div class="card pad0">
-    {% if open_trades %}
-    <div class="tablewrap">
-      <table class="stack">
-        <thead><tr>
-          <th>Instrument</th><th>Side</th><th class="r">Entry</th>
-          <th class="r">Stop</th><th class="r">Target</th><th class="r">Now</th>
-          <th class="r">Open R</th><th>State</th><th class="r">Close it</th>
-          <th><span class="sr">Actions</span></th>
-        </tr></thead>
-        <tbody>
-        {% for t in open_trades %}
-          {% set m = live.get(t['id'], {}) %}
-          {% set p = parts[t['id']] %}
-          {% set long = t['direction'] > 0 %}
-          {% set sized = p.size is not none %}
-          {# The reward to risk it was planned at: the target's distance over
-             the stop's, the way an analysis works out its own. #}
-          {% set rr = ((t['target1'] - t['entry']) / (t['entry'] - t['stop']))
-                      if t['target1'] and t['entry'] != t['stop'] else none %}
-          {% set from_call = call_of(t) %}
-          <tr>
-            <td><b>{{ t['symbol'] }}</b>
-              <div class="faint" style="font-size:var(--t-xs)">{{ t['ts_opened']|ago }}{% if from_call %}
-                · from your {{ from_call }} call{% endif %}</div>
-              {% if p.parts %}<div class="faint" style="font-size:var(--t-xs)">{{ qty(p.left) }}
-                of {{ qty(p.size) }} still open</div>
-              <div class="faint" style="font-size:var(--t-xs)">{{ qty(p.closed) }} closed
-                at {{ p.avg_exit|price }}{{ ' on average' if p.parts > 1 }},
-                {{ p.pnl|signed }}</div>{% endif %}
-              {{ tag_chips(t) }}
-              <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div></td>
-            <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
-              {{ 'Long' if long else 'Short' }}</span></td>
-            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
-            {# The stop in force now. A trail moves it with the best price
-               since opening, and only ever tighter; the plan's R stays
-               measured from the stop it was opened with. #}
-            <td class="r fig loss" data-label="Stop">{{ (m.stop if m.stop is defined else t['stop'])|price }}
-              {% if m.trail %}<div class="faint" style="font-size:var(--t-xs)">{{ m.trail.words() }}
-                {{ 'under' if long else 'over' }} {{ m.best|price }}</div>
-              <div class="faint" style="font-size:var(--t-xs)">{% if m.moved %}{{ 'up' if long else 'down' }}
-                from {{ t['stop']|price }}{% else %}not moved yet{% endif %}</div>
-              {% elif t['trail_pct'] or t['trail_dist'] %}<div class="faint" style="font-size:var(--t-xs)">trailing</div>{% endif %}</td>
-            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}
-              {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
-            <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
-              {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
-                today, after a {{ m.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' if (m.r or 0) < 0 }}" data-label="Open R">
-              {{ m.r|signed if m.r is not none else '—' }}</td>
-            <td data-label="State">
-              {% if m.status == 'past stop' %}<span class="chip short">Stopped</span>
-                {# Traded through and back: when, since the stop shown is today's. #}
-                {% if m.touched_at %}<div class="faint" style="font-size:var(--t-xs);margin-top:4px">crossed
-                  {{ m.touched_at|day }} at {{ m.touched|price }}</div>{% endif %}
-              {% elif m.status == 'past target' %}<span class="chip long">At target</span>
-              {% elif m.status == 'no data' %}<span class="chip mute">No data</span>
-              {% else %}<span class="chip mute">Running</span>{% endif %}
-            </td>
-            <td class="wide" data-label="Close it">
-              {# All of it, or a part when a size was logged. After a split the
-                 price can be typed in today's shares, as a broker shows it, or
-                 in the shares it was opened with; it is filled in in today's. #}
-              <form class="inline-form" action="{{ url_for('close_trade') }}" method="post"
-                    style="flex-wrap:wrap">
-                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
-                <input type="hidden" name="left" value="{{ '%r'|format(p.left) if sized else 'all' }}">
-                {% if sized %}
-                <label class="sr" for="q{{ t['id'] }}">How much of {{ t['symbol'] }} to close, empty for all of it</label>
-                <input class="field fig" id="q{{ t['id'] }}" type="number" name="quantity"
-                       step="any" min="0" inputmode="decimal" placeholder="all">
-                {% endif %}
-                <label class="sr" for="px{{ t['id'] }}">Exit price for {{ t['symbol'] }}</label>
-                <input class="field fig" id="px{{ t['id'] }}" type="number" inputmode="decimal"
-                       name="price" step="any" required placeholder="price"
-                       value="{{ '%s'|format(m.quoted if m.split_words else m.price) if m.price else '' }}">
-                {% if m.split_words %}
-                <label class="sr" for="sh{{ t['id'] }}">Which shares the price{{ ' and size are' if sized else ' is' }} in: today's, or the ones you opened with</label>
-                <select class="field" id="sh{{ t['id'] }}" name="shares">
-                  <option value="today" selected>today's shares</option>
-                  <option value="opened">shares opened with</option>
-                </select>
-                {% endif %}
-                <label class="sr" for="why{{ t['id'] }}">Reason</label>
-                <select class="field" id="why{{ t['id'] }}" name="reason">
-                  <option value="target">target</option>
-                  <option value="stop">stop</option>
-                  <option value="manual" selected>manual</option>
-                </select>
-                <button class="btn quiet sm" type="submit">Close</button>
-              </form>
-              {% if m.status != 'past stop' %}
-              <details style="margin-top:6px;text-align:left">
-                <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">{{ 'Tighten the trail' if m.trail or t['trail_pct'] or t['trail_dist'] else 'Trail the stop' }}</summary>
-                <form method="post" action="{{ url_for('trail_trade') }}"
-                      style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-                  <input type="hidden" name="trade_id" value="{{ t['id'] }}">
-                  <label class="sr" for="tr{{ t['id'] }}">How far behind the {{ 'high' if long else 'low' }} the stop of {{ t['symbol'] }} trails</label>
-                  <input class="field fig sm" id="tr{{ t['id'] }}" name="trail" type="number" step="any"
-                         min="0" required inputmode="decimal" placeholder="5"
-                         style="max-width:80px">
-                  <label class="sr" for="tk{{ t['id'] }}">Trail measured as</label>
-                  <select class="field sm" id="tk{{ t['id'] }}" name="trail_kind">
-                    <option value="pct">% of price</option>
-                    <option value="atr">times ATR</option>
-                  </select>
-                  <button class="btn quiet sm" type="submit">Trail</button>
-                </form>
-                <p class="faint" style="font-size:var(--t-xs);margin:4px 0 0;max-width:34ch">The
-                  stop follows the {{ 'high' if long else 'low' }} since you opened, this far
-                  behind it, and only ever tightens.</p>
-              </details>
-              {% endif %}
-            </td>
-            <td class="r">
-              <form method="post" action="{{ url_for('delete_trade') }}"
-                    onsubmit='return confirm({{ ("Delete the " ~ t["symbol"] ~ " trade? This cannot be undone.")|tojson }});'>
-                <input type="hidden" name="trade_id" value="{{ t['id'] }}">
-                <button class="btn quiet sm" type="submit"
-                        title="Delete this trade" aria-label="Delete the {{ t['symbol'] }} trade">
-                  Delete</button>
-              </form>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% set ns = namespace(split=false) %}
-    {% for t in open_trades %}{% if (live.get(t['id']) or {}).get('split_words') %}{% set ns.split = true %}{% endif %}{% endfor %}
-    {% if ns.split %}
-      <p class="prose faint" style="padding:var(--s2) var(--s3) var(--s3);margin:0;font-size:var(--t-xs)">
-        A position opened before a share split is kept in the shares it was
-        opened with: its entry, stop, target and price. To close one, say which
-        shares the price you type is in: today's, as a broker shows them and as
-        it is filled in, or the shares you opened with. Either way it is written
-        in the shares you opened with.</p>
-    {% endif %}
-    {% else %}
-      <div class="blank">
-        Nothing open. When an analysis says buy or short, use
-        <b>Log this as a paper trade</b> on it, or add one by hand above.
-      </div>
-    {% endif %}
   </div>
 </section>
 
@@ -400,7 +402,7 @@
                   of {{ p.exits|length }} exits</summary>
                 <ul class="list" style="font-size:var(--t-xs);margin:4px 0 0">
                   {% for e in p.exits %}<li>{{ qty(e.quantity) }} at {{ e.price|price }},
-                    {{ e.reason }}, {{ e.ts|day }}</li>{% endfor %}
+                    {{ e.reason }}, {{ e.ts|day_ny }}</li>{% endfor %}
                 </ul>
               </details>
               {% endif %}</td>

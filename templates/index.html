@@ -37,7 +37,7 @@
               {% if m.touched_at and not beyond %}
                 traded through its {{ 'trailing ' if m.trail }}stop of
                 {{ (m.touched_stop or stop)|price }} at {{ m.touched|price }}
-                on {{ m.touched_at|day }}, and is at {{ m.price|price }} now.
+                on {{ m.touched_day }}, and is at {{ m.price|price }} now.
               {% else %}
                 at {{ m.price|price }}, past its {{ 'trailing ' if m.trail }}stop of {{ stop|price }}.
               {% endif %}

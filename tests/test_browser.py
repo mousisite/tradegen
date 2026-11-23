@@ -455,11 +455,14 @@ MEASURE = r"""
       if (size < 16) { out.fonts.push(name(el) + ' at ' + size); }
     }
     // A ticker box asks the phone for capitals, no corrections and a Go
-    // key; a box for a price or a size asks for the decimal keypad.
+    // key, or a Next key when it only starts a longer form; a box for a
+    // price or a size asks for the decimal keypad.
     const ticker = {autocapitalize: 'characters', autocomplete: 'off',
                     autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go'};
+    const starts = ['m-symbol', 'a-symbol'];
     for (const el of document.querySelectorAll('input[name=symbol], input[name=symbols]')) {
       if (el.type === 'hidden' || hidden(el)) { continue; }
+      ticker.enterkeyhint = starts.includes(el.id) ? 'next' : 'go';
       const off = Object.keys(ticker).filter(k => el.getAttribute(k) !== ticker[k]);
       if (off.length) { out.keys.push(name(el) + ' without ' + off.join(', ')); }
     }

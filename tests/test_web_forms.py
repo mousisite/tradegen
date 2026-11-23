@@ -252,6 +252,8 @@ if tid:
 
 r = c.post("/trades/delete", data={"trade_id": 99999})
 check("deleting a missing trade is rejected", r.status_code == 400)
+check("in words, since the first press of Delete may have removed it",
+      "It may have been deleted already." in r.data.decode("utf-8", "replace"))
 
 # A quote in what was typed as the ticker ended the text of the Delete button's
 # question, and what followed it ran as script.
