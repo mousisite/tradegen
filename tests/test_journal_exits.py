@@ -791,6 +791,33 @@ try:
     check("unless told to", code == 0 and len(of("BTC-USD")) == 2, said)
     for row in of("BTC-USD") + of("ZZDN"):
         db.delete_trade(conn, row["id"])
+    conn.execute(put_run, (at, "MES=F", "BUY", 6000, 5990, 6030, "other"))
+    conn.commit()
+    code, said = cli("take", "MES=F", "--account-size", 10000)
+    check("a futures plan is logged in whole contracts, as the website logs it",
+          code == 0 and close(of("MES=F")[0]["quantity"], 10.0)
+          and close(of("MES=F")[0]["risk_amount"], 100.0), said)
+    code, said = cli("--account", "two", "take", "MES=F", "--account-size", 100)
+    check("and refused in words when not one fits", code == 2
+          and "Not even one MES contract fits" in said, said)
+    for row in of("MES=F"):
+        db.delete_trade(conn, row["id"])
+    real_load = paper.config_mod.load
+
+    def broken():
+        raise RuntimeError("config.json could not be read.")
+
+    paper.config_mod.load = broken
+    try:
+        for argv in (("stats",), ("open", "ZZDAY", "--entry", 100, "--stop", 90)):
+            try:
+                code, said = cli(*argv)
+            except SystemExit as exc:
+                code = exc.code
+            check("a settings file that cannot be read ends paper.py %s in words" % argv[0],
+                  code == 2 and not of("ZZDAY"), code)
+    finally:
+        paper.config_mod.load = real_load
     code, said = cli("open", "ZZDAY", "--entry", 100, "--stop", 90)
     check("a trade typed in is on daily bars, as everywhere else", code == 0
           and of("ZZDAY")[0]["interval"] == "1d", said)

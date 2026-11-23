@@ -37,6 +37,7 @@ from rich.table import Table
 
 from bot import config as config_mod
 from bot import database as db
+from bot.decision import size_futures
 from bot.market import (DataError, fetch_bars, format_price, normalise_symbol,
                         split_factor_since)
 from bot.portfolio import atr_of, read_trade_stop, trade_interval, trail_from, trail_problem
@@ -62,6 +63,15 @@ def _side(direction: int) -> str:
 # Commands
 # ---------------------------------------------------------------------------
 
+def _settings():
+    """The settings file, or the reason it cannot be used, said as analyze.py says it."""
+    try:
+        return config_mod.load()
+    except RuntimeError as exc:
+        console.print("[red]Config error:[/] %s" % exc)
+        raise SystemExit(2)
+
+
 def _bars_for(trade):
     """A trade's own bars, and its shares today per share the day it opened.
 
@@ -81,7 +91,7 @@ def _trade(conn, trade_id: int):
 def cmd_open(args, conn) -> int:
     """Open a position from explicit numbers."""
     direction = -1 if args.short else 1
-    interval = args.interval or config_mod.load()["interval"]
+    interval = args.interval or _settings()["interval"]
     trail = {}
     try:
         if args.trail is not None and args.trail_atr is not None:
@@ -189,7 +199,7 @@ def cmd_take(args, conn) -> int:
     per_unit = abs(run["entry"] - run["stop"])
     qty = args.qty
     if qty is None:
-        cfg = config_mod.load()
+        cfg = _settings()
         account = args.account_size if args.account_size is not None else cfg["account_size"]
         if not 0 < account < float("inf"):
             console.print("[red]Rejected:[/] the account size must be more than zero")
@@ -200,6 +210,15 @@ def cmd_take(args, conn) -> int:
         if qty * run["entry"] > cap:
             qty = cap / run["entry"]
         qty = round(qty, 6) if run["asset_class"] == "crypto" else float(int(qty))
+        if run["symbol"].upper().endswith("=F"):
+            # The whole contracts the analysis sized, written down as their
+            # dollars a point, as the website logs the same plan.
+            sized = size_futures(run["symbol"], float(run["entry"]), float(run["stop"]),
+                                 dict(cfg, account_size=account))
+            if "error" in sized:
+                console.print("[red]Rejected:[/] %s" % sized["error"])
+                return 2
+            qty = sized["quantity"] * sized["multiplier"]
         if qty <= 0:
             console.print("[red]Account too small for one unit at this stop distance.[/]")
             return 2
@@ -510,7 +529,7 @@ def cmd_list(args, conn) -> int:
 
 def cmd_stats(args, conn) -> int:
     # After costs, as the website counts the same trades.
-    cfg = config_mod.load()
+    cfg = _settings()
     s = db.journal_summary(conn, account=args.account, costs={
         kind: float(cfg["cost_bps_" + kind]) / 10000.0
         for kind in ("equity", "crypto", "futures", "other")})
