@@ -36,7 +36,7 @@ class Metric:
     key: str
     label: str
     value: Optional[float]
-    unit: str = ""            # "ratio" | "pct" | "usd" | "x" | ""
+    unit: str = ""            # "ratio" | "pct" | "points" | "usd" | "x" | ""
     source: str = ""
     note: str = ""
 
@@ -57,6 +57,8 @@ class Metric:
             return "%.2f" % v
         if self.unit == "x":
             return "%.1fx" % v
+        if self.unit == "points":
+            return "%.0f%%" % v
         return "%.2f" % v
 
 
@@ -169,7 +171,8 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
     _put(m, "operating_cashflow", "Operating cash flow", g(fin, "operatingCashflow"), "usd")
     _put(m, "total_cash", "Cash", g(fin, "totalCash"), "usd")
     _put(m, "total_debt", "Total debt", g(fin, "totalDebt"), "usd")
-    _put(m, "debt_to_equity", "Debt to equity", g(fin, "debtToEquity"))
+    # Yahoo gives this one as a whole percent: 150 is one and a half times.
+    _put(m, "debt_to_equity", "Debt to equity", g(fin, "debtToEquity"), "points")
     _put(m, "current_ratio", "Current ratio", g(fin, "currentRatio"))
     _put(m, "quick_ratio", "Quick ratio", g(fin, "quickRatio"))
 

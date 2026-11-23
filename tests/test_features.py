@@ -867,6 +867,61 @@ finally:
 check("and with billing off nobody is",
       len(analysed) == 4 and looks_used(pat) == 0, (analysed, looks_used(pat)))
 
+print()
+print("=" * 72)
+print("ONE PERSON'S SCREEN DOES NOT SPEND EVERYBODY'S DATA")
+print("=" * 72)
+from bot import yahoo as yahoo_mod  # noqa: E402
+
+conn = db.connect(DB)
+quin = A.upsert_email_user(conn, "quin@example.com")
+conn.close()
+sign_in(c, quin)
+quoted, listed = [], []
+real_quotes = (yahoo_mod.quotes, yahoo_mod.predefined_screen)
+yahoo_mod.quotes = lambda symbols, *_a, **_k: quoted.append(list(symbols)) or [
+    {"symbol": s, "shortName": s, "regularMarketPrice": 10.0, "marketCap": 1e9}
+    for s in symbols]
+yahoo_mod.predefined_screen = lambda name, count=25: listed.append(name) or [{"symbol": "ZZU"}]
+web._RATE.clear()
+try:
+    long_list = " ".join("ZZ%03d" % n for n in range(300))
+    body = flat(text(c.get("/screener", query_string={"go": "1", "symbols": long_list})))
+    check("a typed list is cut to what one screen takes",
+          [len(q) for q in quoted] == [screener_mod.MAX_LISTED], [len(q) for q in quoted])
+    check("and the page says how many were not looked at",
+          "240 of the 300 instruments on your list were not looked at" in body)
+    del quoted[:]
+    c.get("/screener", query_string={"go": "1", "symbols": "zzq ZZQ,zzq"})
+    check("a name typed three times is asked for once", quoted == [["ZZQ"]], quoted)
+    body = text(c.get("/screener", query_string={
+        "go": "1", "universe": "anything, a link says so"}))
+    check("a list that is not on the form is never asked for, nor said back",
+          listed == ["most_actives"] and "a link says so" not in body, listed)
+    check("a debt filter is said back as the percent it is",
+          "Debt to equity at most 150%" in " ".join(re.sub(
+              r"<[^>]+>", " ", text(c.get("/screener", query_string={
+                  "go": "1", "symbols": "ZZNONE", "price_min": "999", "debt_max": "150"}))).split()))
+    done = sum(len(v) for k, v in web._RATE.items() if k == ("screen", "user:%d" % quin.id))
+    check("each screen is counted", done == 4, done)
+    for _n in range(web.SCREENS_PER_HOUR - done):
+        c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    before = len(quoted)
+    r = c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    check("past the hour's screens, one more is refused in words and asks for nothing",
+          r.status_code == 429 and "run screens a lot" in text(r) and len(quoted) == before,
+          (r.status_code, len(quoted) - before))
+    check("while the empty form still opens", c.get("/screener").status_code == 200)
+finally:
+    yahoo_mod.quotes, yahoo_mod.predefined_screen = real_quotes
+    web._RATE.clear()
+
+from bot import fundamentals as fundamentals_mod  # noqa: E402
+
+check("a company's debt to equity is shown as the percent it is",
+      fundamentals_mod.Metric("debt_to_equity", "Debt to equity", 154.49, "points").display()
+      == "154%")
+
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)
 

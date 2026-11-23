@@ -4693,6 +4693,9 @@ def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
+# One screen is up to two requests to the data source for quotes and one a
+# company for fundamentals, all from a quota the whole site shares.
+SCREENS_PER_HOUR = 60
 
 
 @app.route("/screener", methods=["GET"])
@@ -4703,6 +4706,10 @@ def screener():
 
     filters: Dict[str, float] = {}
     universe = request.args.get("universe") or "most_actives"
+    if universe not in screener_mod.UNIVERSES:
+        # Only the lists on the form: anything else would go to the data
+        # source, and back onto the page, as whoever wrote the link put it.
+        universe = "most_actives"
     symbols_raw = (request.args.get("symbols") or "").strip()
 
     if preset:
@@ -4771,6 +4778,8 @@ def screener():
             return render_template("error.html", symbol="", message=_plainly(
                 exc, SCREEN_FAILED)), 500
     elif request.args.get("go") or preset:
+        if _rate_limited("screen", SCREENS_PER_HOUR):
+            return _too_often("run screens")
         symbols = [s.strip() for s in symbols_raw.replace(",", " ").split()
                    ] if symbols_raw else None
         try:

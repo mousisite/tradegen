@@ -30,6 +30,10 @@ from . import yahoo
 # answered by then is named as not read rather than waited for.
 BUDGET = 40.0
 
+# How many instruments one typed list may hold. Every one is a share of a
+# request to a data source the whole site shares, outside the budget above.
+MAX_LISTED = 60
+
 # Yahoo's own saved screens, usable as starting universes.
 UNIVERSES = {
     "most_actives": "Most actively traded today",
@@ -46,7 +50,9 @@ UNIVERSES = {
 
 # Every filter the screener understands, with the field it reads and how to
 # describe it. Keeping this in one table means the UI and the engine can never
-# disagree about what a filter means.
+# disagree about what a filter means. A unit of "pct" is a fraction here and a
+# whole percent on the page; "points" is already a whole percent, as the data
+# source gives it. A hint is shown under the filter's box.
 FILTERS: Dict[str, Dict] = {
     "price_min": {"field": "price", "op": ">=", "label": "Price at least", "unit": ""},
     "price_max": {"field": "price", "op": "<=", "label": "Price at most", "unit": ""},
@@ -75,9 +81,11 @@ FILTERS: Dict[str, Dict] = {
     "growth_min": {"field": "revenue_growth", "op": ">=",
                    "label": "Revenue growth at least", "unit": "pct", "deep": True},
     "debt_max": {"field": "debt_to_equity", "op": "<=",
-                 "label": "Debt to equity at most", "unit": "", "deep": True},
-    "fcf_positive": {"field": "free_cashflow", "op": ">", "label": "Free cash flow positive",
-                     "unit": "usd", "deep": True},
+                 "label": "Debt to equity at most", "unit": "points", "deep": True,
+                 "hint": "As a percent: 150 means debt of one and a half times equity."},
+    "fcf_positive": {"field": "free_cashflow", "op": ">", "label": "Free cash flow above",
+                     "unit": "usd", "deep": True,
+                     "hint": "Type 0 for any company that takes in more cash than it spends."},
 }
 
 
@@ -207,9 +215,15 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
     filters = {k: v for k, v in (filters or {}).items()
                if v is not None and k in FILTERS}
 
+    notes: List[str] = []
     if symbols:
         universe_name = "your list"
-        pool = [s.strip().upper() for s in symbols if s and s.strip()]
+        pool = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))
+        if len(pool) > MAX_LISTED:
+            notes.append("%d of the %d instruments on your list were not looked at, "
+                         "because one screen takes up to %d. Screen the rest as a "
+                         "second list." % (len(pool) - MAX_LISTED, len(pool), MAX_LISTED))
+            pool = pool[:MAX_LISTED]
     else:
         universe_name = UNIVERSES.get(universe, universe)
         try:
@@ -219,7 +233,6 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
                                 ["Could not fetch that list just now: %s" % exc],
                                 failed=True, at=started)
 
-    notes: List[str] = []
     if not pool:
         return ScreenResult(universe_name, 0, [], 0,
                             _describe(filters), deep,
@@ -398,6 +411,8 @@ def _describe(filters: Dict[str, float]) -> List[Dict]:
             shown = "%.1f%%" % (value * 100)
         elif unit == "usd":
             shown = "{:,.0f}".format(value)
+        elif unit == "points":
+            shown = "%.4g%%" % value
         elif unit == "x":
             shown = "%.1fx" % value
         else:

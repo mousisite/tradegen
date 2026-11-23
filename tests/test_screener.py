@@ -116,8 +116,8 @@ print("   by sector: %s" % {k: "%.0f%%" % (val/v.gross_exposure*100)
 check("all positions priced", len(v.failed) == 0, str(v.failed))
 check("invested is positive", v.invested > 0)
 check("concentration between 0 and 1", 0 < (v.concentration or 0) <= 1)
-check("cash plus invested is about the account",
-      abs((v.cash + v.invested) - 100000) < 1 or v.invested > 100000)
+check("cash is the account less what was paid for the holdings",
+      abs(v.cash - (100000 - (300 * 30 + 480 * 12 + 210 * 40 + 85 * 60))) < 1, str(v.cash))
 check("correlation computed", bool(v.correlation.get("usable")))
 if v.correlation.get("usable"):
     print("   average correlation %.3f" % v.correlation["average"])
@@ -284,6 +284,11 @@ try:
     today = _re.findall(r'<td class="r fig([^"]*)"[^>]*>\s*0\.0%', flat)
     check("a move of 0.0% is not coloured as a loss",
           today and "loss" not in today[0] and "gain" not in today[0], str(today))
+    check("the debt box says it wants a percent, and the cash flow box dollars above a figure",
+          "As a percent: 150 means debt of one and a half times equity." in _text(body)
+          and _re.search(r'name="debt_max"[^>]*placeholder="percent"', body)
+          and "Free cash flow above" in _text(body)
+          and "Free cash flow positive" not in _text(body))
     check("and the page says when the quotes were read",
           _re.search(r"Quotes read at \d\d:\d\d UTC", _text(body)) is not None)
 

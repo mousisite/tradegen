@@ -60,9 +60,11 @@
               {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
             <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
                    step="any" value="{{ typed.get(key, '') }}"
-                   placeholder="{{ 'percent' if spec.unit == 'pct' else
+                   placeholder="{{ 'percent' if spec.unit in ('pct', 'points') else
                                    'dollars' if spec.unit == 'usd' else
-                                   'multiple' if spec.unit == 'x' else 'any' }}">
+                                   'multiple' if spec.unit == 'x' else 'any' }}"
+                   {% if spec.hint %}aria-describedby="h-{{ key }}"{% endif %}>
+            {% if spec.hint %}<div class="hint" id="h-{{ key }}">{{ spec.hint }}</div>{% endif %}
           </div>
         {% endfor %}
       </div>
