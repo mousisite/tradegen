@@ -564,6 +564,20 @@ code, said = start(serving=listen, PORT="10000", WEB_THREADS=" 6 ")
 check("numbers are used as they are, with nothing to say",
       listened[-1] == (10000, 6) and "    setting" not in said, (listened, said[-300:]))
 
+head("NOR DOES A SETTING OF THE ANALYSIS THAT CANNOT BE USED")
+for key, typed in (("STOCKBOT_INTERVAL", "daily"), ("STOCKBOT_INTERVAL", " "),
+                   ("STOCKBOT_ACCOUNT_SIZE", "nan"), ("STOCKBOT_ACCOUNT_SIZE", "-5"),
+                   ("STOCKBOT_RISK_PCT", "50"), ("STOCKBOT_RISK_PCT", "1%")):
+    try:
+        code, said = start(**{key: typed})
+    except Exception as exc:
+        code = "%s: %s" % (type(exc).__name__, exc)
+    check("%s typed as %r is left out" % (key, typed), code == 0, code)
+_os.environ["STOCKBOT_RISK_PCT"] = "2.5"
+check("one that can be is used",
+      web.config_mod.load(web.app.config.get("CFG_PATH"))["risk_per_trade_pct"] == 2.5)
+_os.environ.pop("STOCKBOT_RISK_PCT")
+
 head("ERROR REPORTING STARTS BEFORE THE APP IS LOADED")
 # A release that could not be loaded looped on restart with the site down, and
 # error reporting heard nothing of it.

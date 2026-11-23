@@ -7,6 +7,7 @@ variables override that.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Dict
 
@@ -79,6 +80,9 @@ _ENV_MAP = {
     "STOCKBOT_RISK_PCT": ("risk_per_trade_pct", float),
     "STOCKBOT_INTERVAL": ("interval", str),
 }
+
+# Overrides already said to be unusable: the settings are loaded for every page.
+_SAID = set()
 
 
 def project_root() -> str:
@@ -187,9 +191,19 @@ def load(path: str | None = None) -> Dict[str, Any]:
         raw = os.environ.get(env_key)
         if raw:
             try:
-                cfg[cfg_key] = cast(raw)
-            except ValueError:
-                pass
+                value = cast(raw)
+                # On its own, so a fault in the file is not blamed on it. One
+                # that cannot work is left out as text that is no number
+                # always was: a slip in the host's settings must not keep the
+                # site from starting.
+                validate(dict(DEFAULTS, **{cfg_key: value}))
+                cfg[cfg_key] = value
+            except (ValueError, RuntimeError) as exc:
+                if (env_key, raw) not in _SAID:
+                    _SAID.add((env_key, raw))
+                    logging.getLogger(__name__).warning(
+                        "%s is %r, which cannot be used, so it is left out: %s",
+                        env_key, raw, exc)
 
     validate(cfg)
     return cfg
