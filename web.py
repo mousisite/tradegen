@@ -747,6 +747,8 @@ def uid() -> int:
 _CACHE: Dict[Tuple, Tuple[float, engine.Analysis, Dict[int, int]]] = {}
 # Research costs several network round trips, so it gets its own cache.
 _RESEARCH_CACHE: Dict[Tuple, Tuple[float, object]] = {}
+# Research being put together right now, by cache key, as _RUNNING is below.
+_RESEARCH_RUNNING: Dict[Tuple, Dict] = {}
 _CACHE_TTL = 90.0
 # How long the example account's analyses are reused. Long, because visitors
 # looking around should cost the server one analysis per instrument per
@@ -2649,6 +2651,88 @@ def _interval_from(timeframe: Optional[str]) -> str:
     return known.get(t, "1d")
 
 
+def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
+                  with_options: bool) -> Tuple:
+    """What one piece of research is kept under.
+
+    Keyed like the analysis it is built from: the thesis and the reasoning
+    quote that person's own plan, so one person's stops and targets were
+    being shown to the next person who opened the same ticker. The example's
+    is kept apart from everyone's, because it has no reasoning in it.
+    """
+    return (symbol.upper(), interval, "research", _settings_key(cfg),
+            with_news, with_options, bool(g.demo))
+
+
+def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
+                     with_options: bool):
+    """The research for one analysis, built once for everyone asking at once."""
+    key = _research_key(analysis.bars.symbol, interval, cfg, with_news, with_options)
+    ttl = DEMO_TTL if g.demo else _CACHE_TTL
+    owned = None
+    while True:
+        with _CACHE_LOCK:
+            hit = _RESEARCH_CACHE.get(key)
+            if hit and (time.time() - hit[0]) < ttl:
+                return hit[1]
+            running = _RESEARCH_RUNNING.get(key)
+            if running is None:
+                owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
+                break
+        if not running["done"].wait(_RUNNING_WAIT):
+            break                        # stuck: build one here rather than fail
+        if running["error"] is not None:
+            raise running["error"]
+    try:
+        # The written reasoning is a paid request, and the example is open to
+        # anyone, so it is not asked for there.
+        found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
+                                cfg, analysis=analysis, with_options=with_options,
+                                with_reasoning=not g.demo)
+        with _CACHE_LOCK:
+            _RESEARCH_CACHE[key] = (time.time(), found)
+            if len(_RESEARCH_CACHE) > 20:
+                oldest = min(_RESEARCH_CACHE, key=lambda k: _RESEARCH_CACHE[k][0])
+                _RESEARCH_CACHE.pop(oldest, None)
+        return found
+    except Exception as exc:
+        if owned is not None:
+            owned["error"] = exc
+        raise
+    finally:
+        if owned is not None:
+            with _CACHE_LOCK:
+                if _RESEARCH_RUNNING.get(key) is owned:
+                    _RESEARCH_RUNNING.pop(key, None)
+            owned["done"].set()
+
+
+def _year_chart(bars) -> Dict:
+    """The last year's closing prices, and what to call them; {} for none.
+
+    Always from daily bars. Opened from a 5-minute analysis, the page drew
+    that analysis's last 260 bars, three days of them, as "the last year".
+    """
+    if bars.interval != "1d":
+        try:
+            bars = market_mod.fetch_bars(bars.symbol, "1d")
+        except Exception:
+            return {}
+    stamps = [int(t) for t in bars.timestamp]
+    if not stamps:
+        return {}
+    start = next(k for k, t in enumerate(stamps) if t >= stamps[-1] - 366 * 86400)
+    days = (stamps[-1] - stamps[start]) // 86400
+    title = ("The last year" if days >= 350 else
+             "The last %d months" % round(days / 30.44) if days >= 60 else
+             "The last %d days" % days)
+    day = time.gmtime(stamps[start] + (getattr(bars, "gmt_offset", 0) or 0))
+    return {"title": title,
+            "draw": dict(closes=[float(v) for v in bars.close[start:]],
+                         labels=("%d %s" % (day.tm_mday, time.strftime("%b %Y", day)), "now"),
+                         title="%s price history" % bars.symbol)}
+
+
 @app.route("/research")
 def research():
     """Fundamentals, valuation, filings, options and a two-sided thesis."""
@@ -2675,8 +2759,10 @@ def research():
         return _allowance_used()
 
     cfg = _cfg()
-    with_news = request.args.get("news", "1") != "0"
-    with_options = request.args.get("options", "1") != "0"
+    # The example is one page for everyone: leaving pieces of it out by the
+    # address only made the server build it again, four times over.
+    with_news = bool(g.demo) or request.args.get("news", "1") != "0"
+    with_options = bool(g.demo) or request.args.get("options", "1") != "0"
     try:
         analysis = cached_analysis(symbol, interval, cfg, with_news,
                                    record=not g.demo,
@@ -2685,34 +2771,16 @@ def research():
         return _no_prices(exc, symbol, 404)
     _spend_view(symbol, interval, exact)
 
-    # Keyed like the analysis it is built from: the thesis and the reasoning
-    # quote that person's own plan, so one person's stops and targets were
-    # being shown to the next person who opened the same ticker.
-    key = (analysis.bars.symbol.upper(), interval, "research", _settings_key(cfg),
-           with_news, with_options)
-    now = time.time()
-    with _CACHE_LOCK:
-        hit = _RESEARCH_CACHE.get(key)
-    if hit and (now - hit[0]) < _CACHE_TTL:
-        found = hit[1]
-    else:
-        found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
-                                cfg, analysis=analysis, with_options=with_options)
-        with _CACHE_LOCK:
-            _RESEARCH_CACHE[key] = (time.time(), found)
-            if len(_RESEARCH_CACHE) > 20:
-                oldest = min(_RESEARCH_CACHE, key=lambda k: _RESEARCH_CACHE[k][0])
-                _RESEARCH_CACHE.pop(oldest, None)
+    found = _cached_research(analysis, interval, cfg, with_news, with_options)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
     # page's chart is: shrunk to a phone, the wide drawing's labels were 4
     # pixels tall. The narrow one is drawn for a phone's width.
-    year = dict(closes=[float(v) for v in analysis.bars.close[-260:]],
-                labels=("about a year ago", "now"),
-                title="%s price history" % analysis.bars.symbol)
-    price_svg = charts_mod.price_chart(**year)
-    price_svg_narrow = charts_mod.price_chart(width=300, height=190, **year)
+    year = _year_chart(analysis.bars)
+    price_svg = charts_mod.price_chart(**year["draw"]) if year else ""
+    price_svg_narrow = (charts_mod.price_chart(width=300, height=190, **year["draw"])
+                        if year else "")
     filed_charts = charts_mod.charts_for(found.sec_history or {})
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2728,6 +2796,15 @@ def research():
 
     reviews = []
     for row in saved:
+        if row["outcome"]:
+            # Closed: the outcome recorded then stands, at the price it was
+            # closed at, whatever the price has done since.
+            at_close = row["closed_price"]
+            look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
+                                       "created": row["created_ts"]}, at_close)
+                    if at_close else {"usable": False, "reason": ""})
+            reviews.append((row, dict(look, now=at_close, quoted=None, split_words="")))
+            continue
         now_price, split = _thesis_price(row, analysis.bars)
         look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
                                    "created": row["created_ts"]}, now_price)
@@ -2741,13 +2818,18 @@ def research():
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
                            price_svg=price_svg, price_svg_narrow=price_svg_narrow,
+                           price_title=year.get("title", ""),
+                           with_news=with_news, with_options=with_options,
                            filed_charts=filed_charts,
                            plain=plain_mod.explain_company(found),
                            canonical_url=_canonical("research", analysis.bars))
 
 
-# Each save runs the research pipeline again: fundamentals, filings and risk.
+# A save whose research is no longer kept runs the pipeline again:
+# fundamentals, filings and risk.
 THESES_PER_HOUR = 30
+# How long the research on a page can still be saved from it, as it was read.
+SAVE_TTL = 15 * 60.0
 # A note is a reminder to yourself, not an essay, and it is stored for good.
 NOTE_LIMIT = 1000
 
@@ -2789,13 +2871,28 @@ def save_thesis():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         cfg = _cfg()
-        analysis = cached_analysis(symbol, interval, cfg, False, exact=exact)
-        found = engine.research(symbol, analysis.bars.last_price, cfg,
-                                analysis=analysis, with_options=False,
-                                with_reasoning=False)
-        t = found.thesis
+        with_news = request.form.get("news", "1") != "0"
+        with_options = request.form.get("options", "1") != "0"
+        # The research the page showed, when it is still kept: the case that
+        # was read is the one saved, and nothing is worked out twice. A bare
+        # ticker that is also a coin's does not name a page, so not for that.
+        hit = None
+        if exact or not market_mod.needs_exact(symbol):
+            with _CACHE_LOCK:
+                hit = _RESEARCH_CACHE.get(_research_key(
+                    symbol, interval, cfg, with_news, with_options))
+        if hit and time.time() - hit[0] < SAVE_TTL and hit[1].thesis is not None:
+            t, price = hit[1].thesis, hit[1].price
+        else:
+            # As the page does it, so it is the same case by today's figures;
+            # the written reasoning is not part of a thesis.
+            analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
+            price = analysis.bars.last_price
+            t = engine.research(symbol, price, cfg, analysis=analysis,
+                                with_options=with_options,
+                                with_reasoning=False).thesis
         db_mod.thesis_save(
-            conn, symbol, analysis.bars.last_price, t.balance, t.verdict,
+            conn, symbol, price, t.balance, t.verdict,
             [{"headline": p.headline, "detail": p.detail,
               "evidence": [{"claim": e.claim, "value": e.value,
                             "source": e.source, "url": e.url} for e in p.evidence]}
@@ -2819,7 +2916,9 @@ def save_thesis():
         conn.close()
     _spend_view(symbol, interval, exact)
     return redirect(url_for("research", symbol=symbol, interval=interval,
-                            exact=1 if exact else None))
+                            exact=1 if exact else None,
+                            news=None if with_news else 0,
+                            options=None if with_options else 0))
 
 
 @app.route("/thesis/delete", methods=["POST"])

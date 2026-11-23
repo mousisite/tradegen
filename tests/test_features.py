@@ -475,6 +475,148 @@ try:
     check("a saved thesis that cannot be priced just now leaves the research page standing",
           r.status_code == 200 and "Could not price ZZRES today" in page, r.status_code)
 
+    # A thesis that was closed keeps the outcome recorded for it: the price
+    # recovering afterwards made a "wrong" one read "right so far".
+    def thesis_of(balance, case):
+        return NS(balance=balance, verdict="lean", evidence_count=1, unknowns=[], neutral=[],
+                  bull=NS(summary="", points=case), bear=NS(summary="", points=[]),
+                  falsifiers=["A price below 80"], all_sources=[])
+
+    asked = []
+
+    def research_stub(symbol, price, cfg, **k):
+        asked.append(k)
+        points = [NS(headline="Coverage is positive", detail="d", evidence=[])]
+        return web.engine.Research(symbol=symbol, price=price, thesis=thesis_of(0.19, points))
+
+    web.cached_analysis = lambda *a, **k: NS(bars=stand_in)
+    web.engine.research = research_stub
+    market_mod.split_history = lambda symbol: []
+    web._RESEARCH_CACHE.clear()
+    conn = db.connect(DB)
+    conn.execute("DELETE FROM theses WHERE symbol='ZZRES'")
+    conn.execute("INSERT INTO theses (symbol, created_ts, price, balance, verdict, user_id, "
+                 "outcome, closed_price, closed_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("ZZRES", NOW - 90 * 86400, 100.0, 0.4, "lean bull", alice.id, "wrong", 60.0,
+                  NOW - 30 * 86400))
+    conn.commit()
+    conn.close()
+    daily = NS(symbol="ZZRES", interval="1d", close=[50.0 + k / 10 for k in range(400)],
+               timestamp=[NOW - (399 - k) * 86400 for k in range(400)], gmt_offset=0)
+    market_mod.fetch_bars = lambda symbol, interval="1d", lookback=None: daily
+    try:
+        sign_in(c, alice)
+        page = flat(text(c.get("/research?symbol=ZZRES&interval=15m")))
+        saved_part = page[page.index("Theses you saved"):]
+        check("a closed thesis keeps the outcome recorded for it",
+              ">wrong</span>" in saved_part and "so far" not in saved_part
+              and "closed 30d ago" in saved_part, saved_part[:1200])
+        check("at the price it was closed at", "-40.0%" in saved_part
+              and 'data-label="Now">60 ' in saved_part and "101" not in saved_part,
+              saved_part[:1200])
+
+        # The chart named for a year is a year of daily prices, whatever bars
+        # the analysis was opened on.
+        check("opened from 15-minute bars, the year's chart is of daily prices",
+              "<h2>The last year</h2>" in page and "daily closing prices" in page
+              and "about a year ago" not in page and "15m bars" not in page)
+        start = time.gmtime(NOW - 366 * 86400)
+        check("and its left end is dated",
+              "%d %s" % (start.tm_mday, time.strftime("%b %Y", start)) in page)
+        young = NS(symbol="ZZRES", interval="1d", close=daily.close[-40:],
+                   timestamp=daily.timestamp[-40:], gmt_offset=0)
+        check("forty days of prices are not called a year",
+              web._year_chart(young)["title"] == "The last 39 days",
+              web._year_chart(young)["title"])
+        market_mod.fetch_bars = must_not_run("a request for prices")
+        check("daily bars already in hand are used as they are",
+              web._year_chart(daily)["title"] == "The last year")
+        check("and with none to be had the chart is left out",
+              web._year_chart(stand_in) == {})
+        started.clear()
+
+        # What is saved is the case that was on the page.
+        asked.clear()
+        r = c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        conn = db.connect(DB)
+        row = db.thesis_list(conn, "ZZRES", user=alice.id)[0]
+        conn.close()
+        check("saving a thesis saves the one on the page, worked out once",
+              r.status_code == 302 and not asked and row["balance"] == 0.19
+              and row["price"] == 101.0 and "Coverage is positive" in row["bull_json"],
+              (r.status_code, asked, dict(row)))
+        web._RESEARCH_CACHE.clear()
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        check("and one whose page is no longer kept is worked out as the page is",
+              len(asked) == 1 and asked[0]["with_options"] is True
+              and asked[0]["with_reasoning"] is False, asked)
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m", "options": "0"})
+        check("a page without options saves without them", asked[-1]["with_options"] is False)
+
+        # Two people opening one page, or one person twice, share the work.
+        import threading
+        together, done = threading.Barrier(2), []
+
+        def slow_research(symbol, price, cfg, **k):
+            asked.append(k)
+            time.sleep(0.4)
+            return web.engine.Research(symbol=symbol, price=price)
+
+        web.engine.research = slow_research
+        web._RESEARCH_CACHE.clear()
+        asked.clear()
+
+        def open_page():
+            client = web.app.test_client()
+            sign_in(client, alice)
+            together.wait(5)
+            done.append(client.get("/research?symbol=ZZRES&interval=1d").status_code)
+
+        market_mod.fetch_bars = fake_bars
+        threads = [threading.Thread(target=open_page) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        check("two requests at once build the research once",
+              done == [200, 200] and len(asked) == 1 and not web._RESEARCH_RUNNING,
+              (done, asked))
+
+        # The example is open to anyone, so its address cannot make the server
+        # build it again, nor send a paid request.
+        visitor = web.app.test_client()
+        asked.clear()
+        stand_in.interval, stand_in.symbol = "1d", "NVDA"
+        real_clock, web.time = web.time, NS(**{k: getattr(time, k) for k in (
+            "time", "gmtime", "strftime", "localtime", "mktime", "sleep", "monotonic")
+            if hasattr(time, k)})
+        try:
+            statuses = []
+            for later in (0, 600):
+                web.time.time = lambda later=later: time.time() + later
+                for extra in ("", "&news=0", "&options=0", "&news=0&options=0"):
+                    statuses.append(visitor.get("/research?symbol=NVDA&interval=1d" + extra)
+                                    .status_code)
+        finally:
+            web.time = real_clock
+            stand_in.interval, stand_in.symbol = "15m", "ZZRES"
+        check("the example's research is built once, whatever the address asks for",
+              set(statuses) == {200} and len(asked) == 1, (statuses, asked))
+        check("and without the paid written reasoning",
+              asked and asked[0]["with_reasoning"] is False, asked)
+        sign_in(c, alice)
+        stand_in.interval, stand_in.symbol = "1d", "NVDA"
+        c.get("/research?symbol=NVDA&interval=1d")
+        stand_in.interval, stand_in.symbol = "15m", "ZZRES"
+        check("an account's own page is never the example's copy",
+              len(asked) == 2 and asked[1]["with_reasoning"] is True, asked)
+    finally:
+        web.cached_analysis = must_not_run("an analysis")
+        web.engine.research = real_research
+        market_mod.split_history = lambda symbol: []
+        market_mod.fetch_bars = fake_bars
+        web._RESEARCH_CACHE.clear()
+
     print()
     print("=" * 72)
     print("THE JOURNAL: WHAT WAS PLANNED, WHAT HAPPENED")

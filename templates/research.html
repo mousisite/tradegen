@@ -66,6 +66,8 @@
       <input type="hidden" name="symbol" value="{{ r.symbol }}">
       {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
       <input type="hidden" name="interval" value="{{ a.bars.interval }}">
+      {% if with_news is defined and not with_news %}<input type="hidden" name="news" value="0">{% endif %}
+      {% if with_options is defined and not with_options %}<input type="hidden" name="options" value="0">{% endif %}
       <button class="btn sm" type="submit">Save this thesis</button>
     </form>
   </div>
@@ -223,7 +225,12 @@
   <div class="cols b" style="margin-top:var(--s3)">
     <div class="card">
       <span class="eyebrow">What would prove this wrong</span>
-      <ul class="list">{% for x in t.falsifiers %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% if t.falsifiers %}
+        <ul class="list">{% for x in t.falsifiers %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% else %}
+        <p class="prose">The evidence leans neither way, so there is no case here
+          to prove wrong.</p>
+      {% endif %}
     </div>
     <div class="card">
       <span class="eyebrow">What could not be measured</span>
@@ -256,12 +263,31 @@
 </section>
 {% endif %}
 
-{% if f and r.quality %}
+{# A coin or a fund has no business to judge, but may have figures. #}
+{% set figures = [] %}
+{% if f %}
+  {% for key in ['market_cap','pe','forward_pe','pb','ps','ev_ebitda',
+                 'gross_margin','operating_margin','net_margin','roe','roa',
+                 'revenue_growth','earnings_growth','revenue','free_cashflow',
+                 'fcf_yield','total_cash','total_debt','debt_to_equity',
+                 'current_ratio','beta','dividend_yield','short_pct_float',
+                 'sec_revenue','sec_net_income','sec_assets','sec_liabilities',
+                 'sec_equity','sec_eps'] %}
+    {% set m = f.metrics.get(key) %}
+    {% if m and m.known %}{% set _ = figures.append(m) %}{% endif %}
+  {% endfor %}
+{% endif %}
+{% if f and r.quality and (r.quality.known or figures or f.summary or f.notes) %}
 <section>
   <div class="sechead">
-    <h2>The business</h2>
-    <span class="tail">{{ r.quality.known }} of {{ r.quality.total }} checks could be judged</span>
+    {% if r.quality.known %}
+      <h2>The business</h2>
+      <span class="tail">{{ r.quality.known }} of {{ r.quality.total }} checks could be judged</span>
+    {% else %}
+      <h2>What is reported about it</h2>
+    {% endif %}
   </div>
+  {% if r.quality.known %}
   <div class="card">
     <p class="prose" style="margin-bottom:var(--s3);color:var(--ink)">
       {{ r.quality.verdict }}</p>
@@ -284,42 +310,27 @@
       </div>
     </div>
   </div>
+  {% endif %}
 
+  {% if figures %}
   <div class="card pad0" style="margin-top:var(--s3)">
     <div class="cardhead"><span class="eyebrow">Key figures</span></div>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Measure</th><th class="r">Value</th><th>Source</th></tr></thead>
         <tbody>
-        {% for key in ['market_cap','pe','forward_pe','pb','ps','ev_ebitda',
-                       'gross_margin','operating_margin','net_margin','roe','roa',
-                       'revenue_growth','earnings_growth','revenue','free_cashflow',
-                       'fcf_yield','total_cash','total_debt','debt_to_equity',
-                       'current_ratio','beta','dividend_yield','short_pct_float'] %}
-          {% set m = f.metrics.get(key) %}
-          {% if m and m.known %}
-            <tr>
-              <td>{{ m.label }}</td>
-              <td class="r fig">{{ m.display() }}</td>
-              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
-            </tr>
-          {% endif %}
-        {% endfor %}
-        {% for key in ['sec_revenue','sec_net_income','sec_assets','sec_liabilities',
-                       'sec_equity','sec_eps'] %}
-          {% set m = f.metrics.get(key) %}
-          {% if m and m.known %}
-            <tr>
-              <td>{{ m.label }}</td>
-              <td class="r fig">{{ m.display() }}</td>
-              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
-            </tr>
-          {% endif %}
+        {% for m in figures %}
+          <tr>
+            <td>{{ m.label }}</td>
+            <td class="r fig">{{ m.display() }}</td>
+            <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
+          </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
   </div>
+  {% endif %}
 
   {% if f.summary %}
     <div class="card" style="margin-top:var(--s3)">
@@ -351,8 +362,8 @@
 {% if price_svg %}
 <section class="yearchart">
   <div class="sechead">
-    <h2>The last year</h2>
-    <span class="tail">closing prices, {{ a.bars.interval }} bars</span>
+    <h2>{{ price_title }}</h2>
+    <span class="tail">daily closing prices</span>
   </div>
   <div class="card">
     <div class="wide">{{ price_svg|safe }}</div>
@@ -550,19 +561,34 @@
 </section>
 {% endif %}
 
-{% if r.valuation and r.valuation.usable %}
+{# With no value to show, the cards are still worth reading when one of them
+   ran: the ratios of a fund or a bank, say. #}
+{% if r.valuation and (r.valuation.usable or r.valuation.models|selectattr('usable')|list) %}
 {% set v = r.valuation %}
 <section>
   <div class="sechead">
     <h2>What it might be worth</h2>
-    <span class="tail">{{ v.agreement }} agreement between models</span>
+    <span class="tail">{{ 'no value could be worked out' if not v.usable
+      else 'from one model' if v.agreement == 'single'
+      else v.agreement ~ ' agreement between models' }}</span>
   </div>
+  {% if not v.usable %}
+  <div class="card">
+    <p class="prose">No model could put a value on it. What could be worked out
+      is below, with the reason for what could not.</p>
+  </div>
+  {% else %}
   <div class="card">
     <div class="figs" style="margin-bottom:var(--s3)">
+      {% if v.agreement == 'single' %}
+      <div class="f"><div class="k">Modelled value</div>
+        <div class="v fig">{{ v.midpoint|price }}</div></div>
+      {% else %}
       <div class="f"><div class="k">Modelled range</div>
         <div class="v fig">{{ v.low|price }}–{{ v.high|price }}</div></div>
       <div class="f"><div class="k">Midpoint</div>
         <div class="v fig">{{ v.midpoint|price }}</div></div>
+      {% endif %}
       <div class="f"><div class="k">Price today</div>
         <div class="v fig">{{ r.price|price }}</div></div>
       <div class="f"><div class="k">Gap</div>
@@ -573,12 +599,13 @@
       <p class="prose">{{ line }}</p>
     {% endfor %}
   </div>
+  {% endif %}
 
   {% for m in v.models %}
     <div class="card" style="margin-top:var(--s3)">
       <span class="eyebrow">{{ m.method }}</span>
       {% if m.usable %}
-        {% if m.fair_value %}
+        {% if m.fair_value and not m.only_a_check %}
           <p class="prose" style="color:var(--ink);font-size:var(--t-base)">
             Fair value <span class="fig">{{ m.fair_value|price }}</span>
             {% if m.upside is not none %}
@@ -596,7 +623,8 @@
                 <tr>
                   <td>{{ a_.label }}</td>
                   <td class="r fig">
-                    {% if a_.key in ['growth','terminal_growth','discount','implied_growth'] %}
+                    {% if a_.key in ['growth','terminal_growth','discount','implied_growth',
+                                     'implied_average'] %}
                       {{ a_.value|pct(1) }}
                     {% elif a_.value|abs >= 1000000 %}{{ "%.2fB"|format(a_.value/1000000000) }}
                     {% else %}{{ "%.4g"|format(a_.value) }}{% endif %}
@@ -618,7 +646,8 @@
                   <td>{{ row.label }}</td>
                   <td class="r fig">{{ row.value|pct(1) if row.unit == 'pct'
                       else "%.1fx"|format(row.value) }}</td>
-                  <td class="{{ 'gain' if row.cheap else 'loss' }}">{{ row.comment }}</td>
+                  <td class="{{ 'faint' if not row.comparable else 'gain' if row.cheap
+                    else 'loss' }}">{{ row.comment }}</td>
                 </tr>
               {% endfor %}
               </tbody>
@@ -818,12 +847,19 @@
             {# Today's price in the shares the thesis was saved in, so it
                sits beside "Price then"; after a split it says so. #}
             <td class="r fig" data-label="Now">{{ rev.now|price if rev.now else '—' }}
+              {% if row['outcome'] %}<div class="faint" style="font-size:var(--t-xs)">when
+                it was closed</div>{% endif %}
               {% if rev.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ rev.quoted|price }} today, after a {{ rev.split_words }} split</div>{% endif %}</td>
             <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}" data-label="Move">
               {{ rev.move|pct(1) if rev.usable else '—' }}</td>
             <td class="fig" data-label="Called">{{ row['balance']|signed }}</td>
-            <td data-label="Outcome">{% if rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
+            <td data-label="Outcome">{% if row['outcome'] %}<span class="chip {{
+                 'long' if row['outcome'] == 'right' else 'short' if row['outcome'] == 'wrong'
+                 else 'hold' if row['outcome'] == 'luck' else 'mute' }}">{{
+                 'right for the wrong reason' if row['outcome'] == 'luck' else row['outcome'] }}</span>
+                 <div class="faint" style="font-size:var(--t-xs)">closed {{ row['closed_ts']|ago }}</div>
+              {% elif rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
                  else 'short' if rev.outcome == 'wrong so far' else 'mute' }}">
               {{ rev.outcome }}</span>{% else %}<span class="faint">{{ rev.reason }}</span>{% endif %}</td>
             <td class="r">

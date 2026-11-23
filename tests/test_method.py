@@ -707,6 +707,130 @@ check("and where the count came from is said",
           for a_ in V.discounted_cash_flow(classes, 100.0).assumptions))
 
 
+# A model that comes to less than nothing has no price to give.
+def yahoo_says(**changed):
+    sent = company()
+    for path, value in changed.items():
+        module, key = path.split("__")
+        sent[module][key] = value
+    real_summary = yahoo.quote_summary
+    yahoo.quote_summary = lambda symbol, modules: sent
+    try:
+        return F.load("TEST", with_sec=False)
+    finally:
+        yahoo.quote_summary = real_summary
+
+
+owing = yahoo_says(financialData__totalDebt=5e11)
+o_dcf, o_rev, o_mult = valued(owing)
+check("debt above the whole value is a reason, not a fair value below nothing",
+      not o_dcf.usable and o_dcf.fair_value is None and "debt is larger" in o_dcf.reason,
+      (o_dcf.fair_value, o_dcf.reason))
+alone = V.combine([o_dcf, o_rev, o_mult], 100.0)
+check("20 times earnings is never the value on its own",
+      o_mult.usable and not alone["usable"] and "debt is larger" in alone["reason"], alone)
+said_alone = thesis.build("TEST", 100.0, fundamentals=owing, valuation=alone)
+check("nor a point in the case, which says why there is no value",
+      not any("on the model" in p.headline
+              for p in said_alone.bull.points + said_alone.bear.points)
+      and any("debt is larger" in u for u in said_alone.unknowns), said_alone.unknowns)
+check("while what the price assumes is still said",
+      o_rev.usable and any("already assumes a lot" in p.headline
+                           for p in said_alone.bear.points),
+      (o_rev.implied_average, [p.headline for p in said_alone.bear.points]))
+fund = yahoo_says(financialData__freeCashflow=None)
+check("a fund is not told that it burns cash",
+      "none is reported for this instrument" in V.discounted_cash_flow(fund, 100.0).reason
+      and "burn" not in V.discounted_cash_flow(fund, 100.0).reason)
+lone = yahoo_says(summaryDetail__trailingPE=None)
+only = V.combine(valued(lone), 100.0)
+check("one model alone is not said to agree",
+      only["usable"] and only["agreement"] == "single"
+      and "Only one model" in only["commentary"][0]
+      and not any("agree" in line for line in only["commentary"]), only["commentary"])
+check("two are judged as before", V.combine(valued(home), 100.0)["agreement"]
+      in ("tight", "loose", "wide"))
+near = yahoo_says(financialData__totalDebt=1.05e11)
+n_dcf = V.discounted_cash_flow(near, 100.0)
+check("the grid shows no value below nothing, and says what its dashes are",
+      n_dcf.usable and all(v is None or v > 0 for row in n_dcf.sensitivity
+                           for v in row["values"])
+      and any(v is None for row in n_dcf.sensitivity for v in row["values"])
+      and any("dash" in n for n in n_dcf.notes), n_dcf.sensitivity)
+
+slow = yahoo_says(financialData__revenueGrowth=0.01)
+grid = V.discounted_cash_flow(slow, 100.0).sensitivity
+wrong = [row["growth"] for row in grid if abs(
+    row["values"][2] - V.discounted_cash_flow(slow, 100.0, growth=row["growth"]).fair_value)
+    > 1e-6]
+check("every row of the grid is worked out at the growth it names",
+      not wrong and len({row["values"][2] for row in grid}) == 5, (wrong, grid))
+
+path = [h_rev.implied_growth + (0.025 - h_rev.implied_growth) * k / 9 for k in range(10)]
+came_to = float(np.prod([1 + g for g in path])) ** 0.1 - 1
+check("what the price assumes is the average of a path that fades",
+      abs(h_rev.implied_average - came_to) < 1e-9
+      and "on average" in h_rev.notes[0] and "%.1f%% a year on average" % (came_to * 100)
+      in h_rev.notes[0] and "a year for 10 years" not in h_rev.notes[0], h_rev.notes)
+fast = V.reverse_dcf(yahoo_says(summaryDetail__marketCap=3.2e11,
+                                defaultKeyStatistics__sharesOutstanding=3.2e9), 100.0)
+said_fast = thesis.build("TEST", 100.0, valuation=V.combine([h_dcf, fast, h_mult], 100.0))
+check("and the case asks for that average, not the first year's rate",
+      fast.implied_growth > 0.25 > fast.implied_average > 0.12
+      and not any("assumes a lot" in p.headline for p in said_fast.bear.points),
+      (fast.implied_growth, fast.implied_average))
+bargain = V.reverse_dcf(yahoo_says(summaryDetail__marketCap=1e10,
+                                   financialData__totalCash=0.0,
+                                   financialData__totalDebt=0.0,
+                                   defaultKeyStatistics__sharesOutstanding=1e8), 100.0)
+check("a price below the search says it is the limit",
+      bargain.usable and bargain.implied_at_limit and "lowest it tries" in bargain.notes[0],
+      (bargain.implied_growth, bargain.notes))
+brief_ = reasoning_mod = __import__("bot.reasoning", fromlist=["x"]).build_payload(
+    "TEST", 100.0, valuation=only)
+check("the reasoning step is told the same",
+      "on average over ten years" in str(brief_) and "only one model" in str(brief_), brief_)
+
+losing = yahoo_says(defaultKeyStatistics__forwardPE=-8.0,
+                    defaultKeyStatistics__priceToBook=-3.5,
+                    defaultKeyStatistics__enterpriseToEbitda=-12.0)
+ratios = V.multiples(losing, 100.0)
+below = [r for r in ratios.workings if r["value"] < 0]
+check("a ratio below nothing is not cheap",
+      len(below) == 3 and not any(r["cheap"] or r["comparable"] for r in below)
+      and all("negative" in r["comment"] for r in below), below)
+check("and is left out of the count",
+      any(n.startswith("2 of 2 ratios look cheap") for n in ratios.notes), ratios.notes)
+
+check("debt to equity carries its percent sign",
+      yahoo_says(financialData__debtToEquity=154.49).show("debt_to_equity") == "154%")
+notes = " ".join(yahoo_says(financialData__profitMargins=-0.2,
+                            financialData__returnOnEquity=-0.1,
+                            summaryDetail__trailingPE=None).notes)
+check("a company that lost money is told that is why it has no P/E",
+      "because it lost money" in notes and "Not reported" not in notes, notes)
+notes = " ".join(yahoo_says(financialData__profitMargins=None,
+                            financialData__totalRevenue=None,
+                            summaryDetail__trailingPE=None).notes)
+check("figures that are missing go by their names",
+      "revenue, net margin, return on equity, price to earnings" in notes
+      and "net_margin" not in notes and "coins" in notes, notes)
+
+
+def yahoo_down(symbol, modules):
+    raise yahoo.YahooError("refused")
+
+
+real_summary, yahoo.quote_summary = yahoo.quote_summary, yahoo_down
+F.log.disabled = True
+try:
+    notes = F.load("TEST", with_sec=False).notes
+finally:
+    yahoo.quote_summary, F.log.disabled = real_summary, False
+check("figures that were not fetched are not called unpublished",
+      len(notes) == 1 and "unavailable" in notes[0], notes)
+
+
 def told(table, **kw):
     history = {"available": True, "table": table, "years": [2024, 2025],
                "currency": "USD"}
@@ -767,7 +891,27 @@ check("three passed of six is not called weak",
       and Q.strength_band(score) == "mixed", (score.value, score.verdict))
 check("and its scale is the tests that could be measured", "0 to 6" in score.scale,
       score.scale)
+check("what could not be measured is named in words",
+      "because 3 of them could not be measured (debt, liquidity, share count)"
+      in score.verdict and "was not reported" not in score.verdict, score.verdict)
+check("the score says which years it compares, and 'the year before' is that",
+      "fiscal 2025 against 2024" in score.scale
+      and any("the year before" in t.detail for t in score.tests), score.scale)
+gap = filings(**{key: {2021: values[2024], 2025: values[2025]} for key, values in (
+    ("net_income", {2024: 110.0, 2025: 100.0}), ("assets", {2024: 1000.0, 2025: 1000.0}),
+    ("operating_cashflow", {2024: 150.0, 2025: 150.0}),
+    ("revenue", {2024: 1000.0, 2025: 950.0}),
+    ("gross_profit", {2024: 400.0, 2025: 350.0}))})
+score = Q.piotroski(gap)
+check("four years back is not 'the year before'",
+      "fiscal 2025 against 2021" in score.scale
+      and any("in 2021" in t.detail for t in score.tests)
+      and not any("year before" in t.detail or "last year" in t.detail for t in score.tests),
+      [t.detail for t in score.tests])
 judged = Q.assess(half)
+check("the earnings score names its year too",
+      "fiscal 2025" in judged["scores"]["accruals"].scale,
+      judged["scores"]["accruals"].scale)
 check("nor listed as a concern out of nine", not judged["concerns"], judged["concerns"])
 good = Q.assess(filings(net_income={2024: 100.0, 2025: 110.0},
                         assets={2024: 1000.0, 2025: 1000.0},
@@ -830,6 +974,16 @@ flagged = dict(revenue={2024: 1000.0, 2025: 1600.0}, receivables={2024: 100.0, 2
                net_income={2024: 100.0, 2025: 100.0},
                operating_cashflow={2024: 100.0, 2025: 110.0})
 m = Q.beneish_m(filings(**flagged))
+check("the manipulation screen names the years it compares",
+      "fiscal 2025 against 2024" in m.scale, m.scale)
+sound = Q.altman_z(filings(retained_earnings={2024: 300.0, 2025: 400.0},
+                           operating_income={2024: 90.0, 2025: 100.0},
+                           liabilities={2024: 400.0, 2025: 400.0},
+                           **{k: flagged[k] for k in ("assets", "current_assets",
+                                                      "current_liabilities", "revenue")}),
+                   2000.0)
+check("and the distress score its own", sound.usable and "fiscal 2025" in sound.scale,
+      (sound.value, sound.scale, sound.verdict))
 check("the ratios named are the ones that pull the score up",
       m.value > -1.78 and "receivables against sales" in m.verdict
       and "accruals" not in m.verdict, (m.value, m.verdict))
@@ -900,6 +1054,33 @@ bare, whole = risk_of(make_bars(payer)), risk_of(make_bars(payer, factor=factor)
 check("an ex-dividend drop is not counted as a loss",
       whole.sharpe > bare.sharpe + 0.4 and whole.worst_day > bare.worst_day,
       (bare.sharpe, whole.sharpe))
+fell = risk_of(make_bars(np.concatenate([[100.0, 50.0], np.full(60, 50.0)])))
+check("a fall from the very first close counts",
+      abs(fell.max_drawdown + 0.5) < 1e-9 and abs(fell.current_drawdown + 0.5) < 1e-9
+      and fell.drawdown_days == 1,
+      (fell.max_drawdown, fell.current_drawdown, fell.drawdown_days))
+grew = risk_of(make_bars(np.linspace(100.0, 150.0, 60)))
+check("and a price that only rose has none", grew.max_drawdown == 0.0, grew.max_drawdown)
+
+
+def matched(**series):
+    real_fetch = R.fetch_bars
+    R.fetch_bars = lambda symbol, interval: make_bars(series[symbol])
+    try:
+        return R.correlation_matrix(sorted(series))
+    finally:
+        R.fetch_bars = real_fetch
+
+
+ups, other = moves[:200], 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, 200)))
+flat_too = matched(FLAT=np.full(200, 10.0), WALK=ups, ZED=other)
+check("a price that never moves is left out of the overlap, not shown as nan",
+      flat_too["usable"] and flat_too["symbols"] == ["WALK", "ZED"]
+      and flat_too["failed"] == ["FLAT"] and len(flat_too["matrix"]) == 2
+      and "nan" not in str(flat_too), flat_too)
+check("with one thing left that moves there is nothing to compare",
+      not matched(FLAT=np.full(200, 10.0), WALK=ups)["usable"])
+
 paid = make_bars(payer, factor=factor)
 check("nor when two instruments are compared day by day",
       np.allclose(R.aligned_returns([paid, paid])[0], R.daily_returns(paid)))
@@ -948,6 +1129,48 @@ for when, expiry, out_ in (((2026, 11, 12, 10, 0), (2026, 11, 20), 8),
           and chain.calls[1].delta > 0, (iv, chain.days))
 check("after the close of the last day there is no time left to price",
       chain_at(O.clock.ny(2026, 11, 20, 15, 59), (2026, 11, 20)).days == 0)
+
+
+def quoted(state, *rows):
+    """A chain of calls with these (bid, ask, last), in a market in this state."""
+    now = O.clock.ny(2026, 11, 12, 10, 0)
+    stamp = _calendar.timegm((2026, 11, 20, 0, 0, 0))
+    quote = {"regularMarketPrice": 100.0}
+    if state:
+        quote["marketState"] = state
+    sent = {"quote": quote, "expirationDates": [stamp], "options": [{
+        "expirationDate": stamp, "puts": [], "calls": [
+            {"strike": 95.0 + k, "bid": bid, "ask": ask, "lastPrice": last,
+             "openInterest": 100} for k, (bid, ask, last) in enumerate(rows)]}]}
+    real_o = (O.yahoo.options, O.risk_free_rate, O.time)
+    O.yahoo.options = lambda symbol, expiry=None: sent
+    O.risk_free_rate = lambda default=0.042: 0.042
+    O.time = types.SimpleNamespace(time=lambda: now, gmtime=time.gmtime,
+                                   strftime=time.strftime)
+    try:
+        return O.load_chain("TEST")
+    finally:
+        O.yahoo.options, O.risk_free_rate, O.time = real_o
+
+
+thin = [(2.5, 2.6, 2.5)] + [(0.0, 3.0, 2.0)] * 4
+open_now = quoted("REGULAR", *thin)
+check("with the market open, thin strikes do not close it",
+      not any("closed" in n for n in open_now.notes)
+      and [c_.quality for c_ in open_now.calls[1:]] == ["no-bid"] * 4,
+      (open_now.notes, [c_.quality for c_ in open_now.calls]))
+check("with it closed the last prices still stand, and it is said",
+      any("market is closed" in n for n in quoted("CLOSED", *thin).notes)
+      and quoted("CLOSED", *thin).calls[1].quality == "stale")
+just_open = quoted("REGULAR", *[(0.0, 0.0, 2.0)] * 5)
+check("open without one bid yet, the last prices are used and called that",
+      just_open.calls[0].quality == "stale"
+      and any("No live quotes" in n for n in just_open.notes)
+      and not any("closed" in n for n in just_open.notes), just_open.notes)
+check("a market state that was not sent is read as before",
+      quoted("", *thin).calls[1].quality == "stale")
+check("bid and ask at one price is the best spread there is, not the worst",
+      quoted("REGULAR", (2.5, 2.5, 2.5)).calls[0].tradable)
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1276,84 @@ check("a refusal is shared too, not asked again by each",
 check("and nothing is left waiting", not sec._FACTS_FLIGHTS, sec._FACTS_FLIGHTS)
 
 
+def history_from(cik, taxonomies, symbol="TEST"):
+    real_sec = (sec._get, sec.cik_for)
+    sec._get = lambda url, params=None, tries=2: {"entityName": "Test Co",
+                                                  "facts": taxonomies}
+    sec.cik_for = lambda symbol: cik
+    try:
+        return sec.financial_history(symbol)
+    finally:
+        sec._get, sec.cik_for = real_sec
+        sec._FACTS_CACHE.pop(cik, None)
+
+
+canada = annual({2024: 8.0, 2025: 9.0})
+for row in canada["units"]["USD"]:
+    row["form"] = "40-F"
+check("a Canadian company's 40-F is an annual report",
+      history_from(980011, {"us-gaap": {LATER: canada}}).get("years") == [2024, 2025])
+ifrs = history_from(980012, {"ifrs-full": {"Revenue": annual({2024: 8.0, 2025: 9.0})}})
+check("a company under international rules is told that, not that it re-registered",
+      not ifrs["available"] and "international rules (IFRS)" in ifrs["reason"]
+      and "re-registered" not in ifrs["reason"], ifrs["reason"])
+words = plain.explain_company(types.SimpleNamespace(
+    sec_history=ifrs, fundamentals=None, scores=None, valuation=None))
+check("and the plain words do not call it a company that does not file",
+      not words["available"] and "IFRS" in words["why"]
+      and "not a company that files" not in words["why"], words)
+bare_history = history_from(980013, {"us-gaap": {LATER: annual({2025: 9.0})}})
+check("one year filed is said without a 'CIK'",
+      "only one year" in bare_history["reason"] and "CIK" not in bare_history["reason"],
+      bare_history["reason"])
+
+
+# The ticker list in memory ages too, and an old one beats none.
+import json  # noqa: E402
+import tempfile  # noqa: E402
+
+
+def ticker_reads(age_days, answers, reads=1, in_memory=True):
+    """ticker_map with a list this old: (its last answer, downloads asked for)."""
+    asked_ = []
+
+    def get(url, params=None, tries=2):
+        asked_.append(url)
+        if isinstance(answers, Exception):
+            raise answers
+        return answers
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = _os.path.join(folder, "sec_tickers.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"OLD": 1}, fh)
+        made = time.time() - age_days * DAY
+        _os.utime(path, (made, made))
+        real_t = (sec._get, sec._cache_dir, sec._TICKER_CACHE, sec._TICKER_AT[0],
+                  sec._TICKER_ASKED[0])
+        sec._get, sec._cache_dir = get, lambda: folder
+        sec._TICKER_CACHE = {"OLD": 1} if in_memory else None
+        sec._TICKER_AT[0], sec._TICKER_ASKED[0] = made, 0.0
+        try:
+            for _ in range(reads):
+                got_ = sec.ticker_map()
+            return got_, len(asked_)
+        finally:
+            (sec._get, sec._cache_dir, sec._TICKER_CACHE, sec._TICKER_AT[0],
+             sec._TICKER_ASKED[0]) = real_t
+
+
+listed_new = {"0": {"ticker": "NEW", "cik_str": 2}}
+check("a list in memory past its age is asked for again",
+      ticker_reads(15, listed_new, reads=3) == ({"NEW": 2}, 1),
+      ticker_reads(15, listed_new, reads=3))
+check("a younger one is not", ticker_reads(3, listed_new) == ({"OLD": 1}, 0))
+check("when none comes the old one stays, and it is not asked for at every page",
+      ticker_reads(15, sec.SECError("down"), reads=3) == ({"OLD": 1}, 1))
+check("so does one left on disk when the server starts",
+      ticker_reads(15, sec.SECError("down"), in_memory=False) == ({"OLD": 1}, 1))
+
+
 class Answer:
     def __init__(self, status):
         self.status_code, self.headers = status, {}
@@ -1143,6 +1444,28 @@ check("and are kept, on neither side",
       [p.headline for p in full_case.neutral])
 
 
+coin_case = thesis.build("BTC-USD", 0.00001234, technical={
+    "composite": 0.4, "regime": "trending", "expectancy": 0.1, "hit_rate": 0.4,
+    "samples": 50})
+told_wrong = " ".join(coin_case.falsifiers)
+check("a coin is not told about revenue, margins or chief executives",
+      coin_case.balance > 0 and len(coin_case.falsifiers) == 1
+      and not any(w in told_wrong.lower() for w in ("revenue", "margin", "executive",
+                                                    "8-k", "cash")), told_wrong)
+check("and its price keeps the digits it needs", "0.000009872" in told_wrong, told_wrong)
+check("a case that leans neither way has nothing to prove wrong",
+      thesis.build("TEST", 100.0).falsifiers == [])
+deep = yahoo_says(financialData__profitMargins=-0.1, financialData__freeCashflow=-1e9)
+told_wrong = " ".join(thesis.build("TEST", 100.0, fundamentals=deep).falsifiers)
+check("a company already losing money is not told its margin could fall below zero",
+      "below 0.0%" not in told_wrong and "better profit margins" in told_wrong
+      and "cash-burn" in told_wrong and "chief executive" not in told_wrong, told_wrong)
+check("a company that files is told which filings matter",
+      any("chief executive" in x for x in full_case.falsifiers)
+      and any("Net margin falling below 15.0%" in x for x in full_case.falsifiers),
+      full_case.falsifiers)
+
+
 def researched(sec_answer, odds_side=0, composite=0.05):
     """engine.research on stand-ins, with EDGAR answering or not."""
     real_parts = (F.load, sec.financial_history, sec.recent_material, R.profile)
@@ -1176,6 +1499,24 @@ check("the valuation runs when EDGAR does not answer",
 check("and only the filed accounts are named as missing",
       "Valuation" not in down.unavailable and "Filed accounts" in down.unavailable,
       down.unavailable)
+real_wait, engine.RESEARCH_WAIT = engine.RESEARCH_WAIT, 0.3
+release = threading.Event()
+real_parts = (F.load, sec.financial_history, sec.recent_material, R.profile)
+F.load = lambda symbol, with_sec=True: home
+sec.financial_history = lambda symbol, years=6: release.wait(10)
+sec.recent_material = lambda symbol, limit=12: []
+R.profile = lambda symbol, interval="1d", benchmark="SPY": None
+began = time.time()
+try:
+    late = engine.research("TEST", 100.0, CFG, with_options=False, with_reasoning=False)
+finally:
+    release.set()
+    engine.RESEARCH_WAIT = real_wait
+    F.load, sec.financial_history, sec.recent_material, R.profile = real_parts
+check("a source that never answers costs the page that piece, not the page",
+      time.time() - began < 5 and late.unavailable == ["Filed accounts"]
+      and late.fundamentals is home and late.valuation["usable"],
+      (time.time() - began, late.unavailable))
 short_odds = researched({"available": False}, odds_side=-1)
 check("odds measured for a short argue the case against, whatever the signals lean",
       any("fall have paid" in p.headline for p in short_odds.thesis.bear.points)
@@ -1302,6 +1643,41 @@ check("one day is not 'days'", "1 day out" in page)
 check("the plain words name the currency", "Taiwan dollars" in page)
 check("and nothing unfinished is on it",
       not any(w in page for w in (">None<", "None%", ">nan<", "currency_problem")))
+
+
+def drawn(r, **kw):
+    with web.app.test_request_context("/research?symbol=TEST&interval=1d"):
+        web.app.preprocess_request()
+        return " ".join(render_template(
+            "research.html", r=r, a=shown, cfg=CFG, saved=[], watched=False,
+            price_svg="", price_svg_narrow="", filed_charts={}, plain=None, **kw).split())
+
+
+page = drawn(engine.Research(symbol="TEST", price=100.0, fundamentals=owing,
+                             quality=F.quality_score(owing), valuation=alone,
+                             thesis=said_alone))
+check("with no value the ratios are still shown, and no fair value is",
+      "No model could put a value on it" in page and "Price to earnings" in page
+      and "Fair value" not in page and "Modelled" not in page.split("What it might")[-1])
+page = drawn(engine.Research(symbol="TEST", price=100.0, fundamentals=lone,
+                             quality=F.quality_score(lone), valuation=only,
+                             thesis=thesis.build("TEST", 100.0, fundamentals=lone,
+                                                 valuation=only)))
+check("one model is called one model",
+      "from one model" in page and "Modelled value" in page and "Midpoint" not in page
+      and "single agreement" not in page)
+check("the key figures are there once each", page.count("<td>Market capitalisation</td>") == 1
+      and "The business" in page)
+nothing = F.Fundamentals(symbol="BTC-USD")
+page = drawn(engine.Research(symbol="BTC-USD", price=1.0, fundamentals=nothing,
+                             quality=F.quality_score(nothing), thesis=coin_case,
+                             valuation=V.combine(valued(nothing), 1.0)))
+check("a coin has no business section, nor a table of nothing",
+      "The business" not in page and "checks could be judged" not in page
+      and "Key figures" not in page and "What is reported" not in page)
+check("a case that leans neither way says there is nothing to prove wrong",
+      "no case here to prove wrong" in drawn(engine.Research(
+          symbol="TEST", price=1.0, thesis=thesis.build("TEST", 1.0))))
 
 
 print()
