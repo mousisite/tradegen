@@ -335,6 +335,10 @@ def cik_for(symbol: str) -> Optional[int]:
     Matches the ticker as written. The only normalisation is the dot-to-dash
     convention for share classes: some write BRK.B for what Yahoo and the SEC
     both write as BRK-B.
+
+    Raises SECError when the list of registrants cannot be had. Not knowing is
+    not None: it was told to visitors as a company that files nothing, and the
+    Find page kept that answer for a day.
     """
     raw = (symbol or "").upper().strip()
     if not raw:
@@ -343,10 +347,7 @@ def cik_for(symbol: str) -> Optional[int]:
     if any(raw.endswith(s) for s in _NON_EQUITY_SUFFIXES) or raw.startswith("^") \
             or "=" in raw:
         return None
-    try:
-        table = ticker_map()
-    except SECError:
-        return None
+    table = ticker_map()
     return table.get(raw) or table.get(raw.replace(".", "-"))
 
 
