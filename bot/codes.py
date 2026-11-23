@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -32,6 +33,26 @@ import ssl
 import time
 from email.message import EmailMessage
 from typing import Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
+
+
+def _number(key: str, default: int, least: int, most: int) -> int:
+    """A whole number from the settings, or the default when it is mistyped:
+    a stray letter must not stop the site, nor every code it sends."""
+    raw = (os.environ.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if least <= value <= most:
+            return value
+    except ValueError:
+        pass
+    log.warning("%s is %r, which is not a usable number, so %d is used",
+                key, raw, default)
+    return default
+
 
 CODE_TTL = 10 * 60
 MAX_ATTEMPTS = 5
@@ -48,7 +69,7 @@ PER_IP = (10, 60 * 60)
 # Texts cost money per message, and SMS-pumping fraud sends to thousands of
 # different numbers from thousands of addresses, which no per-number or
 # per-address limit stops. This caps what a bad hour can cost in total.
-PHONE_PER_HOUR = int(os.environ.get("PHONE_CODES_PER_HOUR") or 40)
+PHONE_PER_HOUR = _number("PHONE_CODES_PER_HOUR", 40, 0, 1_000_000)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS login_codes (
@@ -221,7 +242,7 @@ def send_mail(to: str, subject: str, body: str,
         msg[key] = value
     msg.set_content(body)
     host = os.environ["SMTP_HOST"]
-    port = int(os.environ.get("SMTP_PORT") or 587)
+    port = _number("SMTP_PORT", 587, 1, 65535)
     try:
         if port == 465:
             server = smtplib.SMTP_SSL(host, port, timeout=15,
