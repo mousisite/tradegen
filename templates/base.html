@@ -153,7 +153,7 @@
         <a class="btn sm" href="{{ url_for('signin') }}">Sign in</a>
       {% endif %}
       {% if go_pro and active != 'pricing' %}
-        <a class="btn sm" href="{{ url_for('pricing') }}">Go Pro</a>
+        <a class="btn sm" href="{{ url_for('pricing') }}" data-go-pro>Go Pro</a>
       {% endif %}
       {% if current_user and not demo %}
         <a class="me" href="{{ url_for('account') }}" title="{{ current_user.contact }}"
