@@ -185,8 +185,13 @@ def warnings_for(cal: Calendar, interval: str, horizon_bars: int,
                 "to need, but not by much, so a trade that runs long will meet "
                 "them." % (_when(cal, cal.earnings), confirmed, span))
 
+    # By the date, as it is shown: the stamp is midnight in London, the evening
+    # before in New York, and from then until the morning the warning was gone
+    # while the calendar beside it said "tomorrow". On the day itself the price
+    # has dropped, and a share sold short that day owes nothing.
     ex_div = cal.days_to_ex_dividend
-    if ex_div is not None and 0 <= ex_div <= window:
+    if ex_div is not None and _dates_away(cal, cal.ex_dividend) > 0 \
+            and ex_div <= window:
         if direction < 0:
             out.append(
                 "This goes ex-dividend %s. A short position pays the dividend "
