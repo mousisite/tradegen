@@ -331,6 +331,9 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             out.scores = {"available": False,
                           "reason": "The scored models could not be run on these "
                                     "filings."}
+
+    # Built on Yahoo's figures, so it does not wait on EDGAR having answered.
+    if out.fundamentals is not None:
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),
@@ -347,6 +350,10 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             "expectancy": analysis.calibration.expectancy_r,
             "hit_rate": analysis.calibration.hit_rate,
             "samples": analysis.calibration.bucket_samples,
+            # The side those odds were measured on, which the news can tip the
+            # other way from the signals; guessed from the signals alone, a
+            # short's winning record was filed under the case for buying.
+            "side": analysis.calibration.direction or None,
         }
 
     step("Building the case")
