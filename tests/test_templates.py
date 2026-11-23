@@ -138,7 +138,8 @@ def test_shared_pieces_are_styled_everywhere():
     """A class styled only inside one page's container renders as plain text
     everywhere else it is used."""
     css = open(STYLE, encoding="utf-8").read()
-    for rule in (r"(^|\n)\.notice\s*\{", r"(^|\n)\.count\s*\{", r"(^|\n)\.skip\s*\{"):
+    for rule in (r"(^|\n)\.notice\s*\{", r"(^|\n)\.count\s*\{", r"(^|\n)\.skip\s*\{",
+                 r"(^|\n)p\.lead\s*\{"):
         assert re.search(rule, css), "no top-level rule for %s" % rule
     assert "display: none" not in re.search(
         r"\.drop input\[type=file\]\s*\{[^}]*\}", css).group(0), \
@@ -172,6 +173,67 @@ def test_strategy_names_read_the_same_everywhere():
     assert not bad, "\n".join(bad)
 
 
+def _drawn(name, **values):
+    """A template drawn as the site draws it, with whitespace squeezed."""
+    from flask import render_template
+    with web.app.test_request_context("/"):
+        page = render_template(name, **values)
+    return re.sub(r"\s+", " ", page)
+
+
+def _strategy_page(tested):
+    from bot import strategies
+    summary = {"tested": tested, "verdict": 0, "kept": 0.05, "se": 0.1, "paid": tested,
+               "n": 100, "separate": 60.0, "wins": 40, "side": "", "base": None,
+               "short_base": None, "long_share": 0.5, "index": None, "indexes": ()}
+    return _drawn("backtest.html", strategy="rsi_reversion", label="RSI reversion",
+                  asked="RSI reversion", asked_of=str, info=strategies.BY_NAME["rsi_reversion"],
+                  results=[], rare=None, course=False, intraday=False, summary=summary, kin=[],
+                  method=web._house_method(), strategy_slug=str, short=str, slug=str)
+
+
+def test_one_of_a_thing_is_not_called_several():
+    one, three = _strategy_page(1), _strategy_page(3)
+    assert "Back-tested on 1 stock or coin ·" in one
+    assert "1 stocks and coins" not in one and "1 popular stocks" not in one, one[:3000]
+    assert "On the 1 stock or coin it has enough trades on" in one and "of the 1." not in one
+    # Only those it has enough trades on are counted, not every one tested.
+    assert "Across the 3 stocks and coins it has enough trades on" in three
+    assert "It kept money on 3 of the 3." in three
+
+
+def _strategies_page(rows=(), symbol=None, regime="all"):
+    return _drawn("strategies.html", rows=list(rows), regime=regime, rank_by="gross",
+                  symbol=symbol, seen=["AAPL"], minimum=40)
+
+
+def test_an_empty_choice_does_not_say_nothing_was_ever_measured():
+    assert "Nothing measured yet." in _strategies_page()
+    for picked in ({"symbol": "AAPL"}, {"regime": "ranging"}):
+        page = _strategies_page(**picked)
+        assert "Nothing measured yet." not in page
+        assert "No strategy has 40 measured setups for that choice yet." in page
+
+
+def test_a_result_of_nothing_is_not_drawn_as_a_loss():
+    row = {"strategy": "rsi_reversion", "family": "reversion", "n": 50, "hit_rate": 0.4,
+           "gross_exp": 0.0001, "net_exp": -0.0002, "symbols": 2}
+    page = _strategies_page([row])
+    cells = re.findall(r'<td data-label="(?:Raw|Kept)" class="r fig ([^"]*)"> ([^<]*)</td>', page)
+    assert cells == [("", "0.000R"), ("", "0.000R")], cells
+
+
+def test_what_orenth_is_stays_the_same_on_every_page():
+    """A stock page's words, its call among them, once described the company
+    and the app to search engines as well as the stock."""
+    import json
+    page = _drawn("base.html", page_blurb="Orenth's check on X: AVOID.")
+    graph = json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>',
+                                 page).group(1))["@graph"]
+    assert 'content="Orenth&#39;s check on X: AVOID."' in page
+    assert [g["description"][:30] for g in graph] == ["Free stock and crypto research"] * 2, graph
+
+
 if __name__ == "__main__":
     n = test_every_template_compiles()
     print("   OK   %d templates compile" % n)
@@ -187,4 +249,12 @@ if __name__ == "__main__":
     print("   OK   every page has a main landmark and a skip link")
     test_strategy_names_read_the_same_everywhere()
     print("   OK   strategy names come from one label")
+    test_one_of_a_thing_is_not_called_several()
+    print("   OK   a strategy tested on one stock says so")
+    test_an_empty_choice_does_not_say_nothing_was_ever_measured()
+    print("   OK   an empty choice on Strategies says it is the choice")
+    test_a_result_of_nothing_is_not_drawn_as_a_loss()
+    print("   OK   a result that rounds to nothing has no colour")
+    test_what_orenth_is_stays_the_same_on_every_page()
+    print("   OK   search engines read the same description of Orenth everywhere")
     print("TEMPLATES OK")

@@ -75,7 +75,7 @@
     prices, after trading costs. The &plusmn; is each result's margin of error:
     a result inside it cannot be told apart from luck.</p>
   {% for title, part in [("Did best", tested[:3]), ("Did worst", tested[-3:]|reverse)] %}
-    <span class="eyebrow">{{ title }}</span>
+    <span class="eyebrow" style="display:block;margin-top:var(--s2)">{{ title }}</span>
     <ul class="list">
       {% for t in part %}
         <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:

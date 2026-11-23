@@ -616,6 +616,27 @@ CONTRAST = r"""
 }
 """
 
+# Every table drawn as one: how many there are, and the first heading of each
+# that does not start where its column does.
+COLUMNS = r"""
+() => {
+  let seen = 0;
+  const off = [];
+  for (const t of document.querySelectorAll('table')) {
+    const row = t.tBodies[0] && t.tBodies[0].rows[0];
+    if (!t.tHead || !row || !t.getBoundingClientRect().width) { continue; }
+    seen += 1;
+    const th = [...t.tHead.rows[0].cells];
+    for (let i = 0; i < Math.min(th.length, row.cells.length); i++) {
+      const d = th[i].getBoundingClientRect().left - row.cells[i].getBoundingClientRect().left;
+      if (Math.abs(d) > 1.5) { off.push(th[i].textContent.trim() + ' by ' + Math.round(d)); break; }
+      if (row.cells[i].colSpan > 1) { break; }
+    }
+  }
+  return [seen, off];
+}
+"""
+
 # With a notch and a home bar pretended: the bars clear them, and nothing of
 # the page ends up under the tab bar or the fired-alert bar under the notch.
 NOTCH = r"""
@@ -1579,6 +1600,67 @@ def run(browser, site, base, check, head):
     except Exception as exc:
         check("deleting an account on a phone", False, exc)
     ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("ON A WIDE SCREEN, HELD SIDEWAYS, AND ON PAPER")
+    # -----------------------------------------------------------------------
+    # .stack is a column of boxes, and on a table it drew the headings out of
+    # line with the figures under them, by up to 461 pixels.
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800},
+                              service_workers="block")
+    ctx.set_default_timeout(15000)
+    ctx.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/")
+              else r.abort())
+    ctx.add_cookies([session_cookie(site, base)])
+    page = ctx.new_page()
+    crooked, seen = [], 0
+    for path in ("/backtests", "/backtest/trend-stack", "/learn", "/privacy", "/monitor",
+                 "/trades", "/settings"):
+        page.goto(base + path)
+        tables, off = page.evaluate(COLUMNS)
+        seen += tables
+        crooked += ["%s: %s" % (path, o) for o in off]
+    check("every heading of a table stands over its own column (%d tables)" % seen,
+          seen >= 8 and not crooked, crooked[:6])
+    hidden = []
+    for path, target in (("/backtests#how-we-tested", "#how-we-tested"),
+                         ("/privacy#notifications", "#notifications"),
+                         ("/backtests#main", "h1")):
+        page.goto("about:blank")
+        page.goto(base + path)
+        top, bar = page.evaluate("s => [document.querySelector(s).getBoundingClientRect().top,"
+                                 " document.querySelector('.topbar')"
+                                 ".getBoundingClientRect().bottom]", target)
+        if top < bar:
+            hidden.append("%s at %d under a bar down to %d" % (path, top, bar))
+    check("what a link jumps to lands below the top bar, not behind it", not hidden, hidden)
+    page.goto(base + "/backtests")
+    centred = page.evaluate("(() => { const a = document.querySelector('.closing .prose')"
+                            ".getBoundingClientRect(), b = document.querySelector('.closing')"
+                            ".getBoundingClientRect();"
+                            " return Math.abs(a.left + a.right - b.left - b.right) / 2; })()")
+    check("the closing box's words are in its middle", centred <= 1, centred)
+    page.set_viewport_size({"width": 720, "height": 900})
+    page.emulate_media(media="print")
+    page.goto(base + "/stock/nvda")
+    printed = page.evaluate("['.tabbar', '.topbar .tools', '.sharebar'].filter(s =>"
+                            " getComputedStyle(document.querySelector(s)).display !== 'none')")
+    check("the bars and buttons are left off a printed page", printed == [], printed)
+    ctx.close()
+    out = []
+    for w, h, ua, opener in ((667, 375, APP_UA, ".tabbar .more"),
+                             (800, 300, None, ".topbar .menu")):
+        ctx = context(w, ua=ua, signed_in=True)
+        page = ctx.new_page()
+        page.set_viewport_size({"width": w, "height": h})
+        page.goto(base + "/")
+        box = page.evaluate("s => { document.querySelector(s).open = true;"
+                            " const r = document.querySelector(s + ' .menu-panel')"
+                            ".getBoundingClientRect(); return [r.top, r.bottom]; }", opener)
+        if box[0] < 0 or box[1] > h:
+            out.append("%s from %d to %d of %d" % (opener, box[0], box[1], h))
+        ctx.close()
+    check("on a phone held sideways the menus stay on the screen", not out, out)
 
     print()
     print("   (refused %d requests for other sites: %s)"
