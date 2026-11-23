@@ -166,6 +166,9 @@ class ShareError(RuntimeError):
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create what is missing. database.connect runs this once for each file a
+    process opens, so nothing that only reads, on every page view, runs it
+    again: what is read here comes through database.connect."""
     conn.executescript(_SCHEMA)
     have = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
     for name, kind in _CALL_COLUMNS:
@@ -458,7 +461,6 @@ def save_verdict(conn: sqlite3.Connection, snap: Dict) -> None:
 
 
 def verdict(conn: sqlite3.Connection, symbol: str) -> Optional[Dict]:
-    ensure_schema(conn)
     row = conn.execute("SELECT data FROM public_verdicts WHERE symbol=?",
                        (symbol,)).fetchone()
     return json.loads(row["data"]) if row else None
@@ -466,7 +468,6 @@ def verdict(conn: sqlite3.Connection, symbol: str) -> Optional[Dict]:
 
 def verdicts(conn: sqlite3.Connection) -> List[Dict]:
     """Every popular instrument in list order, checked or not yet."""
-    ensure_schema(conn)
     stored = {r["symbol"]: json.loads(r["data"]) for r in
               conn.execute("SELECT symbol, data FROM public_verdicts")}
     return [stored.get(sym) or {"symbol": sym, "name": name, "action": ""}
@@ -1325,7 +1326,6 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     apart, as "early": they are mostly the ones whose stop was touched first.
     costs are round-trip fractions by asset kind, e.g. {"equity": 0.0002}.
     """
-    ensure_schema(conn)
     costs = costs or {}
     now = int(now or time.time())
     rows = [_dated(r) for r in conn.execute("SELECT * FROM calls ORDER BY at, id")]
@@ -1380,7 +1380,6 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
 def record_mark(conn: sqlite3.Connection) -> Tuple:
     """Changes whenever the record does: a call written, scored, marked as left
     out or dated. For keeping what record() and calls_csv() worked out."""
-    ensure_schema(conn)
     return tuple(conn.execute(
         "SELECT COUNT(*), MAX(id), COUNT(outcome), MAX(settled), COUNT(excluded), "
         "COUNT(price_day) FROM calls").fetchone())
@@ -1430,8 +1429,6 @@ def calls_csv(conn: sqlite3.Connection) -> str:
     any later stock split. Ordered by when each was written, then symbol,
     the order fingerprint_text takes them in.
     """
-    ensure_schema(conn)
-
     def num(x) -> str:
         return "" if x is None else "%.10g" % float(x)
 
@@ -1515,7 +1512,6 @@ def fingerprint_days(conn: sqlite3.Connection, now: Optional[float] = None) -> i
 def fingerprints(conn: sqlite3.Connection, limit: Optional[int] = None) -> List[Dict]:
     """The days' fingerprints, newest first. "late" marks one taken after the
     fact; "start" is the day's first second, for dating it on a page."""
-    ensure_schema(conn)
     sql = "SELECT * FROM record_fingerprints ORDER BY day DESC"
     rows = conn.execute(sql + (" LIMIT %d" % int(limit) if limit else "")).fetchall()
     out = []
@@ -1549,7 +1545,6 @@ def symbol_record(conn: sqlite3.Connection, symbol: str, limit: int = 6) -> Dict
     something else by the afternoon; on_record is the one being scored, with
     when it was written down ("written", in UTC).
     """
-    ensure_schema(conn)
     rows = [_dated(r) for r in conn.execute(
         "SELECT * FROM calls WHERE symbol=? AND excluded IS NULL "
         "ORDER BY at DESC, id DESC", (symbol,))]
@@ -1597,7 +1592,6 @@ def create_share(conn: sqlite3.Connection, user_id: int, snap: Dict,
 
 
 def get_share(conn: sqlite3.Connection, sid: str) -> Optional[Dict]:
-    ensure_schema(conn)
     row = conn.execute("SELECT data FROM shares WHERE id=?", (sid,)).fetchone()
     return json.loads(row["data"]) if row else None
 
