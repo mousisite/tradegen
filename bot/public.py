@@ -225,11 +225,20 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
     separate = int(round(n_eff)) if n_eff and samples and n_eff < samples - 0.5 else None
     # The page leads with the counts, so the plain explanation's own opening
     # sentence saying the same thing is dropped rather than read twice.
-    from .plain import counted
+    from .plain import FALL_COUNTS, counted
     sure = plain.get("sure", "")
     said = counted(samples, worked)
     if sure.startswith(said):
         sure = sure[len(said):].strip()
+    # The examples are of the side the signals lean. Leaning down on a call
+    # that is not a short, they are bets on a fall, and counts_line says so
+    # wherever the counts go alone: a strong record of falls read as buying.
+    action = (plan.action or "").upper()
+    short_side = action == "SHORT" or (action == "WAIT" and
+                                       (getattr(plan, "direction", 0) or 0) < 0)
+    fall = (getattr(plan, "odds_direction", 0) or 0) < 0 and not short_side
+    if fall and sure.startswith(FALL_COUNTS.strip()):
+        sure = sure[len(FALL_COUNTS.strip()):].strip()
     return {"symbol": bars.symbol,
             "name": NAMES.get(bars.symbol) or getattr(bars, "name", "") or "",
             "action": (plan.action or "").upper(),
@@ -237,6 +246,7 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
             "sure": sure,
             "points": list(plain.get("points") or [])[:3],
             "samples": samples, "worked": worked, "separate": separate,
+            "fall": fall,
             "reliable": bool(plan.prob_reliable),
             "price": float(bars.last_price),
             "currency": getattr(bars, "currency", "") or "USD",
@@ -802,18 +812,48 @@ def _bar_session(bars, k: int) -> int:
     return (int(bars.timestamp[k]) + int(getattr(bars, "gmt_offset", 0) or 0)) // 86400
 
 
-def _split_factor(bars, at: int) -> float:
+def _already_split(bars, at: int, price: float, when: int, ratio: float) -> bool:
+    """Whether a call's price was already in the new shares of the split at when.
+
+    A call is written down after one close and before the next open, and
+    Yahoo can rescale a splitting stock's prices some hours before the open
+    it dates the split by. A call written in those hours holds the new price,
+    and dividing it by the split again would score a fall of nine tenths that
+    never happened. Only a split at the first session after the call can be
+    one, and the close the call was made at tells: rescaled, it is the call's
+    own price, or it is that price divided by the split.
+    """
+    stamps = [int(t) for t in bars.timestamp]
+    start = bisect.bisect_right(stamps, int(at))
+    if not 0 < start < len(stamps) or (start + 1 < len(stamps)
+                                       and int(when) >= stamps[start + 1]):
+        return False
+    close = float(bars.close[start - 1])
+    for later, r in bars.splits:            # back to the shares of that session
+        if int(later) > int(when) and r and float(r) > 0:
+            close *= float(r)
+    if close <= 0 or price <= 0:
+        return False
+    off = abs(math.log(price / close))
+    return off < 0.03 and off < abs(math.log(price / (close * ratio)))
+
+
+def _split_factor(bars, at: int, price: Optional[float] = None) -> float:
     """How many of today's shares one share was when the call was made.
 
     Yahoo rescales the prices before a split by its ratio, new shares per
     old (10.0 for a ten-for-one), so a price written down before a split is
     divided by the ratios of every split since to set it beside today's
     history. Bars without split events (market data before it carried them)
-    give 1.0.
+    give 1.0. With the call's price, a split that price already allowed for
+    is left out (_already_split).
     """
     factor = 1.0
     for when, ratio in getattr(bars, "splits", None) or ():
         if int(when) > int(at) and ratio and float(ratio) > 0:
+            if price is not None and _already_split(bars, at, float(price),
+                                                    int(when), float(ratio)):
+                continue
             factor *= float(ratio)
     return factor
 
@@ -832,13 +872,17 @@ def _split_error(bars, row, start: int) -> Optional[str]:
               if ratio and row["at"] < int(when) <= row["settled"]]
     if not inside:
         return None
-    f = _split_factor(bars, row["at"])
+    f = _split_factor(bars, row["at"], row["price"])
     how, exit_price = _walk(bars, start, row["price"] / f, row["stop"] / f,
                             row["target"] / f, row["horizon"])
     if how is None:
         return None
     if how == row["how"] and abs(exit_price * f / row["exit_price"] - 1.0) <= 0.01:
         return None
+    if f != _split_factor(bars, row["at"]):
+        return ("A stock split on %s was counted when it was scored, although its "
+                "price already allowed for it. Counted once, the price %s."
+                % (_date(min(inside)), HOW_WORDS[how]))
     return ("A stock split on %s fell inside its window and was not allowed for "
             "when it was scored. Allowing for it, the price %s."
             % (_date(min(inside)), HOW_WORDS[how]))
@@ -964,7 +1008,7 @@ def settle_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
     for row in rows:
         # The bar the call fell inside is skipped: part of it was already over.
         start = next((k for k in range(n) if int(bars.timestamp[k]) > row["at"]), n)
-        f = _split_factor(bars, row["at"])
+        f = _split_factor(bars, row["at"], row["price"])
         entry, stop, target = row["price"] / f, row["stop"] / f, row["target"] / f
         how, exit_price = _walk(bars, start, entry, stop, target, row["horizon"])
         if how is None:
@@ -1282,6 +1326,15 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
             "latest": latest[:limit]}
 
 
+def record_mark(conn: sqlite3.Connection) -> Tuple:
+    """Changes whenever the record does: a call written, scored, marked as left
+    out or dated. For keeping what record() and calls_csv() worked out."""
+    ensure_schema(conn)
+    return tuple(conn.execute(
+        "SELECT COUNT(*), MAX(id), COUNT(outcome), MAX(settled), COUNT(excluded), "
+        "COUNT(price_day) FROM calls").fetchone())
+
+
 def _dated(row) -> Dict:
     """A call as a dict, with session_at: midnight UTC of the session its
     price came from, for dating it, or when it was written down if that is
@@ -1550,11 +1603,15 @@ def counts_line(snap: Dict, short: bool = False) -> str:
     counts, which is as large as a test of up to 2,500 sampled days goes."""
     if not snap.get("samples"):
         return "Too few past examples to count."
+    fall = bool(snap.get("fall"))
+    if short and fall:
+        return ("In tests on past prices, a bet on a fall worked %d of %d times."
+                % (snap["worked"], snap["samples"]))
     if short:
         return ("Tested on past prices: it hit its target before its stop "
                 "%d of %d times." % (snap["worked"], snap["samples"]))
     from .plain import counted
-    line = counted(snap["samples"], snap["worked"])
+    line = counted(snap["samples"], snap["worked"], fall)
     if snap.get("separate"):
         line += (" Many overlap in time, so together they are worth about %d "
                  "separate tests." % snap["separate"])

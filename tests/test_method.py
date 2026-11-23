@@ -527,6 +527,24 @@ out, text = said(action="SHORT", direction=-1, entry=105.0, stop=110.0,
 check("a SHORT's stop is above it, and said so",
       "rising to $110.00" in text and "fell to" not in text, out["points"])
 
+sized = {"quantity": 7, "risk_amount": 87.73, "gap_loss": 188.32, "gap_multiple": 2.1}
+for act in ("WAIT", "SHORT"):
+    out, text = said(action=act, direction=-1, entry=105.0, stop=110.0, target1=95.0,
+                     odds_direction=-1, position=sized)
+    check("a short %s's risk is a sale, and its danger a jump up" % act,
+          out["risk"] == "Shorting 7 of these would put $87.73 at risk. But if the price "
+          "jumped up overnight, which happens, you could lose about $188.32 instead.",
+          out["risk"])
+out, text = said(position=sized)
+check("a buy's is still a purchase, and a jump down",
+      out["risk"].startswith("Buying 7 of these") and "jumped down" in out["risk"], out["risk"])
+for miss, want, never in ((-0.52, "lost about 52% of what you put at risk, not all of it", "trading costs"),
+                          (-1.0, "about 100% of what you put at risk: trading costs", "not all"),
+                          (-2.3, "about 230% of what you put at risk: trading costs", "not all"),
+                          (0.12, "still made about 12% of what you put at risk", "lost about")):
+    out, text = said(avg_loss_r=miss)
+    check("a usual miss of %+.2f times the risk is said as that" % miss,
+          want in out["sure"] and never not in out["sure"], out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="bearish_no_shorts", odds_direction=-1)
 check("a bearish AVOID says the signals point to a fall",

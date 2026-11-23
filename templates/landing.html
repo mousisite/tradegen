@@ -42,9 +42,7 @@
     {# The counts are pretend trades on past prices, and say what "worked"
        measured, in the same words as every other page that gives them. #}
     {% if example.samples %}
-      <span class="prose">{{ counts_line(example) }}{% if example.fall %} Here,
-        worked means a bet on the price falling paid off.{% endif %} A test,
-        not a promise.</span>
+      <span class="prose">{{ counts_line(example) }} A test, not a promise.</span>
     {% endif %}
     <span class="go">See the whole analysis &rarr;</span>
     {# Kept for the tests and for anyone reading the page source: this is a
