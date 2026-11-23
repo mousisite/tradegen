@@ -274,6 +274,29 @@ try:
                            (t1,)).fetchone()[0] == "partly")
     db.delete_trade(conn, t1)
 
+    # The form always sends the setup and the feeling, so a press of Save on an
+    # untouched form was kept, and announced, as a review.
+    sign_in(c, alice)
+    blank = db.open_trade(conn, "ZZA", "5m", 1, 100.0, 99.0, user=alice.id, setup="own")
+    db.close_trade(conn, blank, 101.0, user=alice.id)
+    r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": "",
+                                       "lesson": " ", "setup": "own", "emotion": ""})
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (blank,)).fetchone()
+    check("a review with nothing in it is refused, and nothing is kept",
+          r.status_code == 400 and "Say whether you followed your plan" in text(r)
+          and row["reviewed_ts"] is None, r.status_code)
+    r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": "",
+                                       "lesson": "", "setup": "own", "emotion": "calm"})
+    check("but a feeling set on it is kept", r.status_code == 302 and conn.execute(
+        "SELECT emotion FROM trades WHERE id=?", (blank,)).fetchone()[0] == "calm")
+    for answer in ("yes", ""):
+        r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": answer,
+                                           "lesson": "", "setup": "own", "emotion": "calm"})
+    check("and an answer given by mistake can be taken back", r.status_code == 302
+          and conn.execute("SELECT followed_plan FROM trades WHERE id=?",
+                           (blank,)).fetchone()[0] is None)
+    db.delete_trade(conn, blank)
+
     # -----------------------------------------------------------------------
     head("THE BREAKDOWN, ON 40 SCRIPTED TRADES")
     # -----------------------------------------------------------------------
@@ -434,6 +457,22 @@ try:
     check("rules switched off say nothing",
           not journal.rules_check(conn, dan.id, web.config_mod.DEFAULTS, then, costs=COSTS))
 
+    # A trade typed in later is told about its own day, not about today.
+    late = journal.rules_check(conn, dan.id, dict(timed, max_trades_per_day=1), ny_at(1, 10, 31),
+                               present=ny_at(0, 12, 0))
+    check("a trade from an earlier day is told when it was entered",
+          journal.rules_words(late) == "Your rule said stop that day: you entered at 10:31 New "
+          "York time, after your last entry time of 10:30.", journal.rules_words(late))
+    late = journal.rules_check(conn, dan.id, dict(cfg, max_trades_per_day=1), then, costs=COSTS,
+                               present=NOW)
+    check("and so for the loss and the count", journal.rules_words(late) ==
+          "Your rules said stop that day: you had lost 2.1R that day (limit 2R) and you had "
+          "taken 3 trades that day (most 1).", journal.rules_words(late))
+    late = journal.rules_check(conn, dan.id, timed, ny_at(1, 10, 31), present=ny_at(1, 13, 0))
+    check("one from earlier today is still today's", journal.rules_words(late) ==
+          "Your rule says stop for today: you entered at 10:31 New York time, after your last "
+          "entry time of 10:30.", journal.rules_words(late))
+
     erin = A.upsert_email_user(conn, "erin@example.com")
     A.save_settings(conn, erin.id, {"max_trades_per_day": 2})
     sign_in(c, erin)
@@ -465,6 +504,15 @@ try:
     tagged = {g["key"]: g["trades"] for g in journal.breakdown(conn, erin.id, COSTS,
                                                                "broke_rule")}
     check("broken rules show up in the breakdown", tagged == {"yes": 1}, tagged)
+
+    # One typed in for yesterday is held to yesterday, and the page says so.
+    A.save_settings(conn, erin.id, {"max_trades_per_day": 2, "last_entry_time": "00:01"})
+    page = flat(text(c.post("/trades/open", data=dict(
+        form, opened=journal.entry_field(ny_at(1, 9, 45)),
+        opened_shown=journal.entry_field(NOW)))))
+    check("the stop page for an earlier day's trade never says today",
+          "Your rule said stop that day: you entered at 9:45 New York time" in page
+          and "Log it anyway?" in page and "Stop for today?" not in page, page[:1500])
 
     # The settings page keeps the rules.
     r = c.post("/settings", data={"daily_loss_limit_r": "2", "max_trades_per_day": "3",

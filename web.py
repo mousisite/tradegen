@@ -1611,7 +1611,8 @@ def _rules_stop(conn, cfg: Dict, opened_ts: Optional[int]):
     page, and broke_rule names the rules it broke, to keep with the trade.
     """
     from bot import journal as journal_mod
-    broken = journal_mod.rules_check(conn, uid(), cfg, opened_ts, costs=_costs(cfg))
+    broken = journal_mod.rules_check(conn, uid(), cfg, opened_ts, costs=_costs(cfg),
+                                     present=int(time.time()))
     if not broken:
         return None, None
     if request.form.get("override") == "1":
@@ -1620,7 +1621,8 @@ def _rules_stop(conn, cfg: Dict, opened_ts: Optional[int]):
     fields = [(k, v) for k in request.form for v in request.form.getlist(k)
               if k != "override"]
     page = render_template("rule_stop.html", said=journal_mod.rules_words(broken),
-                           broken=broken, fields=fields, action=request.path,
+                           broken=broken, past=broken[0]["past"], fields=fields,
+                           action=request.path,
                            settings_url=url_for("settings") + "#rules")
     return page, None
 

@@ -1114,7 +1114,13 @@ def review_trade(conn: sqlite3.Connection, trade_id: int, followed_plan: Optiona
         raise ValueError("There is no such trade in your journal.")
     if row["status"] != "closed":
         raise ValueError("A trade is reviewed once it is closed.")
-    if followed_plan is None and not lesson and setup is None and emotion is None:
+    # The form always sends the setup and the feeling, so they say something
+    # only when changed. Emptying a review that had something in it is allowed.
+    same = all(sent is None or (sent or "") == (row[key] or "")
+               for key, sent in (("setup", setup), ("emotion", emotion)))
+    emptied = (setup is not None or emotion is not None) and (
+        row["followed_plan"] or row["lesson"])
+    if followed_plan is None and not lesson and same and not emptied:
         raise ValueError("Say whether you followed your plan, or write what you learned.")
     sets, values = ["followed_plan=?", "lesson=?", "reviewed_ts=?"], [
         followed_plan, lesson or None, int(time.time())]

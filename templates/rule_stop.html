@@ -9,7 +9,7 @@
    form again, marked so the trade is kept as one that broke a rule. #}
 <div class="pagehead">
   <span class="eyebrow">Your trading rules</span>
-  <h1>Stop for today?</h1>
+  <h1>{{ 'Log it anyway?' if past else 'Stop for today?' }}</h1>
   <p>{{ said }}</p>
 </div>
 

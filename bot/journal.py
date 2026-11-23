@@ -389,7 +389,8 @@ def _hhmm(minutes: int) -> str:
 
 
 def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
-                costs: Optional[Dict[str, float]] = None) -> List[Dict]:
+                costs: Optional[Dict[str, float]] = None,
+                present: Optional[int] = None) -> List[Dict]:
     """The daily rules a new trade entered at `now` would break, in words.
 
     "Today" is the New York date of `now` (the entry time of the trade being
@@ -397,11 +398,18 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
     The loss is the R after costs of trades closed that day by then; the
     count is the trades entered that day by then; the time rule compares
     New York's clock with the person's last entry time. A rule set to 0 or
-    left empty is off. Each broken rule is {"rule", "words"}.
+    left empty is off. Each broken rule is {"rule", "words", "past"}.
+
+    present is the time it really is, when that may be later than `now`: a
+    trade from an earlier day is told "that day" (and is "past"), and one
+    from earlier the same day the time it was entered.
     """
     from .config import clock_minutes
     now = int(now if now is not None else time.time())
+    present = now if present is None else int(present)
     day, minute, _ = clock.ny_clock(now)
+    past = clock.ny_clock(present)[0] != day
+    when = "that day" if past else "today"
     out: List[Dict] = []
 
     limit = float(cfg.get("daily_loss_limit_r") or 0.0)
@@ -409,8 +417,9 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
         lost = -sum(i["r"] for i in closed_results(conn, user, costs or costs_from(cfg))
                     if i["closed"] <= now and clock.ny_clock(i["closed"])[0] == day)
         if lost >= limit - 1e-9:
-            out.append({"rule": "loss", "words": "you have lost %.1fR today (limit %gR)"
-                        % (lost, limit)})
+            out.append({"rule": "loss", "past": past,
+                        "words": "you %s lost %.1fR %s (limit %gR)"
+                        % ("had" if past else "have", lost, when, limit)})
 
     most = int(cfg.get("max_trades_per_day") or 0)
     if most > 0:
@@ -420,13 +429,17 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
         taken = sum(1 for (ts,) in conn.execute(sql, args)
                     if clock.ny_clock(int(ts))[0] == day)
         if taken >= most:
-            out.append({"rule": "trades", "words": "you have taken %d trade%s today (most %d)"
-                        % (taken, "" if taken == 1 else "s", most)})
+            out.append({"rule": "trades", "past": past,
+                        "words": "you %s taken %d trade%s %s (most %d)"
+                        % ("had" if past else "have", taken, "" if taken == 1 else "s",
+                           when, most)})
 
     last = clock_minutes(str(cfg.get("last_entry_time") or ""))
     if last is not None and minute > last:
-        out.append({"rule": "time", "words": "it is %s New York time, after your last "
-                    "entry time of %s" % (_hhmm(minute), _hhmm(last))})
+        earlier = past or present - now > CLOCK_SLACK
+        out.append({"rule": "time", "past": past, "words": "%s %s New York time, after your "
+                    "last entry time of %s" % ("you entered at" if earlier else "it is",
+                                               _hhmm(minute), _hhmm(last))})
     return out
 
 
@@ -436,6 +449,8 @@ def rules_words(broken: Sequence[Dict]) -> str:
         return ""
     said = [b["words"] for b in broken]
     joined = said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1]
+    if broken[0].get("past"):
+        return "Your rule%s said stop that day: %s." % ("s" if len(said) > 1 else "", joined)
     return "Your rule%s say%s stop for today: %s." % (
         "s" if len(said) > 1 else "", "" if len(said) > 1 else "s", joined)
 
