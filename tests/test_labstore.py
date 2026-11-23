@@ -259,6 +259,23 @@ for res in few:
 check("the same few dates in two instruments are still too few",
       labstore.pooled(few, "liquidity_model", "2r")["days"] == 6
       and labstore.pooled(few, "liquidity_model", "2r")["verdict"] is None)
+# An instrument with trades on one date has no error of its own. By hand: one
+# with 1 and 3 on two dates (average 2), and one with two trades of 5 on the
+# first of them. The average of all four is 3.5, so the dates' remainders are
+# (1 - 2) + (10 - 2 * 3.5) = 2 and 3 - 2 = 1, and the error is sqrt(4 + 1) / 4.
+lone = labstore.day_error([(2, 2.0, {1: (1, 1.0), 2: (1, 3.0)}), (2, 5.0, {1: (2, 10.0)})])
+check("an instrument with one date is set against them all",
+      lone is not None and abs(lone - 5 ** 0.5 / 4) < 1e-9, lone)
+check("and alone, or with none but one date between them, there is still no error",
+      labstore.day_error([(2, 5.0, {1: (2, 10.0)})]) is None
+      and labstore.day_error([(2, 5.0, {1: (2, 10.0)}), (1, 1.0, {1: (1, 1.0)})]) is None)
+corner = labstore.sample_result("SPY")
+corner["setups"]["liquidity_model"]["rules"]["2r"] = dict(
+    labstore._sample_rule(2, 1, 0.5, 0.0, 1), se=None, diff_se=None)
+kept_ = labstore.pooled([labstore.sample_result("ES=F"), corner], "liquidity_model", "2r")
+check("so two trades on one date do not cost the rest their margin and their verdict",
+      kept_["n"] == 43 and kept_["se"] is not None and kept_["verdict"] is not None
+      and kept_["diff_se"] is not None, kept_)
 # Trades with no random entries are no part of the comparison, or of its count.
 part = labstore.sample_result("ES=F")
 rule_ = part["setups"]["liquidity_model"]["rules"]["2r"]

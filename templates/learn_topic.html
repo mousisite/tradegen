@@ -40,7 +40,7 @@
 <div class="plainbox">
   <span class="eyebrow">The short answer</span>
   {% if not page.measured %}
-    <p class="lead">{% if page.no_cases %}No cases in the days tested.{% else %}Being tested. This fills in after the first nightly run.{% endif %}</p>
+    <p class="lead">{% if page.no_cases %}No cases in the days tested.{% else %}Being tested. This fills in after the next nightly run.{% endif %}</p>
   {% else %}
     {% set ns = namespace(said=false) %}
     {% for v in page.setups %}
@@ -177,7 +177,7 @@
     {% endif %}
   {% else %}
     <div class="card"><p class="prose">Being tested on 5- and 15-minute prices. This
-      fills in after the first nightly run.</p></div>
+      fills in after the next nightly run.</p></div>
   {% endif %}
   {% if v.daily %}
     <p class="prose" style="margin-top:var(--s2)">{% if v.daily.tested %}On up to five
@@ -209,7 +209,7 @@
             {{ rate(e.base) }}{% if c.versus %} <span class="soft">· {{ c.versus }}</span>{% endif %}.</li>{% endfor %}
           {% for note in c.notes %}<li>{{ note }}</li>{% endfor %}
         {% else %}
-          <li><b>Result:</b> {% if c.no_cases %}no cases in the days tested.{% else %}being tested. This fills in after the first nightly run.{% endif %}</li>
+          <li><b>Result:</b> {% if c.no_cases %}no cases in the days tested.{% else %}being tested. This fills in after the next nightly run.{% endif %}</li>
         {% endif %}
       </ul>
       {% if c.by_symbol %}
