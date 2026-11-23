@@ -163,8 +163,9 @@
           {% endif %}{{ help('reward_risk') }}</dd>
       {% if plan.position and not plan.position.error %}
       <dt>Size</dt>
-      <dd><span class="fig">{{ plan.position.quantity }}</span> units
-          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span>{{ help('size') }}</dd>
+      <dd><span class="fig">{{ plan.position.quantity_text }}</span> {{ plan.position.unit_text }}
+          <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}{% if plan.position.account_in %},
+            as if your account were in {{ plan.position.account_in }}{% endif %}</span>{{ help('size') }}</dd>
       <dt>You risk</dt>
       <dd><span class="fig">{{ plan.position.risk_amount|money }}</span>
           <span class="faint">{{ "%.2f"|format(plan.position.risk_pct_of_account) }}% of account</span>{{ help('risk') }}</dd>

@@ -77,15 +77,28 @@ class Plan:
     tested_reward_risk: Optional[float] = None
 
 
-def _round_price(value: float, reference: float) -> float:
-    """Round to a sensible tick for the instrument's price magnitude."""
+def _round_price(value: float, reference: float, move: float = 0.0) -> float:
+    """Round to a sensible tick for the instrument's price magnitude.
+
+    Under 1, at least four figures are kept however small the price: cut to
+    six decimals, a coin at 0.0000024 had its stop, entry and target rounded
+    onto each other. `move` is what a bar usually moves; a tick that is more
+    than a tenth of it (a currency on 5-minute bars, a cash fund) is made
+    finer for the same reason.
+    """
     if reference >= 1000:
-        return round(value, 1)
-    if reference >= 100:
-        return round(value, 2)
-    if reference >= 1:
-        return round(value, 3)
-    return round(value, 6)
+        digits = 1
+    elif reference >= 100:
+        digits = 2
+    elif reference >= 1:
+        digits = 3
+    elif reference > 0:
+        digits = max(6, 3 - math.floor(math.log10(reference)))
+    else:
+        digits = 6
+    if move > 0 and 10.0 ** -digits > move / 10.0:
+        digits = max(digits, 2 - math.floor(math.log10(move)))
+    return round(value, digits)
 
 
 def blend_conviction(composite: float, sentiment: Sentiment,
@@ -233,6 +246,52 @@ def build_targets(entry: float, stop: float, direction: int, atr_value: float,
                     "resistance on the way" % (note, len(blockers)))
 
 
+# Currencies quoted in hundredths, named so the size beside them makes sense.
+_HUNDREDTHS = {"GBp": "pence (GBp)", "GBX": "pence (GBX)", "ZAc": "South African cents (ZAc)",
+               "ILA": "Israeli agorot (ILA)"}
+
+
+def _foreign(bars: Bars) -> str:
+    """The currency a price is in, when it is not US dollars, else nothing.
+
+    The account is one number with no currency of its own, so a size is in
+    whatever the price is in. Nothing is converted; the page says so.
+    """
+    currency = getattr(bars, "currency", "") or ""
+    return "" if currency == "USD" else _HUNDREDTHS.get(currency, currency)
+
+
+def size_futures(symbol: str, entry: float, stop: float, cfg: Dict) -> Dict:
+    """Whole futures contracts for the risk set, as the size calculator counts them.
+
+    One E-mini S&P contract gains or loses 50 dollars a point. Sized like a
+    share, at a dollar a point, "4 units, risk 200" was ten thousand dollars
+    at risk in four contracts. There is no cap by the position's full value:
+    a contract is held on a deposit, and its full value is many times that.
+    """
+    from . import journal                   # journal reads the setups module
+
+    root = (symbol or "").upper()[:-2]
+    if root not in journal.CONTRACTS:
+        return {"error": "Futures are sized in whole contracts, and what one point of "
+                         "this contract is worth is not known here. The size calculator "
+                         "can work it out from your contract's dollars a point."}
+    try:
+        sized = journal.size(float(cfg["account_size"]), float(cfg["risk_per_trade_pct"]),
+                             entry, stop, "futures", root)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if not sized["fits"]:
+        return {"error": sized["why_none"], "risk_amount": 0.0,
+                "per_unit_risk": sized["per_unit"]}
+    many = "contract" if sized["quantity"] == 1 else "contracts"
+    return {"quantity": sized["quantity"], "quantity_text": sized["quantity_text"],
+            "unit_text": "%s %s" % (root, many), "multiplier": sized["multiplier"],
+            "notional": sized["notional"], "risk_amount": sized["at_risk"],
+            "risk_pct_of_account": sized["pct"], "per_unit_risk": sized["per_unit"],
+            "capped_by_max_position": False}
+
+
 def size_position(entry: float, stop: float, bars: Bars, cfg: Dict) -> Dict:
     """Risk-based sizing: never risk more than the configured share of capital."""
     account = float(cfg["account_size"])
@@ -240,6 +299,13 @@ def size_position(entry: float, stop: float, bars: Bars, cfg: Dict) -> Dict:
     per_unit = abs(entry - stop)
     if per_unit <= 0:
         return {"error": "stop equals entry, cannot size"}
+    if (bars.symbol or "").upper().endswith("=F"):
+        out = size_futures(bars.symbol, entry, stop, cfg)
+        if "error" not in out:
+            out.update(_gap_risk(entry, stop, out["quantity"] * out["multiplier"],
+                                 account, out["risk_amount"], bars))
+        return out
+    foreign = _foreign(bars)
 
     qty = risk_amount / per_unit
     notional = qty * entry
@@ -255,11 +321,16 @@ def size_position(entry: float, stop: float, bars: Bars, cfg: Dict) -> Dict:
     else:
         qty = float(int(qty))          # whole shares only
         if qty < 1:
-            return {"error": "account too small to take one share at this stop distance",
+            return {"error": "account too small to take one share at this stop distance"
+                             + (", counting the account as %s" % foreign if foreign else ""),
                     "risk_amount": risk_amount, "per_unit_risk": per_unit}
 
     out = {
         "quantity": qty,
+        "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if bars.is_crypto
+                          else "{:,.0f}".format(qty)),
+        "unit_text": "units",
+        "account_in": foreign,
         "notional": qty * entry,
         "risk_amount": qty * per_unit,
         "risk_pct_of_account": (qty * per_unit) / account * 100.0,
@@ -319,7 +390,7 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
 
     def fp(value) -> str:
         """Round to the instrument's tick, then render it readably."""
-        return format_price(_round_price(float(value), price))
+        return format_price(_round_price(float(value), price, atr_value))
 
     conviction, conflict = blend_conviction(composite, sentiment,
                                             float(cfg["sentiment_weight"]))
@@ -398,9 +469,10 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
             action="AVOID", direction=0,
             headline="Bearish lean, and shorting is disabled. Do not buy here.",
             conviction=conviction,
-            edge_verdict=("Evidence points down. A long entry would be fighting "
-                          "it. The odds shown are for a bet on the price "
-                          "falling, the side these signals take, not for a buy."),
+            edge_verdict=("Evidence points down. A long entry would be fighting it."
+                          + (" The odds shown are for a bet on the price falling, the "
+                             "side these signals take, not for a buy."
+                             if calib.hit_rate is not None else "")),
             avoid_reason="bearish_no_shorts",
             invalidation="Reconsider a long only if price reclaims %s and "
                          "holds it on a closing basis." % fp(ctx.vwap[i] if np.isfinite(ctx.vwap[i]) else price),
@@ -439,8 +511,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
         why = "Price is %.1f ATR from VWAP, too extended to chase." % abs(extension)
     elif blocked:
         mode = "WAIT"
-        why = "Price is sitting into %s, only %.2f away." % (
-            blocker.label(), abs(blocker.price - price))
+        why = "Price is sitting into %s, only %s away." % (
+            blocker.label(), format_price(abs(blocker.price - price)))
     elif edge:
         # Direction decides the label. Calling a short "BUY" while building a
         # trade whose target sits below the entry is how someone clicks the
@@ -481,9 +553,16 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
                    "straight through is not support." % (
                        fp(entry), bars.interval, side))
 
+    # Rounded before anything is worked out from them, so the size, the money
+    # at risk and the reward to risk are those of the prices shown, which are
+    # also the ones the review page and the journal size from.
+    entry = _round_price(entry, price, atr_value)
     stop, stop_rationale = build_stop(entry, direction, atr_value, levels, cfg)
+    stop = _round_price(stop, price, atr_value)
     target1, target2, target_rationale = build_targets(entry, stop, direction,
                                                        atr_value, levels, cfg)
+    target1 = _round_price(target1, price, atr_value)
+    target2 = _round_price(target2, price, atr_value)
 
     risk_per_unit = abs(entry - stop)
     reward = abs(target1 - entry)
@@ -505,7 +584,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     # target entered at the close, because that is the trade the hit rate it
     # is compared with belongs to. This plan's own levels can differ; the
     # verdict says so rather than pairing one trade's odds with another's.
-    if calib.avg_win_r is not None and calib.avg_loss_r is not None             and calib.avg_loss_r < 0 < calib.avg_win_r - calib.avg_loss_r:
+    if (calib.avg_win_r is not None and calib.avg_loss_r is not None
+            and calib.avg_loss_r < 0 < calib.avg_win_r - calib.avg_loss_r):
         breakeven = -calib.avg_loss_r / (calib.avg_win_r - calib.avg_loss_r)
     elif calib.hit_rate is not None:
         breakeven = calib.breakeven
@@ -530,7 +610,9 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     verdict_bits = []
     action = mode
     avoid_reason = ""
-    if calib.hit_rate is None:
+    if calib.hit_rate is None and calib_side * (calib.score or 0.0) < 0:
+        verdict_bits.append(calib.note)         # the two readings disagree
+    elif calib.hit_rate is None:
         verdict_bits.append("No historical sample was available to measure this "
                             "setup, so the odds are unverified.")
     else:
@@ -583,6 +665,12 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
                     "the market's own drift."
                     % ("Buying" if direction > 0 else "Shorting", baseline))
 
+    if action != "AVOID" and _foreign(bars):
+        risks.append("This is priced in %s, and the size treats your account as if "
+                     "it were in %s too. If your account is in another currency, "
+                     "convert it before trading the size shown."
+                     % (_foreign(bars), _foreign(bars)))
+
     if calib.stable is False:
         verdict_bits.append("The most recent third of samples disagrees with the "
                             "full period, which suggests the edge is decaying.")
@@ -614,12 +702,12 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     return Plan(
         action=action, direction=direction, headline=headline,
         conviction=conviction,
-        entry=_round_price(entry, price), entry_type=entry_type,
+        entry=entry, entry_type=entry_type,
         entry_rationale=("%s. Level used: %s." % (why.rstrip(". "), entry_rationale)
                          if entry_type == "limit" else why),
         trigger=trigger,
-        stop=_round_price(stop, price), stop_rationale=stop_rationale,
-        target1=_round_price(target1, price), target2=_round_price(target2, price),
+        stop=stop, stop_rationale=stop_rationale,
+        target1=target1, target2=target2,
         target_rationale=target_rationale,
         reward_risk=rr,
         edge_verdict=" ".join(verdict_bits),
