@@ -22,6 +22,7 @@ blank or an error on the page.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -32,7 +33,9 @@ import numpy as np
 
 from . import charts, clock, labstore, liquidity, setups, structure
 from . import sessions as sessions_mod
-from .market import format_price
+from .market import DataError, format_price
+
+log = logging.getLogger(__name__)
 
 # Hourly bars for the lean, and a related market's bars, are kept this long.
 CACHE_SECONDS = 300
@@ -43,10 +46,17 @@ FAIL_SECONDS = 60
 # or low, and the 4-hour trend settles within a few weeks), and a quarter of a
 # full download.
 HOURLY_LOOKBACK = "60d"
+# The same stretch of an hourly analysis's own two years of bars: a coin's 60
+# days are 1,440 of them. The read is the same from these as from all of them.
+HOURLY_BARS = 1500
 WIDE_BARS, NARROW_BARS = 90, 40
 MAX_MARKS = 8
 # app choice: how many recent bars the pair check compares.
 PAIR_BARS = 300
+# How far back a partner's bars are asked for, enough for PAIR_BARS of a
+# stock's (a future or coin has more). 30-minute bars need nearly the whole 60
+# days the source has, and get them.
+PAIR_LOOKBACK = {"1h": HOURLY_LOOKBACK, "5m": "5d", "15m": "1mo"}
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
            "Nov", "Dec")
@@ -57,6 +67,7 @@ _FETCHED: Dict[Tuple[str, str], Tuple[float, object]] = {}
 
 UNAVAILABLE = ("The hourly prices this read needs could not be fetched just now, so "
                "there is no read of the day's lean here. Try again in a few minutes.")
+NOT_READ = "The day's lean could not be worked out from these prices."
 TOO_FEW = "There are too few hourly prices yet to read the day's lean from."
 
 
@@ -113,14 +124,6 @@ def ny_as_of(bars) -> str:
     return stamp
 
 
-def _prior_words(bars) -> Tuple[str, str]:
-    """('Yesterday's', 'Yest.') for intraday and daily bars; for longer bars
-    the bar before is not yesterday."""
-    if clock.bar_seconds(bars) > clock.DAY:
-        return "The previous bar's", "Prev."
-    return "Yesterday's", "Yest."
-
-
 # --- the series -----------------------------------------------------------------------
 
 _WANTED = structure.KEYS + clock.KEYS + liquidity.KEYS
@@ -166,7 +169,7 @@ def _fetched(symbol: str, interval: str, fetch: Optional[Callable]):
             return value
     if fetch is None:
         from . import market as market_mod
-        lookback = HOURLY_LOOKBACK if interval == "1h" else None
+        lookback = PAIR_LOOKBACK.get(interval)
         fetch = lambda sym, iv: market_mod.fetch_bars(sym, iv, lookback)  # noqa: E731
     try:
         value = fetch(symbol, interval)
@@ -220,12 +223,15 @@ def for_analysis(result, cfg: Dict, db_path: Optional[str] = None,
     last = n - 1
     out["close"] = float(bars.close[last])
     days = clock.day_table(bars) if intraday else []
-    out["structure"] = _structure(bars, s, kind)
-    out["levels"] = _levels(bars, s, kind)
-    out["notes"] = _notes(bars, s, kind, days)
+    live = clock.live_day(bars)
+    prior = _prior(bars, s, days, live)
+    out["structure"] = _structure(bars, s, kind, live is not None)
+    out["levels"] = _levels(bars, s, kind, prior)
+    out["notes"] = _notes(bars, s, kind, days, live is not None)
     try:
-        out["chart"] = _chart(bars, s, kind, days, out["calm"])
+        out["chart"] = _chart(bars, s, kind, days, out["calm"], prior)
     except Exception:
+        log.exception("the key-levels chart of %s %s", bars.symbol, bars.interval)
         out["chart"] = {}
     if not intraday:
         return out
@@ -235,16 +241,19 @@ def for_analysis(result, cfg: Dict, db_path: Optional[str] = None,
     try:
         conn = _open(db_path)
     except Exception:
+        log.exception("the Setup lab's records could not be opened")
         conn = None
     try:
         try:
             out["clock"] = clock_strip(bars, kind, now, conn)
         except Exception:
+            log.exception("the New York clock of %s %s", bars.symbol, bars.interval)
             out["clock"] = None
         out["bias"] = _bias(bars, fetch, conn)
         try:
             out["pair"] = pair_check(bars, fetch, conn)
         except Exception:
+            log.exception("the pair check of %s %s", bars.symbol, bars.interval)
             out["pair"] = None
     finally:
         if conn is not None:
@@ -267,7 +276,9 @@ def _event_at(bars, s: Dict[str, np.ndarray], i: int, kinds: Tuple[str, ...]) ->
     return None
 
 
-def _structure(bars, s: Dict[str, np.ndarray], kind: str) -> Dict:
+def _structure(bars, s: Dict[str, np.ndarray], kind: str, ahead: bool = False) -> Dict:
+    """The structure in sentences. `ahead`: the live price is already in a day
+    with no finished bar, so the bars' last day is not today."""
     daily = kind == "daily"
     last = len(bars.close) - 1
     close = float(bars.close[last])
@@ -313,7 +324,9 @@ def _structure(bars, s: Dict[str, np.ndarray], kind: str) -> Dict:
         d = int(s["lq_take"][jt])
         level = float(s["lq_take_lvl"][jt])
         after = np.asarray(bars.close[jt + 1:last + 1], dtype=float)
-        if bool(s["lq_take_back"][jt]):
+        took_close = float(bars.close[jt])
+        # Against the level the sentence names, as liquidity.events judges it.
+        if took_close > level if d == 1 else took_close < level:
             since_words = ""
         elif after.size and ((d == 1 and np.any(after > level)) or
                              (d == -1 and np.any(after < level))):
@@ -365,7 +378,7 @@ def _structure(bars, s: Dict[str, np.ndarray], kind: str) -> Dict:
                "dear" if upper else "cheap"), "half_line")
 
     # Today's opening gap (not a coin's: it never shuts).
-    if kind in ("future", "stock") and int(s["ck_gap_dir"][last]) != 0:
+    if not ahead and kind in ("future", "stock") and int(s["ck_gap_dir"][last]) != 0:
         d = int(s["ck_gap_dir"][last])
         lo, hi = float(s["ck_gap_lo"][last]), float(s["ck_gap_hi"][last])
         prev, opened = (lo, hi) if d == 1 else (hi, lo)
@@ -393,6 +406,40 @@ def _week_start(s: Dict[str, np.ndarray], last: int) -> int:
     week = (np.asarray(s["ck_day"][:last + 1], dtype=np.int64) - 1) // 7
     other = np.flatnonzero(week != week[last])
     return int(other[-1]) + 1 if other.size else 0
+
+
+def _prior(bars, s: Dict[str, np.ndarray], days: List, live: Optional[date]) -> Dict:
+    """Yesterday's and last week's levels as of the live price, and the bar each
+    can first be taken at.
+
+    The series give them as of the last finished bar. When the live price is
+    already in a later trading day (`live`, clock.live_day), that bar's own
+    day is yesterday, and its week is last week once a new one has begun. No
+    bar of the new day is finished then, so only the live price can say
+    whether a level was taken: the start is past the last bar.
+    """
+    last = len(bars.close) - 1
+    out = {"live": live, "high": s["ck_pdh"][last], "low": s["ck_pdl"][last],
+           "close": s["ck_pdc"][last], "week_high": s["ck_pwh"][last],
+           "week_low": s["ck_pwl"][last], "today": _today_start(s, last),
+           "week": _week_start(s, last)}
+    if live is None:
+        return out
+    out["today"] = last + 1
+    if not days:                                  # daily bars: the last one
+        out.update(high=bars.high[last], low=bars.low[last], close=bars.close[last])
+    elif days[-1].complete:
+        out.update(high=days[-1].high, low=days[-1].low, close=days[-1].close)
+    weeks_on = (live.toordinal() - 1) // 7 - (int(s["ck_day"][last]) - 1) // 7
+    if weeks_on:
+        start = out["week"]
+        out["week"] = last + 1
+        # A week the data starts inside, or one with none of its days in the
+        # data, has no high and low here.
+        known = weeks_on == 1 and start > 0
+        out["week_high"] = float(np.max(bars.high[start:])) if known else float("nan")
+        out["week_low"] = float(np.min(bars.low[start:])) if known else float("nan")
+    return out
 
 
 def _first_past(bars, start: int, last: int, price: float, side: int) -> int:
@@ -432,16 +479,15 @@ def _opening_range(bars, s: Dict[str, np.ndarray], start: int, last: int):
             start + int(after[0]))
 
 
-def _levels(bars, s: Dict[str, np.ndarray], kind: str) -> List[Dict]:
-    """The key levels, each with its distance and whether it was taken."""
+def _levels(bars, s: Dict[str, np.ndarray], kind: str, prior: Dict) -> List[Dict]:
+    """The key levels, each with its distance and whether it was taken. `prior`
+    is _prior()'s."""
     daily = kind == "daily"
     last = len(bars.close) - 1
     close = float(bars.close[last])
     atr = float(s["st_atr"][last]) if _ok(s["st_atr"][last]) else 0.0
-    today = _today_start(s, last)
-    week = _week_start(s, last)
-    prior, _ = _prior_words(bars)
-    longer = clock.bar_seconds(bars) > clock.DAY
+    today, week = prior["today"], prior["week"]
+    ahead = prior["live"] is not None
     rows: List[Dict] = []
 
     def add(name: str, price, source: str, start: Optional[int] = None, side: int = 0) -> None:
@@ -449,25 +495,33 @@ def _levels(bars, s: Dict[str, np.ndarray], kind: str) -> List[Dict]:
             return
         price = float(price)
         taken_i = _first_past(bars, start, last, price, side) if start is not None else -1
+        when = _when(bars, s, taken_i, daily) if taken_i >= 0 else ""
+        untaken = "no"
+        if ahead and start is not None and taken_i < 0:
+            # No bar of the live price's day is finished: only that price is known.
+            now = float(bars.last_price)
+            untaken = "not at the latest price"
+            if side and (now > price if side > 0 else now < price):
+                when = "by the latest price"
         rows.append({"name": name, "price": price, "source": source,
                      "side": "above" if price > close else "below" if price < close else "at",
                      "pct": (price - close) / close * 100.0 if close else 0.0,
                      "atr": abs(price - close) / atr if atr > 0 else None,
-                     "taken": taken_i >= 0,
+                     "taken": bool(when),
                      # A close is reached, not taken: there is nothing past it.
-                     "taken_word": "Traded at" if side == 0 else "Taken",
-                     "taken_at": _when(bars, s, taken_i, daily) if taken_i >= 0 else ""})
+                     "taken_word": "Reached" if side == 0 else "Taken",
+                     "taken_at": when, "untaken": untaken})
 
-    add("%s high" % prior, s["ck_pdh"][last], "prior_day", today, 1)
-    add("%s low" % prior, s["ck_pdl"][last], "prior_day", today, -1)
-    add("%s close" % prior, s["ck_pdc"][last], "prior_day", today, 0)
-    if not longer:
-        add("Last week's high", s["ck_pwh"][last], "prior_week", week, 1)
-        add("Last week's low", s["ck_pwl"][last], "prior_week", week, -1)
-    if not daily:
+    add("Yesterday's high", prior["high"], "prior_day", today, 1)
+    add("Yesterday's low", prior["low"], "prior_day", today, -1)
+    add("Yesterday's close", prior["close"], "prior_day", today, 0)
+    add("Last week's high", prior["week_high"], "prior_week", week, 1)
+    add("Last week's low", prior["week_low"], "prior_week", week, -1)
+    # Today's own levels, once a bar of today is finished.
+    if not daily and not ahead:
         add("Today's high so far", s["ck_day_hi"][last], "today")
         add("Today's low so far", s["ck_day_lo"][last], "today")
-    if kind in ("future", "coin"):
+    if kind in ("future", "coin") and not ahead:
         for hi_k, lo_k, label in (("ck_asia_hi", "ck_asia_lo", "Asia session"),
                                   ("ck_lon_hi", "ck_lon_lo", "London session"),
                                   ("ck_pre_hi", "ck_pre_lo", "New York before the open")):
@@ -477,7 +531,7 @@ def _levels(bars, s: Dict[str, np.ndarray], kind: str) -> List[Dict]:
             start = today + int(known[0])
             add("%s high" % label, s[hi_k][last], "session", start, 1)
             add("%s low" % label, s[lo_k][last], "session", start, -1)
-    if not daily:
+    if not daily and not ahead and not clock.elsewhere(bars):
         rng = _opening_range(bars, s, today, last)
         if rng:
             add("Opening range high (9:30 to 10:00)", rng[0], "opening_range", rng[2], 1)
@@ -509,30 +563,42 @@ def _levels(bars, s: Dict[str, np.ndarray], kind: str) -> List[Dict]:
     return rows
 
 
-def _notes(bars, s: Dict[str, np.ndarray], kind: str, days: List) -> List[str]:
-    """What the levels leave out, and why, said where the numbers are."""
+def _notes(bars, s: Dict[str, np.ndarray], kind: str, days: List,
+           ahead: bool = False) -> List[str]:
+    """What the levels leave out, and why, said where the numbers are. `ahead`:
+    the live price is in a day after the last finished bar's (see _prior)."""
     notes: List[str] = []
     last = len(bars.close) - 1
-    if kind == "stock":
+    if kind == "stock" and clock.elsewhere(bars):
+        notes.append("This instrument does not trade New York's hours, so its trading days "
+                     "here are its own market's dates, and it has no Asia, London or New York "
+                     "ranges.")
+    elif kind == "stock":
         notes.append("A US stock's prices here cover 9:30 to 16:00 New York time only, so "
                       "it has no Asia or London ranges.")
     if kind in ("future", "coin", "stock") and len(days) >= 2:
-        before = days[:-1]
+        before = days if ahead else days[:-1]
         if not before[-1].complete:
             whole = [d for d in before if d.complete]
             if whole:
-                notes.append("The price source is missing too many of %s's bars, so the "
-                             "levels called yesterday's are from %s, the last whole day."
+                notes.append("%s has too few bars for a whole day, so the levels called "
+                             "yesterday's are from %s, the last whole day."
                              % (_day_words(before[-1].day.toordinal()),
                                 _day_words(whole[-1].day.toordinal())))
             else:
                 notes.append("No whole trading day before today is in the data, so "
                              "there are no levels from yesterday.")
-    if kind in ("future", "coin") and days:
+    if kind in ("future", "coin") and days and not ahead:
         today = days[-1]
+        step = clock.bar_seconds(bars) // 60
         now_pos = (int(s["ck_min"][last]) - 18 * 60) % (24 * 60)
-        for name, label, end in (("asia", "Asia", 3 * 60), ("london", "London", 8 * 60 + 30),
-                                 ("ny_pre", "New York before-the-open", 9 * 60 + 30)):
+        for name, label, start, end in (
+                ("asia", "Asia", 18 * 60, 3 * 60), ("london", "London", 3 * 60, 8 * 60 + 30),
+                ("ny_pre", "New York before-the-open", 8 * 60 + 30, 9 * 60 + 30)):
+            # Hourly bars start on the hour, so none lies inside 8:30 to 9:30:
+            # nothing is missing, and bars that long cannot have the range.
+            if -(-start // step) * step + step > start + (end - start) % (24 * 60):
+                continue
             sess = today.sessions.get(name)
             if sess is None or sess.complete:
                 continue
@@ -542,28 +608,31 @@ def _notes(bars, s: Dict[str, np.ndarray], kind: str, days: List) -> List[str]:
                          "its %d bars, under the 80%% a range needs."
                          % (label, sess.bars, sess.expected))
     if kind == "future" and int(s["ck_roll"][last]):
-        notes.append("Today's prices jump where the futures contract switched to the next "
+        notes.append("%s prices jump where the futures contract switched to the next "
                      "one (or the data has a break), so levels from before the jump may not "
-                     "line up with prices after it.")
+                     "line up with prices after it." % ("Yesterday's" if ahead else "Today's"))
     return notes
 
 
 # --- the key-levels chart -------------------------------------------------------------------
 
-def _chart(bars, s: Dict[str, np.ndarray], kind: str, days: List, calm: bool) -> Dict:
+def _chart(bars, s: Dict[str, np.ndarray], kind: str, days: List, calm: bool,
+           prior: Dict) -> Dict:
     from . import alerts as alerts_mod
     n = len(bars.close)
     last = n - 1
     daily = kind == "daily"
     ts = np.asarray(bars.timestamp, dtype=np.int64)
-    _, short = _prior_words(bars)
     t = int(s["st_trend"][last])
 
     def level(key):
         v = s[key][last]
         return float(v) if _ok(v) else None
 
-    narrow_levels = {"%s high" % short: level("ck_pdh"), "%s low" % short: level("ck_pdl"),
+    def yesterday(key):
+        return float(prior[key]) if _ok(prior[key]) else None
+
+    narrow_levels = {"Yest. high": yesterday("high"), "Yest. low": yesterday("low"),
                      "Old high": level("st_above1"), "Old low": level("st_below1")}
     wide_levels = dict(narrow_levels)
     wide_levels.update({"Equal highs": level("st_eqh"), "Equal lows": level("st_eql")})
@@ -630,8 +699,7 @@ def _chart(bars, s: Dict[str, np.ndarray], kind: str, days: List, calm: bool) ->
     wide = wide.replace('class="chart trade"', 'class="chart trade keylevels"', 1)
     narrow = (narrow or wide).replace('class="chart trade"', 'class="chart trade keylevels"', 1)
     return {"wide": wide, "narrow": narrow, "as_of": as_of,
-            "gaps": bool(zones), "marks": bool(marks), "bands": bool(bands),
-            "short": short}
+            "gaps": bool(zones), "marks": bool(marks), "bands": bool(bands)}
 
 
 # --- the New York clock --------------------------------------------------------------------
@@ -661,11 +729,19 @@ def clock_strip(bars, kind: str, now: float, conn=None) -> Dict:
     window = clock.window_of(now)
     words: List[str] = []
     open_now = True
-    if kind == "future":
+    no_window = False               # no New York morning to trade today
+    away = clock.elsewhere(bars)
+    if away:
+        open_now = bool(getattr(bars, "market_open", True))
+        no_window = True
+        words.append("It is %s in New York. This instrument does not trade New York's "
+                     "hours; the course's times are New York's." % _hm(minute))
+    elif kind == "future":
         shut = weekday == 5 or (weekday == 4 and minute >= 17 * 60) or \
             (weekday == 6 and minute < 18 * 60)
         if shut:
             open_now = False
+            no_window = weekday != 4
             words.append("It is %s in New York. The futures market is shut for the "
                          "weekend and reopens on Sunday at 18:00." % _hm(minute))
         elif session == "halt":
@@ -676,17 +752,18 @@ def clock_strip(bars, kind: str, now: float, conn=None) -> Dict:
         hours = sessions_mod.us_session(day)
         if not hours:
             open_now = False
+            no_window = True
             words.append("It is %s in New York. The US stock market is shut today." % _hm(minute))
         elif not (hours[0] <= now < hours[1]):
             open_now = False
             words.append("It is %s in New York. The US stock market is shut now; it trades "
                          "from 9:30 New York time." % _hm(minute))
-    if open_now:
+    if open_now and not away:
         words.append("It is %s in New York: %s." % (_hm(minute), _SESSION_WORDS.get(
             session, "the trading day")))
 
     # video 4:31:11-4:37:38: the course's three marks after the open.
-    if minute < 9 * 60 + 30 or minute >= 18 * 60:
+    if no_window or minute < 9 * 60 + 30 or minute >= 18 * 60:
         words.append("The course watches 9:30 to 9:50, looks for its entries from 9:50 to "
                      "10:10 and stops looking at 10:30.")
     elif window == "open_drive":
@@ -746,9 +823,9 @@ def _measured_window(bars, now: float, conn) -> List[str]:
     return out
 
 
-_LAB_WHEN = {"asia": "in the Asia session (18:00 to 03:00)",
-             "london": "in the London session (03:00 to 08:30)",
-             "ny_pre": "before the New York open (08:30 to 09:30)",
+_LAB_WHEN = {"asia": "in the Asia session (18:00 to 3:00)",
+             "london": "in the London session (3:00 to 8:30)",
+             "ny_pre": "before the New York open (8:30 to 9:30)",
              "open_drive": "from 9:30 to 9:50", "macro": "from 9:50 to 10:10",
              "late_morning": "from 10:10 to 10:30", "midday": "from 10:30 to 12:00",
              "afternoon": "from 12:00 to 16:00", "after": "from 16:00 to 18:00"}
@@ -760,12 +837,18 @@ def _bias(bars, fetch, conn) -> Dict:
     from . import bias as bias_mod
     try:
         if (bars.interval or "").lower() in ("1h", "60m"):
-            hourly = bars
+            hourly = clock.tail(bars, HOURLY_BARS)
         else:
             hourly = _fetched(bars.symbol, "1h", fetch)
+    except Exception as exc:
+        if not isinstance(exc, DataError):
+            log.exception("hourly bars of %s for the day's lean", bars.symbol)
+        return {"unavailable": UNAVAILABLE}
+    try:
         read = bias_mod.read(hourly)
     except Exception:
-        return {"unavailable": UNAVAILABLE}
+        log.exception("the day's lean of %s", bars.symbol)
+        return {"unavailable": NOT_READ}
     if read is None:
         return {"unavailable": TOO_FEW}
     lean = int(read.lean)
@@ -773,10 +856,16 @@ def _bias(bars, fetch, conn) -> Dict:
     t1 = int(read.checks.get("trend_1h") or 0)
     side = lean or t1
     if read.flip_level is not None and _ok(read.flip_level) and side:
-        flip_words = ("An hourly close %s %s would turn the hourly trend %s, and the course "
-                      "would read the day again." % ("below" if side == 1 else "above",
-                                                     _p(read.flip_level),
-                                                     "down" if side == 1 else "up"))
+        beyond, point = ("below", "low") if side == 1 else ("above", "high")
+        if t1 == side:
+            flip_words = ("An hourly close %s %s would turn the hourly trend %s, and the "
+                          "course would read the day again."
+                          % (beyond, _p(read.flip_level), "down" if side == 1 else "up"))
+        elif (hourly.close[-1] > read.flip_level) == (side == 1):
+            # The hourly trend is not the lean's way, so no close turns it.
+            flip_words = ("An hourly close %s %s, the last swing %s, would go against this "
+                          "lean, and the course would read the day again."
+                          % (beyond, _p(read.flip_level), point))
     out = {"lean": lean,
            "word": "Leans up" if lean == 1 else "Leans down" if lean == -1 else "Unclear",
            "reasons": list(read.reasons),
@@ -829,6 +918,9 @@ def bias_record(conn, symbol: str) -> Dict:
                       "than its margin of error.",
                   0: "So it cannot be told apart from always guessing up."}.get(
                       v, "Too few days to say whether it beats guessing."))
+    words.append("Each of those reads was made once a day, at 9:00 New York time (9:30 for a "
+                 "stock), and judged at that day's 16:00 close; a read made later in the day "
+                 "was not measured.")
     return {"record": {"days": days, "called": called, "right": right, "up_days": up,
                        "verdict": v}, "record_words": words, "pooled": pooled}
 
@@ -853,7 +945,9 @@ def pair_check(bars, fetch=None, conn=None) -> Optional[Dict]:
         return None
     try:
         other = _fetched(partner, bars.interval, fetch)
-    except Exception:
+    except Exception as exc:
+        if not isinstance(exc, DataError):
+            log.exception("bars of %s for the pair check", partner)
         return None
     a_ts = np.asarray(bars.timestamp, dtype=np.int64)
     b_ts = np.asarray(other.timestamp, dtype=np.int64)

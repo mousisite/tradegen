@@ -11,7 +11,9 @@ undefined, every "?" it uses has words, a daily analysis shows only structure
 and levels, and inside the iPhone app the video is named but not linked. No
 network.
 """
+import dataclasses
 import json
+import logging
 import math
 import os as _os
 import re
@@ -30,6 +32,7 @@ import numpy as np  # noqa: E402
 
 import scenarios as sc  # noqa: E402
 import web  # noqa: E402
+from bot import bias as bias_mod  # noqa: E402
 from bot import catalysts, clock, engine, labstore, levelview, liquidity, plain  # noqa: E402
 from bot import database as db  # noqa: E402
 from bot import market as market_mod  # noqa: E402
@@ -95,7 +98,7 @@ def analysis(bars):
 KEYS = {"kind", "intraday", "symbol", "interval", "words", "close", "clock", "structure",
         "levels", "bias", "chart", "calm", "notes", "pair", "video"}
 LEVEL_KEYS = {"name", "price", "side", "pct", "atr", "taken", "taken_word", "taken_at",
-              "source"}
+              "untaken", "source"}
 STRUCTURE_KEYS = {"trend", "since", "flip_level", "last_flip", "last_take", "gaps", "eq",
                   "points"}
 
@@ -211,6 +214,117 @@ check("and said as day and New York time",
 check("New York time, not UTC: 9:30 there is 14:30 UTC in November",
       clock.label_ny(clock.utc(2026, 11, 18, 14, 30)) == "18 Nov 09:30")
 
+check("a close is reached, not taken or traded at",
+      {r["taken_word"] for r in fut["levels"] if r["name"] == "Yesterday's close"} == {"Reached"})
+
+head("WHILE THE MARKET TRADES, YESTERDAY IS THE LAST FINISHED DAY")
+
+
+def live(bars, at, price):
+    return dataclasses.replace(bars, live_price=price,
+                               meta=dict(bars.meta, regularMarketTime=int(at)))
+
+
+def prior_rows(out):
+    return {r["name"]: r for r in out["levels"]}
+
+
+# The scripted days end on a Tuesday; cut them so a week ends on the last bar too.
+DAYS = [int(x) for x in clock.series(DAILY)["ck_day"]]
+friday = max(i for i in range(len(DAYS) - 1) if (DAYS[i] - 1) % 7 == 4)
+midweek = max(i for i in range(len(DAYS) - 1) if (DAYS[i] - 1) % 7 == 1)
+for label, i in (("a Wednesday", midweek), ("a Monday", friday)):
+    cut = clock.head(DAILY, i + 1)
+    top = float(cut.high[-1])
+    out = levelview.for_analysis(analysis(live(cut, int(DAILY.timestamp[i + 1]) + 5400,
+                                               top + 1.0)), {})
+    got = prior_rows(out)
+    check("daily, %s: yesterday is the last finished bar" % label,
+          (got["Yesterday's high"]["price"], got["Yesterday's low"]["price"],
+           got["Yesterday's close"]["price"]) == (top, float(cut.low[-1]), float(cut.close[-1])),
+          got["Yesterday's high"])
+    check("daily, %s: taken is judged by the live price, and says so" % label,
+          got["Yesterday's high"]["taken"]
+          and got["Yesterday's high"]["taken_at"] == "by the latest price"
+          and not got["Yesterday's low"]["taken"]
+          and got["Yesterday's low"]["untaken"] == "not at the latest price")
+    check("daily, %s: the chart's line is the same" % label,
+          "Yest. high" in out["chart"]["wide"]
+          and market_mod.format_price(top) in out["chart"]["wide"])
+    check("daily, %s: nothing is said about today's opening gap" % label,
+          not any(p["help"] == "opening_gap" for p in out["structure"]["points"]))
+    begun = next(k for k in range(i, -1, -1) if (DAYS[k] - 1) // 7 != (DAYS[i] - 1) // 7) + 1
+    if label == "a Monday":
+        check("and last week is the week of that bar",
+              got["Last week's high"]["price"] == float(np.max(cut.high[begun:]))
+              and got["Last week's low"]["price"] == float(np.min(cut.low[begun:])))
+    else:
+        check("and last week is the one before that bar's",
+              got["Last week's high"]["price"]
+              == float(clock.series(cut)["ck_pwh"][-1]))
+same = prior_rows(levelview.for_analysis(analysis(live(
+    DAILY, int(DAILY.timestamp[-1]) + 23400, float(DAILY.close[-1]))), {}))
+check("after the close, when today's bar is finished, it is the bar before again",
+      same["Yesterday's high"]["price"] == float(DAILY.high[-2])
+      and same["Yesterday's high"]["untaken"] == "no")
+for name, bars, opened in (
+        ("a stock's hourly", sc.walk(sc.stock_times(7 * 30, step=3600), seed=4, interval="1h",
+                                     vol=0.004), int(sc.stock_times(7 * 31, step=3600)[-7])),
+        ("a future's 5-minute", sc.walk(sc.futures_times(276 * 4), seed=4, kind="future",
+                                        vol=0.0008, price=6000.0),
+         int(sc.futures_times(276 * 4 + 1)[-1]))):
+    table = clock.day_table(bars)
+    out = levelview.for_analysis(analysis(live(bars, opened + 60, float(bars.close[-1]))), {},
+                                 fetch=hourly_fetch, now=opened + 60)
+    got = prior_rows(out)
+    check("%s bars in a day's first bar: yesterday is the day that just ended" % name,
+          got["Yesterday's high"]["price"] == table[-1].high
+          and got["Yesterday's low"]["price"] == table[-1].low)
+    check("%s: no level of that day is called today's" % name,
+          not any(r["name"].startswith(("Today's", "Asia", "London", "New York before",
+                                        "Opening range")) for r in out["levels"]),
+          sorted(got))
+    check("%s: nor its opening gap" % name,
+          not any(p["help"] == "opening_gap" for p in out["structure"]["points"]))
+
+head("A STOCK ON AN EXCHANGE ABROAD")
+gmt = 9 * 3600
+tts = np.array([clock.utc(2026, 11, 9) - gmt + d * 86400 + m * 60 for d in range(12)
+                if d % 7 < 5 for m in list(range(540, 690, 5)) + list(range(750, 930, 5))])
+TOKYO = dataclasses.replace(
+    sc.walk(tts, seed=5, vol=0.001, price=3000.0, symbol="7203.T"), gmt_offset=gmt,
+    session_id=(tts + gmt) // 86400,
+    meta={"instrumentType": "EQUITY", "exchangeTimezoneName": "Asia/Tokyo"})
+out = levelview.for_analysis(analysis(TOKYO), {}, fetch=broken_fetch,
+                             now=clock.ny(2026, 11, 18, 9, 35))
+got = prior_rows(out)
+before = TOKYO.session_id == np.unique(TOKYO.session_id)[-2]
+check("yesterday's levels are its own last session's",
+      got["Yesterday's high"]["price"] == float(TOKYO.high[before].max())
+      and got["Yesterday's low"]["price"] == float(TOKYO.low[before].min()))
+said = " ".join(out["clock"]["words"] + out["notes"])
+check("nothing is said of the US market, a US stock or today's New York window",
+      "US stock" not in said and "does not trade New York's hours" in said
+      and "This is 9:30" not in said, said)
+check("and no New York opening range is listed",
+      not any(r["source"] == "opening_range" for r in out["levels"]))
+
+head("NOTES THAT BLAME NOBODY")
+for kind, times in (("future", sc.futures_times(400, step=3600)),
+                    ("coin", sc.coin_times(400, step=3600))):
+    noon = [j for j in range(len(times)) if clock.fmt_ny(int(times[j])) == "12:00"][-1]
+    hb = sc.walk(times[:noon + 1], seed=3, kind=kind, interval="1h", price=6000.0, vol=0.002)
+    out = levelview.for_analysis(analysis(hb), {}, fetch=hourly_fetch, now=at_955)
+    check("%s, hourly: no bar that long fits in 8:30 to 9:30, and none is said missing" % kind,
+          not any("before-the-open" in note for note in out["notes"]), out["notes"])
+gone = np.array([k for k in range(len(FUTURE.close))
+                 if not 180 <= clock.ny_clock(int(FUTURE.timestamp[k]))[1] < 420])
+out = levelview.for_analysis(analysis(sc.make(
+    FUTURE.open[gone], FUTURE.high[gone], FUTURE.low[gone], FUTURE.close[gone],
+    FUTURE.timestamp[gone], kind="future")), {}, fetch=hourly_fetch, now=at_955)
+check("a session whose bars are missing is still said to be",
+      any("London session's range is left out" in note for note in out["notes"]), out["notes"])
+
 head("THE DAY'S LEAN")
 levelview._FETCHED.clear()
 bad = levelview.for_analysis(analysis(FUTURE), {}, fetch=broken_fetch, now=at_955)
@@ -226,6 +340,49 @@ check("with hourly bars, a lean in words", b.get("word") in ("Leans up", "Leans 
 check("the scripted rise leans up", b.get("lean") == 1, b.get("lean"))
 check("with no database, it says the read is not measured, not tested",
       "not been measured" in " ".join(b["record_words"]))
+against = levelview._bias(sc.hourly_path(sc.BIAS_TAKEN_THEN_GAP), None, None)
+check("a lean against the hourly trend is not said to turn that trend",
+      against["lean"] == 1 and "would go against this lean" in against["flip_words"]
+      and "turn the hourly trend" not in against["flip_words"], against["flip_words"])
+check("a lean with it is", "would turn the hourly trend down" in b["flip_words"], b["flip_words"])
+two_years = sc.walk(sc.coin_times(6000, step=3600), seed=6, kind="coin", interval="1h",
+                    vol=0.004, price=90000.0)
+reads = []
+real_read = bias_mod.read
+bias_mod.read = lambda h, *a, **k: (reads.append(len(h.close)), real_read(h, *a, **k))[1]
+try:
+    short = levelview._bias(two_years, None, None)
+finally:
+    bias_mod.read = real_read
+whole_read = bias_mod.read(two_years)
+check("an hourly analysis's lean is read from its last 1,500 bars", reads == [1500], reads)
+check("and is the read of all of them",
+      (short["lean"], short["reasons"], short["flip_level"])
+      == (whole_read.lean, whole_read.reasons, whole_read.flip_level))
+
+
+class Kept(logging.Handler):
+    def __init__(self):
+        logging.Handler.__init__(self)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+kept = Kept()
+levelview.log.addHandler(kept)
+levelview.log.propagate = False
+bias_mod.read = lambda *a, **k: 1 / 0
+try:
+    odd = levelview._bias(HOURLY, None, None)
+finally:
+    bias_mod.read = real_read
+    levelview.log.removeHandler(kept)
+    levelview.log.propagate = True
+check("a fault in the read is not called a failed download, and is logged",
+      odd == {"unavailable": levelview.NOT_READ} and "fetched" not in levelview.NOT_READ
+      and len(kept.lines) == 1, (odd, kept.lines))
 conn = db.connect(DB)
 labstore.save_bias(conn, "ES=F", labstore.sample_bias())
 said = levelview.bias_record(conn, "ES=F")
@@ -236,6 +393,8 @@ check("with its 95% range", re.search(r"95% range of \d+% to \d+%", words) is no
 check("beside always guessing up", "Always guessing up was right on 162 of the 312 days (52%)"
       in words, words)
 check("and a coin flip", "a coin flip is right on half" in words)
+check("and when those reads were made", "once a day, at 9:00 New York time (9:30 for a stock)"
+      in words and "later in the day was not measured" in words, words)
 check("and a conclusion from the one rule", said["record"]["verdict"] == labstore.rate_verdict(
     101, 190, 162, 312) and "cannot be told apart from always guessing up" in words, words)
 pooled = levelview.bias_record(conn, "NQ=F")
@@ -258,6 +417,15 @@ check("at 10:40 it says the course's 10:30 cut-off has passed",
       "10:30 cut-off has passed" in text, text)
 strip = levelview.clock_strip(FUTURE, "future", clock.ny(2026, 11, 21, 12, 0))
 check("on a Saturday the futures are shut", "shut for the weekend" in " ".join(strip["words"]))
+for label, bars, kind, at in (
+        ("a future on a Saturday", FUTURE, "future", clock.ny(2026, 11, 21, 9, 55)),
+        ("a stock on a Saturday", STOCK, "stock", clock.ny(2026, 11, 21, 9, 55)),
+        ("a stock on Thanksgiving", STOCK, "stock", clock.ny(2026, 11, 26, 9, 40))):
+    text = " ".join(levelview.clock_strip(bars, kind, at)["words"])
+    check("%s: shut, and no window is said to be running" % label,
+          "This is 9:" not in text and "The course watches 9:30 to 9:50" in text, text)
+check("hours are written one way in sentences", not any(
+    re.search(r"\b0\d:", w) for w in levelview._LAB_WHEN.values()))
 strip = levelview.clock_strip(STOCK, "stock", clock.ny(2026, 11, 18, 7, 0))
 check("before 9:30 a stock's market is shut, and the course's times are said",
       "shut now" in " ".join(strip["words"]) and "9:50 to 10:10" in " ".join(strip["words"]))
@@ -283,6 +451,18 @@ check("in words about their last swing highs and lows",
                                    r"(higher|lower|equal) (high|low) and NQ=F made", row)
                           for row in fut["pair"]["rows"]), fut["pair"])
 check("a stock with no partner gets none", stock["pair"] is None)
+asked = []
+real_fetch = market_mod.fetch_bars
+market_mod.fetch_bars = lambda s_, iv, lookback=None: (asked.append((iv, lookback)), NQ)[1]
+try:
+    for iv in ("5m", "15m", "30m", "1h"):
+        levelview._FETCHED.clear()
+        levelview._fetched("QQQ", iv, None)
+finally:
+    market_mod.fetch_bars = real_fetch
+    levelview._FETCHED.clear()
+check("a partner's bars are asked for no further back than the check compares",
+      asked == [("5m", "5d"), ("15m", "1mo"), ("30m", None), ("1h", "60d")], asked)
 
 head("NOTHING PRINTS AS NONE OR NAN")
 blob = json.dumps({k: v for k, v in fut.items() if k != "chart"}, default=str)

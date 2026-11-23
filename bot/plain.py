@@ -273,9 +273,10 @@ HELP: Dict[str, Dict[str, str]] = {
         "through yet. Equal highs or lows are two or more within a tenth of a typical "
         "bar's range of each other.")},
     "prior_day": {"name": "yesterday's high and low", "text": (
-        "The high, low and close of the last whole trading day before today; for futures "
-        "and coins a trading day runs from 18:00 to 17:00 New York time. Taken means price "
-        "has traded past it today (this week, for last week's).")},
+        "The high, low and close of the last whole trading day before today; on "
+        "bars shorter than a day, a trading day runs from 18:00 to 17:00 New York time for "
+        "futures, and from 18:00 to 18:00 for coins. Taken means price has traded past it "
+        "today (this week, for last week's).")},
     "typical_bar": {"name": "the distance in typical bars", "text": (
         "How far the level is from the last close, counted in the average range of one "
         "bar over the last 14 bars. 2 means about two ordinary bars' moves away.")},

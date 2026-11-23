@@ -21,7 +21,8 @@ its measured record (the bias study in the Setup lab):
 
 The video also says a bias can be overruled by what price does next
 (6:27:20-6:28:23), so the hourly's most recent break is the one that counts
-(app choice), and flip_level is the hourly close that would overrule the lean.
+(app choice), and flip_level is the swing an hourly close past would go
+against the lean.
 
 read() uses only the hourly bars closed by `at`, so a read made at 09:00 is
 the read anyone could have made at 09:00. 4-hour bars are built from the
@@ -50,7 +51,8 @@ class BiasRead:
     reasons: List[str]                 # one plain sentence per check
     checks: Dict                       # trend_4h, trend_1h, sweep, key, rule
     targets: List[Tuple[str, float]]   # nearest untaken levels the lean's way, up to 3
-    flip_level: Optional[float]        # an hourly close beyond it changes the hourly trend
+    flip_level: Optional[float]        # an hourly close beyond it goes against the lean, and
+                                       # turns the hourly trend when that is the lean's way
     as_of: int                         # start time of the last closed hourly bar used
     extra: Dict = field(default_factory=dict)
 
@@ -168,7 +170,7 @@ def _read(p: Prepared, m: int, at: int) -> BiasRead:
     lean: Optional[int] = None
 
     # --- 1: taken today, then turned -------------------------------------------
-    day_now = clock.trading_day(at, kind).toordinal()
+    day_now = clock.trading_day(at, kind, bars).toordinal()
     today_start = -1
     if int(s1["ck_day"][last]) == day_now:
         today_start = last
@@ -350,7 +352,12 @@ def _targets(bars, s1, last: int, lean: int, day_now: int, kind: str, past: List
             wk = [d for d in past if d.week == prev.week]
             add("last week's %s" % side, max(d.high for d in wk) if up else min(d.low for d in wk))
         else:
-            add("last week's %s" % side, s1["ck_pwh" if up else "ck_pwl"][last])
+            # Not one a finished day of this week already traded past.
+            pw = float(s1["ck_pwh" if up else "ck_pwl"][last])
+            this_week = [d for d in past if tuple(d.week) == tuple(now_week)]
+            if pw == pw and ((up and max(d.high for d in this_week) < pw)
+                             or (not up and min(d.low for d in this_week) > pw)):
+                add("last week's %s" % side, pw)
     add("equal %ss" % side, s1["st_eqh" if up else "st_eql"][last])
     for key in (("st_above1", "st_above2", "st_above3") if up else
                 ("st_below1", "st_below2", "st_below3")):

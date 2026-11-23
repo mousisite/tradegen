@@ -19,7 +19,9 @@ harness.isolate("method")
 import numpy as np  # noqa: E402
 
 from bot import calibrate as cal  # noqa: E402
-from bot import catalysts, config, decision, engine, market, plain, public  # noqa: E402
+import scenarios as sc  # noqa: E402
+from bot import catalysts, clock, config, decision, engine, levels  # noqa: E402
+from bot import market, plain, public  # noqa: E402
 from bot import strategies as S  # noqa: E402
 from bot.calibrate import Calibration, Outcome  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -239,6 +241,36 @@ check("crypto: today's bar is still forming at noon",
       len(b) == 39 and b.live_price == closes[-1])
 check("and the day's change is against yesterday's close",
       b.prev_close == closes[-2], (b.prev_close, closes[-2]))
+
+# The plan's "prior session" levels follow the same rule: while the market
+# trades, the session before the live price's is the last finished bar.
+b = fetch(payload([d + OPEN for d in days], closes, regular=today, price=closes[-1],
+                  when=today["start"] + 3600), now=today["start"] + 3600)
+prior = levels.prior_session(b)
+check("mid-session the plan's prior session is the one that closed last",
+      prior == {"high": float(b.high[-1]), "low": float(b.low[-1]),
+                "close": float(b.close[-1])} and prior["close"] == closes[-2], prior)
+b = fetch(payload([d + OPEN for d in days], closes, regular=today, price=closes[-1],
+                  when=today["end"]), now=today["end"] + 3600)
+check("and after the close the one before today's",
+      levels.prior_session(b)["close"] == closes[-2], levels.prior_session(b))
+b = fetch(payload(ts5, c5, regular={"start": sess[-1] + DAY, "end": sess[-1] + DAY + 23400},
+                  when=sess[-1] + DAY + 60), now=sess[-1] + DAY + 60, interval="5m")
+check("at an intraday session's first bar it is yesterday's, with no opening range yet",
+      levels.prior_session(b)["close"] == c5[-2] and levels.opening_range(b) is None,
+      levels.prior_session(b))
+orb_days = sc.stock_series(78 * 3)
+for bars_in, wanted in ((3, False), (6, False), (7, True)):
+    part = clock.head(orb_days, 78 * 2 + bars_in)
+    named = [lv for lv in levels.build_levels(part, 0.0001) if "opening range" in lv.source]
+    check("%d bars into a session the plan has %s opening range"
+          % (bars_in, "an" if wanted else "no"), bool(named) == wanted, named)
+fut = sc.futures_series(276 * 4 + 200, roll_day=None)
+table = clock.day_table(fut)
+check("a future's prior session is its whole trading day, as the key levels have it",
+      levels.prior_session(fut) == {"high": table[-2].high, "low": table[-2].low,
+                                    "close": table[-2].close})
+check("and it has no opening range at midnight", levels.opening_range(fut) is None)
 
 # Dividends: the factor is carried, the traded prices are not rewritten.
 adj = [c * (0.98 if k < 30 else 1.0) for k, c in enumerate(closes)]

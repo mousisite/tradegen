@@ -166,6 +166,26 @@ check("the bar that trades past both takes both at once, as equal highs",
       and near(s["st_sweep_lvl"][28], 100.95) and s["st_sweep_far"][28] == 101.0,
       (s["st_sweep"][28], s["st_sweep_n"][28], s["st_sweep_lvl"][28]))
 check("and closes back below them", s["st_sweep_back"][28] == 1)
+check("the nearest of the equal ones is told apart from the nearest level of any kind",
+      near(s["st_sweep_eq_lvl"][28], 100.95) and math.isnan(s["st_sweep_eq_lvl"][27]))
+book = structure._Levels(True)
+for price, p in ((101.0, 1), (100.95, 5), (100.5, 9)):
+    book.add(price, p, 0.1)
+got, equal = book.take(101.2)
+check("a single high taken on the way to equal ones does not lend them its price",
+      len(got) == 3 and got[0][0] == 100.5 and equal == 100.95, (got, equal))
+book = structure._Levels(True)
+for price, p in ((101.0, 1), (100.95, 5), (100.5, 9)):
+    book.add(price, p, 0.1)
+got, equal = book.take(100.97)
+check("one of a pair taken, the other still standing, is not equal highs taken",
+      len(got) == 2 and math.isnan(equal), (got, equal))
+book = structure._Levels(False)
+for price, p in ((85.8777, 1), (85.8824, 5), (85.9051, 9)):
+    book.add(price, p, 0.1 * 0.05)
+got, equal = book.take(85.8)
+check("the same for lows: the nearest of the equal ones is the highest of them",
+      len(got) == 3 and equal == 85.8824, (got, equal))
 check("a level taken once cannot be taken again", s["st_sweep"][29] == 0
       and b.high[29] > 101.0)
 took = [e for e in liquidity.events(b, liquidity.series(b), limit=50) if e["kind"] == "take"
@@ -248,6 +268,21 @@ check("events since a time keep only bars after it",
       all(e["at"] > int(b.timestamp[27]) for e in
           liquidity.events(b, liquidity.series(b), since=int(b.timestamp[27]))))
 
+# One bar under yesterday's low (100) and a swing low above it (101), closing
+# between the two: the sentence names yesterday's, so it is judged against it.
+first_day = [(102.9, 103.2, 102.6, 102.9)] * 78
+first_day[40] = (102.6, 102.7, 100.0, 102.2)
+second_day = [(102.5, 102.8, 102.3, 102.6)] * 6 + [
+    (102.6, 102.7, 101.8, 101.9), (101.9, 102.0, 101.0, 101.6), (101.6, 102.2, 101.5, 102.1),
+    (102.1, 102.5, 102.0, 102.4), (102.4, 102.6, 102.2, 102.5), (102.5, 102.7, 102.3, 102.4),
+    (102.4, 102.5, 99.8, 100.5), (100.5, 100.9, 100.4, 100.8)]
+b = sc.rows(first_day + second_day)
+s = liquidity.series(b)
+took = [e for e in liquidity.events(b, s) if e["kind"] == "take" and e["i"] == 90]
+check("a bar closing above the low it is said to have taken closed back above it",
+      took and s["lq_take_lvl"][90] == 100.0 and s["lq_take_back"][90] == 0
+      and took[0]["words"].endswith("closed back above it at 100.5."), took)
+
 # ---------------------------------------------------------------------------
 head("EVERY KEY, WITH ITS TYPE")
 # ---------------------------------------------------------------------------
@@ -262,7 +297,7 @@ DOCUMENTED = {
               "lq_chain_sweep_at"),
     "float64": ("st_hi", "st_lo", "st_above1", "st_above2", "st_above3", "st_below1",
                 "st_below2", "st_below3", "st_ref_hi", "st_ref_lo", "st_sweep_lvl",
-                "st_sweep_far", "st_eqh", "st_eql", "st_fvg_up_top", "st_fvg_up_bot",
+                "st_sweep_far", "st_sweep_eq_lvl", "st_eqh", "st_eql", "st_fvg_up_top", "st_fvg_up_bot",
                 "st_fvg_up_stack_bot", "st_fvg_dn_top", "st_fvg_dn_bot",
                 "st_fvg_dn_stack_top", "st_eq", "st_leg_lo", "st_leg_hi", "ck_pdh", "ck_pdl",
                 "ck_pdc", "ck_pwh", "ck_pwl", "ck_open", "ck_asia_hi", "ck_asia_lo",
