@@ -143,9 +143,12 @@ too. Do not edit any other file.
 ### Send the app to Apple (each new version)
 
 24. Click the blue **App** icon, then **App** under TARGETS, then the
-    **General** tab. Set **Version** to `1.0` the first time. Set **Build**
-    to `1`. Every upload needs a bigger Build number: `2`, then `3`, and so
-    on.
+    **General** tab. The first time, set **Version** to `1.0` and
+    **Build** to `1`. Every upload after that needs a bigger Build number
+    than any before it: `2`, then `3`, and so on. A newly downloaded copy of
+    the code says `1` again, so write the last number you used down. Once a
+    version is on the App Store, the next upload needs a bigger Version too:
+    `1.1`, then `1.2`, and so on.
 25. At the top of Xcode, click the device name and choose **Any iOS Device
     (arm64)**.
 26. In the menu bar, click **Product > Archive**. Wait.
@@ -340,7 +343,7 @@ LOOK AROUND FIRST
 Explore a full example account without signing up. Create a free account to keep your own journal, watchlist and alerts.
 
 FREE AND PRO
-Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits: as many stocks and coins a day as you like, every result in every Find list, and as many alerts as you like.
+Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits: as many stocks and coins a day as you like, every Find result worth a look, and as many alerts as you like.
 
 Orenth Pro is an auto-renewing subscription: Orenth Pro Monthly (1 month) or Orenth Pro Yearly (1 year). The price is shown in the app, in your currency, before you buy. Payment is charged to your Apple Account when you confirm the purchase. The subscription renews automatically unless it is cancelled at least 24 hours before the end of the current period. Manage or cancel it in Settings > Apple Account > Subscriptions.
 
@@ -395,7 +398,9 @@ keeps, because the app shows the website.
 Tick these. For every one, answer: **Linked to the user: Yes**, **Used for
 tracking: No**, **Purpose: App Functionality** (and nothing else). The
 privacy page (`templates/legal.html`) says the same things in its own
-words, and Apple's reviewers compare the two: change both together.
+words, and Apple's reviewers compare the two: change both together. The
+app's privacy manifest (`ios/App/App/PrivacyInfo.xcprivacy`) lists the same
+types too, except Phone Number and the ones that depend on a setting.
 
 | Data type | Why Orenth keeps it |
 | --- | --- |
@@ -719,7 +724,7 @@ IN-APP PURCHASE
 Tap Go Pro, or More > Account > See Pro. Both subscriptions (Orenth Pro Monthly and Yearly, one group) show with their App Store prices, Restore Purchases, and links to the Terms of Use (EULA), Terms and Privacy Policy. After buying, the Account page has Manage subscription, which opens Apple's sheet. Orenth is also a website (3.1.3(b)): Pro bought there works in the app too, and the app sells Pro only through in-app purchase, with no link to buying on the website.
 
 DELETING AN ACCOUNT
-Tap the round account picture at the top right (or More > Account), then "Leaving" at the bottom: type delete, then tap Delete my account. Everything is deleted straight away, not deactivated.
+Tap the round account picture at the top right (or More > Account), then "Leaving" at the bottom: type delete, then tap Delete my account. The account and everything in it are deleted straight away, not deactivated.
 
 ABOUT ORENTH
 Orenth is a research and learning tool for stocks and crypto: historical back-tests, charts, price alerts and a practice journal that uses virtual money only. It is not a broker, exchange or wallet. There is no trading, no real money, no deposits or withdrawals, no wallets, and no linking of bank or brokerage accounts. Nothing in it is personalized investment advice, so guidelines 3.2.1(viii), 3.1.5 and 5.1.1(ix) do not apply.
@@ -787,6 +792,11 @@ with the review address: Orenth refuses those for it.
 10. **Age checks** (Part 5, "Age checks some US states ask for"): until the
     app has its native age-range check, the Age Assurance answer stays
     **No**. The check is needed before 1 January 2027.
+11. **The screenshots match the app** (rule 2.3.3). The ones in
+    `store/screenshots/` were taken on 17 November 2026, and some pages have
+    changed since (one still says "Point at a candle to see its prices").
+    Have whoever works on the code take them again with
+    `scripts/take_screenshots.py` before you submit.
 
 ---
 
@@ -797,9 +807,11 @@ with the review address: Orenth refuses those for it.
 - **Something in this `mobile` folder changed:** on the Mac, get the new
   code, run `npm ci`, `npx cap sync ios` and `npx cap open ios` in the
   `mobile` folder, pick your **Team** again (Part 2, step 14) and check the
-  capabilities are listed (steps 16 to 18), raise the **Build** number
-  (step 24), then Archive and Distribute again (steps 25 to 27). In App
-  Store Connect, make a new version, pick the new build, and submit.
+  capabilities are listed (steps 16 to 18), set a bigger **Version** (such as
+  `1.1`) and a bigger **Build** number than the last you sent (step 24), then
+  Archive and Distribute again (steps 25 to 27). Apple refuses an upload with
+  the Version of one already on the App Store. In App Store Connect, make a
+  new version with that same number, pick the new build, and submit.
 
 ## For whoever works on the code next
 

@@ -465,6 +465,11 @@ try:
           not [t for t in tables if "practice" in t], sorted(tables))
     page = get("/learn/practice")[1]
     check("it keeps builder text and jargon out", not leaks(page), leaks(page))
+    in_app = " ".join(c.get("/learn/practice", headers={
+        "User-Agent": "Mozilla/5.0 (iPhone) Mobile/15E148 OrenthApp/1"}).data.decode().split())
+    check("it says the tally is kept in this browser, or inside the iPhone app in this app",
+          "kept in this browser only" in " ".join(page.split())
+          and "kept in this app only" in in_app and "this browser only" not in in_app)
 finally:
     pass
 

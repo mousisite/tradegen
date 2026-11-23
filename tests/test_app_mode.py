@@ -859,6 +859,7 @@ function page(ground) {
     getComputedStyle: () => ({ backgroundColor: ground }),
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     MutationObserver: function () { this.observe = function () {}; },
+    addEventListener: (type, fn) => { heard['window ' + type] = fn; },
   };
   ctx.window = ctx;
   vm.createContext(ctx);
@@ -873,6 +874,18 @@ function page(ground) {
     if (!p.heard['App.appUrlOpen']) { throw new Error('native.js does not listen for app links'); }
     p.heard['App.appUrlOpen']({ url: link });
     out.links[link] = p.went;
+  }
+  // Swiped back to, and returned as it was left: the app has forgotten its
+  // listeners, and the page's script does not run again.
+  out.back = {};
+  for (const persisted of [true, false]) {
+    const p = page('rgb(244, 243, 238)');
+    delete p.heard['App.appUrlOpen'];
+    delete p.heard['Browser.browserFinished'];
+    if (p.heard['window pageshow']) { p.heard['window pageshow']({ persisted: persisted }); }
+    const again = p.heard['App.appUrlOpen'];
+    if (again) { again({ url: LINKS[LINKS.length - 1] }); }
+    out.back[persisted] = { went: p.went, sheet: !!p.heard['Browser.browserFinished'] };
   }
   out.bar = {};
   const grounds = { light: 'rgb(244, 243, 238)', dark: 'rgb(25, 24, 23)', none: 'rgba(0, 0, 0, 0)' };
@@ -953,6 +966,11 @@ else:
               ran["links"][link])
     for link in refused_links:
         check("%r opens nothing" % link, ran["links"][link] == [], ran["links"][link])
+    last = list(GOOD_LINKS.values())[-1]
+    check("a page swiped back to that returns as it was left hears app links again",
+          ran["back"]["true"] == {"went": [last], "sheet": True}, ran["back"])
+    check("while one that has just run hears them once",
+          ran["back"]["false"] == {"went": [], "sheet": False}, ran["back"])
     # The page runs under the status bar, so only the bar's text is set: dark
     # on a light page, light (DARK) on a dark one, and again once the sheet
     # has closed, which puts the app's own style back.
@@ -1133,9 +1151,25 @@ check("Info.plist: one window, made by SceneDelegate",
 
 with open(_os.path.join(IOS_APP, "PrivacyInfo.xcprivacy"), "rb") as fh:
     privacy = plistlib.load(fh)
+collected = privacy.pop("NSPrivacyCollectedDataTypes", [])
 check("privacy manifest: no tracking, no tracking domains, no reasoned APIs",
       privacy == {"NSPrivacyTracking": False, "NSPrivacyTrackingDomains": [],
                   "NSPrivacyAccessedAPITypes": []}, privacy)
+# It listed nothing collected, while the App Privacy answers list ten types.
+KIND = "NSPrivacyCollectedDataType"
+store = guide[guide.index("### App Privacy"):guide.index("Add these only if the setting")]
+cells = [line.split("|")[1].split(":")[-1].replace("*", "") for line in store.splitlines()
+         if line.startswith("| ")][2:]
+answered = {"".join(w[0].upper() + w[1:] for w in cell.split()) for cell in cells}
+check("privacy manifest: the types collected are the App Privacy answers', but for the "
+      "phone number, which only a setting collects",
+      {row[KIND] for row in collected} == {KIND + a for a in answered - {"PhoneNumber"}}
+      and len(answered) == 11, (sorted(answered), [row.get(KIND) for row in collected]))
+check("privacy manifest: each linked to the person, never for tracking, only to make the "
+      "app work",
+      collected and all(row[KIND + "Linked"] is True and row[KIND + "Tracking"] is False
+                        and row[KIND + "Purposes"] == [KIND + "PurposeAppFunctionality"]
+                        for row in collected))
 
 board = ET.parse(_os.path.join(IOS_APP, "Base.lproj", "Main.storyboard")).getroot()
 screens = [(v.get("customClass"), v.get("customModule"), v.get("customModuleProvider"))
