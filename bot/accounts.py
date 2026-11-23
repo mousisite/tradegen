@@ -153,6 +153,7 @@ class User:
     plan: str = "free"
     plan_status: str = ""
     plan_until: int = 0           # when the paid period ends, 0 if not known
+    plan_ends: int = -1           # when a cancelled plan stops, 0 if it renews, -1 not known
     bonus_until: int = 0          # free Pro from invites, until this time
     apple_until: int = 0          # Pro bought through Apple, until this time
     weekly_email: bool = False
@@ -180,6 +181,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 plan=row["plan"] if "plan" in keys else "free",
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
                 plan_until=row["plan_until"] if "plan_until" in keys else 0,
+                plan_ends=row["plan_ends"] if "plan_ends" in keys else -1,
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
                 apple_until=row["apple_until"] if "apple_until" in keys else 0,
                 alert_email=bool(row["alert_email"]) if "alert_email" in keys
@@ -206,6 +208,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                         ("plan_status", "TEXT NOT NULL DEFAULT ''"),
                         ("stripe_customer", "TEXT NOT NULL DEFAULT ''"),
                         ("plan_until", "INTEGER NOT NULL DEFAULT 0"),
+                        # When a plan paid on the website stops, 0 while it
+                        # renews, -1 until Stripe has said which.
+                        ("plan_ends", "INTEGER NOT NULL DEFAULT -1"),
                         ("invite_code", "TEXT NOT NULL DEFAULT ''"),
                         ("invited_by", "INTEGER NOT NULL DEFAULT 0"),
                         ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),

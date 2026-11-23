@@ -36,6 +36,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest import mock
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
 _sys.path.insert(0, _os.path.dirname(HERE))
@@ -1017,7 +1018,12 @@ class Ownership(StoreBase):
         self.assertEqual(moved, {"outcome": st.MOVED, "previous": self.ann})
         self.assertTrue(self.pro(self.ben))
         self.assertFalse(self.pro(self.ann))
-        self.assertTrue(billing.is_pro(self.user(self.ben)) or not billing.ready())
+        # With billing on, as on the site: while it is off everyone has Pro.
+        with mock.patch.dict(_os.environ, {"STRIPE_SECRET_KEY": "sk_test_x",
+                                           "STRIPE_PRICE_ID": "price_x",
+                                           "STRIPE_WEBHOOK_SECRET": "whsec_x"}):
+            self.assertTrue(billing.is_pro(self.user(self.ben)))
+            self.assertFalse(billing.is_pro(self.user(self.ann)))
         self.assertEqual(self.user(self.ann).apple_until, 0)
         row = self.conn.execute("SELECT user_id, moved_from, moved_ms FROM apple_subs").fetchone()
         self.assertEqual((row["user_id"], row["moved_from"]), (self.ben, self.ann))
@@ -1771,14 +1777,18 @@ class Notifications(WebBase):
         from bot import monitoring
         real = monitoring.note
         monitoring.note = lambda message, **context: notes.append((message, context))
-        web._APPSTORE_REFUSED.clear()
+        web._REFUSED.clear()
         try:
-            for _ in range(4):
-                self.send("a.b.c")
+            with self.assertLogs(web.app.logger, level="WARNING") as logs:
+                for _ in range(30):
+                    self.send("a.b.c")
         finally:
             monitoring.note = real
         self.assertEqual(len(notes), 1)
         self.assertIn("APPLE_APP_ID", notes[0][0])
+        # However many anyone posts, a few lines an hour and one count.
+        self.assertEqual(len(logs.output), web.REFUSALS_SAID)
+        self.assertEqual(len(web._REFUSED), 1)
 
 
 class DeepJSON(WebBase):

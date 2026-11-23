@@ -216,6 +216,48 @@ conn.close()
 check("when an account goes, so does the note of when its plan was read",
       gone is not None and kept == 0, kept)
 
+head("A PLAN WITH NO RECORDED END IS READ TOO")
+# A paid checkout says nothing of when its period ends. If the subscription's
+# own messages never come, nothing else would ever read the plan again.
+conn = db.connect(DB)
+endless = A.upsert_email_user(conn, "endless@example.com")
+billing.handle(conn, {"type": "checkout.session.completed", "created": int(NOW),
+                      "data": {"object": {"client_reference_id": str(endless.id),
+                                          "mode": "subscription", "customer": "cus_endless",
+                                          "payment_status": "paid"}}})
+conn.close()
+answers = {"data": []}
+
+
+def stripe_endless(method, path, data=None):
+    customer = path.rsplit("customer=", 1)[-1]
+    heard.append(customer)
+    return answers if customer == "cus_endless" else {"data": []}
+
+
+def reads_at(when):
+    del heard[:]
+    conn = db.connect(DB)
+    try:
+        billing.recheck(conn, when, call=stripe_endless, limit=1000)
+    finally:
+        conn.close()
+    return heard.count("cus_endless")
+
+
+check("it is read, and one Stripe has nothing for is left alone",
+      reads_at(NOW) == 1 and billing.is_pro(user(endless)))
+check("but asked about once a day, not every hour",
+      [reads_at(NOW + h * 3600) for h in (1, 12, 25)] == [0, 0, 1])
+answers["data"] = [{"id": "sub_e", "status": "active", "created": int(NOW - 60),
+                    "cancel_at_period_end": True,
+                    "current_period_end": int(NOW + 30 * DAY)}]
+reads_at(NOW + 2.5 * DAY)
+e = user(endless)
+check("its end is then known, and that it is cancelled",
+      billing.is_pro(e) and (e.plan_until, e.plan_ends) == (int(NOW + 30 * DAY),) * 2,
+      (e.plan_until, e.plan_ends))
+
 head("THE JOB IS STARTED WITH THE OTHERS")
 check("start_background_jobs schedules it hourly",
       "_recheck_plans_job" in open(web.__file__, encoding="utf-8").read()

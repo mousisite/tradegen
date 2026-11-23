@@ -402,6 +402,12 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
                            apple=_apple_plan()), status
 
 
+# What a plan paid on the website does next (billing.paid_until).
+PAID_SAID = {"renews": "Pro renews on %s.", "paid": "It is paid until %s.",
+             "ends": "The subscription is cancelled: Pro stays on until %s, and "
+                     "then ends."}
+
+
 def _apple_plan() -> Dict:
     """Pro through Apple, for the pricing and account pages.
 
@@ -411,10 +417,12 @@ def _apple_plan() -> Dict:
     warning before an account is deleted. retrying: whether Apple may yet
     charge for Pro that has ended, so the website sells none meanwhile.
     via: how Pro was got otherwise, so the app can say why it sells nothing:
-    "web" (paid on the website), "invite" or "other".
+    "web" (paid on the website), "invite" or "other". paid_said: when what
+    was paid on the website renews or ends, in words, when that is known.
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
            "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "paid_said": "",
            "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
@@ -430,6 +438,9 @@ def _apple_plan() -> Dict:
     if billing_mod.ready() and billing_mod.is_pro(plain, _is_operator()):
         if plain.plan == "pro" and plain.plan_status in billing_mod.ACTIVE:
             out["via"] = "web"
+            what, when = billing_mod.paid_until(plain)
+            if what:
+                out["paid_said"] = PAID_SAID[what] % _day(when)
         elif plain.bonus_until > time.time():
             out["via"], out["invite_until"] = "invite", plain.bonus_until
         else:
@@ -3776,6 +3787,19 @@ CODE_REFUSED = ("Payments would not take that code for this purchase. Nothing "
                 "was charged. Empty the box to pay full price.")
 CODE_TOO_OFTEN = ("Too many codes were tried in the last hour. Wait a while, "
                   "or empty the box to pay full price.")
+# Every other request that makes this server ask Stripe, per account an hour
+# (a network gets three times this), each counted on its own: without it, one
+# account in a loop could use up what Stripe allows and hold up real buyers.
+STRIPE_ASKS_PER_HOUR = 30
+STRIPE_TOO_OFTEN = ("That was asked for many times in the last hour. Wait a "
+                    "while, then try again. Nothing was charged.")
+
+
+def _code_said(status: int = 200, **said):
+    """The line under the discount box, marked as that and nothing else, so
+    the page never draws some other page there."""
+    return (render_template("_codesaid.html", **said), status,
+            {"X-Orenth-Part": "code"})
 
 
 @app.route("/billing/code", methods=["POST"])
@@ -3791,7 +3815,7 @@ def billing_code():
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
-        return render_template("_codesaid.html", code_error=CODE_TOO_OFTEN), 429
+        return _code_said(429, code_error=CODE_TOO_OFTEN)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         customer = billing_mod.customer_of(conn, g.user.id)
@@ -3800,10 +3824,10 @@ def billing_code():
     try:
         found = billing_mod.promotion(code, customer=customer)
     except billing_mod.BillingError as exc:
-        return render_template("_codesaid.html", code_error=str(exc)), 502
+        return _code_said(502, code_error=str(exc))
     if code and not found:
-        return render_template("_codesaid.html", code_error=CODE_ERROR), 400
-    return render_template("_codesaid.html", applied=found)
+        return _code_said(400, code_error=CODE_ERROR)
+    return _code_said(applied=found)
 
 
 @app.route("/billing/checkout", methods=["POST"])
@@ -3829,6 +3853,8 @@ def billing_checkout():
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
+    if _rate_limited("checkout", STRIPE_ASKS_PER_HOUR):
+        return _pricing_page(STRIPE_TOO_OFTEN, 429, code=code)
     found = None
 
     def checkout(as_customer: str) -> str:
@@ -3876,7 +3902,12 @@ def billing_done():
         return redirect(url_for("signin", next=url_for("billing_done",
                                                        session_id=session_id)))
     state = "no"
-    if billing_mod.key_set() and session_id and not g.demo:
+    asking = billing_mod.key_set() and session_id and not g.demo
+    if asking and _rate_limited("checkout_done", STRIPE_ASKS_PER_HOUR):
+        # Not asked again for a while, which is not a no: Stripe's own message
+        # may settle it meanwhile.
+        state = "waiting"
+    elif asking:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             with events_mod.counting_upgrades(conn):
@@ -3911,11 +3942,33 @@ def billing_portal():
         conn.close()
     if not customer:
         return redirect(url_for("pricing" if billing_mod.ready() else "account"))
+    if _rate_limited("portal", STRIPE_ASKS_PER_HOUR):
+        return render_template("error.html", message=STRIPE_TOO_OFTEN, symbol=""), 429
     try:
         url = billing_mod.portal_url(customer, _public_base() + url_for("account"))
     except billing_mod.BillingError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)
+
+
+# Signed messages refused, by whose they claim to be and why: when the hour
+# being counted began, and how many since. One that keeps happening (a wrong
+# STRIPE_WEBHOOK_SECRET, APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once
+# an hour, and anyone posting rubbish fills neither the log nor memory.
+_REFUSED: Dict[str, Tuple[float, int]] = {}
+_REFUSED_LOCK = threading.Lock()
+REFUSALS_SAID = 3
+
+
+def _refusals(kind: str) -> int:
+    """Count one more refusal of this kind; how many this hour."""
+    now = time.time()
+    with _REFUSED_LOCK:
+        since, tries = _REFUSED.get(kind, (now, 0))
+        if now - since >= 3600:
+            since, tries = now, 0
+        _REFUSED[kind] = (since, tries + 1)
+    return tries + 1
 
 
 @app.route("/billing/webhook", methods=["POST"])
@@ -3931,6 +3984,14 @@ def billing_webhook():
     payload = request.get_data()
     if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
                               secret):
+        tries = _refusals("stripe")
+        if tries <= REFUSALS_SAID:
+            app.logger.warning("A message to Stripe's webhook address was refused: "
+                               "its signature does not check out")
+        if tries == REFUSALS_SAID:
+            from bot import monitoring
+            monitoring.note("Messages to Stripe's webhook address keep failing their "
+                            "check; STRIPE_WEBHOOK_SECRET may be wrong")
         return jsonify({"error": "bad signature"}), 400
     try:
         event = safejson.loads(payload.decode("utf-8"))
@@ -3977,21 +4038,13 @@ APPSTORE_JWS_PER_POST = 20
 APPSTORE_STATE_PER_HOUR = 240
 APPSTORE_POSTS_PER_HOUR = 60
 APPSTORE_MOVES_PER_HOUR = 5
-# Notifications refused by kind of failure, so one that keeps happening (a
-# wrong APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once an hour.
-_APPSTORE_REFUSED: Dict[str, list] = {}
-_APPSTORE_REFUSED_LOCK = threading.Lock()
 
 
 def _appstore_refused(status: str) -> None:
-    app.logger.warning("An App Store notification was refused: %s", status)
-    now = time.time()
-    with _APPSTORE_REFUSED_LOCK:
-        seen = [t for t in _APPSTORE_REFUSED.get(status, []) if now - t < 3600]
-        seen.append(now)
-        _APPSTORE_REFUSED[status] = seen
-        loud = len(seen) == 3
-    if loud:
+    tries = _refusals("app store: " + status)
+    if tries <= REFUSALS_SAID:
+        app.logger.warning("An App Store notification was refused: %s", status)
+    if tries == REFUSALS_SAID:
         from bot import monitoring
         monitoring.note("App Store notifications keep failing their check; "
                         "APPLE_APP_ID or APPLE_BUNDLE_ID may be wrong",
@@ -4268,8 +4321,6 @@ def account():
         finally:
             conn.close()
         plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
-        plan["bonus_until"] = (g.user.bonus_until
-                               if g.user.bonus_until > time.time() else 0)
     weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
               "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,

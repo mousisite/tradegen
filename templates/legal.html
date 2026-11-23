@@ -71,8 +71,8 @@
     such as which browser and phone it is, until you sign out or it runs out
     after {{ session_days }} days.</p>
   <p class="prose">If you subscribe to Pro{% if iap_on %} on the website{% endif %},
-    Orenth stores the customer number Stripe gives it and whether your plan
-    is active. It never sees or stores your card.</p>
+    Orenth stores the customer number Stripe gives it, whether your plan is
+    active, and when it renews or ends. It never sees or stores your card.</p>
   {% if iap_on %}
   <p class="prose" id="apple-purchases">If you subscribe to Pro in the iPhone
     app, Apple takes the payment, through your Apple Account, and Orenth never

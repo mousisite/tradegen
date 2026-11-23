@@ -385,9 +385,9 @@ try:
     limit = billing.free_limits()["analyses_per_day"]
     for n in range(limit):
         billing.count_view(conn, free.id, "SYM%d|1d" % n)
-    check("the allowance can be used up", not billing.may_view(conn, free.id, "NEW|1d"))
+    check("the allowance can be used up", billing.reserve_view(conn, free.id, "NEW|1d") == "")
     check("but an instrument already opened today stays open",
-          billing.may_view(conn, free.id, "SYM0|1d"))
+          billing.reserve_view(conn, free.id, "SYM0|1d") == "seen")
     conn.close()
 
     r = c.get("/analyse?symbol=MSFT&interval=1d")
@@ -623,7 +623,8 @@ try:
     try:
         page = c.get("/ideas?market=stocks&horizon=medium&risk=balanced").data.decode()
         shown = sum(1 for i in range(8) if ">S%d<" % i in page)
-        check("a free account sees the top of the Find list", 0 < shown <= 6, shown)
+        check("a free account sees the top of the Find list, as far as its plan says",
+              shown == billing.free_limits()["find_results"], shown)
         check("and is told how many more Pro would show", "Pro shows all of them" in page)
         conn = db.connect(DB)
         billing.set_plan(conn, free.id, "pro", "active")
@@ -811,7 +812,99 @@ try:
     check("deleting an account cancels its subscription in Stripe",
           ("DELETE", "customers/cus_leaver", {}) in sent)
     check("and then deletes the account", A.get_user(conn, leaver.id) is None)
+    # Deleting the customer makes Stripe say its subscription ended.
+    said = billing.handle(conn, event("customer.subscription.deleted", now,
+                                      customer="cus_leaver", status="canceled",
+                                      metadata={"user_id": str(leaver.id)}))
+    again = billing.handle(conn, event("checkout.session.completed", now,
+                                       client_reference_id=str(leaver.id),
+                                       customer="cus_leaver", payment_status="paid"))
+    applied = billing._apply(conn, leaver.id, now, "free", "canceled")
+    kept = conn.execute("SELECT COUNT(*) FROM plan_events WHERE user_id=?",
+                        (leaver.id,)).fetchone()[0]
+    check("what Stripe says of it afterwards leaves nothing behind",
+          (said, again) == ("unknown customer",) * 2 and not applied and kept == 0,
+          (said, again, applied, kept))
     conn.close()
+
+    print()
+    print("   What a plan does next is said, as Stripe tells it:")
+
+    def dated(days):
+        return web._day(now + days * 86400)
+
+    conn = db.connect(DB)
+    teller = A.upsert_email_user(conn, "teller@example.com")
+    conn.close()
+    sign_in(teller)
+    ends_at = now + 20 * 86400
+
+    def told(created, **obj):
+        conn = db.connect(DB)
+        try:
+            billing.handle(conn, event("customer.subscription.updated", created,
+                                       metadata={"user_id": str(teller.id)},
+                                       customer="cus_teller", **obj),
+                           call=lambda *a, **k: {"data": []})
+        finally:
+            conn.close()
+        return [words_of(c.get(p)) for p in ("/account", "/pricing")]
+
+    pages = told(100, status="active", current_period_end=ends_at)
+    check("with nothing said of renewing, only what is paid for is claimed",
+          all("It is paid until %s." % dated(20) in p and "Pro renews on" not in p
+              and "is cancelled" not in p for p in pages))
+    pages = told(200, status="active", current_period_end=ends_at,
+                 cancel_at_period_end=False, cancel_at=None)
+    check("a plan that renews says when, on the account and the pricing page",
+          all("Pro renews on %s." % dated(20) in p for p in pages))
+    for at, extra in ((300, {"cancel_at_period_end": True}),
+                      (400, {"cancel_at_period_end": False, "cancel_at": ends_at})):
+        pages = told(at, status="active", current_period_end=ends_at, **extra)
+        check("one cancelled says when it ends, %s" % sorted(extra),
+              all("is cancelled: Pro stays on until %s, and then ends." % dated(20) in p
+                  and "Pro renews on" not in p for p in pages))
+    check("and none of them is told it has no limits",
+          "No limits" not in pages[0] and "as many alerts" in pages[0])
+    pages = told(500, status="past_due", current_period_end=ends_at,
+                 cancel_at_period_end=False)
+    check("while a payment is being tried again, no renewal is promised",
+          all("renews on" not in p for p in pages))
+    pages = told(600, status="canceled", cancel_at_period_end=False)
+    check("a Free account that paid before still reaches its receipts",
+          "Receipts and billing" in pages[0] and 'action="/billing/portal"' in pages[0]
+          and c.post("/billing/portal").status_code == 303)
+    conn = db.connect(DB)
+    billing.handle(conn, event("checkout.session.completed", 700, mode="payment",
+                               client_reference_id=str(teller.id),
+                               customer="cus_teller", payment_status="paid"))
+    check("a paid checkout that is not of a plan makes nobody Pro",
+          not billing.is_pro(A.get_user(conn, teller.id)))
+    billing.handle(conn, event("checkout.session.completed", 800, mode="subscription",
+                               client_reference_id=str(teller.id),
+                               customer="cus_teller", payment_status="paid"))
+    back = A.get_user(conn, teller.id)
+    check("while one of a plan does, with nothing left over of the one cancelled",
+          billing.is_pro(back) and (back.plan_ends, billing.paid_until(back)) == (-1, ("", 0)),
+          (back.plan_ends, billing.paid_until(back)))
+    billing.set_plan(conn, teller.id, "free", "canceled")
+    conn.execute("UPDATE users SET bonus_until=? WHERE id=?",
+                 (now + 5 * 86400, teller.id))
+    conn.commit()
+    conn.close()
+    page = words_of(c.get("/pricing"))
+    check("Pro from an invite is said to be free, with its end, and not to renew",
+          "It is free until %s, and then your account goes back to Free" % dated(5) in page
+          and "Pro renews automatically" not in page and "Receipts and billing" in page)
+    check("as it is on the account page",
+          "Free from invites until %s." % dated(5) in words_of(c.get("/account")))
+    conn = db.connect(DB)
+    conn.execute("UPDATE users SET bonus_until=0 WHERE id=?", (teller.id,))
+    conn.commit()
+    conn.close()
+    check("while whoever may buy is told that it renews",
+          "Pro renews automatically" in words_of(c.get("/pricing"))
+          and "Pro renews automatically" in words_of(web.app.test_client().get("/pricing")))
 
     print()
     print("   One setting missing never traps someone who pays:")
@@ -914,13 +1007,14 @@ try:
     check("and a minute later it is asked again",
           billing.offers()["yearly"]["label"] == "$79.99 a year")
     billing._PRICES.clear()
-    asked_with = []
+    asked_with, keys = [], []
 
     import requests as requests_mod
     real_request = requests_mod.request
     requests_mod.request = lambda method, url, **k: (
-        asked_with.append(k["timeout"]),
+        asked_with.append(k["timeout"]), keys.append(k["auth"]),
         (_ for _ in ()).throw(requests_mod.ConnectionError("slow")))[0]
+    _os.environ["STRIPE_SECRET_KEY"] = "sk_test_x\r\n"
     try:
         for path in ("prices/price_x", "subscriptions?x=1"):
             try:
@@ -929,6 +1023,9 @@ try:
                 pass
     finally:
         requests_mod.request = real_request
+        _os.environ["STRIPE_SECRET_KEY"] = STRIPE["STRIPE_SECRET_KEY"]
+    check("a key pasted with a line break after it still works",
+          keys == [("sk_test_x", "")] * 2, keys)
     check("a price is waited for briefly, anything else as before",
           asked_with == [billing.PRICE_TIMEOUT, 20] and billing.PRICE_TIMEOUT < 8,
           asked_with)
@@ -1051,6 +1148,16 @@ try:
     r = c.post("/billing/code", data={"code": "NOPE"})
     check("in place too", r.status_code == 400
           and "does not work" in r.data.decode("utf-8", "replace"))
+    check("every such line is marked, so the page draws nothing else in its place",
+          r.headers.get("X-Orenth-Part") == "code")
+    r = web.app.test_client().post("/billing/code", data={"code": "half"})
+    check("which the sign-in page, for a sign-in that has ended, is not",
+          r.status_code == 302 and "/signin" in r.headers["Location"]
+          and "X-Orenth-Part" not in r.headers, r.status_code)
+    page = c.get("/pricing").data.decode("utf-8", "replace")
+    check("the line's place is one screen readers watch, and both plans have headings",
+          'data-said aria-live="polite"' in page
+          and '<h2 class="eyebrow">Free</h2>' in page and '<h2 class="eyebrow">Pro</h2>' in page)
 
     print()
     print("   What Stripe will not take:")
@@ -1141,6 +1248,66 @@ try:
     check("while paying full price is never held up", r.status_code == 303,
           r.status_code)
     billing._stripe = fake_stripe
+
+    print()
+    print("   Nor can one account use up what Stripe allows everyone:")
+    conn = db.connect(DB)
+    looper = A.upsert_email_user(conn, "looper@example.com")
+    billing.set_plan(conn, looper.id, "free", "canceled", "cus_looper")
+    conn.close()
+    sign_in(looper)
+    web._RATE.clear()
+    # The last one of each is past the budget.
+    for what, ask, inside, past in (
+            ("checkout", lambda: c.post("/billing/checkout"), 303, 429),
+            ("the portal", lambda: c.post("/billing/portal"), 303, 429),
+            ("the return page", lambda: c.get("/billing/done?session_id=cs_test_1"), 302, 200)):
+        before = len(sent)
+        got = [ask().status_code for _ in range(web.STRIPE_ASKS_PER_HOUR)]
+        calls = len([s for s in sent[before:] if not s[1].startswith("prices/")])
+        last = ask()
+        check("%s is asked of Stripe %d times an hour and no more"
+              % (what, web.STRIPE_ASKS_PER_HOUR),
+              set(got) == {inside} and last.status_code == past
+              and calls == web.STRIPE_ASKS_PER_HOUR
+              and not [s for s in sent[before:][calls:] if not s[1].startswith("prices/")],
+              (set(got), last.status_code, calls))
+    check("and the return page then says neither that it was paid nor that it was not",
+          "We are confirming your payment" in words_of(last))
+    web._RATE.clear()
+
+    print()
+    print("   A wrong signing secret is heard of:")
+    from bot import monitoring
+    noted, warned = [], []
+
+    import logging
+
+    class Warned(logging.Handler):
+        def emit(self, record):
+            warned.append(record.getMessage())
+
+    real_note, handlers = monitoring.note, web.app.logger.handlers[:]
+    monitoring.note = lambda message, **k: noted.append(message)
+    web.app.logger.handlers = [Warned()]
+    web._REFUSED.clear()
+    try:
+        for _ in range(20):
+            c.post("/billing/webhook", data=body,
+                   headers={"Stripe-Signature": signed(body, "whsec_forged")})
+    finally:
+        monitoring.note, web.app.logger.handlers = real_note, handlers
+    check("refused messages from Stripe are logged, a few an hour, and reported once",
+          len(warned) == web.REFUSALS_SAID and len(noted) == 1
+          and "STRIPE_WEBHOOK_SECRET" in noted[0], (len(warned), noted))
+    web._REFUSED["stripe"] = (time.time() - 3601, 20)
+    check("and counted afresh the next hour", web._refusals("stripe") == 1)
+    _os.environ["STRIPE_WEBHOOK_SECRET"] = STRIPE["STRIPE_WEBHOOK_SECRET"] + "\n"
+    quiet = json.dumps({"type": "nothing.to.do"}).encode()
+    r = c.post("/billing/webhook", data=quiet, headers={"Stripe-Signature": signed(quiet)})
+    check("a secret pasted with a line break after it still checks out",
+          r.status_code == 200, r.status_code)
+    _os.environ["STRIPE_WEBHOOK_SECRET"] = STRIPE["STRIPE_WEBHOOK_SECRET"]
 
     print()
     print("=" * 72)
