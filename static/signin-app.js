@@ -176,7 +176,8 @@
     form.submit();
   }
 
-  // Apple's own sheet, through @capacitor-community/apple-sign-in. The nonce
+  // Apple's own sheet, through the app's bridge, over
+  // @capawesome/capacitor-apple-sign-in, or an older build's plugin. The nonce
   // comes from the server, which keeps its hash in this session; Apple signs
   // it into the token, so the token is good for this session and once.
   function withApple(link) {

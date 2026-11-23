@@ -509,7 +509,7 @@ paper journal and a live one side by side without editing anything:
 |---|---|
 | `STOCKBOT_DB` | Use this database file instead of `data/stockbot.db` |
 | `STOCKBOT_CONFIG` | Use this settings file instead of `config.json` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. Unset means no login at all |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. With no sign-in setting at all, a copy on your own machine has no login |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
 

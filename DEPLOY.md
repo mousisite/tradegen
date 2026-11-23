@@ -483,6 +483,7 @@ and refuses anything else.
 | `APPLE_APP_ID` | for selling Pro in the app | The app's number (Apple ID) from App Store Connect. Switches on in-app purchase, and Apple's production notifications must name it. See section 7 |
 | `APPLE_PRODUCT_IDS` | no | The subscriptions that are Pro, default `app.orenth.ios.pro.monthly,app.orenth.ios.pro.yearly` |
 | `APPLE_SANDBOX_PRO`, `APPLE_SANDBOX_USERS` | no | Whether test purchases give Pro: `all` (the default, which App Review needs), `allowlist` (only the email addresses in `APPLE_SANDBOX_USERS`) or `none` |
+| `REVIEW_LOGIN_EMAIL`, `REVIEW_LOGIN_CODE` | for App Review | The address and the fixed code (at least 16 characters) of the one account Apple's reviewers sign in to. See `mobile/APP_STORE.md`, Part 4 |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
 | `VAPID_PRIVATE_KEY` | recommended | The key browser notifications are signed with. Made and kept in `/data/vapid.pem` if unset; copy that file's text here so it outlives the disk. See "Notifications" below |
 | `VAPID_PUBLIC_KEY` | no | Only checked against the private key; the server works it out itself |
@@ -495,7 +496,7 @@ and refuses anything else.
 | `STOCKBOT_BACKUP_KEEP` | no | How many to keep, default 8 |
 | `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | recommended | All four copy each backup to a private storage bucket off the server, such as Cloudflare R2. See section 6 |
 | `BACKUP_S3_REGION`, `BACKUP_S3_PREFIX` | no | The bucket's region, default `auto` (R2's), and the folder in it, default `orenth/` |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | for email sign-in | All five turn on "Continue with email". Port defaults to 587; 465 uses SSL |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | for email sign-in | The four besides the port turn on "Continue with email". Port defaults to 587; 465 uses SSL |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SID` | for phone sign-in | All three turn on "Continue with phone", through Twilio Verify |
 | `PHONE_ALLOWED_PREFIXES` | no | Country codes allowed to get texts, e.g. `+1,+44`. Limits SMS fraud |
 | `PHONE_CODES_PER_HOUR` | no | Texts the whole site may send an hour, default 40 |
