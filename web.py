@@ -447,7 +447,7 @@ def _fair_use() -> Dict[str, int]:
     """
     return {"images": (IMAGE_READS_PER_HOUR
                        if os.environ.get("ANTHROPIC_API_KEY") else 0),
-            "theses": THESES_PER_HOUR}
+            "theses": THESES_PER_HOUR, "json": JSON_READS_PER_HOUR}
 
 
 def _upgrade(reason: str):
@@ -694,16 +694,6 @@ def _expose_user():
             # website is set up, and in the app as soon as the app's half is.
             "apple_button": apple_mod.web_ready()
                             or (apple_mod.native_ready() and _in_app())}
-
-
-def _in_app() -> bool:
-    """Whether this page is drawn inside the Orenth iPhone app.
-
-    The app's web view adds OrenthApp/<version> to its User-Agent. It only
-    ever chooses what to show, never what is allowed: anyone can send any
-    User-Agent.
-    """
-    return "OrenthApp/" in request.headers.get("User-Agent", "")
 
 
 # The iPhone app is this same site inside a native shell, and it says so by
@@ -1030,7 +1020,8 @@ def _refresh_example() -> None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
         result = engine_mod.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
                                     with_news=False, with_learning=True,
-                                    record=False)
+                                    record=False, resolve_symbol=False,
+                                    with_calendar=False)
         said = plain_mod.explain_plan(result.plan, result.bars)
         plan = result.plan
         samples = plan.prob_samples or 0
@@ -2989,7 +2980,9 @@ def google_callback():
 
     state = request.args.get("state", "")
     # Constant time, because this is a secret being compared.
-    if not expected or not hmac.compare_digest(str(expected), str(state)):
+    # As bytes, because text with a letter outside ASCII raises here.
+    if not expected or not hmac.compare_digest(
+            str(expected).encode("utf-8"), str(state).encode("utf-8", "replace")):
         return _sign_in_failed(
             challenge, "That sign-in link did not match this browser session. "
                        "Start again from this page.", "expired")
@@ -5434,10 +5427,22 @@ def _ai_consent_since() -> int:
         conn.close()
 
 
+# The addresses a program asks rather than a person: an analysis is seconds
+# of work and several requests to the data source, so an account looping one
+# over a list of tickers would slow every page and use up the source's limit
+# for everyone. Far more than anyone typing or pressing "View as JSON" makes.
+JSON_READS_PER_HOUR = 120
+SEARCHES_PER_HOUR = 600
+JSON_RETRY = 600            # seconds a program refused for this is told to wait
+
+
 @app.route("/api/search")
 def api_search():
     """Suggestions for a search box, from what has been typed so far."""
-    return jsonify(market_mod.search((request.args.get("q") or "")[:40]))
+    text = (request.args.get("q") or "")[:40]
+    if not text.strip() or _rate_limited("search", SEARCHES_PER_HOUR):
+        return jsonify([])
+    return jsonify(market_mod.search(text))
 
 
 @app.route("/api/analyse")
@@ -5447,6 +5452,13 @@ def api_analyse():
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
+    if _rate_limited("json", JSON_READS_PER_HOUR):
+        answer = jsonify({"error": "That is a lot of analyses in one hour. Wait a "
+                                   "while, then ask again.",
+                          "retry_after": JSON_RETRY})
+        answer.status_code = 429
+        answer.headers["Retry-After"] = str(JSON_RETRY)
+        return answer
     # The same allowance as the pages, or the API is a way round it.
     if not _allowance_left(symbol, interval, exact):
         return jsonify({"error": "The free daily allowance is used up."}), 402
@@ -5465,7 +5477,6 @@ def api_analyse():
     _spend_view(symbol, interval, exact)
 
     from bot import report as report_mod
-    import json as _json
     return app.response_class(
         report_mod.to_json(result.bars, result.plan, result.signals,
                            result.composite, result.regime, result.calibration,
@@ -5582,14 +5593,38 @@ def backtest_page(name):
         slug=public_mod.slug)
 
 
+# The record is worked out from every call ever made, which takes longer with
+# each day's, and changes only when the hourly check writes to it. So what was
+# worked out is kept until a call is written, scored or marked, or for this
+# long, since which calls are old enough to count moves with the clock.
+RECORD_KEPT = 600.0
+_RECORD_KEPT: Dict[str, Tuple] = {}
+_RECORD_LOCK = threading.Lock()
+
+
+def _record_kept(what: str, conn, settings, work):
+    """work()'s answer, kept while the record and the settings stay the same.
+
+    Worked out under the lock: a second reader arriving meanwhile waits for
+    the first one's answer rather than working it out again beside it.
+    """
+    key = (app.config.get("DB_PATH"), public_mod.record_mark(conn), tuple(settings))
+    with _RECORD_LOCK:
+        kept = _RECORD_KEPT.get(what)
+        if kept is None or kept[0] != key or not 0 <= time.time() - kept[1] < RECORD_KEPT:
+            kept = _RECORD_KEPT[what] = (key, time.time(), work())
+        return kept[2]
+
+
 @app.route("/record")
 def record():
     """How every past public call turned out, for anyone to check."""
     method = _house_method()
+    costs = {"equity": method["equity"] / 100.0, "crypto": method["crypto"] / 100.0}
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        rec = public_mod.record(conn, costs={"equity": method["equity"] / 100.0,
-                                             "crypto": method["crypto"] / 100.0})
+        rec = _record_kept("page", conn, sorted(costs.items()),
+                           lambda: public_mod.record(conn, costs=costs))
         prints = public_mod.fingerprints(conn, limit=7)
     finally:
         conn.close()
@@ -5609,7 +5644,7 @@ def record_csv():
     """Every public call, left-out ones included, as a file anyone can check."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        body = public_mod.calls_csv(conn)
+        body = _record_kept("file", conn, (), lambda: public_mod.calls_csv(conn))
     finally:
         conn.close()
     return Response(body, mimetype="text/csv", headers={
@@ -5689,6 +5724,8 @@ def learn_practice():
         items = learn_mod.practice_items(conn)
     finally:
         conn.close()
+    # Each chart by its own key: its place in the list moves with every run.
+    places = {x["key"]: n for n, x in enumerate(items)}
     tally = session.get("practice_tally") or {"n": 0, "right": 0}
     if request.method == "POST":
         if not _from_this_site():
@@ -5697,29 +5734,34 @@ def learn_practice():
             for key in ("practice_tally", "practice_last", "practice_done"):
                 session.pop(key, None)
             return redirect(url_for("learn_practice"), code=303)
-        k = request.form.get("item", type=int)
+        key = request.form.get("item", "")
         pick = request.form.get("pick", "")
-        if not items or k is None or not 0 <= k < len(items) \
-                or pick not in dict(learn_mod.PRACTICE_PICKS):
+        if not key or pick not in dict(learn_mod.PRACTICE_PICKS):
             abort(400)
-        answer = learn_mod.practice_answer(items[k])
-        done = list(session.get("practice_done") or [])
-        if k not in done:
+        if key not in places:
+            # The nightly run replaced the chart while it was on screen, so
+            # there is nothing to mark the pick against: on to one there is.
+            return redirect(url_for("learn_practice", n=request.form.get("n", type=int)),
+                            code=303)
+        answer = learn_mod.practice_answer(items[places[key]])
+        # Charts no longer in the list are let go of, so the cookie stays small.
+        done = [x for x in session.get("practice_done") or [] if x in places]
+        if key not in done:
             # Answering the same chart again shows it again but is not counted.
             tally = {"n": int(tally.get("n", 0)) + 1,
                      "right": int(tally.get("right", 0)) + (pick == answer)}
             session["practice_tally"] = tally
-            session["practice_done"] = (done + [k])[-200:]
-        session["practice_last"] = {"item": k, "pick": pick, "answer": answer}
-        return redirect(url_for("learn_practice", shown=k), code=303)
+            session["practice_done"] = (done + [key])[-200:]
+        session["practice_last"] = {"item": key, "pick": pick, "answer": answer}
+        return redirect(url_for("learn_practice", shown=key), code=303)
 
     item = reveal = None
     k = 0
     if items:
-        shown = request.args.get("shown", type=int)
+        shown = request.args.get("shown", "")
         last = session.get("practice_last") or {}
-        if shown is not None and last.get("item") == shown and 0 <= shown < len(items):
-            k, reveal = shown, last
+        if shown in places and last.get("item") == shown:
+            k, reveal = places[shown], last
         else:
             k = (request.args.get("n", type=int) or 0) % len(items)
         item = items[k]
@@ -5894,11 +5936,18 @@ def _public_snapshot(symbol: str, indexes: Optional[dict] = None,
     fetch (None) keeps the one stored at the last check. The weekly email
     uses it for watched symbols too, with exact for an entry saved as
     Yahoo's own symbol (LINK for Interlink Electronics).
+
+    A popular instrument's ticker is already Yahoo's own, so it is not looked
+    up, and the earnings calendar is not read: it adds warnings to a plan,
+    which nothing here keeps, and never changes its call. Asked for on every
+    check, the two were hundreds of requests a day for nothing.
     """
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
-                            db_path=app.config.get("DB_PATH"), exact=exact)
+                            db_path=app.config.get("DB_PATH"), exact=exact,
+                            resolve_symbol=symbol not in public_mod.NAMES,
+                            with_calendar=False)
     horizon = config_mod.horizon_for("1d", cfg)
     stop, target = cfg["stop_atr_multiple"], cfg["target_atr_multiple"]
     stride = cfg["calibration_stride"]

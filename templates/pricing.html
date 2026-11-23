@@ -46,7 +46,9 @@
        numbers the server enforces. #}
     <p class="fine">Fair use: up to {% if fair.images %}{{ fair.images }}
       screenshot reads and {% endif %}{{ fair.theses }} saved theses an hour,
-      and Find scans wait their turn when the server is busy.</p>
+      and Find scans wait their turn when the server is busy.{% if not in_app %}
+      A program of your own can read up to {{ fair.json }} analyses an
+      hour.{% endif %}</p>
     {% if in_app %}
       {# ===================== app_purchase =====================
          Inside the iPhone app, Pro may only be sold through Apple (App Store

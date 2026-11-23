@@ -273,28 +273,55 @@ try:
     check("a chart and three choices", status == 200 and 'class="chart trade"' in page
           and 'value="up"' in page and 'value="unclear"' in page, status)
     check("the instrument is not named before the answer", "S&P 500" not in main_text(page))
-    r = c.post("/learn/practice", data={"item": 0, "pick": "up"},
+    key0, key1 = items[0]["key"], items[1]["key"]
+    check("each chart has a key of its own, which the form sends",
+          key0 != key1 and 'name="item" value="%s"' % key0 in page, (key0, key1))
+    r = c.post("/learn/practice", data={"item": key0, "pick": "up"},
                headers={"Sec-Fetch-Site": "same-origin"})
     check("a pick goes back to a page that can be reloaded", r.status_code == 303
-          and "shown=0" in r.headers.get("Location", ""), r.status_code)
+          and "shown=%s" % key0 in r.headers.get("Location", ""), r.status_code)
     text = main_text(get(r.headers["Location"])[1])
     answer = learn.practice_answer(items[0])
     check("the answer is shown, with the instrument",
           ("Right." if answer == "up" else "Not this time.") in text and "S&P 500" in text)
     check("and counted", "right of 1" in text)
-    c.post("/learn/practice", data={"item": 0, "pick": "down"},
+    c.post("/learn/practice", data={"item": key0, "pick": "down"},
            headers={"Sec-Fetch-Site": "same-origin"})
     check("the same chart again is not counted twice",
-          "right of 1" in main_text(get("/learn/practice?shown=0")[1]))
-    r = c.post("/learn/practice", data={"item": 1, "pick": "up"},
+          "right of 1" in main_text(get("/learn/practice?shown=%s" % key0)[1]))
+    # The nightly run puts another chart in the first one's place.
+    real_items = learn.practice_items
+
+    def after_the_run(conn):
+        found = real_items(conn)
+        found[0] = dict(found[0], key="0123456789")
+        return found
+
+    learn.practice_items = after_the_run
+    try:
+        r = c.post("/learn/practice", data={"item": key0, "pick": "up", "n": 0},
+                   headers={"Sec-Fetch-Site": "same-origin"})
+        where = r.headers.get("Location", "")
+        check("a pick on a chart the nightly run replaced is not marked against another",
+              r.status_code == 303 and "shown" not in where
+              and "right of 1" in main_text(get(where)[1]), (r.status_code, where))
+        check("nor is the old answer shown on the new chart",
+              "You said" not in main_text(get("/learn/practice?shown=%s" % key0)[1]))
+        c.post("/learn/practice", data={"item": "0123456789", "pick": "up"},
+               headers={"Sec-Fetch-Site": "same-origin"})
+        check("and the new chart is counted, though another in its place was",
+              "right of 2" in main_text(get("/learn/practice?shown=0123456789")[1]))
+    finally:
+        learn.practice_items = real_items
+    r = c.post("/learn/practice", data={"item": key1, "pick": "up"},
                headers={"Sec-Fetch-Site": "cross-site"})
     check("a pick sent from another site is refused", r.status_code == 403, r.status_code)
     check("a pick that is not a choice is refused",
-          c.post("/learn/practice", data={"item": 0, "pick": "sideways"},
+          c.post("/learn/practice", data={"item": key0, "pick": "sideways"},
                  headers={"Sec-Fetch-Site": "same-origin"}).status_code == 400)
     with c.session_transaction() as sess:
         kept = dict(sess.get("practice_tally") or {})
-    check("the tally lives in the session", kept.get("n") == 1, kept)
+    check("the tally lives in the session", kept.get("n") == 2, kept)
     c.post("/learn/practice", data={"reset": "1"}, headers={"Sec-Fetch-Site": "same-origin"})
     with c.session_transaction() as sess:
         check("and Start over clears it", "practice_tally" not in sess)

@@ -40,7 +40,8 @@
       </div>
     {% else %}
       <form method="post" action="{{ url_for('learn_practice') }}">
-        <input type="hidden" name="item" value="{{ k }}">
+        <input type="hidden" name="item" value="{{ item.key }}">
+        <input type="hidden" name="n" value="{{ k }}">
         <p class="prose" style="margin-top:var(--s2)">Over the next {{ ahead }} bars,
           the price went:</p>
         <div class="learn-picks">

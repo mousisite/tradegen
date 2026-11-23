@@ -17,6 +17,7 @@ setup that lost money says so in the same words everywhere.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -911,7 +912,13 @@ def practice_items(conn: sqlite3.Connection) -> List[Dict]:
                 continue
             if cut < 10 or cut + PRACTICE_AHEAD >= len(t):
                 continue
-            out.append({"symbol": res["symbol"], "interval": res.get("interval", ""),
+            interval = res.get("interval", "")
+            # What tells this chart from the one the next run may put in its
+            # place. Short, because the browser's cookie keeps those answered,
+            # and it says nothing of the instrument before the answer.
+            key = hashlib.sha256(("%s|%s|%s|%d" % (res["symbol"], interval, name, t[cut]))
+                                 .encode("utf-8")).hexdigest()[:10]
+            out.append({"symbol": res["symbol"], "interval": interval, "key": key,
                         "setup": name, "t": t, "o": o, "h": h, "l": l, "c": c, "cut": cut})
     return out
 

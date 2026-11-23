@@ -230,6 +230,36 @@ try:
     check("while one scored with it falls to the stop in its own prices",
           got[0] == "stop" and abs(got[1] - 4.7) < 1e-9, got[:])
 
+    # Written down after the close before the split, once Yahoo had already
+    # rescaled its prices: 113.5 is in new shares, and divided again it was
+    # 11.35 beside prices near 113, a target "reached" on the first day.
+    eve = utc(2026, 2, 28, 1)                                  # Friday's close, at night
+    falls = [112.0, 112.5, 105.0, 104.0, 103.0]
+    eve_bars = bars_at(stamps, falls, swing=1.0, opens=falls, splits=split)
+    public.record_call(conn, call("LLY", "AVOID", 112.5, 2.0, eve))
+    public.settle_calls(conn, "LLY", eve_bars)
+    got = row(conn, "LLY", "outcome", "how", "exit_price")
+    check("a call already in the new shares is not divided by the split again",
+          got[:] == ("right", "stop", 105.0), got[:])
+    check("and is not marked", public.mark_calls(conn, "LLY", eve_bars) == 0)
+    public.record_call(conn, call("COST", "AVOID", 1125.0, 20.0, eve))
+    public.settle_calls(conn, "COST", eve_bars)
+    got = row(conn, "COST", "outcome", "how", "exit_price")
+    check("one written the same night in the old shares still is",
+          got[:] == ("right", "stop", 1050.0), got[:])
+    public.record_call(conn, call("WMT", "AVOID", 112.5, 2.0, eve))
+    conn.execute("UPDATE calls SET outcome='wrong', how='target', exit_price=157.5, "
+                 "settled=? WHERE symbol='WMT'", (stamps[-1],))
+    check("one scored that way before this is marked, with what happened",
+          public.mark_calls(conn, "WMT", eve_bars) == 1
+          and "its price already allowed for it. Counted once, the price fell to the stop."
+          in row(conn, "WMT", "excluded")[0], row(conn, "WMT", "excluded")[0])
+    two = split + [(utc(2026, 3, 4, 14, 30), 2.0)]             # and a second, two days on
+    halved = [x / 2 for x in falls]
+    check("a later split still counts, beside one its price allowed for",
+          public._split_factor(bars_at(stamps, halved, splits=two), eve, 112.5) == 2.0
+          and public._split_factor(bars_at(stamps, halved, splits=two), eve, 1125.0) == 20.0)
+
     # -----------------------------------------------------------------------
     head("ONLY CALLS OLD ENOUGH TO HAVE SETTLED ARE SCORED")
     # -----------------------------------------------------------------------
@@ -297,6 +327,35 @@ try:
           any(x["symbol"] == "SPY" and x["session"] == "2026-11-24" for x in named))
     check("with nothing about any person in it", "@" not in body and "user" not in body)
     page = text("/record")
+    worked_out = []
+    real_record, real_csv = public.record, public.calls_csv
+    public.record = lambda *a, **k: (worked_out.append("page"), real_record(*a, **k))[1]
+    public.calls_csv = lambda *a, **k: (worked_out.append("file"), real_csv(*a, **k))[1]
+    try:
+        again = text("/record")
+        c.get("/record.csv")
+        check("seen again with nothing new, the record is not worked out again",
+              worked_out == [] and again == page, worked_out)
+        public.record_call(conn, call("KO", "BUY", 70.0, 1.0, utc(2026, 4, 1, 21),
+                                      price_day=39999))
+        fresh_file = c.get("/record.csv").data.decode("utf-8")
+        text("/record")
+        check("a new call shows at once, on the page and in the file",
+              worked_out == ["file", "page"] and "2026-04-01 21:00:00,BUY,70.0" in fresh_file,
+              worked_out)
+        conn.execute("UPDATE calls SET excluded='left out' WHERE symbol='KO' AND price_day=39999")
+        conn.commit()
+        check("and so does one marked as left out",
+              "left out" in c.get("/record.csv").data.decode("utf-8").split(",KO,")[0]
+              and worked_out[-1] == "file" and len(worked_out) == 3, worked_out)
+        del worked_out[:]
+        kept, web.RECORD_KEPT = web.RECORD_KEPT, 0.0
+        text("/record")
+        web.RECORD_KEPT = kept
+        check("and it is worked out again after a while, since the clock moves what counts",
+              worked_out == ["page"], worked_out)
+    finally:
+        public.record, public.calls_csv = real_record, real_csv
     check("the record page links to it", 'href="/record.csv"' in page)
     check("and says how a call is made and scored", "first check after its market closes"
           in page and "scored when the price reaches its stop or its target" in page
@@ -581,10 +640,20 @@ try:
                 close=close, volume=np.full(n, 1e6), session_id=(stamps - 18000) // DAY,
                 gmt_offset=-18000, market_open=False,
                 meta={"regularMarketTime": int(end) + 6 * 3600 + 1800})
-    engine.resolve = lambda s: {"symbol": s, "name": s}
+    looked_up = []
+    engine.resolve = lambda s: (looked_up.append(s), {"symbol": s, "name": s})[1]
     engine.fetch_bars = lambda s, iv: live
-    catalysts.fetch = _no_calendar
+
+    def calendar_read(s):
+        looked_up.append("calendar of " + s)
+        return _no_calendar(s)
+
+    catalysts.fetch = calendar_read
     snap = web._public_snapshot("NVDA")
+    check("a popular check asks for no ticker search and no earnings calendar, used by neither",
+          looked_up == [], looked_up)
+    web._public_snapshot("ZZTYPED")
+    check("a typed watchlist entry is still looked up", looked_up == ["ZZTYPED"], looked_up)
     check("the check stores each strategy's spread, and buying every day",
           snap["baseline"] and len(snap["baseline"]) == 5
           and snap["tests"] and all(len(v) == 3 for v in snap["tests"].values())
