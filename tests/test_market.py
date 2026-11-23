@@ -177,7 +177,7 @@ check("a source that is down says so, with the wait it asked for",
 exc = refused("ZZZZ", Wire(Answer(404, body={"chart": {"result": None, "error": {
     "code": "Not Found", "description": "No data found, symbol may be delisted"}}})))
 check("a ticker the source does not have is its own kind too",
-      isinstance(exc, market.SymbolNotFound) and "no instrument found for 'ZZZZ'" in str(exc),
+      isinstance(exc, market.SymbolNotFound) and "No instrument was found for 'ZZZZ'" in str(exc),
       repr(exc))
 
 days, good = daily_stock()
@@ -189,9 +189,36 @@ check("with one short pause between, and none after the last try", SLEPT == [0.6
 
 exc = refused("TEST", Wire(requests.Timeout("read timed out")))
 check("two slow answers are said plainly",
-      exc is not None and "took too long to answer" in str(exc)
+      exc is not None and str(exc) == "Prices for TEST could not be fetched. The market "
+      "data source could not be used: it took too long to answer."
       and not any(u in str(exc) for u in URLISH), str(exc))
 check("after two tries, not three", len(SLEPT) == 1, SLEPT)
+
+# Timeouts never counted towards leaving the source alone, so during an outage
+# each page held one of the server's threads for its full 26 seconds.
+wire = on(Wire(requests.Timeout("read timed out")))
+kinds = []
+for n in range(upstream.THRESHOLD + 2):
+    try:
+        market.fetch_bars("TEST%d" % n, "1d")
+    except market.DataError as caught:
+        kinds.append(caught)
+check("after three requests with no answer, nothing more is sent",
+      len(wire.asked) == upstream.THRESHOLD * market._TRIES, len(wire.asked))
+check("and the reader is told the source is not answering, and when to come back",
+      isinstance(kinds[-1], market.DataThrottled) and "not answering" in str(kinds[-1])
+      and "Try again in about" in str(kinds[-1]), repr(kinds[-1]))
+wire = on(Wire(requests.Timeout("slow"), Answer(404), requests.Timeout("slow"),
+               Answer(404), requests.Timeout("slow"), Answer(404), requests.Timeout("slow"),
+               Answer(404)))
+for n in range(4):
+    refused_kind = None
+    try:
+        market.fetch_bars("GONE%d" % n, "1d")
+    except market.DataError as caught:
+        refused_kind = caught
+check("a source that answers on the second try is not taken for one that is down",
+      isinstance(refused_kind, market.SymbolNotFound), repr(refused_kind))
 
 exc = refused("TEST", Wire(Answer(200, None)))
 check("a page that is not price data is an error in words, not a crash",
@@ -344,7 +371,30 @@ q = short["chart"]["result"][0]["indicators"]["quote"][0]
 q["volume"][-1], q["high"][-1], q["low"][-1] = 0.0, q["close"][-1], q["close"][-1]
 exc = refused("TEST", Wire(Answer(200, short)))
 check("thirty bars with a stub are twenty-nine, too few, and said so",
-      exc is not None and "only 29 usable bars" in str(exc), str(exc))
+      str(exc) == "TEST has only 29 daily bars of history, and an analysis needs at "
+      "least 30.", str(exc))
+on(Wire(Answer(200, {"chart": {"result": [], "error": None}})))
+try:
+    market.fetch_bars("TEST", "5m")
+    exc = None
+except market.DataError as caught:
+    exc = caught
+check("no prices at all is a sentence too",
+      str(exc) == "The market data source sent no prices for TEST.", str(exc))
+wire = on(Wire(Answer(404)))
+try:
+    market.fetch_bars("AAPL#X", "1d")
+except market.DataError:
+    pass
+check("a # in a ticker stays part of it, rather than asking for AAPL",
+      wire.asked[0]["url"].endswith("/AAPL%23X"), wire.asked[0]["url"])
+wire = on(Wire(Answer(404)))
+try:
+    market.fetch_bars("^GSPC", "1d")
+except market.DataError:
+    pass
+check("and an index's ^ goes as it is", wire.asked[0]["url"].endswith("/^GSPC"),
+      wire.asked[0]["url"])
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +437,18 @@ check("the day's change runs from the day that just ended, not two days back",
       bars.prev_close == 140.5, bars.prev_close)
 check("and the last bar is dated that day", bars.last_bar_time.startswith(
     time.strftime("%Y-%m-%d", time.gmtime(cdays[38]))), bars.last_bar_time)
+
+# Yahoo stamps the day now trading with the time of its last trade, and then
+# the gap to it is not a day, so nothing was rebuilt in the very case above.
+live_days = cdays[:-1] + [cdays[-1] + 2 * 3600 - 40]
+on(Wire(Answer(200, chart(live_days, closes, opens=opens, highs=highs, lows=lows,
+                          volumes=[5e9] * n, itype="CRYPTOCURRENCY", gmt=0,
+                          regular={"start": cdays[-1], "end": cdays[-1] + DAY - 1}))))
+bars = market.fetch_bars("BTC-USD", "1d")
+check("the same with the day now trading stamped at its last trade",
+      len(bars) == 39 and bars.close[-1] == 140.5 and bars.live_price == 141.0
+      and bars.prev_close == 140.5 and bars.rebuilt == [cdays[38]],
+      (len(bars), bars.close[-1], bars.prev_close))
 
 two = chart(cdays, closes[:37] + [None, None, 141.0], opens=opens, highs=highs, lows=lows,
             volumes=[5e9] * n, itype="CRYPTOCURRENCY", gmt=0,
@@ -460,7 +522,10 @@ for typed, meant in (
         ("UNI", "UNI7083-USD"), ("MATIC", "POL28321-USD"), ("APTUSDT", "APT21794-USD"),
         ("PEPE", "PEPE24478-USD"), ("hbar", "HBAR-USD"),
         ("SUI20947-USD", "SUI20947-USD"), ("$aapl", "AAPL"), ("NASDAQ:msft", "MSFT"),
-        ("BRK-B", "BRK-B"), ("eth/eur", "ETH-EUR"), ("^GSPC", "^GSPC"),
+        ("BRK-B", "BRK-B"), ("brk.b", "BRK-B"), ("NYSE:BF.A", "BF-A"),
+        ("BTC-USDT", "BTC-USD"), ("ETH_USDT", "ETH-USD"), ("sui-usdc", "SUI20947-USD"),
+        ("SHOP.TO", "SHOP.TO"), ("VOD.L", "VOD.L"), ("USDC-USD", "USDC-USD"),
+        ("eth/eur", "ETH-EUR"), ("^GSPC", "^GSPC"),
         ("4043.T", "4043.T")):
     got = market.normalise_symbol(typed)
     check("%r is %s" % (typed, meant), got == meant, got)
@@ -473,6 +538,13 @@ for empty in ("", "   ", "$", "NYSE:"):
 check("every coin id is a dollar price", all(v.endswith("-USD") for v in market._COINS.values()))
 check("the listing-first tickers are all coin tickers",
       market._LISTED_FIRST <= set(market._COINS), market._LISTED_FIRST - set(market._COINS))
+
+check("a coin's id at the data source says the ticker people call it by",
+      [market.coin_ticker(s) for s in ("SUI20947-USD", "POL28321-USD", "GRAM-USD", "BTC-USD",
+                                       "LINK-USD", "1INCH-USD")]
+      == ["SUI", "POL", "TON", "BTC", "LINK", "1INCH"])
+check("and anything else has none", [market.coin_ticker(s) for s in ("LINK", "BRK-B", "^GSPC")]
+      == [None] * 3)
 
 from bot import public  # noqa: E402
 
@@ -674,6 +746,12 @@ SEARCH = {
     "ATOM": [quote("ATOM", "EQUITY", "Atomera Incorporated", "NASDAQ"),
              quote("ATOM-USD", "CRYPTOCURRENCY", "Cosmos USD", "CCC")],
     "BTC-USD": [quote("BTC-USD", "CRYPTOCURRENCY", "Bitcoin USD", "CCC")],
+    # A company's name, with a token named after it further down (made up).
+    "GAMESTOP": [quote("GME.MX", "EQUITY", "GameStop Corp.", "Mexico"),
+                 quote("GAME-USD", "CRYPTOCURRENCY", "GameStop token USD", "CCC")],
+    "BITCOIN": [quote("BTC=F", "FUTURE", "Bitcoin Futures"),
+                quote("GBTC", "ETF", "Bitcoin Trust", "NYSEArca"),
+                quote("BTC-USD", "CRYPTOCURRENCY", "Bitcoin USD", "CCC")],
     "UNI7083-USD": [quote("UNI7083-USD", "CRYPTOCURRENCY", "Uniswap USD", "CCC")],
     "XRP": [quote("XRP", "ETF", "Bitwise XRP ETF", "NYSEArca"),
             quote("XRP-USD", "CRYPTOCURRENCY", "XRP USD", "CCC"),
@@ -701,7 +779,9 @@ try:
                                ("ATOM", "ATOM", "Atomera Incorporated"),
                                ("ltc", "LTC-USD", "Litecoin USD"),
                                ("btc", "BTC-USD", "Bitcoin USD"),
-                               ("uni", "UNI7083-USD", "Uniswap USD")):
+                               ("uni", "UNI7083-USD", "Uniswap USD"),
+                               ("gamestop", "GME.MX", "GameStop Corp."),
+                               ("bitcoin", "BTC-USD", "Bitcoin USD")):
         found = market.resolve(typed)
         check("an analysis of %r is of %s, %s" % (typed, meant, name),
               found["symbol"] == meant and found["name"] == name, found)
@@ -747,6 +827,81 @@ try:
 finally:
     market._get = real_get
     REFUSE[0] = False
+
+
+# ---------------------------------------------------------------------------
+head("A COMPANY'S CALENDAR: UNREAD IS SAID, AND DATES ARE DATES")
+# ---------------------------------------------------------------------------
+from bot import catalysts  # noqa: E402
+
+real_engine = (engine.resolve, engine.fetch_bars, catalysts.fetch)
+UNREAD = "The earnings calendar could not be read just now"
+
+
+def plan_risks(kind, calendar):
+    """The plan's risks for an instrument of that kind, with that calendar."""
+    days = [D0 + k * DAY + OPEN for k in range(300)]
+    NOW[0] = days[-1] + 23400 + 3 * 3600
+    wave = [100.0 + 10.0 * np.sin(k / 9.0) + 0.05 * k for k in range(300)]
+    on(Wire(Answer(200, chart(days, wave, itype=kind))))
+    made = market.fetch_bars("TEST", "1d")
+    engine.resolve = lambda s: {"symbol": "TEST", "name": "Test"}
+    engine.fetch_bars = lambda s, iv: made
+    catalysts.fetch = calendar
+    return engine.analyse("TEST", config_mod.load(None), interval="1d", with_news=False,
+                          record=False).plan.risks
+
+
+def refuses(symbol):
+    return catalysts.Calendar(symbol=symbol, available=False)
+
+
+def reads(symbol):
+    return catalysts.Calendar(symbol=symbol)
+
+
+try:
+    # A calendar that could not be read used to look like no earnings coming.
+    check("a company whose calendar could not be read says the plan was not checked",
+          sum(UNREAD in r for r in plan_risks("EQUITY", refuses)) == 1)
+    check("one that was read does not", not any(UNREAD in r for r in plan_risks("EQUITY", reads)))
+    check("nor does a fund, which reports no earnings",
+          not any(UNREAD in r for r in plan_risks("ETF", refuses)))
+    check("nor a coin", not any(UNREAD in r for r in plan_risks("CRYPTOCURRENCY", refuses)))
+finally:
+    engine.resolve, engine.fetch_bars, catalysts.fetch = real_engine
+
+real_time = catalysts.time
+catalysts.time = types.SimpleNamespace(time=lambda: NOW[0])
+try:
+    sunday = D0 + 23 * 3600                                  # 23:00 UTC
+    NOW[0] = sunday
+    cal = catalysts.Calendar(symbol="T", earnings=D0 + 2 * DAY + 22 * 3600)
+    check("a report on Tuesday evening is in 2 days on Sunday night, not tomorrow",
+          [r["due"] for r in catalysts.describe(cal)] == ["in 2 days"]
+          and "due in 2 days" in catalysts.warnings_for(cal, "1d", 10)[0],
+          catalysts.describe(cal))
+    NOW[0] = D0 + DAY + 12 * 3600
+    check("tomorrow the day before", catalysts.describe(cal)[0]["due"] == "tomorrow")
+    NOW[0] = D0 + 2 * DAY + 12 * 3600
+    check("today on the day", catalysts.describe(cal)[0]["due"] == "today")
+    NOW[0] = D0 + 3 * DAY + 3600
+    check("and gone once its date is over", catalysts.describe(cal) == [])
+    cal.gmt_offset = -18000                                  # still that evening in New York
+    check("by the exchange's own clock", catalysts.describe(cal)[0]["due"] == "today")
+
+    NOW[0] = D0 + 12 * 3600
+    soon = catalysts.Calendar(symbol="T", earnings=NOW[0] + 3600)
+    said = catalysts.warnings_for(soon, "5m", 24)[0]
+    check("a plan of hours has no '0-day window'",
+          "0-day" not in said and "inside the time this plan expects to need" in said, said)
+    soon.earnings = NOW[0] + 14 * 3600
+    said = catalysts.warnings_for(soon, "5m", 24)[0]
+    check("nor just outside it", "0-day" not in said and "outside the time" in said, said)
+    check("a plan of days keeps its count", "inside the 14-day window" in
+          catalysts.warnings_for(soon, "1d", 10)[0])
+finally:
+    catalysts.time = real_time
 
 
 # ---------------------------------------------------------------------------

@@ -218,6 +218,8 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
         finally:
             pool.shutdown(wait=False)
+    # So that its "today" is the exchange's own.
+    calendar.gmt_offset = bars.gmt_offset
 
     step("Deciding")
     plan = decide(ctx, bars, signals, composite, regime, calib, sentiment,
@@ -229,6 +231,10 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
                                            plan.direction):
         if note not in plan.risks:
             plan.risks.append(note)
+    # Asked for and not had. Silence would read as no earnings coming.
+    unread = catalysts_mod.unread_warning(calendar, bars) if with_calendar else None
+    if unread:
+        plan.risks.append(unread)
 
     run_id = None
     if record:

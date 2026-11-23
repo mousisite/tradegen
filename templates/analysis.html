@@ -642,6 +642,7 @@
         Scored {{ 'with a built-in list of finance words'
                   if r.sentiment.method in ('finance lexicon', 'a list of finance words')
                   else 'by ' ~ r.sentiment.method }}.
+        {{ r.sentiment.social_note }}
         {# The analysis is shared by everyone who opens this ticker, so the
            hint travels with it and the page decides who sees it: only the
            owner of a copy on their own machine can add a key. #}
@@ -697,10 +698,7 @@
             <dt>{{ row.label }}{% if row.estimated %}
               <span class="faint">estimated</span>{% endif %}</dt>
             <dd><span class="fig">{{ row.when }}</span>
-              <span class="faint">
-                {{ 'today' if row.days < 1 else
-                   'tomorrow' if row.days < 2 else
-                   '%d days'|format(row.days|round(0,'floor')|int) }}</span></dd>
+              <span class="faint">{{ row.due }}</span></dd>
           {% endfor %}
         </dl>
         <p class="prose" style="margin-top:var(--s2)">
