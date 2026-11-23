@@ -566,6 +566,14 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
     distance = abs(entry - stop)
     per_unit = distance * multiplier
     budget = account * risk_pct / 100.0
+    # Real numbers that multiply or divide past what a computer holds: a page
+    # anyone can open must say so rather than break.
+    aim = float(target) if target is not None and math.isfinite(float(target)) else 0.0
+    fits_in_a_number = per_unit > 0 and all(map(math.isfinite, (
+        per_unit, budget, budget / per_unit * 1e6, budget / per_unit * entry * multiplier,
+        entry * cost_bps / distance, aim / distance)))
+    if not fits_in_a_number:
+        raise ValueError("Those numbers are too large or too small to size.")
     raw = budget / per_unit
     if kind == "coins":
         qty = math.floor(raw * 1e6 + 1e-6) / 1e6
@@ -625,6 +633,8 @@ def fixed_contracts(account: float, contract: str = "MES", contracts: int = 3,
         raise ValueError("Give at least one contract.")
     label, per_point, tick = CONTRACTS[contract]
     tick_value = per_point * tick
+    if not math.isfinite(contracts * max(ticks) * tick_value / account * 100.0):
+        raise ValueError("That account is too small to work this out for.")
     rows = [{"ticks": t, "points": t * tick, "cash": contracts * t * tick_value,
              "pct": contracts * t * tick_value / account * 100.0} for t in ticks]
     return {"contract": contract, "label": label, "contracts": contracts,

@@ -101,6 +101,19 @@ check("a stop at the entry is refused", refused(journal.size, "away from the ent
                                                 10000, 1, 100, 100))
 check("a target on the wrong side is refused", refused(
     journal.size, "winning side", 10000, 1, 100, 99, target=98))
+for label, args, extra in (
+        ("account", (1e308, 100, 10, 9), {}),
+        ("account in coins", (1e305, 1, 10, 9, "coins"), {}),
+        ("contract", (10000, 1, 10, 1, "futures", "own"), {"point_value": 1e308}),
+        ("tiny contract", (10000, 1, 10, 9, "futures", "own"), {"point_value": 1e-320}),
+        ("contract worth nothing a point", (10000, 1, 1.001, 1, "futures", "own"),
+         {"point_value": 5e-324}),
+        ("cost", (10000, 1, 10, 9), {"cost_bps": 1e308}),
+        ("target", (10000, 1, 10, 9.9999), {"target": 1.7e308})):
+    check("a number too big or small to work with is refused: %s" % label, refused(
+        journal.size, "too large or too small", *args, **extra))
+check("an account too small to work a share of out is refused too", refused(
+    journal.fixed_contracts, "too small", 1e-320))
 check("a risk over 100% is refused", refused(journal.size, "at most 100%",
                                              10000, 150, 100, 99))
 
@@ -212,6 +225,13 @@ check("a word where a number goes is said plainly", r.status_code == 200
       and "The entry must be a number." in flat(r))
 r = visitor.get("/tools/size?entry=100&stop=100")
 check("as is a stop at the entry", "The stop must be away from the entry." in flat(r))
+for query in ("account=1e308&risk=100&entry=10&stop=9",
+              "account=1e305&entry=10&stop=9&kind=coins",
+              "entry=10&stop=9&kind=futures&contract=own&point_value=1e-320"):
+    r = visitor.get("/tools/size?" + query)
+    check("numbers too big to size are said plainly, not a broken page: %s" % query,
+          r.status_code == 200 and "too large or too small to size" in flat(r),
+          r.status_code)
 r = visitor.get("/tools/survival")
 page = flat(r)
 check("the survival check opens for a visitor, worked out on its example numbers",
