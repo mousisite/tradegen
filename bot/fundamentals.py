@@ -100,6 +100,12 @@ class Fundamentals:
     price_currency: str = ""
     accounts_currency: str = ""
 
+    @property
+    def unread(self) -> bool:
+        """Whether Yahoo did not answer, so a figure that is missing was not
+        fetched, which is not the same as not reported."""
+        return any(n.startswith("Yahoo fundamentals unavailable") for n in self.notes)
+
     def currency_problem(self) -> str:
         """Why the accounts cannot be set against the share price, if they cannot.
 

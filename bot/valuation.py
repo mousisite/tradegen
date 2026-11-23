@@ -54,6 +54,10 @@ def normalised_fcf(f: Fundamentals) -> Dict:
     years = sorted(set(ocf) & set(capex))
     if len(years) < 3:
         return out
+    # The last three years, or no average: a company that now files its capital
+    # spending under another name left only years long past to average.
+    if years[-1] != max(ocf) or years[-3] != years[-1] - 2:
+        return out
 
     history = [{"fy": y, "value": ocf[y] - abs(capex[y])} for y in years]
     out["history"] = history
@@ -77,6 +81,10 @@ def normalised_fcf(f: Fundamentals) -> Dict:
                 % (big_number(trailing), abs(gap) * 100,
                    "above" if gap > 0 else "below", big_number(average)))
     return out
+
+
+_UNREAD = ("Yahoo did not send this company's figures this time, so this could not "
+           "be worked out. Open the page again in a few minutes.")
 
 
 def share_count(f: Fundamentals, price: float) -> Dict:
@@ -154,7 +162,7 @@ def discounted_cash_flow(f: Fundamentals, price: float,
     """
     v = Valuation(method="Discounted cash flow")
 
-    v.reason = f.currency_problem()
+    v.reason = _UNREAD if f.unread else f.currency_problem()
     if v.reason:
         return v
 
@@ -304,7 +312,7 @@ def reverse_dcf(f: Fundamentals, price: float, years: int = 10,
     """
     v = Valuation(method="Reverse DCF: growth already priced in")
 
-    v.reason = f.currency_problem()
+    v.reason = _UNREAD if f.unread else f.currency_problem()
     if v.reason:
         return v
 
@@ -436,7 +444,8 @@ def multiples(f: Fundamentals, price: float) -> Valuation:
                      "comparable": comparable})
 
     if not rows:
-        v.reason = ("No valuation ratios were reported. This is normal for "
+        v.reason = _UNREAD if f.unread else (
+                    "No valuation ratios were reported. This is normal for "
                     "funds, ETFs and companies with no earnings.")
         return v
 
