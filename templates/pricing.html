@@ -38,8 +38,11 @@
     {% endif %}
     <ul class="list">
       <li>As many stocks and coins a day as you like</li>
-      <li>Every result in every Find list</li>
+      <li>Every Find result worth a look, and the {{ watch_shown }} strongest
+        worth watching</li>
       <li>As many alerts as you like</li>
+      <li>A daily call on the first {{ watch_calls }} stocks or coins you watch
+        (on Free, only the popular ones get one)</li>
       <li>Everything in Free</li>
     </ul>
     {# The hourly safety limits every account keeps, Pro included, from the
@@ -73,7 +76,12 @@
         {% elif apple.pro %}
           <p class="prose"><b>You have Pro through Apple</b>{% if apple.pro.test %},
             from a test purchase{% endif %}.
-            {% if apple.pro.renews %}It renews on {{ apple.pro.until|day }}.{% else %}It
+            {% if apple.pro.grace %}Apple could not take the last payment. Pro
+            stays on until {{ apple.pro.until|day }} while Apple tries
+            again{% if apple.pro.renews %}; to keep it after that, update the
+            payment method in your iPhone's Settings &gt; Apple
+            Account{% else %}, and then ends{% endif %}.{% elif apple.pro.renews %}It
+            renews on {{ apple.pro.until|day }}.{% else %}It
             ends on {{ apple.pro.until|day }} and will not renew.{% endif %}</p>
           {% if apple.twice %}
             <p class="notice">You are paying for Pro twice: through Apple, and
@@ -96,7 +104,8 @@
               <p class="prose"><b>The Pro on this iPhone's Apple Account belongs
                 to another Orenth account.</b> Move it here, and that account
                 loses it and is told by email. A subscription can move once
-                every 30 days.</p>
+                every 30 days, except back to the account it was moved
+                from.</p>
               <button class="btn quiet" type="button" data-iap-move>Move Pro to this account</button>
             </div>
             <p class="fine">Payment is charged to your Apple Account when you

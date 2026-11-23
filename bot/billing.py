@@ -71,10 +71,55 @@ class BillingError(RuntimeError):
     """Stripe could not be reached or refused, phrased for the person."""
 
 
+class BillingRefused(BillingError):
+    """Stripe answered, and said no: asking the same again changes nothing.
+
+    Kept apart from a Stripe that could not be reached or broke. status is
+    its HTTP answer.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+REQUIRED = ("STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "STRIPE_WEBHOOK_SECRET")
+
+
+def _set(key: str) -> bool:
+    return bool((os.environ.get(key) or "").strip())
+
+
 def ready() -> bool:
-    return all((os.environ.get(k) or "").strip()
-               for k in ("STRIPE_SECRET_KEY", "STRIPE_PRICE_ID",
-                         "STRIPE_WEBHOOK_SECRET"))
+    return all(_set(k) for k in REQUIRED)
+
+
+def key_set() -> bool:
+    """Whether Stripe can be asked anything at all.
+
+    Enough to cancel a subscription, open Stripe's own page or read a plan
+    again: those must go on working for people who already pay, even with
+    another setting missing and nothing on sale.
+    """
+    return _set("STRIPE_SECRET_KEY")
+
+
+def half_set() -> str:
+    """Which settings are missing when only some are there, for whoever runs
+    this: paid plans are then off, which nobody chose. "" otherwise."""
+    missing = [k for k in REQUIRED if not _set(k)]
+    if not missing or len(missing) == len(REQUIRED):
+        return ""
+    return "%s %s not set" % (" and ".join(missing), "is" if len(missing) == 1 else "are")
+
+
+def describe() -> str:
+    """Whether paid plans are on, for the lines printed at start-up."""
+    if ready():
+        return "on"
+    missing = half_set()
+    return ("OFF, though partly set up: %s. Everyone has Pro and nobody can "
+            "buy it" % missing) if missing else "off"
 
 
 def price_label() -> str:
@@ -108,7 +153,18 @@ def price_id_for(plan: str) -> str:
 
 SYMBOLS = {"usd": "$", "eur": "€", "gbp": "£", "cad": "CA$", "aud": "A$"}
 PRICE_TTL = 3600.0
+# How long the last answer, or none, is shown before Stripe is asked again
+# after it failed, and how long it has to answer: a page waits on it.
+PRICE_RETRY = 60.0
+PRICE_TIMEOUT = 4
 _PRICES: Dict[str, tuple] = {}
+
+
+def _money(cents: int, currency: str) -> str:
+    """An amount as people write it: $9, $9.99, €2.50."""
+    currency = (currency or "usd").lower()
+    return SYMBOLS.get(currency, currency.upper() + " ") + (
+        "%d" % (cents // 100) if cents % 100 == 0 else "%.2f" % (cents / 100.0))
 
 
 def describe_price(price_id: str, call=None) -> Optional[Dict]:
@@ -116,20 +172,27 @@ def describe_price(price_id: str, call=None) -> Optional[Dict]:
     hit = _PRICES.get(price_id)
     if hit and time.time() - hit[0] < PRICE_TTL:
         return hit[1]
+    last = hit[1] if hit else None
+    again = time.time() - PRICE_TTL + PRICE_RETRY
+    if last is not None:
+        # One page asks, and those drawn meanwhile show the last answer
+        # rather than each waiting on Stripe as well.
+        _PRICES[price_id] = (again, last)
     try:
         found = (call or _stripe)("GET", "prices/" + price_id)
     except BillingError:
-        return hit[1] if hit else None
+        # Remembered too, for a minute: while Stripe is down, every pricing
+        # page used to hold a server thread for as long as it took to give up.
+        _PRICES[price_id] = (time.time() - PRICE_TTL + PRICE_RETRY, last)
+        return last
     cents = found.get("unit_amount")
     recurring = found.get("recurring") or {}
     if cents is None or recurring.get("interval") not in ("month", "year") \
             or recurring.get("interval_count", 1) != 1:
         return None
-    currency = (found.get("currency") or "usd").lower()
-    amount = SYMBOLS.get(currency, currency.upper() + " ") + (
-        "%d" % (cents // 100) if cents % 100 == 0 else "%.2f" % (cents / 100.0))
     info = {"cents": int(cents), "interval": recurring["interval"],
-            "label": "%s a %s" % (amount, recurring["interval"])}
+            "label": "%s a %s" % (_money(int(cents), found.get("currency")),
+                                  recurring["interval"])}
     _PRICES[price_id] = (time.time(), info)
     return info
 
@@ -163,11 +226,13 @@ def _describe(coupon: Dict) -> tuple:
         pct = float(coupon["percent_off"])
         what = "half price" if pct == 50 else "%g%% off" % pct
     else:
-        what = "$%g off" % (int(coupon.get("amount_off") or 0) / 100.0)
+        what = "%s off" % _money(int(coupon.get("amount_off") or 0),
+                                 coupon.get("currency"))
     months = coupon.get("duration_in_months")
     how_long = {"forever": "forever", "once": "on the first payment"}.get(
         coupon.get("duration"),
-        "for your first year" if months == 12 else "for %s months" % months)
+        "for your first year" if months == 12 else
+        "for 1 month" if months == 1 else "for %s months" % months)
     return what, how_long
 
 
@@ -189,12 +254,13 @@ def _missed(key: str) -> None:
         _MISSES[key] = now
 
 
-def promotion(code: str, call=None) -> Optional[Dict]:
+def promotion(code: str, call=None, customer: str = "") -> Optional[Dict]:
     """A typed code that would apply right now: Stripe's id and what it gives.
 
     Stripe matches the code whatever its capitals. A code that is switched
-    off or has used up its redemptions is turned away here, so the person
-    hears it on our page rather than as a refusal on Stripe's.
+    off or has used up its redemptions, or was made for one customer who is
+    not this one, is turned away here, so the person hears it on our page
+    rather than as a refusal on Stripe's.
     """
     code = code.strip()
     if not code:
@@ -223,6 +289,9 @@ def promotion(code: str, call=None) -> Optional[Dict]:
         if most and int(used or 0) >= int(most):
             _missed(key)
             return None
+    # Not remembered as a wrong code: it is right for the person it was made for.
+    if promo.get("customer") and promo["customer"] != customer:
+        return None
     what, how_long = _describe(coupon)
     return {"id": promo.get("id", ""), "code": promo.get("code") or code,
             "what": what, "how_long": how_long}
@@ -464,7 +533,9 @@ def _stamp(value) -> int:
 def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
     import requests
     try:
-        r = requests.request(method, API + path, data=data, timeout=20,
+        r = requests.request(method, API + path, data=data,
+                             timeout=(PRICE_TIMEOUT if path.startswith("prices/")
+                                      else 20),
                              auth=(os.environ["STRIPE_SECRET_KEY"], ""))
     except requests.RequestException as exc:
         raise BillingError("Payments could not be reached just now. Nothing "
@@ -472,7 +543,10 @@ def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
     if r.status_code == 404 and method == "DELETE":
         return {"deleted": True}                    # already gone is done
     if r.status_code >= 400:
-        raise BillingError("Payments refused the request. Nothing was charged.")
+        said = "Payments refused the request. Nothing was charged."
+        if r.status_code >= 500 or r.status_code == 429:
+            raise BillingError(said)
+        raise BillingRefused(said, r.status_code)
     return r.json()
 
 
@@ -504,31 +578,60 @@ def checkout_url(user, base: str, customer: str = "", call=None,
     return (call or _stripe)("POST", "checkout/sessions", data)["url"]
 
 
+def customer_gone(customer: str, call=None) -> bool:
+    """Whether Stripe no longer has a customer this server kept: deleted in
+    Stripe's dashboard, or made with test keys before the live ones."""
+    try:
+        return bool((call or _stripe)("GET", "customers/" + customer).get("deleted"))
+    except BillingRefused as exc:
+        return exc.status == 404
+
+
 def confirm_checkout(conn: sqlite3.Connection, session_id: str, user_id: int,
                      call=None) -> bool:
+    """Whether this person's checkout finished and is still running, recorded."""
+    return checkout_state(conn, session_id, user_id, call) == "pro"
+
+
+def checkout_state(conn: sqlite3.Connection, session_id: str, user_id: int,
+                   call=None) -> str:
     """Ask Stripe whether this person's checkout finished, and record it.
+
+    "pro" when it did and its subscription is running; "waiting" when they
+    finished it and the payment, or the subscription, is not settled yet;
+    "no" for anything else: no checkout of theirs, one given up, or one whose
+    subscription has ended. Raises BillingError when Stripe cannot say.
 
     A finished checkout stays complete and paid for ever, so on its own it
     proves only that a payment was once made: opening this page again after
     cancelling used to bring Pro back for good. The subscription it started is
     read with it, and only one still running counts.
     """
-    if not session_id.startswith("cs_"):
-        return False
-    found = (call or _stripe)("GET", "checkout/sessions/" + session_id
-                              + "?expand[]=subscription")
+    if not session_id.startswith("cs_") or not session_id.replace("_", "").isalnum():
+        return "no"
+    try:
+        found = (call or _stripe)("GET", "checkout/sessions/" + session_id
+                                  + "?expand[]=subscription")
+    except BillingRefused as exc:
+        if exc.status in (400, 404):
+            return "no"                             # Stripe knows no such checkout
+        raise
     if str(found.get("client_reference_id")) != str(user_id):
-        return False
-    if found.get("status") != "complete" or found.get("payment_status") not in PAID:
-        return False
+        return "no"
+    if found.get("status") != "complete":
+        return "no"
+    if found.get("payment_status") not in PAID:
+        return "waiting"
     sub = found.get("subscription")
-    if not isinstance(sub, dict) or sub.get("status") not in ACTIVE:
-        return False
+    if not isinstance(sub, dict) or sub.get("status") == "incomplete":
+        return "waiting"
+    if sub.get("status") not in ACTIVE:
+        return "no"
     # Events created before this checkout began describe an earlier
     # subscription, so the checkout's own time is where ordering starts.
     _apply(conn, user_id, _stamp(found.get("created")), "pro", sub["status"],
            found.get("customer") or "", _period_end(sub), in_order=False)
-    return True
+    return "pro"
 
 
 # How long before a recorded period end a plan is read again from Stripe
@@ -584,7 +687,7 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
     at Stripe; it only reads. Every plan asked about, answered or not, goes to
     the back of the queue.
     """
-    if not ready():
+    if not key_set():
         return {"checked": 0, "errors": []}
     now = now or time.time()
     checked, errors = 0, []
@@ -627,6 +730,26 @@ def close_customer(customer: str, call=None) -> None:
     (call or _stripe)("DELETE", "customers/" + customer)
 
 
+def end_subscription(conn: sqlite3.Connection, user_id: int, call=None) -> None:
+    """Stop what an account about to be deleted is paying, if anything.
+
+    Raises BillingError when it could not be stopped, and the account must
+    then be kept: a deleted account would go on being charged with nobody
+    left to say so. That includes a running plan while the key to Stripe is
+    missing and the other settings are there, which is a mistake in them.
+    """
+    customer = customer_of(conn, user_id)
+    if not customer:
+        return
+    if key_set():
+        close_customer(customer, call)
+    elif half_set():
+        row = conn.execute("SELECT plan, plan_status FROM users WHERE id=?",
+                           (user_id,)).fetchone()
+        if row["plan"] == "pro" and row["plan_status"] in ACTIVE:
+            raise BillingError("The subscription could not be cancelled just now.")
+
+
 # --- the webhook -----------------------------------------------------------------
 
 def verify(payload: bytes, header: str, secret: str,
@@ -664,8 +787,48 @@ def _period_end(sub: Dict) -> int:
         return 0
 
 
-def handle(conn: sqlite3.Connection, event: Dict) -> str:
-    """Apply one verified event. Safe to receive twice, and out of order."""
+def _still_paying(conn: sqlite3.Connection, user_id: int, customer: str,
+                  created: int, call=None) -> Optional[Dict]:
+    """The subscription Stripe is still running for someone an event would
+    make Free, or None.
+
+    An event speaks of one subscription, and a person can have several: a
+    first checkout given up at the bank's check expires a day later, after
+    they paid in a second one, and one of two can be cancelled. Two events of
+    one second also arrive in either order. So before Pro ends, Stripe is
+    asked what the person has now. Raises BillingError when it cannot be
+    reached, and the event waits for Stripe to send it again; when it refuses
+    to say (a deleted customer), the event decides.
+    """
+    row = conn.execute("SELECT plan, plan_status, stripe_customer FROM users WHERE id=?",
+                       (user_id,)).fetchone()
+    if row is None or row["plan"] != "pro" or row["plan_status"] not in ACTIVE \
+            or not key_set():
+        return None
+    ensure_schema(conn)
+    last = conn.execute("SELECT last_ts FROM plan_events WHERE user_id=?",
+                        (user_id,)).fetchone()
+    if created and last is not None and created < int(last[0]):
+        return None                                 # old news, turned away below
+    found: List[Dict] = []
+    for who in dict.fromkeys((row["stripe_customer"] or "", customer)):
+        if not who:
+            continue
+        try:
+            answer = (call or _stripe)(
+                "GET", "subscriptions?status=all&limit=100&customer=" + who)
+        except BillingRefused:
+            continue
+        found += [dict(sub, customer=who) for sub in answer.get("data") or []]
+    sub = _current(found)
+    return sub if sub and sub.get("status") in ACTIVE else None
+
+
+def handle(conn: sqlite3.Connection, event: Dict, call=None) -> str:
+    """Apply one verified event. Safe to receive twice, and out of order.
+
+    Raises BillingError when Stripe has to be asked and cannot be reached.
+    """
     kind = event.get("type") or ""
     obj = (event.get("data") or {}).get("object") or {}
     created = _stamp(event.get("created"))
@@ -694,6 +857,12 @@ def handle(conn: sqlite3.Connection, event: Dict) -> str:
             return "unknown customer"
         status = "canceled" if kind.endswith(".deleted") else (obj.get("status") or "")
         plan = "pro" if status in ACTIVE else "free"
+        if plan == "free":
+            running = _still_paying(conn, user_id, customer, created, call)
+            if running is not None:
+                _apply(conn, user_id, created, "pro", running["status"],
+                       running["customer"], _period_end(running), in_order=False)
+                return "pro"
         if not _apply(conn, user_id, created, plan, status, customer,
                       _period_end(obj)):
             return "stale"
