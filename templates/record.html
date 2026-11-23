@@ -111,7 +111,7 @@
       day of the price it was made at.</p>
     <div class="card pad0">
       <div class="tablewrap">
-        <table>
+        <table class="stack">
           <thead><tr>
             <th>Stock</th><th>It said</th><th>Result</th><th>What the price did</th>
             <th class="r">Move</th><th>Called</th>
@@ -119,13 +119,13 @@
           <tbody>
           {% for r in rec.latest %}
             <tr>
-              <td><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a></td>
-              <td><span class="chip {{ 'long' if r.action == 'BUY' else 'short' if r.action == 'SHORT'
+              <td class="lead"><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a></td>
+              <td data-label="It said"><span class="chip {{ 'long' if r.action == 'BUY' else 'short' if r.action == 'SHORT'
                    else 'hold' if r.action == 'WAIT' else 'mute' }}">{{ r.action }}</span></td>
-              <td>{{ result(r) }}</td>
-              <td style="white-space:nowrap">{{ how_words[r.how] }}</td>
-              <td class="r fig {{ 'gain' if r.exit_price > r.price else 'loss' if r.exit_price < r.price else '' }}">{{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%</td>
-              <td class="soft" style="white-space:nowrap">{{ r.session_at|day }}</td>
+              <td data-label="Result">{{ result(r) }}</td>
+              <td data-label="What the price did">{{ how_words[r.how] }}</td>
+              <td data-label="Move" class="r fig {{ 'gain' if r.exit_price > r.price else 'loss' if r.exit_price < r.price else '' }}">{{ ((r.exit_price / r.price - 1) * 100)|signed(1) }}%</td>
+              <td data-label="Called" class="soft" style="white-space:nowrap">{{ r.session_at|day }}</td>
             </tr>
           {% endfor %}
           </tbody>
@@ -184,6 +184,9 @@
 <div class="card" style="margin-top:var(--s3)">
   <span class="eyebrow">How it is scored</span>
   <ul class="list">
+    <li>Calls before 19 November 2026 came from 34 strategies. On that day ten
+      price-action setups began to have a say too, so calls since come from
+      44. All of them are scored together.</li>
     <li>A stock's call is the first check after its market closes, at the
       closing price, and it is scored from the next trading day. A weekend or
       a holiday has no new close, so it has no new call. The page for each
@@ -251,15 +254,15 @@
   <summary><b>{{ rec.excluded|length }} call{{ '' if rec.excluded|length == 1 else 's' }}
     left out of the scores</b>, and why</summary>
   <div class="tablewrap" style="margin-top:var(--s2)">
-    <table>
+    <table class="stack">
       <thead><tr><th>Stock</th><th>Written down</th><th>It said</th><th>Why it is left out</th></tr></thead>
       <tbody>
       {% for r in rec.excluded %}
         <tr>
-          <td><b>{{ short(r.symbol) }}</b></td>
-          <td class="soft" style="white-space:nowrap">{{ r.at|day }}</td>
-          <td>{{ r.action }}</td>
-          <td class="soft">{{ r.excluded }}</td>
+          <td class="lead"><b>{{ short(r.symbol) }}</b></td>
+          <td data-label="Written down" class="soft" style="white-space:nowrap">{{ r.at|day }}</td>
+          <td data-label="It said">{{ r.action }}</td>
+          <td data-label="Why it is left out" class="soft wide">{{ r.excluded }}</td>
         </tr>
       {% endfor %}
       </tbody>
@@ -270,8 +273,8 @@
 
 <section class="card closing" style="margin-top:var(--s4)">
   <p class="lead">Analyse any stock or coin, free.</p>
-  <p class="prose">The same check that made every call on this page, on
-    whatever you are looking at.</p>
+  <p class="prose">The check that makes these calls, on whatever you are
+    looking at.</p>
   <div class="cta">
     {% if not current_user or demo %}
       <a class="btn" href="{{ url_for('signin') }}">Create free account</a>

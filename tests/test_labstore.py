@@ -211,7 +211,7 @@ check("names are unique", len(names) == len(set(names)))
 TEN = ("sweep_reclaim", "prior_day_sweep", "equal_levels_sweep", "session_sweep",
        "structure_flip", "sweep_then_flip", "fvg_retest", "ifvg_flip", "premium_discount",
        "liquidity_model")
-check("the ten strategies on trial are there, and the breakout the lab measures beside them",
+check("the ten that are strategies are there, and the breakout the lab measures beside them",
       set(setups.REGISTRY_NAMES) == set(TEN) and "crowd_breakout" in names
       and not setups.setup("crowd_breakout").registry)
 check("only the session sweep needs intraday bars",

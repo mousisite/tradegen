@@ -326,7 +326,7 @@ See how often a setup worked in tests on past prices, after real trading costs, 
 Orenth is a research and learning tool for stocks and crypto: charts, historical back-tests, a practice (paper-trading) journal that uses virtual money only, and price alerts. Orenth is not a broker, exchange or wallet. You cannot buy, sell, deposit or hold real securities, crypto or money in Orenth, and nothing in the app is personalized investment advice.
 
 WHAT IT DOES
-- Analyse any stock or coin. Orenth back-tests 34 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how often this setup came up in tests on past prices, and how often it reached its target first.
+- Analyse any stock or coin. Orenth back-tests 44 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how often this setup came up in tests on past prices, and how often it reached its target first.
 - Says so when there is no edge. Often the honest answer is to wait, and Orenth says it plainly.
 - Find: choose stocks or crypto and a risk level, and Orenth ranks what is worth a closer look.
 - Screener: filter companies by the numbers in their SEC filings. Company figures on the research page link to the filing they came from.

@@ -335,14 +335,11 @@ check("with no None anywhere a visitor reads", ">None<" not in page
       and 'value="None"' not in page and "nan" not in re.sub(r"<[^>]+>", " ", page).split(),
       [f for f in forms if f[1] == "None"])
 detail = page[page.find("<h2>Strategy detail</h2>"):page.find("What the columns and words mean")]
-trial_rows = re.findall(r"<tr>\s*<td>([^<]+)\s*(<span class=\"chip mute\"[^>]*>on "
-                        r"trial</span>)?</td>", detail)
-print("   (%d rows in the strategy table, %d on trial)"
-      % (len(trial_rows), sum(1 for _, chip in trial_rows if chip)))
-check("and the strategy table says what on trial means, and marks those on trial",
-      "<dt>On trial</dt>" in page and len(trial_rows) == 12 and all(
-          (label.strip() in [web.public_mod.strategy_label(n) for n in web.strategies_mod.TRIAL])
-          == bool(chip) for label, chip in trial_rows), trial_rows[:3])
+rows = re.findall(r"<tr>\s*<td>([^<]+)</td>", detail)
+check("the strategy table has its twelve rows, and nothing on the page speaks of a trial",
+      len(rows) == 12 and not web.strategies_mod.TRIAL
+      and "on trial" not in page.lower(), rows[:3])
+check("the Liquidity row is among the families", re.search(r"<td>Liquidity</td>", page))
 
 conn.close()
 print()

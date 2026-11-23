@@ -1,4 +1,3 @@
-from markupsafe import escape as _markup_escape
 """End-to-end exercise of every web route, including the new ones."""
 import io
 import os
@@ -10,6 +9,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import harness
 from PIL import Image, ImageDraw
+from markupsafe import escape as _markup_escape
 
 import web
 from bot import database as db
@@ -299,13 +299,24 @@ from bot import market as market_mod
 from bot import public as public_mod
 
 
-def made_up_bars(symbol="FAKE", n=500):
-    rng = np.random.RandomState(11)
-    close = 100.0 * np.exp(np.cumsum(rng.normal(0.0006, 0.016, n)))
-    open_ = close * (1 + rng.normal(0, 0.004, n))
-    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.006, n)))
-    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.006, n)))
-    start = 1_700_000_000 - (1_700_000_000 % 86400) + 14 * 3600 + 1800
+def made_up_bars(symbol="FAKE", n=1250, leg=60, into=40, dip=4):
+    """Rises and falls in turn, ending on a turn up inside a rise: prices with
+    a real edge for the signals, so the analysis has a plan to draw. On random
+    prices it had one only until the strategies that vote were changed."""
+    rng = np.random.RandomState(0)
+    k = np.arange(n)
+    sign = np.where(((k - (n - into)) // leg) % 2 == 0, 1.0, -1.0)
+    rets = sign * 0.005 + rng.normal(0.0, 0.01, n)
+    rets[-dip - 1:-1] = -0.012 + rng.normal(0.0, 0.002, dip)
+    rets[-1] = 0.02
+    close = 100.0 * np.exp(np.cumsum(rets))
+    prev = np.concatenate([[100.0], close[:-1]])
+    open_ = prev * np.exp(rng.normal(0.0, 0.002, n))
+    high = np.maximum(open_, close) * np.exp(np.abs(rng.normal(0.0, 0.003, n)))
+    low = np.minimum(open_, close) * np.exp(-np.abs(rng.normal(0.0, 0.003, n)))
+    open_[-1] = low[-1] = close[-2] * 0.998
+    high[-1] = close[-1] = max(close[-1], high[-2] * 1.002)
+    start = 1_600_000_000 - (1_600_000_000 % 86400) + 14 * 3600 + 1800
     ts = np.array([start + 86400 * i for i in range(n)], dtype=np.int64)
     return market_mod.Bars(symbol=symbol, name="Made Up Corp", asset_class="equity",
                            currency="USD", exchange="NMS", interval="1d",
@@ -331,6 +342,9 @@ try:
     web.cached_analysis = lambda *a, **k: fake
     web.portfolio_mod.overlap = lambda *a, **k: {"warnings": [], "pairs": []}
     fake.run_id = 4242
+    check("the made-up stock gives a plan to draw",
+          None not in (fake.plan.entry, fake.plan.stop, fake.plan.target1),
+          fake.plan.action)
     # Only a call to act now is a trade. A WAIT's entry is a price the market
     # has not reached, and logging it put a fill that never happened in the
     # journal.

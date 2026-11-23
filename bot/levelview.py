@@ -7,7 +7,8 @@ halfway line of the last move, all in New York time. This module says the
 same things about the bars an analysis already has, in plain words, beside
 what Orenth measured about them.
 
-Nothing here is a signal and nothing here changes the call. Every sentence
+Nothing here changes the call: the price-action strategies that vote in it
+(strategies.LIQUIDITY) read the same structure themselves. Every sentence
 says what the price did or where a level is; the course's reading of it is
 said as the course's ("the course reads this as ..."), and the daily lean is
 shown beside its measured record (the bias study), never alone.

@@ -4,6 +4,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import numpy as np
 from bot.market import fetch_bars
+from bot import config
 from bot import strategies as S
 from bot import indicators as ind
 
@@ -47,16 +48,17 @@ print()
 print("=" * 70)
 print("3. IS THE HOLDING HORIZON SENSIBLE PER INTERVAL?")
 print("=" * 70)
-print("  horizon_bars default is 24. In real time that is:")
+print("  The default holding window (config.horizon_for) in real time:")
 for iv, mins in [("5m", 5), ("15m", 15), ("30m", 30), ("1h", 60), ("1d", 60 * 24)]:
-    total = 24 * mins
-    if total < 60 * 8:
+    held = config.horizon_for(iv, config.DEFAULTS)
+    total = held * mins
+    if iv == "1d":
+        span = "%d trading days" % held
+    elif total < 60 * 8:
         span = "%.1f hours" % (total / 60)
-    elif iv == "1d":
-        span = "24 trading days, about 5 weeks"
     else:
         span = "%.1f trading days" % (total / (60 * 6.5))
-    print("    %-4s -> %s" % (iv, span))
+    print("    %-4s %3d bars -> %s" % (iv, held, span))
 
 print()
 print("=" * 70)

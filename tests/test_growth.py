@@ -1,6 +1,7 @@
 """Popular pages, sharing, invites and the weekly email."""
 import calendar
 import os as _os
+import re
 import sys as _sys
 import time
 from types import SimpleNamespace
@@ -197,16 +198,73 @@ try:
     check("the list ranks tested strategies, leaving out too few trades",
           "RSI reversion" in page and "Trend stack" not in page)
     from bot import strategies as _strats
-    # The strategies that decide the call are counted apart from those on trial.
     _all, _daily = len(_strats.voting_names()), len(_strats.daily_voting_names())
-    _trial = len(_strats.TRIAL)
+    _inside = len(_strats.INTRADAY_ONLY)
+    _flat = " ".join(page.split())
     check("every count of the strategies comes from the registry",
-          _daily <= _all and ("of Orenth's %d" % _all) in page
+          _daily == _all - _inside
+          and ("%d strategies decide Orenth's calls." % _all) in _flat
           and ("running %d strategies" % _all) in page, (_all, _daily))
-    check("and the page says how many decide the call and how many are on trial",
-          not _trial or _all + _trial == len(_strats.REGISTRY)
-          and ("%d strategies decide Orenth's calls; %d" % (_all, _trial)) in page
-          and "price-action setups are measured on trial" in page, (_all, _trial))
+    # Six strategies are in the table; the page accounts for every other one.
+    _rest = re.search(r"(\d+) of them (?:has|have) fewer than 40 separate trades", _flat)
+    _in_day = re.search(r"(\d+) of them reads? the inside of a trading day", _flat)
+    _shown = re.search(r"<p>(\d+) strategies, back-tested every day", _flat)
+    check("and the ones not listed are counted, so the numbers add up",
+          _rest and _in_day and _shown and int(_shown.group(1)) == 6
+          and int(_shown.group(1)) + int(_rest.group(1)) + int(_in_day.group(1)) == _all,
+          [m and m.group(0) for m in (_shown, _rest, _in_day)])
+    check("no page speaks of a trial while nothing is on trial", not _strats.TRIAL
+          and not [p for p in ("/backtests", "/strategies", "/backtest/liquidity-model",
+                               "/backtest/session-sweep", "/backtest/rsi-reversion")
+                   if "on trial" in c.get(p).data.decode("utf-8", "replace")])
+    # A strategy tested everywhere with too few trades was "being tested" for good.
+    page = " ".join(c.get("/backtest/trend-stack").data.decode("utf-8", "replace").split())
+    check("a strategy tested but too rare to rank says so, with its figures",
+          "Too rare to rank" in page and "Being tested" not in page
+          and "2 stocks and coins tested so far, it took a pretend trade on 20 days in all, "
+              "fewer than 40 separate trades on any one of them" in page)
+    page = " ".join(c.get("/backtest/structure-flip").data.decode("utf-8", "replace").split())
+    check("and one that never fired says that", "it has not come up" in page
+          and "Being tested" not in page)
+    check("its heading reads as English", "Does a break of structure work?" in page)
+    check("so does every price-action setup's",
+          all(public.strategy_asked(s.name)[0].islower() for s in _strats.REGISTRY
+              if s.family == _strats.LIQUIDITY))
+    check("on a phone each row of the tests and of Strategies is a card of named figures",
+          all('<table class="stack">' in c.get(p).data.decode("utf-8", "replace")
+              for p in ("/backtests", "/backtest/rsi-reversion"))
+          and 'data-label="Kept a trade"' in c.get("/backtests").data.decode("utf-8", "replace"))
+    # With one on trial (votes=False still works), the pages say so again.
+    _real = _strats.TRIAL
+    _strats.TRIAL = ("macd_momentum",)
+    try:
+        page = " ".join(c.get("/backtests").data.decode("utf-8", "replace").split())
+        check("with one on trial, the list says so and marks it",
+              "1 more strategy is on trial" in page
+              and ">on trial</span>" in page[page.index("/backtest/macd-momentum"):]
+              [:260])
+        page = " ".join(c.get("/backtest/macd-momentum").data.decode("utf-8", "replace").split())
+        check("and so does its own page", "Measured here, not used in Orenth's calls" in page)
+        check("and Strategies", "1 more is on trial" in " ".join(
+            c.get("/strategies").data.decode("utf-8", "replace").split()))
+    finally:
+        _strats.TRIAL = _real
+    # The four that did worst were left off a page that says "every strategy".
+    conn = db.connect(DB)
+    for k, s in enumerate(_strats.REGISTRY):
+        conn.execute("INSERT INTO strategy_stats (symbol, interval, strategy, family, regime, "
+                     "n, wins, sum_r, sum_r_gross, sum_bars, updated_ts) VALUES "
+                     "('ALLFORTY', '1d', ?, ?, 'all', 200, 80, ?, ?, 600, 0)",
+                     (s.name, s.family, 5.0 - k, 5.0 - k))
+    conn.commit()
+    page = c.get("/strategies?symbol=ALLFORTY").data.decode("utf-8", "replace")
+    check("with a name on every column", not re.findall(r"<th[^>]*>\s*</th>", page))
+    check("Strategies lists every strategy with enough setups",
+          page.count('<td class="lead">') == len(_strats.REGISTRY),
+          page.count('<td class="lead">'))
+    conn.execute("DELETE FROM strategy_stats WHERE symbol='ALLFORTY'")
+    conn.commit()
+    conn.close()
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
     check("a stock page says which strategies worked there",
           "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)
@@ -245,6 +303,9 @@ try:
                                close=list(closes))
 
     page = c.get("/record").data.decode("utf-8", "replace")
+    check("the record says when the method changed, and from what to what",
+          "Calls before 19 November 2026 came from 34 strategies" in " ".join(page.split())
+          and "so calls since come from 44" in " ".join(page.split()))
     check("before any call, the record page says it is starting",
           "first calls are written down" in page and "noindex" in page)
     conn = db.connect(DB)

@@ -245,7 +245,8 @@ check("an appetite never shows more than balanced does",
       len(scans["wild"]["passed"]) <= len(scans["balanced"]["passed"])
       and len(scans["steady"]["passed"]) <= len(scans["balanced"]["passed"]))
 check("and the page is told how many it set aside",
-      scans["wild"]["wrong_shape"] >= 0
+      scans["wild"]["wrong_shape"] == len(scans["balanced"]["passed"])
+      - len(scans["wild"]["passed"])
       and scans["balanced"]["wrong_shape"] == 0)
 
 check("an unknown appetite falls back rather than failing",

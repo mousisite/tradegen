@@ -25,7 +25,7 @@ _os.environ["GOOGLE_CLIENT_SECRET"] = "x"
 
 import web  # noqa: E402
 from bot import database as db  # noqa: E402
-from bot import labstore, learn, setups, strategies  # noqa: E402
+from bot import labstore, learn, setups  # noqa: E402
 
 c, DB = harness.isolated_web("learn")
 web.app.config["AUTH_MODE"] = None
@@ -229,26 +229,20 @@ try:
               if not t.startswith(("/static/", "/auth/")) and get(t)[0] >= 400]
     check("all %d links from them answer" % len(targets), not broken, broken[:8])
 
+    learn_words = " ".join(get("/learn")[1].split())
+    check("the hub says ten of the setups have a say in the calls, and which one has not",
+          "Ten of these setups also have a say in Orenth's Buy, Wait or Avoid calls" in learn_words
+          and "do not change Orenth" not in learn_words)
+
     head("THE LAB BOX ON A STRATEGY'S TEST PAGE")
-    stand_in = "liquidity_model" not in strategies.BY_NAME
-    if stand_in:
-        # Until the on-trial strategies are in this build, a stand-in gives the
-        # page to draw on; the box itself reads only the lab's store.
-        strategies.BY_NAME["liquidity_model"] = strategies.Strategy(
-            "liquidity_model", "liquidity", lambda ctx, i: None,
-            "Sweep, break and retest")
-    try:
-        status, page = get("/backtest/liquidity-model")
-        check("the sweep, break and retest test page shows the lab's result",
-              status == 200 and "Inside the day, with the course" in page
-              and "-0.08R" in page and "/learn/sweep-break-retest" in page, status)
-        check("before the house method", page.find("Inside the day") < page.find("How we tested"))
-        # The house method below it names ATR on purpose; only blanks are checked here.
-        blanks = [w for w in leaks(page) if w in ("None", "nan", "undefined", "NaN")]
-        check("with no blank printed as a word", not blanks, blanks)
-    finally:
-        if stand_in:
-            strategies.BY_NAME.pop("liquidity_model", None)
+    status, page = get("/backtest/liquidity-model")
+    check("the sweep, break and retest test page shows the lab's result",
+          status == 200 and "Inside the day, with the course" in page
+          and "-0.08R" in page and "/learn/sweep-break-retest" in page, status)
+    check("before the house method", page.find("Inside the day") < page.find("How we tested"))
+    # The house method below it names ATR on purpose; only blanks are checked here.
+    blanks = [w for w in leaks(page) if w in ("None", "nan", "undefined", "NaN")]
+    check("with no blank printed as a word", not blanks, blanks)
     check("a setup the lab has not measured gets no box",
           web._lab_box_data("fvg_retest") is None)
     check("nor does a strategy that is not a setup",

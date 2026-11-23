@@ -29,7 +29,7 @@ class Setup:
     course_says: str          # what the course teaches about it, in our words
     video: Tuple[str, ...]    # timestamps, "h:mm:ss" or "h:mm:ss-h:mm:ss"
     learn: str                # the Learn topic's slug
-    registry: bool            # measured daily as a strategy (on trial)
+    registry: bool            # also a strategy in strategies.REGISTRY, measured daily
     intraday_only: bool       # needs intraday bars (sessions)
     stop_rule: str            # a key of STOP_RULES: where the Setup lab puts its stop
 
@@ -125,6 +125,22 @@ SETUPS: Tuple[Setup, ...] = (
 )
 
 BY_NAME: Dict[str, Setup] = {s.name: s for s in SETUPS}
+
+# Each strategy's name as it reads in a question ("Does a sweep of yesterday's
+# high or low work?"), where the label alone does not make an English sentence.
+ASKED: Dict[str, str] = {
+    "sweep_reclaim": "a liquidity sweep and reclaim",
+    "prior_day_sweep": "a sweep of yesterday's high or low",
+    "equal_levels_sweep": "a sweep of equal highs or lows",
+    "session_sweep": "a sweep of a session's high or low",
+    "structure_flip": "a break of structure",
+    "sweep_then_flip": "a sweep followed by a break of structure",
+    "fvg_retest": "a fair value gap retest",
+    "ifvg_flip": "an inverse fair value gap",
+    "premium_discount": "the 50% line",
+    "liquidity_model": "the sweep, break and retest model",
+}
+
 REGISTRY_NAMES = tuple(s.name for s in SETUPS if s.registry)
 
 
