@@ -11,7 +11,8 @@
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
+{% set _about = "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
+{% set _blurb = page_blurb or _about %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
@@ -34,7 +35,8 @@
    them is clearly this. sameAs is the part that does the disambiguating, so
    it carries only addresses that resolve and that use this name.
    Nothing here is a claim that cannot be checked on the page itself: no
-   ratings, no counts, no awards. #}
+   ratings, no counts, no awards. What Orenth is stays the same on every page:
+   a stock page's own words, "AVOID" among them, describe the stock. #}
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -45,7 +47,7 @@
       "name": "{{ site_name }}",
       "url": "{{ site_base }}/",
       "logo": "{{ site_logo }}",
-      "description": {{ _blurb|tojson }}{% if same_as %},
+      "description": {{ _about|tojson }}{% if same_as %},
       "sameAs": [{% for link in same_as %}"{{ link }}"{{ ", " if not loop.last }}{% endfor %}]{% endif %}
     },
     {
@@ -58,7 +60,7 @@
       "browserRequirements": "Requires JavaScript only for optional extras",
       "publisher": { "@id": "{{ site_base }}/#org" },
       "image": "{{ preview_image }}",
-      "description": {{ _blurb|tojson }},
+      "description": {{ _about|tojson }},
       "offers": {
         "@type": "Offer",
         "price": "0",
