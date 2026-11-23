@@ -876,6 +876,9 @@ try:
     check("a Free account that paid before still reaches its receipts",
           "Receipts and billing" in pages[0] and 'action="/billing/portal"' in pages[0]
           and c.post("/billing/portal").status_code == 303)
+    check("and is not told that leaving cancels a subscription it no longer has",
+          "cancels your Pro subscription" not in pages[0]
+          and "cancels any Pro subscription you pay for on the website" in pages[0])
     conn = db.connect(DB)
     billing.handle(conn, event("checkout.session.completed", 700, mode="payment",
                                client_reference_id=str(teller.id),
@@ -926,6 +929,8 @@ try:
         check("the account page still leads to Stripe's own",
               "Manage subscription" in words_of(c.get("/account"))
               and c.post("/billing/portal").status_code == 303)
+        check("and says that leaving cancels what is paid for, as it does",
+              "cancels any Pro subscription you pay for" in words_of(c.get("/account")))
         _os.environ["STOCKBOT_ADMIN_EMAIL"] = "stuck@example.com"
         check("and the operator's page says what is wrong",
               "Paid plans are off:</b> %s is not set" % missing in words_of(c.get("/usage")))
