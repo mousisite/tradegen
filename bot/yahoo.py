@@ -182,6 +182,8 @@ def _get_once(url: str, params: Optional[Dict] = None, tries: int = _TRIES) -> D
         if r.status_code == 200:
             try:
                 parsed = r.json()
+                if not isinstance(parsed, dict):
+                    raise ValueError("not an object")
             except ValueError:
                 raise YahooError("Yahoo sent something that could not be read.")
             upstream.note_ok(_HOST)

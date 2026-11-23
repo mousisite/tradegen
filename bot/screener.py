@@ -111,9 +111,19 @@ class Candidate:
     quality: Optional[float] = None
     passed: List[str] = field(default_factory=list)
     deep_loaded: bool = False
+    # What its price and its accounts are in; empty when not said.
+    currency: str = ""
+    accounts_currency: str = ""
 
     def value(self, field_name: str):
         return getattr(self, field_name, None)
+
+    @property
+    def cap_currency(self) -> str:
+        """What the market cap is in when that is not dollars. A price in
+        pence has its market cap in pounds."""
+        code = fund._MAJOR.get(self.currency, self.currency)
+        return "" if code == "USD" else code
 
     @property
     def size(self) -> str:
@@ -126,8 +136,8 @@ class Candidate:
         for least, scale, shown in ((999.95e9, 1e12, "%.2fT"), (999.5e6, 1e9, "%.1fB"),
                                     (950e3, 1e6, "%.0fM")):
             if cap >= least:
-                return shown % (cap / scale)
-        return "under 1M"
+                return (shown % (cap / scale) + " " + self.cap_currency).strip()
+        return ("under 1M " + self.cap_currency).strip()
 
 
 @dataclass
@@ -181,6 +191,7 @@ def _from_quote(q: Dict) -> Candidate:
         if q.get("dividendYield") else None,
         off_high=off_high,
         sector=q.get("sector") or "",
+        currency=q.get("currency") or "",
     )
 
 
@@ -190,13 +201,26 @@ def universe_symbols(name: str, count: int = 100) -> List[str]:
     return [r.get("symbol") for r in rows if r.get("symbol")]
 
 
+def _not_dollars(candidate: Candidate, key: str, threshold: float) -> bool:
+    """Whether this filter is an amount of dollars and the figure is not one.
+
+    No exchange rate is at hand, so the two cannot be compared. More or less
+    than nothing is the same question in any currency.
+    """
+    if FILTERS[key]["unit"] != "usd" or not threshold:
+        return False
+    if FILTERS[key]["field"] == "free_cashflow":
+        return candidate.accounts_currency not in ("", "USD")
+    return bool(candidate.cap_currency)
+
+
 def _passes(candidate: Candidate, key: str, threshold: float) -> Optional[bool]:
     """Test one filter. None means the data was not available to judge."""
     spec = FILTERS.get(key)
     if not spec:
         return None
     value = candidate.value(spec["field"])
-    if value is None:
+    if value is None or _not_dollars(candidate, key, threshold):
         return None
     op = spec["op"]
     if op == ">=":
@@ -271,12 +295,15 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
                      "so they were checked only on names that passed the others.")
 
     survivors, rejected = [], 0
+    elsewhere: List[str] = []           # left out: its amounts are not in dollars
     for c in candidates:
         ok = True
         for key, threshold in shallow.items():
             result = _passes(c, key, threshold)
             if result is None:
                 if require_known:
+                    if _not_dollars(c, key, threshold):
+                        elsewhere.append(c.symbol)
                     ok = False
                     break
                 continue
@@ -292,8 +319,9 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
     # Largest first, before anything is cut. The list is shown largest first,
     # so the deep checks have to go to the largest too: cutting in the data
     # source's own order meant a large company that passed everything else was
-    # never checked while a smaller one was shown.
-    survivors.sort(key=lambda c: -(c.market_cap or 0))
+    # never checked while a smaller one was shown. Dollars first: a size in
+    # yen is not a larger company for being a larger number.
+    survivors.sort(key=lambda c: (bool(c.cap_currency), -(c.market_cap or 0)))
 
     not_checked = 0
     unread: List[str] = []
@@ -313,6 +341,8 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
                 result = _passes(c, key, threshold)
                 if result is None:
                     if require_known:
+                        if _not_dollars(c, key, threshold):
+                            elsewhere.append(c.symbol)
                         ok = False
                         break
                     continue
@@ -333,6 +363,10 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
         notes.append("%d more passed the other filters but were not checked "
                      "against the slower ones, because only the %d largest are. "
                      "Narrow the screen to reach them." % (not_checked, len(shortlist)))
+    if elsewhere:
+        notes.append("%s left out: an amount asked for is in dollars, and theirs are "
+                     "in another currency, so the two cannot be compared."
+                     % _names(elsewhere))
     if unread:
         notes.append("The fundamentals for %d could not be read just now (%s), so "
                      "they are neither passed nor rejected. Try again in a minute."
@@ -382,6 +416,7 @@ def _load_deep(candidates: List[Candidate], deadline: Optional[float] = None) ->
                     "revenue_growth": f.get("revenue_growth"),
                     "debt_to_equity": f.get("debt_to_equity"),
                     "free_cashflow": f.get("free_cashflow"), "sector": f.sector,
+                    "accounts_currency": getattr(f, "accounts_currency", ""),
                     "quality": q["score"] if q["reliable"] else None}
         except Exception:
             return None
@@ -404,6 +439,7 @@ def _load_deep(candidates: List[Candidate], deadline: Optional[float] = None) ->
             c.revenue_growth = got["revenue_growth"]
             c.debt_to_equity = got["debt_to_equity"]
             c.free_cashflow = got["free_cashflow"]
+            c.accounts_currency = got["accounts_currency"]
             c.sector = c.sector or got["sector"]
             c.quality = got["quality"]
             c.deep_loaded = True

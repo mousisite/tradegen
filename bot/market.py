@@ -242,6 +242,8 @@ def _fetch(url: str, params: dict, tries: int = _TRIES) -> dict:
         if r.status_code == 200:
             try:
                 data = r.json()
+                if not isinstance(data, dict):
+                    raise ValueError("not an object")
             except ValueError:
                 last = "it sent something that was not price data"
                 continue

@@ -546,6 +546,10 @@ def _accounts_hold_up(symbol: str) -> Optional[Dict]:
     except Exception as exc:
         return _unreadable(exc)
     if not filings.get("available"):
+        if filings.get("entity"):
+            # It does file, under rules not read here or too few years to
+            # compare. Calling that "no filings" would be false about it.
+            return {"ok": None, "reasons": [], "unjudged": True, "strength": None}
         return None
     try:
         facts = fundamentals_mod.load(symbol, with_sec=False)

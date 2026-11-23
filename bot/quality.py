@@ -483,7 +483,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
     out.missing = [label for label, value in needed.items() if not value]
     if out.missing or not assets:
         out.reliable = False
-        out.verdict = ("Cannot be calculated: %s %s not reported."
+        out.verdict = ("Cannot be calculated: %s %s not available."
                        % (", ".join(out.missing),
                           "was" if len(out.missing) == 1 else "were"))
         return out

@@ -2361,6 +2361,263 @@ except web._NoTrade as exc:
     check("and refuses what one contract is too big for", "Not even one ES contract" in str(exc))
 
 
+# ---------------------------------------------------------------------------
+head("WHAT WAS NOT READ IS NOT SAID TO BE NOTHING")
+# ---------------------------------------------------------------------------
+
+from bot import screener  # noqa: E402
+
+
+def no_list():
+    raise sec.SECError("EDGAR request failed: HTTP 403")
+
+
+real_map = sec.ticker_map
+sec.ticker_map = no_list
+try:
+    try:
+        said_ = sec.financial_history("AAPL")
+    except sec.SECError as exc:
+        said_ = exc
+    check("without EDGAR's list, a company is not told it files nothing",
+          isinstance(said_, sec.SECError), said_)
+    unread_ = ideas._accounts_hold_up("AAPL")
+    check("and Find calls its filings unread, and asks again soon",
+          unread_ and unread_["ok"] is None and not unread_.get("unjudged"), unread_)
+    check("a coin still has none", sec.financial_history("BTC-USD")["available"] is False)
+finally:
+    sec.ticker_map = real_map
+
+real_hist = sec.financial_history
+sec.financial_history = lambda symbol, years=6: dict(ifrs)
+try:
+    check("Find does not say a company under international rules files nothing",
+          (ideas._accounts_hold_up("TSM") or {}).get("unjudged") is True,
+          ideas._accounts_hold_up("TSM"))
+finally:
+    sec.financial_history = real_hist
+
+gone = F.Fundamentals("TEST", notes=["Yahoo fundamentals unavailable: Yahoo did not send "
+                                     "this company's figures this time."])
+gone_value = V.combine([V.discounted_cash_flow(gone, 100.0), V.reverse_dcf(gone, 100.0),
+                        V.multiples(gone, 100.0)], 100.0)
+check("figures Yahoo did not send are not called not reported",
+      not gone_value["usable"] and "did not send" in gone_value["reason"]
+      and not any("normal for" in m.reason or "not reported" in m.reason
+                  for m in gone_value["models"]), [m.reason for m in gone_value["models"]])
+
+
+class Filed:
+    """Filed cash flows, by fiscal year."""
+
+    def __init__(self, ocf, capex):
+        self.rows = {"operating_cashflow": ocf, "capex": capex}
+
+    def series(self, concept, years=10):
+        return [{"fy": y, "value": v, "unit": "USD"}
+                for y, v in sorted(self.rows[concept].items())][-years:]
+
+
+def starting(ocf, capex):
+    f_ = F.Fundamentals("TEST")
+    F._put(f_.metrics, "free_cashflow", "Free cash flow", 70.0)
+    f_.sec_facts = Filed(ocf, capex)
+    return V.normalised_fcf(f_)
+
+
+check("the average is of the last three filed years",
+      starting({y: 100.0 for y in range(2020, 2026)},
+               {y: 40.0 for y in range(2020, 2026)})["value"] == 60.0)
+check("and never of three years long past",
+      starting({y: 100.0 for y in range(2020, 2026)},
+               {y: 40.0 for y in range(2017, 2023)})["value"] == 70.0)
+check("nor of three with years missing between them",
+      starting({y: 100.0 for y in range(2020, 2026)},
+               {y: 40.0 for y in (2020, 2022, 2025)})["value"] == 70.0)
+
+
+# ---------------------------------------------------------------------------
+head("NO VIEW, NO TRADE THAT FITS IT")
+# ---------------------------------------------------------------------------
+
+def researched(facts_=None, history_=None):
+    """engine.research on made-up parts: (the research, the view options were asked for)."""
+    views = []
+    chain_ = types.SimpleNamespace()
+    real_parts = (F.load, sec.financial_history, sec.recent_material, R.profile,
+                  O.load_chain, O.analyse, O.suggest)
+    F.load = lambda symbol: facts_ or F.Fundamentals(symbol)
+    sec.financial_history = lambda symbol, years=8: history_ or {"available": False, "reason": ""}
+    sec.recent_material = lambda symbol, limit=10: []
+    R.profile = lambda symbol, interval="1d": R.RiskProfile(
+        symbol=symbol, samples=300, period="", reliable=True, beta=0.05)
+    O.load_chain, O.analyse = lambda symbol: chain_, lambda chain: {}
+    O.suggest = lambda chain, view, conviction=0.5: views.append(view) or []
+    try:
+        return engine.research("TEST", 100.0, dict(HOUSE), with_reasoning=False), views
+    finally:
+        (F.load, sec.financial_history, sec.recent_material, R.profile,
+         O.load_chain, O.analyse, O.suggest) = real_parts
+
+
+one_point, views_ = researched()
+check("one point is not a view, and no option trade is offered to fit it",
+      one_point.thesis.balance == 1.0 and thesis.no_view(one_point.thesis.verdict)
+      and views_ == ["neutral"], (one_point.thesis.balance, views_))
+bank_like = {"available": True, "years": [2024, 2025], "currency": "USD", "entity": "B",
+             "table": {"revenue": [{"fy": y, "value": 1.0, "unit": "USD"} for y in (2024, 2025)]}}
+check("a bank is not scored as a factory while what it is could not be read",
+      researched(gone, bank_like)[0].scores["available"] is False)
+check("any other company still is",
+      researched(gone, dict(bank_like, table=dict(bank_like["table"], current_assets=[
+          {"fy": 2025, "value": 1.0, "unit": "USD"}])))[0].scores["available"] is True)
+
+
+# ---------------------------------------------------------------------------
+head("DOLLARS ARE COMPARED WITH DOLLARS")
+# ---------------------------------------------------------------------------
+
+def screened(filters, **figures):
+    quote_ = {"symbol": "AAA", "regularMarketPrice": 2800.0, "marketCap": 4e13,
+              "currency": "JPY"}
+    quote_.update(figures.pop("quote", {}))
+
+    def loaded(symbol, with_sec=False):
+        f_ = F.Fundamentals(symbol, accounts_currency=figures.get("accounts", "JPY"))
+        F._put(f_.metrics, "free_cashflow", "Free cash flow", 2e12)
+        return f_
+
+    real_s = (yahoo.quotes, F.load)
+    yahoo.quotes, F.load = lambda symbols: [quote_], loaded
+    try:
+        return screener.run(symbols=["AAA"], filters=filters)
+    finally:
+        yahoo.quotes, F.load = real_s
+
+
+yen = screened({"market_cap_min": 1e12})
+check("forty trillion yen is not forty trillion dollars",
+      not yen.passed and any("another currency" in n and "AAA" in n for n in yen.notes), yen.notes)
+check("a size in yen says so", screener._from_quote(
+    {"symbol": "X", "marketCap": 4e13, "currency": "JPY"}).size == "40.00T JPY")
+check("and one of a share in pence is in pounds", screener._from_quote(
+    {"symbol": "X", "marketCap": 1.5e10, "currency": "GBp"}).size == "15.0B GBP")
+check("a dollar one needs no word", screener._from_quote(
+    {"symbol": "X", "marketCap": 2e9, "currency": "USD"}).size == "2.0B")
+check("more cash in than out is the same in any currency",
+      [c.symbol for c in screened({"fcf_positive": 0}).passed] == ["AAA"])
+check("an amount of it is not",
+      not screened({"fcf_positive": 1e9}).passed
+      and [c.symbol for c in screened({"fcf_positive": 1e9}, accounts="USD").passed] == ["AAA"])
+yen_brief = str(_reasoning.build_payload("TEST", 100.0, sec_history={
+    "available": True, "table": {"revenue": [{"fy": 2025, "value": 4.5e13, "unit": "JPY"}]}}))
+check("the brief given to the reasoning step says which currency filed sales are in",
+      "in JPY" in yen_brief and "45.0T" in yen_brief, yen_brief)
+
+
+# ---------------------------------------------------------------------------
+head("THE PAID REASONING IS ASKED FOR ONCE")
+# ---------------------------------------------------------------------------
+
+clients, requests_ = [], []
+
+
+def counted_client(**k):
+    clients.append(k)
+    return types.SimpleNamespace(messages=types.SimpleNamespace(
+        create=lambda **kw: requests_.append(kw) or types.SimpleNamespace(
+            content=[], stop_reason="end_turn")))
+
+
+fake_sdk = types.ModuleType("anthropic")
+fake_sdk.Anthropic = counted_client
+had_sdk, was_available = _sys.modules.get("anthropic"), _reasoning.available
+had_key = _os.environ.get("ANTHROPIC_API_KEY")
+had_model = _os.environ.pop("CLAUDE_MODEL", None)
+quiet = _reasoning.log.level
+_reasoning.log.setLevel(logging.CRITICAL + 1)
+_sys.modules["anthropic"], _reasoning.available = fake_sdk, lambda: True
+_os.environ["ANTHROPIC_API_KEY"] = "made up for this test"
+try:
+    _reasoning.analyse({"Instrument": {"symbol": "T", "price": 10.0}})
+    _reasoning.analyse({"Instrument": {"symbol": "T", "price": 10.0}}, model="another")
+finally:
+    _reasoning.available = was_available
+    _reasoning.log.setLevel(quiet)
+    _sys.modules.pop("anthropic")
+    if had_sdk is not None:
+        _sys.modules["anthropic"] = had_sdk
+    _os.environ.pop("ANTHROPIC_API_KEY")
+    if had_key is not None:
+        _os.environ["ANTHROPIC_API_KEY"] = had_key
+    if had_model is not None:
+        _os.environ["CLAUDE_MODEL"] = had_model
+check("a reply too slow for the page is not asked and paid for a second time",
+      clients and all(c["max_retries"] == 0 and c["timeout"] <= 40 for c in clients), clients)
+check("the default model is kept from thinking past the page's time",
+      requests_[0].get("output_config") == {"effort": "medium"}
+      and "output_config" not in requests_[1], requests_)
+
+
+# ---------------------------------------------------------------------------
+head("AN ANSWER THAT IS NOT DATA")
+# ---------------------------------------------------------------------------
+
+class Nothing:
+    status_code, headers, text = 200, {}, "null"
+
+    def json(self):
+        return None
+
+
+def rubbish(module, ask):
+    real_parts = (module.requests.get, module.time, yahoo._ensure, yahoo._SESSION)
+    module.requests.get = lambda *a, **k: Nothing()
+    module.time = types.SimpleNamespace(sleep=lambda s: None, time=time.time)
+    yahoo._ensure = lambda force=False, seen=None: None
+    yahoo._SESSION = types.SimpleNamespace(get=lambda *a, **k: Nothing())
+    upstream.reset()
+    try:
+        return ask()
+    except Exception as exc:
+        return exc
+    finally:
+        module.requests.get, module.time, yahoo._ensure, yahoo._SESSION = real_parts
+        upstream.reset()
+
+
+got = rubbish(market, lambda: market.fetch_bars("TEST", "1d"))
+check("prices that are not data are the source's failure, said as that",
+      isinstance(got, market.DataUnavailable), repr(got))
+got = rubbish(yahoo, lambda: yahoo.quotes(["TEST"]))
+check("as are figures", isinstance(got, yahoo.YahooError), repr(got))
+
+
+# ---------------------------------------------------------------------------
+head("EX-DIVIDEND TOMORROW, SEEN THE EVENING BEFORE")
+# ---------------------------------------------------------------------------
+
+ex_day = _calendar.timegm((2026, 11, 24, 0, 0, 0))
+
+
+def ex_said(seconds_after):
+    real_time = catalysts.time
+    catalysts.time = types.SimpleNamespace(time=lambda: ex_day + seconds_after)
+    try:
+        cal_ = catalysts.Calendar("T", ex_dividend=ex_day, gmt_offset=-18000)
+        return (catalysts.warnings_for(cal_, "1d", 10, -1),
+                [r["due"] for r in catalysts.describe(cal_)])
+    finally:
+        catalysts.time = real_time
+
+
+check("in the evening in New York the plan still warns, as the calendar does",
+      ex_said(3600)[1] == ["tomorrow"] and any("tomorrow" in w for w in ex_said(3600)[0]),
+      ex_said(3600))
+check("on the day the price has dropped already",
+      ex_said(15 * 3600) == ([], ["today"]), ex_said(15 * 3600))
+
+
 print()
 print("%d failure(s)" % len(fails))
 print("METHOD OK" if not fails else "FAILURES: %s" % fails)
