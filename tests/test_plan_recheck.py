@@ -475,13 +475,13 @@ class Kept(Held):
         stopped.append(timeout)
 
 
-def start(serving=lambda *a, **k: None, **settings):
+def start(serving=lambda *a, **k: None, loop=None, **settings):
     """serve.main([]) with these settings, and the lines it printed."""
     del jobs[:], intervals[:], copied[:]
     real = (waitress.serve, web.start_alert_loop, web.start_background_jobs,
             scheduler_mod.Scheduler, offsite_mod.copy_in_background)
     waitress.serve = serving
-    web.start_alert_loop = lambda cfg: None
+    web.start_alert_loop = lambda cfg: loop
     web.start_background_jobs = lambda: None
     scheduler_mod.Scheduler = Kept
     offsite_mod.copy_in_background = copied.append
@@ -540,6 +540,31 @@ try:
 finally:
     backup_mod.prune = real_prune
 check("nor does failing to delete old ones fail the new one", len(copied) == 1, copied)
+from bot import export as export_mod  # noqa: E402
+
+real_write = export_mod.write_csv
+
+
+def broken_export(conn, name, fh, user=None):
+    if name == "alerts":
+        fh.write("half of it")
+        raise ValueError("made up")
+    return real_write(conn, name, fh, user)
+
+
+export_mod.write_csv = broken_export
+had = set(_os.listdir(backup_mod.folder()))
+try:
+    code, said = start()
+finally:
+    export_mod.write_csv = real_write
+new = sorted(set(_os.listdir(backup_mod.folder())) - had)
+check("nor does one export that cannot be written: the copy is checked and "
+      "copied off the server, beside the exports that could be",
+      len(copied) == 1 and _os.path.basename(copied[0]) in new
+      and len([f for f in new if f.endswith(".csv")]) == len(export_mod.DATASETS) - 1
+      and not any("-alerts-" in f for f in new)
+      and "could not be written" in said, (copied, new, said[-300:]))
 code, said = start(STOCKBOT_BEHIND_PROXY="yes please")
 check("a proxy setting that is not understood is said to be off",
       code == 0 and "STOCKBOT_BEHIND_PROXY is 'yes please', which is read as off" in said,
@@ -566,6 +591,20 @@ for typed in ("", " ", "many", "8.5", "0", "-1", "99999999"):
 code, said = start(serving=listen, PORT="10000", WEB_THREADS=" 6 ")
 check("numbers are used as they are, with nothing to say",
       listened[-1] == (10000, 6) and "    setting" not in said, (listened, said[-300:]))
+
+head("NOR DOES A SETTING OF THE ANALYSIS THAT CANNOT BE USED")
+for key, typed in (("STOCKBOT_INTERVAL", "daily"), ("STOCKBOT_INTERVAL", " "),
+                   ("STOCKBOT_ACCOUNT_SIZE", "nan"), ("STOCKBOT_ACCOUNT_SIZE", "-5"),
+                   ("STOCKBOT_RISK_PCT", "50"), ("STOCKBOT_RISK_PCT", "1%")):
+    try:
+        code, said = start(**{key: typed})
+    except Exception as exc:
+        code = "%s: %s" % (type(exc).__name__, exc)
+    check("%s typed as %r is left out" % (key, typed), code == 0, code)
+_os.environ["STOCKBOT_RISK_PCT"] = "2.5"
+check("one that can be is used",
+      web.config_mod.load(web.app.config.get("CFG_PATH"))["risk_per_trade_pct"] == 2.5)
+_os.environ.pop("STOCKBOT_RISK_PCT")
 
 head("ERROR REPORTING STARTS BEFORE THE APP IS LOADED")
 # A release that could not be loaded looped on restart with the site down, and
@@ -652,6 +691,44 @@ except (Exception, SystemExit) as exc:
 check("it ends by itself, and cleanly", code == 0, code)
 check("within seconds", time.time() - began < 15, time.time() - began)
 check("after waiting for a backup being written", stopped and stopped[0] >= 10, stopped)
+
+# What fired is recorded as told before the notices and emails go, each from a
+# thread that ends with the process.
+import types  # noqa: E402
+
+told = []
+
+
+class Round:
+    """The alert loop, stopped while a round of it is being checked."""
+
+    def stop(self, timeout=2.0):
+        told.append(("round", timeout))
+        hit = [types.SimpleNamespace(user_id=1)]
+        web.push_mod.deliver_later(DB, hit, "")
+        web.alerts_mod.deliver_later(DB, hit, None, lambda conn: None)
+
+
+def slowly(what):
+    def send(*_a, **_kw):
+        time.sleep(0.7)
+        told.append(what)
+    return send
+
+
+real = web.push_mod.deliver, web.alerts_mod.deliver
+web.push_mod.deliver, web.alerts_mod.deliver = slowly("notice"), slowly("email")
+try:
+    code, said = start(loop=Round())
+    at_the_end = list(told)
+    web.push_mod.wait_idle()
+    web.alerts_mod.mail_idle()
+finally:
+    web.push_mod.deliver, web.alerts_mod.deliver = real
+check("and the alerts that had just fired have been told, to phones and by email",
+      {"notice", "email"} <= set(at_the_end), at_the_end)
+check("a round being checked has longer than two seconds to end",
+      told[0][0] == "round" and told[0][1] >= 5, told)
 
 head("WHO IS ASKING, THROUGH THE REAL SERVER")
 # waitress deletes the proxy's headers unless told otherwise, and every

@@ -5235,13 +5235,7 @@ def privacy():
 def _backups_kept() -> int:
     """How many timed backups serve.py keeps; 0 when it deletes none."""
     import serve
-    read = getattr(serve, "_backups_to_keep", None)
-    if read is not None:
-        return max(0, read())
-    try:
-        return max(0, int(os.environ.get("STOCKBOT_BACKUP_KEEP", "8")))
-    except ValueError:
-        return 0                # nothing is pruned while it cannot be read
+    return max(0, serve._backups_to_keep())
 
 
 def _sampled_words(share: float) -> str:
@@ -6908,7 +6902,7 @@ def _weekly_email_job():
     # Every copy carries a link that stops them, which the law asks for. With
     # no public address to make it from, it would go to the reader's own
     # computer, so nothing is sent until there is one.
-    if not _public_base_offline().startswith("https://"):
+    if not _public_base_offline().lower().startswith("https://"):
         if digest_mod.ready() and digest_mod.sending_window(time.time()):
             app.logger.warning("The weekly email is not sent: without the site's https "
                                "address its stop link would lead nowhere.")
