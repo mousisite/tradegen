@@ -376,7 +376,7 @@
     {# A call takes one side, so its odds are that side's record. When the
        signals lean down and the call is not a short, that record is of
        betting on a fall, and has to say so where the numbers are. #}
-    {% if odds_side < 0 and a != 'SHORT' and not (a == 'WAIT' and plan.direction < 0) %}
+    {% if odds_side < 0 and plan.probability is not none and a != 'SHORT' and not (a == 'WAIT' and plan.direction < 0) %}
       <p class="prose"><b>These odds are for the price falling.</b> The signals
         lean down, so the record below is of past bets on a fall here, not of
         buying.</p>

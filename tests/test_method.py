@@ -2095,6 +2095,24 @@ check("and the plain words count contracts", "Buying 4 ES contracts would put" i
     dataclasses.replace(sized, position=f_), es)["risk"])
 check("a size that was refused is not said to be at risk", plain.explain_plan(
     dataclasses.replace(sized, position=dear), yen)["risk"] == "")
+check("a size in the millions is written out", "Buying 416,666,666.5 of these" in plain.explain_plan(
+    dataclasses.replace(sized, position=dict(sized.position, quantity=416666666.5,
+                                             **decision.size_words(416666666.5, True))),
+    base_bars)["risk"])
+refused = plain.explain_plan(dataclasses.replace(
+    sized, action="AVOID", direction=-1, avoid_reason="negative_record",
+    stop=sized.entry + 5, target1=sized.entry - 7), base_bars)
+check("a short refused on its record is not told as a buy",
+      refused["risk"].startswith("Shorting ") and any("kept rising" in x for x in refused["points"])
+      and not any("If you bought" in x for x in refused["points"]), refused)
+unmeasured = plain.explain_plan(decision.Plan(
+    action="AVOID", direction=0, headline="", conviction=-0.3,
+    avoid_reason="bearish_no_shorts", odds_direction=-1), base_bars)
+check("and a fall with no record is not said to have one below",
+      not any("record below" in x for x in unmeasured["points"])
+      and "do not buy" in unmeasured["points"][0], unmeasured)
+check("a company's small sales name their currency once",
+      plain._big(450000, "EUR") == "450,000 euros" and plain._big(450000) == "$450,000")
 
 
 # ---------------------------------------------------------------------------
