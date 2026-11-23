@@ -313,7 +313,7 @@
           <td class="r fig" data-label="Price">{{ row.price|price }}</td>
           <td class="r" data-label="Away">{{ "%+.2f"|format(row.pct) }}%</td>
           <td class="r" data-label="Typical bars">{{ "%.1f"|format(row.atr) if row.atr is not none else 'not measured' }}</td>
-          <td data-label="Taken">{% if row.taken %}{{ row.taken_word }} {{ row.taken_at }}{% elif row.source in ('swing', 'equal') %}not yet{% elif row.source in ('today', 'half') %}&ndash;{% else %}no{% endif %}</td></tr>
+          <td data-label="Taken">{% if row.taken %}{{ row.taken_word }} {{ row.taken_at }}{% elif row.source in ('swing', 'equal') %}not yet{% elif row.source in ('today', 'half') %}&ndash;{% else %}{{ row.untaken }}{% endif %}</td></tr>
       {% endfor %}
       {% if not ns.now %}
         <tr class="nowrow"><td class="lead">Last close</td><td class="r fig" data-label="Price">{{ x.close|price }}</td>
@@ -331,8 +331,7 @@
     <div class="wide">{{ x.chart.wide|safe }}</div>
     <div class="narrow">{{ x.chart.narrow|safe }}</div>
     <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">
-      The dotted lines are {{ "yesterday's" if x.chart.short == 'Yest.' else "the previous bar's" }}
-      high and low ({{ x.chart.short }}), the nearest old high and low price has not traded
+      The dotted lines are yesterday's high and low (Yest.), the nearest old high and low price has not traded
       through, any equal highs or lows, and the half line, the middle of the last move.
       {% if x.chart.gaps %}Shaded boxes are gaps still standing, tinted green for a rise's
         and red for a fall's.{% endif %}
