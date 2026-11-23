@@ -10,7 +10,9 @@ else's job.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -38,6 +40,50 @@ _PIECES = {"fundamentals": "Company figures", "sec_history": "Filed accounts",
 # answering at all takes about half of it to give up on; Cloudflare gives up on
 # the whole page at 100.
 RESEARCH_WAIT = 45.0
+
+
+class _Turn:
+    """One analysis's arithmetic at a time, people's before a background job's.
+
+    Python works for one thread at a time, and the server has half a core. Six
+    analyses worked out side by side were all finished no sooner than in turn,
+    every page in the meantime waited behind all six and behind the scans and
+    the daily checks beside them, and each held its own arrays. Downloads are
+    not part of a turn. A background job gives way to people for so long, and
+    then takes its place among them: it must not wait for ever on a busy day.
+    """
+    GIVES_WAY = 5.0
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._taken = False
+        self._line: List[List[float]] = []     # when each waiting may go, as they came
+
+    def _next(self) -> List[float]:
+        now = time.monotonic()
+        return next((w for w in self._line if w[0] <= now), self._line[0])
+
+    @contextlib.contextmanager
+    def __call__(self, person: bool):
+        me = [time.monotonic() + (0.0 if person else self.GIVES_WAY)]
+        with self._cond:
+            self._line.append(me)
+            try:
+                while self._taken or self._next() is not me:
+                    self._cond.wait(1.0)
+                self._taken = True
+            finally:
+                # By what it is: two that came in the same instant look alike.
+                self._line[:] = [w for w in self._line if w is not me]
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._taken = False
+                self._cond.notify_all()
+
+
+_turn = _Turn()
 
 
 @dataclass
@@ -170,34 +216,38 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             raise info["search_down"]
         raise
 
-    step("Computing indicators")
-    ctx = build_context(bars)
-    last = len(bars) - 1
-    signals, composite, regime = evaluate(ctx, last, cfg["strategy_weights"])
-    # The replay that measures the odds scores history with these standard
-    # weights, so today's setup is looked up by the same model's score. The
-    # learned weights below were fitted on that same history, so replaying
-    # with them would mark the model's own homework.
-    standard_score = composite
-    levels = build_levels(bars, float(ctx.atr[last]))
+    # Asked for by a page or a routine; anything else has nobody waiting for it.
+    person = source in ("web", "workflow")
     cost_bps = config_mod.cost_bps_for_symbol(bars.symbol, bars.asset_class, cfg)
     # Scaled to the interval, so a "day trade" on 5-minute bars does not quietly
     # become a five-week hold when the same number is applied to daily bars.
     horizon = config_mod.horizon_for(bars.interval, cfg)
-
-    # Measure each strategy on this instrument, then re-weight by what actually
-    # worked here rather than by reputation.
+    last = len(bars) - 1
     report = None
     learned: Dict[str, float] = {}
-    if with_learning:
-        step("Measuring strategies on history")
-        report = measure_strategies(
-            ctx, cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
-            horizon, cfg["calibration_stride"], cost_bps,
-            weights=cfg["strategy_weights"])
-        learned = learned_weights(report, regime)
-        signals, composite, regime = evaluate(
-            ctx, last, cfg["strategy_weights"], learned=learned, regime=regime)
+
+    step("Computing indicators")
+    with _turn(person):
+        ctx = build_context(bars)
+        signals, composite, regime = evaluate(ctx, last, cfg["strategy_weights"])
+        # The replay that measures the odds scores history with these standard
+        # weights, so today's setup is looked up by the same model's score. The
+        # learned weights below were fitted on that same history, so replaying
+        # with them would mark the model's own homework.
+        standard_score = composite
+        levels = build_levels(bars, float(ctx.atr[last]))
+
+        # Measure each strategy on this instrument, then re-weight by what
+        # actually worked here rather than by reputation.
+        if with_learning:
+            step("Measuring strategies on history")
+            report = measure_strategies(
+                ctx, cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
+                horizon, cfg["calibration_stride"], cost_bps,
+                weights=cfg["strategy_weights"])
+            learned = learned_weights(report, regime)
+            signals, composite, regime = evaluate(
+                ctx, last, cfg["strategy_weights"], learned=learned, regime=regime)
 
     # The calendar is its own round trip and nothing above depends on it, so it
     # runs while the news is being read rather than after.
@@ -221,16 +271,17 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
     step("Back-testing this setup")
     conviction, _ = blend_conviction(composite, sentiment,
                                      float(cfg["sentiment_weight"]))
-    calib = calibrate(ctx, standard_score,
-                      stop_atr=cfg["stop_atr_multiple"],
-                      target_atr=cfg["target_atr_multiple"],
-                      horizon=horizon,
-                      stride=cfg["calibration_stride"],
-                      weights=cfg["strategy_weights"],
-                      min_bucket=cfg["min_bucket_samples"],
-                      cost_bps=cost_bps,
-                      direction=(1 if conviction > 0 else
-                                 -1 if conviction < 0 else 0))
+    with _turn(person):
+        calib = calibrate(ctx, standard_score,
+                          stop_atr=cfg["stop_atr_multiple"],
+                          target_atr=cfg["target_atr_multiple"],
+                          horizon=horizon,
+                          stride=cfg["calibration_stride"],
+                          weights=cfg["strategy_weights"],
+                          min_bucket=cfg["min_bucket_samples"],
+                          cost_bps=cost_bps,
+                          direction=(1 if conviction > 0 else
+                                     -1 if conviction < 0 else 0))
 
     if calendar_job is None:
         calendar = catalysts_mod.Calendar(

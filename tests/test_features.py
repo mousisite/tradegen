@@ -1352,6 +1352,65 @@ for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)
 
 print()
+print("=" * 72)
+print("ONE ANALYSIS'S ARITHMETIC AT A TIME, PEOPLE'S FIRST")
+print("=" * 72)
+import threading
+
+from bot import engine as engine_mod  # noqa: E402
+
+turn, inside, order = engine_mod._Turn(), [0, 0], []
+
+
+def work(name, person):
+    with turn(person):
+        inside[0] += 1
+        inside[1] = max(inside[1], inside[0])
+        order.append(name)
+        time.sleep(0.15)
+        inside[0] -= 1
+
+
+crowd = [threading.Thread(target=work, args=("first", True))]
+crowd[0].start()
+time.sleep(0.05)
+for name, person in (("scan", False), ("ann", True), ("ben", True)):
+    crowd.append(threading.Thread(target=work, args=(name, person)))
+    crowd[-1].start()
+    time.sleep(0.02)
+for th in crowd:
+    th.join(20)
+check("two are never worked out side by side", inside == [0, 1], inside)
+check("somebody waiting goes before a background job that came sooner",
+      order[0] == "first" and order[-1] == "scan" and len(order) == 4, order)
+turn.GIVES_WAY = 0.2
+del order[:]
+stop = time.time() + 1.2
+
+
+def keen(n):
+    while time.time() < stop:
+        work("person", True)
+
+
+crowd = [threading.Thread(target=keen, args=(n,)) for n in range(3)]
+crowd.append(threading.Thread(target=work, args=("scan", False)))
+for th in crowd:
+    th.start()
+for th in crowd:
+    th.join(20)
+check("but not for ever", "scan" in order[:5], order)
+try:
+    with turn(True):
+        raise ValueError("a strategy broke")
+except ValueError:
+    pass
+done = threading.Thread(target=work, args=("after", True))
+done.start()
+done.join(5)
+check("one that breaks gives up its turn", order[-1] == "after", order)
+
+print()
 print("%d failure(s)" % len(fails))
 print("FEATURES OK" if not fails else "FAILURES: %s" % fails)
 _sys.exit(1 if fails else 0)
