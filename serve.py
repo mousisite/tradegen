@@ -182,6 +182,9 @@ def main(argv=None) -> int:
           % (args.host, args.port, args.threads))
     if public:
         print("    public address %s" % public)
+        if not public.lower().startswith("https://"):
+            print("    PUBLIC ADDRESS IS NOT HTTPS: STOCKBOT_PUBLIC_URL must start with "
+                  "https://, or sign-in cookies go unprotected and Google sign-in fails")
     # The ways in that are actually set up. A public deployment asks people to
     # sign in even when none is, and saying "Google" then sent the operator
     # looking for a fault in Google sign-in rather than for the missing keys.

@@ -130,14 +130,14 @@ _public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
 # An https public address is an operator saying there is a TLS terminator in
 # front, which is the only way these headers get set at all.
 if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
-        in ("1", "true", "yes")) or _public.startswith("https://"):
+        in ("1", "true", "yes")) or _public.lower().startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
 # is served over https; on localhost it stays off or the cookie never arrives.
-if _public.startswith("https://"):
+if _public.lower().startswith("https://"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 
