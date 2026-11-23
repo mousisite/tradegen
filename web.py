@@ -6041,8 +6041,16 @@ def _refresh_popular_job():
         except Exception as exc:
             app.logger.exception("Could not check the watched instruments")
             watch = {"checked": 0, "errors": ["watched instruments: %s" % exc]}
-        return {"checked": done["checked"] + watch["checked"],
-                "errors": list(done["errors"]) + list(watch["errors"])}
+        errors = list(done["errors"]) + list(watch["errors"])
+        # The example visitors look around, refilled here once a week rather
+        # than while one of them waits. Nobody is shown it without sign-in.
+        try:
+            if auth_required():
+                demo_mod.refresh(conn)
+        except Exception as exc:
+            app.logger.exception("Could not refill the example account")
+            errors.append("example account: %s" % exc)
+        return {"checked": done["checked"] + watch["checked"], "errors": errors}
     finally:
         conn.close()
 

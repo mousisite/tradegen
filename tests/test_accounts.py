@@ -805,20 +805,120 @@ try:
           conn.execute("SELECT COUNT(*) FROM runs WHERE user_id=?",
                        (demo_user.id,)).fetchone()[0] == 0)
     # An example book priced weeks ago drifts past its stops. It is refilled
-    # at today's prices once a week, and only its own rows are touched.
-    _others = conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
-                           (demo_user.id,)).fetchone()[0]
-    conn.execute("UPDATE trades SET ts_opened=ts_opened-? WHERE user_id=?",
-                 (_demo.RESEED_AFTER + 86400, demo_user.id))
-    conn.commit()
-    _demo.user(conn)
-    _newest = conn.execute("SELECT MAX(ts_opened) FROM trades WHERE user_id=?",
-                           (demo_user.id,)).fetchone()[0]
-    check("a stale example account is refilled at today's prices",
-          _newest is not None and time.time() - _newest < 600)
-    check("and nobody else's trades are touched",
-          conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
-                       (demo_user.id,)).fetchone()[0] == _others)
+    # at today's prices once a week by the background job, never in a visitor's
+    # request, and only its own rows are touched.
+    import math as _math
+    from types import SimpleNamespace as _NS
+    from bot import market as _market
+    _real_fetch, _asked = _market.fetch_bars, []
+    _levels = {"NVDA": 140.0, "AAPL": 200.0, "TSLA": 250.0, "MSFT": 400.0,
+               "BTC-USD": 60000.0}
+    _today = int(time.time()) // 86400
+
+    def _bars(symbol, interval="5m", lookback=None, splits=()):
+        """Ninety days round a level, the last finished one yesterday's."""
+        _asked.append(symbol)
+        coin = symbol.endswith("-USD")
+        start = [(_today - k) * 86400 + (0 if coin else 52200) for k in range(90, 0, -1)]
+        close = [_levels[symbol] * (1 + 0.05 * _math.sin(k / 2.5)) for k in range(90)]
+        open_ = close[:1] + close[:-1]
+        return _NS(symbol=symbol, timestamp=start, open=open_, close=close,
+                   high=[max(a, b) * 1.005 for a, b in zip(open_, close)],
+                   low=[min(a, b) * 0.995 for a, b in zip(open_, close)],
+                   last_price=close[-1], is_crypto=coin, splits=list(splits))
+
+    def _refused(symbol, interval="5m", lookback=None):
+        _asked.append(symbol)
+        raise _market.DataError("no prices just now")
+
+    def _rows(table="trades", mine=True):
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM %s WHERE user_id%s? ORDER BY 1" % (table, "=" if mine else "<>"),
+            (demo_user.id,))]
+
+    _others = _rows(mine=False)
+    try:
+        _market.fetch_bars = _refused
+        _before = _rows()
+        check("the example can be opened with no price to be had",
+              len(_before) >= 4 and _demo.user(conn).id == demo_user.id and not _asked, _asked)
+        check("and while prices cannot be read the book that is there is kept",
+              _demo.refresh(conn) is False and len(_asked) == 1 and _rows() == _before, _asked)
+        _market.fetch_bars = lambda s, i="5m", lookback=None: (
+            _bars(s, splits=[(time.time() - 5 * 86400, 10.0)] if s == "TSLA" else ()))
+        check("nor is it refilled across a split, whose prices would be adjusted twice",
+              _demo.refresh(conn) is False and _rows() == _before)
+
+        _market.fetch_bars = _bars
+        db.event_add(conn, demo_user.id, "price_above", "NVDA", "NVDA rose above 198", 199.0, "")
+        check("with prices it is refilled", _demo.refresh(conn) is True)
+        _book = _rows()
+        check("with two trades open and three closed: a target, a stop and an early exit",
+              sorted(t["status"] for t in _book) == ["closed"] * 3 + ["open"] * 2
+              and {t["exit_reason"] for t in _book} == {None, "target", "stop", "manual"},
+              [(t["symbol"], t["status"], t["exit_reason"]) for t in _book])
+        check("a watchlist, an alert and two theses",
+              [len(_rows(t)) for t in ("watchlist", "alerts", "theses")] == [4, 1, 2])
+        check("and nothing in its alert history about the book before",
+              not _rows("alert_events"))
+        check("a thesis in it states nothing about the company",
+              not any(w in str(t) for t in _rows("theses")
+                      for w in ("Data-centre", "Deliveries", "argins", "gross")))
+
+        def _on_its_day(when, price, symbol):
+            b = _bars(symbol)
+            k = max(k for k, t in enumerate(b.timestamp) if t <= when)
+            return b.low[k] - 0.01 <= price <= b.high[k] + 0.01
+
+        check("every entry and exit is a price the market had that day",
+              all(_on_its_day(t["ts_opened"], t["entry"], t["symbol"])
+                  and (t["ts_closed"] is None
+                       or _on_its_day(t["ts_closed"], t["exit_price"], t["symbol"]))
+                  for t in _book), _book)
+        check("and no trade is closed in the second it was opened",
+              all(t["ts_closed"] - t["ts_opened"] > 3600 for t in _book if t["ts_closed"]))
+        del _asked[:]
+        check("a fresh one is left alone", _demo.refresh(conn) is False and not _asked)
+        conn.execute("UPDATE meta SET value=? WHERE key='demo_filled'",
+                     (str(int(time.time()) - _demo.RESEED_AFTER - 60),))
+        conn.commit()
+        _ids = {t["id"] for t in _rows()}
+        _demo.user(conn)
+        check("a visitor to a stale one does not wait for its refill",
+              not _asked and {t["id"] for t in _rows()} == _ids, _asked)
+        check("the background job refills it",
+              _demo.refresh(conn) is True and not _ids & {t["id"] for t in _rows()})
+
+        # A stop half-way: the next run fills it again, and a visitor before
+        # that still has a page.
+        conn.execute("DELETE FROM meta WHERE key='demo_filled'")
+        conn.commit()
+        _real_add = db.watch_add
+        db.watch_add = lambda conn, symbol, *a, **k: _refused(symbol)
+        try:
+            _demo.refresh(conn)
+            check("a fill that breaks off is not passed off as finished", False)
+        except _market.DataError:
+            check("a fill that breaks off is not passed off as finished", _demo._due(conn))
+        finally:
+            db.watch_add = _real_add
+        check("and the next run fills all of it", _demo.refresh(conn) is True
+              and [len(_rows(t)) for t in ("trades", "watchlist", "theses")] == [5, 4, 2])
+
+        # The rule that sizes the trades can come to less than one share.
+        _real_load = web.config_mod.load
+        web.config_mod.load = lambda *a, **k: dict(_real_load(*a, **k), account_size=100.0)
+        conn.execute("DELETE FROM trades WHERE user_id=?", (demo_user.id,))
+        conn.commit()
+        try:
+            check("a small account still has an example",
+                  _demo.user(conn).id == demo_user.id and len(_rows()) >= 4
+                  and all(t["quantity"] > 0 for t in _rows()), len(_rows()))
+        finally:
+            web.config_mod.load = _real_load
+        check("nobody else's trades are touched by any of it", _rows(mine=False) == _others)
+    finally:
+        _market.fetch_bars = _real_fetch
     conn.close()
 
     # Each of these would make the server analyse or scan something it has

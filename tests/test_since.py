@@ -385,6 +385,26 @@ try:
                 web.app.logger.disabled = False
             check("and its failure leaves the popular run's result standing",
                   done["checked"] == 2 and any("watched" in e for e in done["errors"]), done)
+            # The front page asks for the two counts it prints; the rest mean
+            # reading every signal and headline the account ever had.
+            conn = db.connect(DB)
+            few = db.stats(conn, user=1, tables=("runs", "strategy_stats"))
+            check("counts are made only of the tables asked for",
+                  set(few) == {"runs", "strategy_stats", "symbols_seen"}
+                  and "run_signals" in db.stats(conn, user=1), few)
+            conn.close()
+            # The same job refills the example account visitors look around.
+            refilled = []
+            real_demo, real_needed = web.demo_mod.refresh, web.auth_required
+            web.demo_mod.refresh = lambda conn: refilled.append(1)
+            try:
+                for needed in (True, False):
+                    web.auth_required = lambda: needed
+                    web._refresh_popular_job()
+            finally:
+                web.demo_mod.refresh, web.auth_required = real_demo, real_needed
+            check("the job refills the example account, where visitors are shown one",
+                  len(refilled) == 1, refilled)
         finally:
             public_mod.refresh = real_refresh
     finally:
