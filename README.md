@@ -179,9 +179,8 @@ gap between those two columns is the whole story of retail day trading.
 | AAPL | 0.07R | 0.04R | 0.02R | 0.01R |
 
 At 20bp round-trip on a 5-minute crypto bar, fees exceed the entire stop
-distance. Break-even for 5-minute BTC is about 98%. Scalping crypto at retail
-fee levels is arithmetically unprofitable before strategy quality even enters
-the picture.
+distance. Scalping crypto at retail fee levels is arithmetically unprofitable
+before strategy quality even enters the picture.
 
 Net expectancy per trade:
 
@@ -365,8 +364,11 @@ Design choices that keep it honest:
 - **Wilson confidence intervals**, which stay sensible at small sample sizes.
 - **A holdout check** on the most recent third. If the edge exists only in older
   data, the report says so.
-- **Break-even includes cost.** With cost `c` and reward:risk `R`, break-even is
-  `(1+c)/(1+R)`, not `1/(1+R)`.
+- **Break-even is measured, not assumed.** It is worked out from what winning
+  and losing trades were worth after costs: with an average win `W` and an
+  average loss `L` (a negative number), it is `-L/(W-L)`. The textbook
+  `(1+c)/(1+R)`, with cost `c` and reward:risk `R`, stands in only when there
+  are no wins or no losses to measure.
 
 ---
 
@@ -509,7 +511,7 @@ paper journal and a live one side by side without editing anything:
 |---|---|
 | `STOCKBOT_DB` | Use this database file instead of `data/stockbot.db` |
 | `STOCKBOT_CONFIG` | Use this settings file instead of `config.json` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. Unset means no login at all |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. With no way to sign in set up, your own machine needs no login; a public server shows the example account and says signing in is off |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
 
@@ -653,10 +655,9 @@ are checked every time, and so is an alert that is new, edited, re-armed or
 whose last check failed. "Check them all now" and the routines check
 everything. The usage page counts the checks skipped.
 
-**Nothing runs when the window is closed.** The interface says so in those
-words rather than letting you believe a level is being watched overnight.
-Making that true means hosting the app somewhere that stays up, which this
-deliberately does not pretend to be.
+**On your own machine nothing runs when Orenth is closed**, and Settings says
+so rather than letting you believe a level is being watched overnight. On
+orenth.app the server checks whether or not anyone has a page open.
 
 ---
 
@@ -746,9 +747,10 @@ against published values, Black-Scholes against textbook figures, put-call
 parity, the lexicon's handling of negation, database invariants, every template
 compiling, every link resolving, and a full analysis end to end.
 
-Every suite gets a private database and settings file through `tests/harness.py`.
-Nothing in the suite can read or write your real journal, and no suite depends
-on the order it runs in.
+Every suite that opens the database, the settings or the website gets private
+ones through `tests/harness.py`, which also keeps the keys in `.env` out of a
+test run. Nothing in the suite can read or write your real journal, and no
+suite depends on the order it runs in.
 
 ---
 
@@ -777,12 +779,13 @@ source in `gather_social` in `bot/sentiment.py`.
 
 ## Limitations
 
-- **The backtest assumes stops and targets fill at the exact level.** Real fills
-  gap through stops, especially on news and at the open. The trade plan now
-  states this in cash: alongside what the stop budgets, it shows what a move the
-  size of that instrument's worst measured day would actually cost. For Bitcoin
+- **A stop is an order, not a price.** The back-test fills a stop the bar opened
+  through at that bar's open. Inside a bar it still assumes the stop's own
+  price, and real fills can be worse, especially on news. The trade plan states
+  this in cash: alongside what the stop budgets, it shows what a move the size
+  of that instrument's worst measured day would actually cost. For Bitcoin
   that is routinely three times the budgeted risk; for an index fund closer to
-  1.2 times. The backtest itself still assumes the clean fill.
+  1.2 times.
 - **Cost is modelled as a flat spread.** No size-dependent slippage, no partial
   fills.
 - **Sixty days of 5-minute history is one market regime.** An edge measured
@@ -821,30 +824,19 @@ decisions are recorded in `design-system/stock-bot/MASTER.md`.
 
 ## Putting it on the internet
 
-The web app runs on your machine. `http://127.0.0.1:8000` only works there,
-which is deliberate: your API key, your trades and your positions stay local.
+Started from `Stock Bot.bat`, the web app runs on your machine.
+`http://127.0.0.1:8000` only works there, which is deliberate: your API key,
+your trades and your positions stay local.
 
-To give other people a public URL, three things have to change.
+orenth.app is the same code on a server: one Render instance behind
+Cloudflare, run by waitress (`serve.py`), with an account for each person and
+one SQLite file on a disk that outlives each release. [DEPLOY.md](DEPLOY.md)
+has the steps. It must stay one instance, because two cannot share that file,
+and one analysis keeps a CPU core busy for a few seconds.
 
-**Hosting.** The Flask development server that ships here is single-process and
-explicitly not meant for public traffic. A real deployment needs a production
-server such as gunicorn or waitress behind a reverse proxy, on a host like
-Fly.io, Render or a small VPS. Expect a few dollars a month for one instance.
-
-**Concurrency.** One analysis pins a CPU core for two to five seconds, and the
-cache is per-process and in-memory. With more than a handful of simultaneous
-users you need a job queue and a shared cache rather than doing the work inside
-the request.
-
-**Multi-user data.** Everything currently assumes one person: one SQLite file,
-one config, one journal, no accounts. Serving several people means user
-accounts, per-user trade isolation, and a database that tolerates concurrent
-writes better than SQLite does.
-
-None of that is exotic, but it is a different project from the one that exists
-now, and it should follow rather than precede a forward-tested edge. There is
-also licensing to check: publishing trading signals for money is regulated in
-many countries, and the rules differ by where you and your users are.
+There is also licensing to check before running your own: publishing trading
+signals for money is regulated in many countries, and the rules differ by where
+you and your users are.
 
 ---
 

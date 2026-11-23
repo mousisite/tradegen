@@ -75,14 +75,16 @@ horizon rather than stopped. Assuming the full stop roughly doubles the hit
 rate a setup appears to need. Getting this wrong had my own page printing a
 positive expectancy beside a break-even line it looked like it was failing.
 
-**Every figure cites the filing.** Fundamentals come from SEC XBRL data with a
-link to the document, not from a vendor's summary. It runs Piotroski, Altman,
-Beneish and the accruals ratio over the filed numbers — and refuses where those
+**It goes back to the filings.** The yearly financials come from SEC XBRL data
+with a link to the document; most of the ratios beside them are Yahoo's. It
+runs Piotroski, Altman, Beneish and the accruals ratio over the filed numbers — and refuses where those
 models do not apply. Ask it about a bank and it will not give you an Altman
 score, because those coefficients were fitted on manufacturers and a bank's
 balance sheet reads as distressed however healthy it is.
 
-Free, no ads, no tracking scripts, nothing sold. Sign in with Google so your
+Free to use, with a paid Pro plan for more of the same analysis. No ads, and
+your data is not sold to anyone. Signed-out pages count visits with one
+request and no cookie; the privacy page names who gets it. Sign in so your
 journal is yours. You can export everything or delete the account from inside
 the app.
 
@@ -113,14 +115,19 @@ institutional data you do not have.
 
 **"Is it profitable / what returns?"**
 
-You do not know, and neither does it. It measures setups on history; it has no
-live track record. Say exactly that. This is the question where a small
+You do not know, and neither does it. It measures setups on history, and each
+trading day it writes down a call on a list of popular stocks and coins and
+scores it later, right or wrong, at orenth.app/record. No real money was
+traded. Say exactly that, and quote only what that page says on the day. This
+is the question where a small
 exaggeration destroys the only thing that makes the product interesting.
 
-**"Why free? What's the catch?"**
+**"What's free, and what's the catch?"**
 
-No catch yet. You are trying to find out whether it is useful before deciding
-whether it is a business. That is true, and it is a good answer.
+The free account gives the full answer, with a few analyses a day, the top of
+each Find list and one alert running at a time. Pro takes those three limits
+off. It is more of the same analysis, not better odds. The exact limits and
+the price are on the pricing page; read them from there.
 
 ---
 

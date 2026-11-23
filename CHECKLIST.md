@@ -50,10 +50,14 @@ sees your trades, and you would find out from them.
 2. Go to https://orenth.app and sign in with a **different Google account**.
    Any second account you have. If you do not have one, making a throwaway
    Gmail takes two minutes and is worth it.
-3. Click through: **Trades**, **Portfolio**, **Monitor**, **Strategies**.
+3. Click through: **Journal**, **Portfolio**, **Monitor**.
 
 **What you should see:** every one of them empty. No trades. No watchlist. No
 saved theses.
+
+**Strategies** is shared on purpose. It shows the strategy record for every
+stock and coin anyone has analysed, so names you looked up can be on it. It
+never shows anyone's trades.
 
 **What would be a disaster:** seeing your own trades. If that happens, stop,
 do not tell anyone about the app, and say so. Do not post the link.
@@ -72,7 +76,7 @@ You would find out from angry users months in.
 Now is the cheapest possible moment to test this, because the only data that
 can be lost is yours.
 
-1. Signed in as yourself, go to **Trades**.
+1. Signed in as yourself, go to **Journal**.
 2. Log a fake trade. Anything: symbol `AAPL`, any price, any size. Give it a
    note like "delete me" so you recognise it.
 3. Confirm it shows in the list.
@@ -158,16 +162,18 @@ this up. This step is for month three, not for launch day.
 12. Click **Submit**.
 
 **How you know it worked:** the sitemap row says **Success** and shows
-**4 discovered pages**. Four is correct. That is every page a stranger can
-read; the rest are behind the sign-in on purpose.
+several dozen discovered pages, 57 or more: the front page, the tools, each
+popular stock, the strategy tests and the track record. Everyone's own pages
+are behind the sign-in on purpose and are not among them.
 
 ---
 
 ## 6. Remove the old address from Google sign-in
 
 **Time:** 2 minutes. **Why:** the app has two addresses right now,
-`orenth.app` and the old `stockbot-je8m.onrender.com`. Sign-in is allowed
-from both. Cleaning that up means one front door instead of two.
+`orenth.app` and your old `onrender.com` address, which Render shows at the
+top of the service's page. Sign-in is allowed from both. Cleaning that up
+means one front door instead of two.
 
 **Careful with this one.** Deleting the wrong line breaks sign-in for
 everybody, including you.
@@ -184,6 +190,11 @@ everybody, including you.
 7. **Test immediately:** open a private window, go to https://orenth.app,
    and sign in. If it works, this is done. If you get an error mentioning
    `redirect_uri_mismatch`, add the onrender line back.
+8. Once that works, close the old door itself. On **dashboard.render.com**,
+   open the service, then **Settings**, and find its `onrender.com` subdomain
+   under the custom domains. Switch it off. Anyone who knew the old address
+   could otherwise go round Cloudflare, which guards only `orenth.app`. Then
+   open https://orenth.app once more. If it does not answer, switch it back on.
 
 ---
 
@@ -222,7 +233,7 @@ Google has never visited orenth.app. Not ranked low, not there at all. The
 reason is that no website anywhere links to it, so Google has no path to walk
 down to reach you.
 
-These four are how you build that path. Do them in this order. The first one
+These five are how you build that path. Do them in this order. The first one
 is the only one that is truly blocking.
 
 ---
@@ -235,50 +246,21 @@ be watching for your address when the links appear.
 
 ---
 
-## B. Put your code on the internet (2 minutes)
+## B. Put your code on the internet (done)
 
-**What GitHub is:** a website where people keep their code. Yours is already
-there, but it is set to private, so nobody can see it. Making it public means
-anyone can read the code.
+**Done: the repository is public.** Anyone can read the code, so when you post
+on Reddit or Hacker News you can say "here is the code, go check it", which is
+the most trusted thing you can say. People assume trading apps are lying.
 
-**Why bother:** two reasons. It gives Google a real link pointing at your app,
-which is the thing you do not have. And when you post on Reddit or Hacker
-News, being able to say "here is the code, go check it" is the most trusted
-thing you can say. People assume trading apps are lying. Showing the code is
-how you prove you are not.
+Because it is public, never put a password, a key or a private note in it.
 
-**The risk, said plainly:** anyone can copy your code. That is true. It
-matters less than it sounds. The code is not the valuable part. The valuable
-part is the record of what the app measured over time, and the people who use
-it. Neither of those can be copied.
-
-**It is safe.** I checked every version of the code you have ever saved, not
-just the current one. No password, no key, no secret is in there anywhere.
-
-### Do this
-
-1. Open **github.com/mousisite/stockbot**
-2. Near the top of the page there is a row of words: Code, Issues, Pull
-   requests, and so on. At the end of that row, click **Settings**.
-   Careful: this is the Settings for the code, not the Settings for your
-   account. The account one is under your picture in the corner. You want the
-   one in the row.
-3. Scroll all the way down. At the bottom there is a box with a red border
-   called **Danger Zone**.
-4. In that box, find **Change repository visibility** and click
-   **Change visibility**.
-5. Choose **Make public**.
-6. GitHub makes you prove you mean it. It shows a box and asks you to type the
-   name. Type: `mousisite/stockbot`
-7. Click the confirm button.
-
-Done. Your code is now public.
-
-### Two small things while you are there
+### Two small things, if they are not done yet
 
 **Rename it.** The code is called "stockbot" but the app is called Orenth.
 
-1. Still on that same Settings page, scroll back to the top
+1. Open **github.com/mousisite/stockbot** and click **Settings** at the end of
+   the row of words near the top (Code, Issues, Pull requests, and so on).
+   Careful: this is the Settings for the code, not for your account.
 2. The first box says **Repository name**
 3. Change `stockbot` to `orenth`
 4. Click **Rename**
@@ -294,7 +276,7 @@ Nothing breaks. GitHub forwards the old name to the new one automatically.
 4. Type: `https://orenth.app`
 5. Click **Save changes**
 
-That link is the reason you did all of this.
+That link is a real one pointing at your app, for Google to follow.
 
 ---
 
@@ -320,7 +302,7 @@ work looks like advertising.
 3. In the **Title** box, paste exactly this:
 
    ```
-   Show HN: Orenth – stock research that back-tests its own advice and reports no edge
+   Show HN: Orenth - stock research that back-tests itself and reports no edge
    ```
 
    Do not make it more exciting than that. This website dislikes excitement
@@ -333,7 +315,8 @@ work looks like advertising.
    is how it is done here: the post is the link, your comment is where you
    explain. Say these things:
    - You built it yourself, one person
-   - Out of 54 analyses, 42 came back saying Avoid
+   - Out of 149 stocks scanned, 109 came back Avoid. Run the count again first,
+     as LAUNCH.md says, and give the new numbers
    - You want them to tell you where the method is wrong
 
    Longer wording is in [LAUNCH.md](LAUNCH.md).
@@ -404,7 +387,7 @@ then come here.
 
 ---
 
-## What to honestly expect from all four
+## What to honestly expect from all five
 
 None of these will make you come up first when someone searches the word
 "orenth." There is an older crypto project with that name and seven years of
@@ -422,7 +405,7 @@ Google part.
 
 | When | What |
 |---|---|
-| Today | **A** (Search Console) and **B** (GitHub). 8 minutes total. |
+| Today | **A** (Search Console), and the two small things in **B** (GitHub). 8 minutes total. |
 | A free weekday morning | **C** (Hacker News) |
 | Once your Reddit account is old enough | **D** (Reddit) |
 | After C and D give you feedback and you fix it | **E** (Product Hunt) |

@@ -19,7 +19,7 @@ Nothing else. No database to provision, no Redis, no build step.
 
 ### What it costs
 
-Be clear-eyed about this before Monday rather than after the first invoice.
+Be clear-eyed about this before you deploy rather than after the first invoice.
 
 `render.yaml` asks for the **`starter`** instance type and a **1 GB disk**.
 Neither is on Render's free tier, and that is deliberate, for two reasons:
@@ -39,7 +39,7 @@ and hosting prices change; I am not going to quote you a number I cannot
 verify. Expect a small monthly figure for the instance plus a little for the
 disk, on either host.
 
-If you want to spend nothing at all on Monday, the honest option is to run it
+If you want to spend nothing at all, the honest option is to run it
 on your own machine exactly as you do now and share nothing. There is no free
 configuration of this that also keeps your data and checks your alerts.
 
@@ -69,16 +69,18 @@ before pushing. Both hosts can deploy from a private repository.
 ## 2. Deploy it once, before touching Google
 
 Do this first and on purpose. Google needs a working HTTPS address before you
-can finish registering the OAuth client, and the app runs perfectly well with
-no sign-in at all, so you can confirm the deployment is healthy before adding
-anything that can fail.
+can finish registering the OAuth client, and the public pages work before any
+way to sign in is set up, so you can confirm the deployment is healthy before
+adding anything that can fail.
 
 ### Render
 
-New → Web Service → connect the repo. Render reads `render.yaml` and needs no
-further configuration. The one thing to check is that the **disk is mounted at
-`/data`**: without it, the database is inside the container and every redeploy
-wipes the journal and signs everyone out.
+New → **Blueprint** → connect the repo. Render reads `render.yaml`, which asks
+for the disk and the instance type, and lists the settings to fill in. (New →
+**Web Service** does not read that file: there you add the disk, the paid
+instance type and the settings named in it by hand.) Either way, check that
+the **disk is mounted at `/data`**: without it, the database is inside the
+container and every redeploy wipes the journal and signs everyone out.
 
 ### Fly
 
@@ -96,8 +98,9 @@ curl https://<your-address>/healthz
 
 Expect `{"ok": true, "service": "stockbot"}`. That endpoint touches the
 database, so a 200 means the process is genuinely able to serve, not merely
-running. Open the address in a browser: you should get the full app with no
-sign-in, as a single local account.
+running. Open the address in a browser: you should see the front page, and the
+example account on the pages behind it. Signing in is off until step 4, and
+the sign-in page says so.
 
 **Set this now**, replacing the address with your real one:
 
@@ -148,7 +151,7 @@ translates Google's error into a message naming the address it actually used,
 so if it goes wrong the page will tell you what to paste.
 
 While the consent screen is in **Testing**, only accounts you add under *Test
-users* can sign in. That is the right state for Monday. Move it to
+users* can sign in. That is the right state while testing. Move it to
 *In production* when you want it open to anyone.
 
 ---
@@ -163,7 +166,7 @@ GOOGLE_CLIENT_SECRET = <from Google>
 ```
 
 Sign-in switches itself on the moment both are present; there is no separate
-setting. Redeploy, open the address, and you should be sent to a sign-in page.
+setting. Redeploy, open the address and press **Sign in**: Google is offered.
 
 To keep it private to you and a few testers for launch:
 
@@ -190,7 +193,7 @@ scoring, and the written reasoning on the research page.
 
 ---
 
-## 6. Recommended: copies of the backups somewhere else
+## Recommended: copies of the backups somewhere else
 
 The automatic backups sit on the same 1 GB disk as the database, so losing that
 disk loses both. With four settings, the server also copies each backup to a
@@ -471,7 +474,7 @@ and refuses anything else.
 | `STOCKBOT_SECRET_KEY` | yes | Signs session cookies. Generated into `data/secret.key` if unset |
 | `STOCKBOT_DB` | yes | `/data/stockbot.db`, on the mounted disk |
 | `STOCKBOT_CONFIG` | yes | `/data/config.json`, so settings survive a redeploy |
-| `STOCKBOT_BEHIND_PROXY` | yes | Trust the proxy's forwarded scheme and host. Already set in both host configs |
+| `STOCKBOT_BEHIND_PROXY` | yes | Believe what the host's proxy says about the visitor's address and https. `1` switches it on. Already set in both host configs and the image. Leave it off when nothing is in front of the server |
 | `STOCKBOT_CONTACT` | yes | Shown on the privacy and terms pages |
 | `GOOGLE_CLIENT_ID` | for sign-in | Turns sign-in on, together with the secret |
 | `GOOGLE_CLIENT_SECRET` | for sign-in | Never appears in a URL or a config file |
@@ -483,19 +486,23 @@ and refuses anything else.
 | `APPLE_APP_ID` | for selling Pro in the app | The app's number (Apple ID) from App Store Connect. Switches on in-app purchase, and Apple's production notifications must name it. See section 7 |
 | `APPLE_PRODUCT_IDS` | no | The subscriptions that are Pro, default `app.orenth.ios.pro.monthly,app.orenth.ios.pro.yearly` |
 | `APPLE_SANDBOX_PRO`, `APPLE_SANDBOX_USERS` | no | Whether test purchases give Pro: `all` (the default, which App Review needs), `allowlist` (only the email addresses in `APPLE_SANDBOX_USERS`) or `none` |
+| `REVIEW_LOGIN_EMAIL`, `REVIEW_LOGIN_CODE` | for App Review | The account Apple's reviewers sign in to, and its code of at least 16 characters. Off unless both are set. `python tools/reset_test_purchases.py` puts that account back on Free. `mobile/APP_STORE.md` says when |
 | `ANTHROPIC_API_KEY` | no | Screenshot reading, LLM sentiment, written reasoning |
+| `CLAUDE_MODEL` | no | The Claude model those use, instead of the one each is written for |
 | `VAPID_PRIVATE_KEY` | recommended | The key browser notifications are signed with. Made and kept in `/data/vapid.pem` if unset; copy that file's text here so it outlives the disk. See "Notifications" below |
 | `VAPID_PUBLIC_KEY` | no | Only checked against the private key; the server works it out itself |
 | `APPLE_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY` | for iPhone app notifications | All three turn on notifications to the Orenth iPhone app, through Apple. The key is the `.p8` file's text |
 | `APNS_BUNDLE_ID` | no | The iPhone app's bundle id, default `app.orenth.ios` |
 | `SENTRY_DSN` | recommended | Error reporting. Without it a 3am failure is invisible until someone emails you |
+| `SENTRY_TRACES_RATE` | no | The share of page loads sent to Sentry for timing even when nothing breaks, such as `0.05` for one in twenty. Default none. The privacy page says so while it is on |
+| `SENTRY_ENVIRONMENT` | no | The name Sentry shows reports under, default `production` |
 | `STOCKBOT_ADMIN_EMAIL` | recommended | Who may see `/usage`. Without it, nobody can on a deployment |
-| `STOCKBOT_BACKUP_HOURS` | no | Hours between automatic backups, default 12. Set 0 to switch off |
+| `STOCKBOT_BACKUP_HOURS` | no | Hours between automatic backups, default 12. Set 0 to switch off. Blank or not a number means 12, and the start-up log says so |
 | `STOCKBOT_BACKUP_DIR` | no | Where they go, default `<database folder>/backups` |
-| `STOCKBOT_BACKUP_KEEP` | no | How many to keep, default 8 |
-| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | recommended | All four copy each backup to a private storage bucket off the server, such as Cloudflare R2. See section 6 |
+| `STOCKBOT_BACKUP_KEEP` | no | How many to keep, default 8. 0 keeps every one, which fills the disk and breaks what the privacy page says about deleted accounts. Blank or not a number means 8 |
+| `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | recommended | All four copy each backup to a private storage bucket off the server, such as Cloudflare R2. See "Copies of the backups somewhere else" above |
 | `BACKUP_S3_REGION`, `BACKUP_S3_PREFIX` | no | The bucket's region, default `auto` (R2's), and the folder in it, default `orenth/` |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | for email sign-in | All five turn on "Continue with email". Port defaults to 587; 465 uses SSL |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | for email sign-in | Turn on "Continue with email". All are needed but `SMTP_PORT`, which defaults to 587; 465 uses SSL |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SID` | for phone sign-in | All three turn on "Continue with phone", through Twilio Verify |
 | `PHONE_ALLOWED_PREFIXES` | no | Country codes allowed to get texts, e.g. `+1,+44`. Limits SMS fraud |
 | `PHONE_CODES_PER_HOUR` | no | Texts the whole site may send an hour, default 40 |
@@ -504,6 +511,7 @@ and refuses anything else.
 | `PRO_PRICE_LABEL` | no | Shown only if Stripe cannot be reached; prices are otherwise read from Stripe |
 | `FREE_ANALYSES_PER_DAY`, `FREE_FIND_RESULTS`, `FREE_ALERTS` | no | The free allowance, default 3, 3 and 1 |
 | `MAIL_POSTAL_ADDRESS` | for the weekly email | A postal address (a PO box works) printed at the foot of the weekly email, as US law requires. With the SMTP settings, it turns the weekly email on |
+| `WEB_THREADS` | no | How many requests the server answers at once, default 8 |
 
 ---
 
@@ -533,7 +541,8 @@ being kept, and prune to the newest eight. Each is a copy of the database and
 four CSV exports, and pruning deletes them together. A deploy restarts the
 server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
-disk as the database: section 6 copies each one somewhere else as it is taken.
+disk as the database: with the settings under "Copies of the backups somewhere
+else" above, each one is copied off it as it is taken.
 
 Each new release also copies the database, verified, before its start-up
 changes anything in it, into `/data/backups/before-release`, and writes the
@@ -653,7 +662,7 @@ Most of this is a script. Run it against the real address:
 python preflight.py https://<your-address>
 ```
 
-It checks roughly two dozen things: that the health check reaches the database,
+It checks about twenty things: that the health check reaches the database,
 that the privacy and terms pages are readable by a stranger (which is what
 Google verifies), that the private pages are not, that sign-in reaches Google
 with PKCE and a state parameter, that the client secret is not in the redirect,
@@ -703,7 +712,8 @@ The automatic backups sit on the same 1 GB disk as the database. They cover a
 bad write or a mistake, not losing the disk or the account. Render also keeps
 daily snapshots of the disk for a few days (check its disk documentation for the
 current terms), but those stay with Render too. So keeping a copy somewhere else
-is the step that matters most. Section 6 does it for you: each backup is copied
+is the step that matters most. "Copies of the backups somewhere else" above
+sets the server up to do it for you: each backup is copied
 to a storage bucket and checked there. Without it, it is a step for you, the
 operator:
 
@@ -721,8 +731,8 @@ operator:
 - Backups hold every account's data. A deleted account is gone from them once
   the last copy taken before the deletion is pruned, about four days at the
   defaults and a week for the copies taken before a release, and from any copy
-  you downloaded only when you delete that. With copies kept off the server
-  (section 6), the monthly ones keep it for up to 12 months, and the privacy
+  you downloaded only when you delete that. With copies kept off the server,
+  the monthly ones keep it for up to 12 months, and the privacy
   page says so.
 
 Do not `cat` or `cp` the database. It runs in WAL mode, so at any moment some
@@ -742,7 +752,7 @@ python backup.py --restore FILE  put a backup in place of the database; then res
 
 Restore with `--restore`, never by copying the file over `stockbot.db`: the
 `-wal` file beside it would lay the latest writes back over the backup.
-Section 6 says more.
+"Copies of the backups somewhere else" above says more.
 
 On the server:
 
@@ -754,7 +764,8 @@ python backup.py --verify local-copy.db
 
 The CSVs are worth taking too. A `.db` file is readable only by this program;
 the exports are readable by anything, which is what matters if the worst case
-is that this app is gone.
+is that this app is gone. Their first column, `user_id`, is the number of the
+account each row belongs to in the database's `users` table.
 
 **Yahoo Finance is an unlicensed source.** It works, it is free, and it has no
 agreement with you. It may rate-limit or break without notice, and it is not a
