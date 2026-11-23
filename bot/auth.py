@@ -95,8 +95,8 @@ def why_not() -> str:
         missing.append("GOOGLE_CLIENT_ID")
     if not client_secret():
         missing.append("GOOGLE_CLIENT_SECRET")
-    return ("Google sign-in is not set up: %s is not set in the environment or "
-            ".env file." % " and ".join(missing))
+    return ("Google sign-in is not set up: %s %s not set in the environment or "
+            ".env file." % (" and ".join(missing), "is" if len(missing) == 1 else "are"))
 
 
 # --- PKCE -------------------------------------------------------------------

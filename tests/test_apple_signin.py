@@ -312,6 +312,14 @@ try:
         line for line in P8_PEM.splitlines() if "-----" not in line)
     check("a key pasted without its BEGIN and END lines still works",
           apple_mod.native_ready())
+    for name in ("APPLE_TEAM_ID", "APPLE_SIGNIN_KEY_ID"):
+        del _os.environ[name]
+        said = apple_mod.why_not()
+        check("the log names what is missing in good English",
+              (name in said) and ("are not set" in said) == (" and " in said)
+              and ("is not set" in said) != (" and " in said), said)
+    _os.environ["APPLE_TEAM_ID"] = ENV["APPLE_TEAM_ID"]
+    _os.environ["APPLE_SIGNIN_KEY_ID"] = ENV["APPLE_SIGNIN_KEY_ID"]
     _os.environ["APPLE_SIGNIN_PRIVATE_KEY"] = "not a key at all"
     check("a key that cannot be read switches Apple off",
           not apple_mod.native_ready() and "readable" in apple_mod.why_not())
@@ -566,6 +574,10 @@ try:
               unverified.id != sam.id)
         check("and the new account does not take that address",
               unverified.email.endswith("@users.invalid"), unverified.email)
+        check("and nobody is shown that placeholder as who they are",
+              unverified.display == "Apple account" and unverified.initial == "A"
+              and "invalid" not in unverified.contact, (unverified.display,
+                                                        unverified.contact))
 
         icloud = A.upsert_email_user(conn, "hidden.one@icloud.com")
         marked = A.upsert_apple_user(conn, {"sub": "a-icloud",

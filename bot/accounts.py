@@ -160,16 +160,26 @@ class User:
     created_ts: int = 0
 
     @property
+    def placeholder(self) -> bool:
+        """Whether the address is one made up here, which nobody should see."""
+        return self.email.endswith("@users.invalid")
+
+    @property
     def display(self) -> str:
+        if not self.name and self.placeholder and self.provider == "apple":
+            return "Apple account"
         return self.name or self.email.split("@")[0]
 
     @property
     def contact(self) -> str:
-        return self.name if self.provider == "phone" else self.email
+        if self.provider == "phone":
+            return self.name
+        return "No email address on this account" if self.placeholder else self.email
 
     @property
     def initial(self) -> str:
-        return (self.display or "?")[0].upper()
+        # A phone account's name is its number, which starts with a plus.
+        return next((c for c in self.display if c.isalnum()), "?").upper()
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
