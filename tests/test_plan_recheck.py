@@ -401,12 +401,16 @@ said = {}
 try:
     started = serve.main([])
     timed = len(jobs)
+    kept_free = web._slow_in_all()
+    serve.main(["--threads", "4"])
+    fewer = web._slow_in_all()
     for address in ("orenth.example", "http://orenth.example", "HTTPS://orenth.example"):
         _os.environ["STOCKBOT_PUBLIC_URL"] = address
         with contextlib.redirect_stdout(io.StringIO()) as out:
             serve.main([])
         said[address] = "PUBLIC ADDRESS IS NOT HTTPS" in out.getvalue()
 finally:
+    web.app.config.pop("WEB_THREADS", None)
     _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
     if had_public is not None:
         _os.environ["STOCKBOT_PUBLIC_URL"] = had_public
@@ -417,6 +421,8 @@ new = sorted(set(held()) - set(before))
 check("serve.main takes the copy for a new release, and notes the release",
       started == 0 and len(new) == 1 and release_noted() == "ffff6666",
       (started, new, release_noted()))
+check("two of the threads it is started with are kept from slow work",
+      (kept_free, fewer) == (6, 2), (kept_free, fewer))
 check("a public address that is not https is said loudly at the start, and only then",
       said == {"orenth.example": True, "http://orenth.example": True,
                "HTTPS://orenth.example": False}, said)

@@ -1275,6 +1275,25 @@ try:
         refused = []
         ask(99, refused)
         check("one account cannot have every thread at work for it", refused == [503], refused)
+        r = another().get("/analyse?symbol=AAPL&interval=1d&news=0&account=77")
+        said = page_of(r)
+        check("what it asked for waits its turn and opens itself, as no thread of the server does",
+              r.status_code == 503 and re.search(
+                  r'<meta http-equiv="refresh" content="[2-5]">', said)
+              and r.headers.get("Retry-After") and "opens by itself" in said
+              and "didn't work" not in said, said[:300])
+        r = another().post("/monitor/alerts/check")
+        check("a button is not pressed again by itself",
+              r.status_code == 503 and "refresh" not in page_of(r)
+              and "press the button again" in page_of(r), page_of(r)[:300])
+        pages = {p: another().get(p).status_code for p in (
+            "/trades", "/portfolio", "/screener?go=1", "/export/trades.csv",
+            "/monitor", "/screener", "/tools/size", "/account", "/")}
+        check("nor has it more of the pages that wait for prices, while every other opens",
+              pages == {"/trades": 503, "/portfolio": 503,
+                        "/screener?go=1": 503, "/export/trades.csv": 503,
+                        "/monitor": 200, "/screener": 200,
+                        "/tools/size": 200, "/account": 200, "/": 200}, pages)
         other = web.app.test_client()
         conn = db.connect(DB)
         try:
@@ -1287,8 +1306,36 @@ try:
             "/analyse?symbol=MSFT&interval=1d&news=0"))
         late.start()
         check("while somebody else's is still worked out", going.acquire(timeout=20))
+        # Five of the eight threads are at it. One place more, and the other
+        # two are left for pages that need nothing worked out.
+        third, sixth = user("third@example.com"), []
+
+        def as_third(path, out):
+            mine = web.app.test_client()
+            k = db.connect(DB)
+            try:
+                token = A.start_session(k, third.id, "test")
+            finally:
+                k.close()
+            with mine.session_transaction() as sess:
+                sess[web.SESSION_KEY] = token
+            out.append(mine.get(path).status_code)
+
+        last = threading.Thread(target=as_third, args=(
+            "/analyse?symbol=TSLA&interval=1d&news=0", sixth))
+        last.start()
+        going.acquire(timeout=20)
+        late_ones = []
+        as_third("/analyse?symbol=AMD&interval=1d&news=0", late_ones)
+        as_third("/export/trades.csv", late_ones)
+        as_third("/trades", late_ones)
+        as_third("/learn", late_ones)
+        check("two threads are kept for other pages, whoever asks for the slow ones",
+              sum(web._SLOW.values()) == 6 and late_ones == [503, 503, 200, 200],
+              (web._SLOW, late_ones))
         let_go.set()
         late.join(20)
+        last.join(20)
     finally:
         let_go.set()
         for t in threads:
@@ -1296,6 +1343,43 @@ try:
         web.engine.analyse = real_analyse
     check("and each is let go of when it is done", out == [404] * web.SLOW_AT_ONCE
           and not web._SLOW, (out, web._SLOW))
+
+    # Visitors on the example, with nothing kept yet. Seven ask for the same
+    # instrument: they wait for the one answer, six of them in threads.
+    let_go.clear()
+    asked_for = []
+
+    def slow_example(symbol, *a, **k):
+        asked_for.append(symbol)
+        let_go.wait(30)
+        raise web.DataError("enough")
+
+    web.engine.analyse = slow_example
+    web._CACHE.clear()
+    out = []
+    looking = [threading.Thread(target=lambda: out.append(web.app.test_client().get(
+        "/analyse?symbol=NVDA").status_code)) for _ in range(6)]
+    try:
+        for t in looking:
+            t.start()
+            time.sleep(0.05)
+        until = time.time() + 20
+        while sum(web._SLOW.values()) < 6 and time.time() < until:
+            time.sleep(0.05)
+        places = sum(web._SLOW.values())
+        r = web.app.test_client().get("/analyse?symbol=NVDA")
+        check("a crowd on a cold page waits for the one answer, and nobody gets an error page",
+              places == 6 and asked_for == ["NVDA"] and r.status_code == 503
+              and "opens by itself" in page_of(r), (places, asked_for, r.status_code))
+        check("while the front page and the public pages open",
+              [web.app.test_client().get(p).status_code
+               for p in ("/", "/stocks", "/healthz")] == [200, 200, 200])
+    finally:
+        let_go.set()
+        for t in looking:
+            t.join(20)
+        web.engine.analyse = real_analyse
+    check("and every place is given back", not web._SLOW, web._SLOW)
 
     def stopped(job, *a):
         job.update(running=False, error="no source", retry_at=time.time() + 60)

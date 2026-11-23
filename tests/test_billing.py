@@ -639,7 +639,7 @@ try:
         conn.close()
 
         real_demo = web._demo_shortlist
-        web._demo_shortlist = lambda market, horizon, risk: fake_find(market, horizon, None, risk)
+        web._demo_shortlist = lambda market, horizon, risk, wait=0: fake_find(market, horizon, None, risk)
         with c.session_transaction() as sess:
             sess.clear()
         try:
