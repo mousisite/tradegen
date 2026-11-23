@@ -1091,7 +1091,8 @@ def index():
     try:
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)
         # As held now: a position closed in part counts only what is left.
-        open_trades = db_mod.open_positions(conn, limit=20, user=uid())
+        # All of them, so a stop crossed on an old one is said too.
+        open_trades = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
         counts = db_mod.stats(conn, user=uid())
         stored = _attention_stored(conn, uid())
@@ -1108,7 +1109,9 @@ def index():
         conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return render_template("index.html", runs=runs,
-                           open_trades=_held(open_trades, attention["marks"]),
+                           open_trades=_held(open_trades[:POSITIONS_SHOWN],
+                                             attention["marks"]),
+                           open_more=max(0, len(open_trades) - POSITIONS_SHOWN),
                            summary=summary, counts=counts, attention=attention,
                            has_key=has_key,
                            ai_ok=has_key and _ai_consented())
@@ -1125,6 +1128,7 @@ DASHBOARD_WAIT = 4.0        # seconds the page waits for open positions' prices
 POPULAR_FRESH = 24 * 3600   # a popular check older than this is not today's
 ATTENTION_SHOWN = 6         # rows per list before "and N more"
 WATCH_SHOWN = 8
+POSITIONS_SHOWN = 20
 
 
 def _quote_day(snap: Dict) -> str:
@@ -1514,15 +1518,23 @@ def _family_rollup(result: engine.Analysis):
     return rows
 
 
+# Closed trades on one page of the journal. Open ones are always all shown:
+# each needs its Close form.
+CLOSED_SHOWN = 100
+
+
 @app.route("/trades")
 def trades():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        open_trades = db_mod.list_trades(conn, status="open", limit=50,
+        open_trades = db_mod.list_trades(conn, status="open", account="paper", limit=None,
                                          user=uid())
-        closed = db_mod.list_trades(conn, status="closed", limit=100,
-                                    user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
+        pages = max(1, math.ceil(summary["trades"] / CLOSED_SHOWN))
+        page = min(_closed_page(request.args), pages)
+        closed = db_mod.list_trades(conn, status="closed", account="paper",
+                                    limit=CLOSED_SHOWN, user=uid(), by_closed=True,
+                                    offset=(page - 1) * CLOSED_SHOWN)
         every = list(open_trades) + list(closed)
         exits = db_mod.exits_for(conn, [t["id"] for t in every])
         # What each trade's exits add up to: what is left of a position
@@ -1538,7 +1550,17 @@ def trades():
     said = session.pop(EXIT_SAID, "") if EXIT_SAID in session else ""
     return render_template("trades.html", open_trades=open_trades,
                            closed=closed, summary=summary, live=live,
-                           parts=parts, said=said, tags=_journal_lists())
+                           parts=parts, said=said, tags=_journal_lists(),
+                           page=page, pages=pages,
+                           closed_from=(page - 1) * CLOSED_SHOWN + 1)
+
+
+def _closed_page(values) -> int:
+    """Which page of closed trades was asked for: 1 for the first, or for nonsense."""
+    try:
+        return max(1, int(values.get("page") or 1))
+    except ValueError:
+        return 1
 
 
 def _journal_lists() -> Dict:
@@ -2193,7 +2215,8 @@ def delete_trade():
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    page = _closed_page(request.form)
+    return redirect(url_for("trades", page=page if page > 1 else None))
 
 
 @app.route("/trades/review", methods=["POST"])
@@ -2215,7 +2238,9 @@ def review_trade():
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
-    return redirect(url_for("trades", reviewed=trade_id) + "#t%d" % trade_id)
+    page = _closed_page(request.form)
+    return redirect(url_for("trades", reviewed=trade_id, page=page if page > 1 else None)
+                    + "#t%d" % trade_id)
 
 
 def _trade_picture(trade) -> Dict:
@@ -4828,7 +4853,7 @@ def portfolio():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         # What is held: a position closed in part counts only what is left.
-        rows = db_mod.open_positions(conn, limit=100, user=uid())
+        rows = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()

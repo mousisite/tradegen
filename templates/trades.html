@@ -51,17 +51,17 @@
       <div class="v fig">{{ summary.hit_rate|pct }}</div>
       <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost{% if summary.scratches %} · {{ summary.scratches }} even{% endif %}</div></div>
     <div class="f"><div class="k">Expectancy</div>
-      <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
+      <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' if summary.expectancy_r < 0 }}">
         {{ summary.expectancy_r|signed(3) }}R</div>
       <div class="n">per trade{% if summary.after_costs %}, after costs{% endif %}</div></div>
     <div class="f"><div class="k">Total</div>
-      <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
+      <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' if summary.total_r < 0 }}">
         {{ summary.total_r|signed(2) }}R</div>
       <div class="n">{{ summary.pnl|money }} cash</div></div>
     <div class="f"><div class="k">Average win</div>
-      <div class="v fig gain">{{ summary.avg_win_r|signed(2) }}R</div></div>
+      <div class="v fig{{ ' gain' if summary.avg_win_r > 0 }}">{{ summary.avg_win_r|signed(2) }}R</div></div>
     <div class="f"><div class="k">Average loss</div>
-      <div class="v fig loss">{{ summary.avg_loss_r|signed(2) }}R</div></div>
+      <div class="v fig{{ ' loss' if summary.avg_loss_r < 0 }}">{{ summary.avg_loss_r|signed(2) }}R</div></div>
     <div class="f"><div class="k">Profit factor</div>
       <div class="v fig">{{ "%.2f"|format(summary.profit_factor) if summary.profit_factor else '—' }}</div></div>
     <div class="f"><div class="k">Worst drawdown</div>
@@ -80,6 +80,11 @@
       {{ summary.open_in_part }} position{{ '' if summary.open_in_part == 1 else 's' }}
       still open. A trade counts here once it is closed in full, at the R of
       the whole position.</p>
+  {% endif %}
+  {% if summary.after_costs %}
+  <p class="prose" style="margin-top:var(--s2)">These figures are after trading
+    costs. The R and cash beside each trade below are before them, so the rows
+    can add up to more than the total.</p>
   {% endif %}
   <p class="prose" style="margin-top:var(--s2)">
     <a href="{{ url_for('journal_breakdown') }}">What your journal says</a>: these
@@ -225,7 +230,7 @@
             <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
               {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
                 today, after a {{ m.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' }}" data-label="Open R">
+            <td class="r fig {{ 'gain' if (m.r or 0) > 0 else 'loss' if (m.r or 0) < 0 }}" data-label="Open R">
               {{ m.r|signed if m.r is not none else '—' }}</td>
             <td data-label="State">
               {% if m.status == 'past stop' %}<span class="chip short">Stopped</span>
@@ -324,10 +329,12 @@
   </div>
 </section>
 
-<section>
+<section id="closed">
   <div class="sechead">
     <h2>Closed</h2>
-    <span class="tail">{{ closed|length }} trade{{ '' if closed|length == 1 else 's' }}</span>
+    <span class="tail">{{ summary.trades }} trade{{ '' if summary.trades == 1 else 's' }}
+      {%- if pages > 1 %}, {{ closed_from }} to {{ closed_from + closed|length - 1 }} shown{% endif %}
+      {%- if closed %} · R and cash before costs{% endif %}</span>
   </div>
   <div class="card pad0">
     {% if closed %}
@@ -362,6 +369,7 @@
                 <form method="post" action="{{ url_for('review_trade') }}" class="setgrid"
                       style="margin-top:var(--s1);grid-template-columns:minmax(0,1fr)">
                   <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                  <input type="hidden" name="page" value="{{ page }}">
                   <div class="setfield">
                     <label for="fp{{ t['id'] }}">Did you follow your plan?</label>
                     <select class="field" id="fp{{ t['id'] }}" name="followed_plan">
@@ -400,16 +408,17 @@
             {# What the plan aimed for beside what it made: a target hit makes
                the planned R, a stop hit makes -1. Closed in parts, it is the
                R of the whole position, each part weighted by its size. #}
-            <td class="r fig {{ 'gain' if (p.r or 0) > 0 else 'loss' }}" data-label="R">
+            <td class="r fig {{ 'gain' if (p.r or 0) > 0 else 'loss' if (p.r or 0) < 0 }}" data-label="R">
               <b>{{ p.r|signed }}</b>
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">of {{ rr|signed }} planned</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (p.pnl or 0) > 0 else 'loss' }}" data-label="Cash">
-              {{ p.pnl|money }}</td>
+            <td class="r fig {{ 'gain' if (p.pnl or 0) > 0 else 'loss' if (p.pnl or 0) < 0 }}" data-label="Cash">
+              {{ p.pnl|money if p.size is not none else '—' }}</td>
             <td class="r faint" data-label="Closed">{{ t['ts_closed']|ago }}</td>
             <td class="r">
               <form method="post" action="{{ url_for('delete_trade') }}"
                     onsubmit='return confirm({{ ("Delete this closed " ~ t["symbol"] ~ " trade? Your statistics will change.")|tojson }});'>
                 <input type="hidden" name="trade_id" value="{{ t['id'] }}">
+                <input type="hidden" name="page" value="{{ page }}">
                 <button class="btn quiet sm" type="submit"
                         aria-label="Delete the {{ t['symbol'] }} trade">Delete</button>
               </form>
@@ -419,6 +428,13 @@
         </tbody>
       </table>
     </div>
+    {% if pages > 1 %}
+      <p class="prose" style="display:flex;gap:var(--s1);flex-wrap:wrap;align-items:center;padding:var(--s2) var(--s3) var(--s3);margin:0">
+        {% if page > 1 %}<a class="btn quiet sm" href="{{ url_for('trades', page=page - 1) }}#closed">Newer</a>{% endif %}
+        <span>Page {{ page }} of {{ pages }}</span>
+        {% if page < pages %}<a class="btn quiet sm" href="{{ url_for('trades', page=page + 1) }}#closed">Older</a>{% endif %}
+      </p>
+    {% endif %}
     {% else %}
       <div class="blank">No closed trades yet.</div>
     {% endif %}

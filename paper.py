@@ -331,7 +331,7 @@ def cmd_check(args, conn) -> int:
     was touched intraday and recovered is still a stop that would have filled,
     and only checking the current price would hide that.
     """
-    open_trades = db.list_trades(conn, status="open", account=args.account)
+    open_trades = db.list_trades(conn, status="open", account=args.account, limit=None)
     if not open_trades:
         console.print("[dim]No open positions.[/]")
         return 0

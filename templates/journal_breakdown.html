@@ -33,7 +33,7 @@
       <div class="v fig">{{ r.trades }}</div>
       <div class="n">{{ o.wins }} won</div></div>
     <div class="f"><div class="k">Average per trade</div>
-      <div class="v fig {{ 'gain' if o.avg_r > 0 else 'loss' }}">{{ o.avg_r|signed(2) }}R</div>
+      <div class="v fig {{ 'gain' if o.avg_r > 0 else 'loss' if o.avg_r < 0 }}">{{ o.avg_r|signed(2) }}R</div>
       <div class="n">{% if o.margin is not none %}give or take {{ '%.2f'|format(o.margin) }}R{% else %}too few to give a margin{% endif %}</div></div>
     <div class="f"><div class="k">Green days {{ help('green_days') }}</div>
       <div class="v fig">{{ r.green.green }} of {{ r.green.days }}</div>

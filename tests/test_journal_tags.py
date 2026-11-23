@@ -529,6 +529,97 @@ try:
           and "30 days" in text(r))
 
     # -----------------------------------------------------------------------
+    head("EVERY TRADE CAN BE REACHED, AND THE COUNTS AGREE")
+    # -----------------------------------------------------------------------
+    hal = A.upsert_email_user(conn, "hal@example.com")
+    sign_in(c, hal)
+    put = ("INSERT INTO trades (account, symbol, interval, direction, status, ts_opened, entry, "
+           "stop, quantity, ts_closed, exit_price, exit_reason, r_multiple, pnl, user_id) "
+           "VALUES (?,?,'1d',1,?,?,100,99,?,?,?,?,?,?,?)")
+    for k in range(60):
+        conn.execute(put, ("paper", "OPN%d" % k, "open", NOW - 20 * 86400 + k, 1, None, None,
+                           None, None, None, hal.id))
+    # Opened in one order and closed in the other.
+    for k in range(130):
+        conn.execute(put, ("paper", "CLS%d" % k, "closed", NOW - 40 * 86400 + k, None,
+                           NOW - 1000 - k, 100.0, "manual", 0.0, 0.0, hal.id))
+    conn.execute(put, ("live", "LIVE1", "open", NOW, 1, None, None, None, None, None, hal.id))
+    conn.execute(put, ("live", "LIVE2", "closed", NOW, 1, NOW, 101.0, "manual", 1.0, 1.0,
+                       hal.id))
+    conn.commit()
+    page = text(c.get("/trades"))
+    check("every open position has its Close form",
+          page.count('action="/trades/close"') == 60 and "60 positions" in page
+          and "<b>OPN0</b>" in page, page.count('action="/trades/close"'))
+    check("the closed ones are a page at a time, and the heading gives the real number",
+          "130 trades, 1 to 100 shown" in flat(page) and "Page 1 of 2" in page
+          and page.count('action="/trades/review"') == 100, flat(page)[-600:])
+    check("the latest closed first", page.index("<b>CLS0</b>") < page.index("<b>CLS99</b>")
+          and "<b>CLS100</b>" not in page)
+    older = text(c.get("/trades?page=2"))
+    check("and the rest on the next page", "130 trades, 101 to 130 shown" in flat(older)
+          and "<b>CLS129</b>" in older and older.count('action="/trades/review"') == 30
+          and "?page=1#closed" in older and "?page=3" not in older)
+    check("a page that does not exist is the last one, and nonsense the first",
+          "<b>CLS129</b>" in text(c.get("/trades?page=99"))
+          and "<b>CLS0</b>" in text(c.get("/trades?page=x"))
+          and "<b>CLS0</b>" in text(c.get("/trades?page=-4")))
+    check("a journal of another name, which the figures leave out, is not listed",
+          "LIVE1" not in page and "LIVE2" not in page
+          and "LIVE1" not in text(c.get("/portfolio")))
+    check("an even trade is not coloured as a loss, and one with no size has no cash",
+          'class="r fig loss" data-label="R"' not in page
+          and not re.search(r'data-label="Cash">\s*0\.00', page))
+    check("the page says which figures are after costs and which before",
+          "These figures are after trading costs." in flat(page)
+          and "R and cash before costs" in flat(page))
+    last = conn.execute("SELECT id FROM trades WHERE symbol='CLS129'").fetchone()[0]
+    r = c.post("/trades/review", data={"trade_id": str(last), "followed_plan": "yes",
+                                       "lesson": "", "page": "2"})
+    check("a review on the second page comes back to it",
+          "page=2" in r.headers["Location"] and r.headers["Location"].endswith("#t%d" % last))
+    r = c.post("/trades/delete", data={"trade_id": str(last), "page": "2"})
+    check("and so does a delete", r.headers["Location"].endswith("/trades?page=2"))
+    front = flat(text(c.get("/")))
+    check("the front page shows 20 and says how many more", front.count("<td><b>OPN") == 20
+          and "The newest 20. 40 more in" in front)
+    # The oldest of them goes through its stop: it is not among the 20 listed.
+    real_mark = web._mark_to_market
+    web._mark_to_market = lambda trades: {
+        t["id"]: {"price": 98.0 if t["symbol"] == "OPN0" else 100.0, "r": 0.0, "as_of": "now",
+                  "status": "past stop" if t["symbol"] == "OPN0" else "open"} for t in trades}
+    try:
+        front = flat(text(c.get("/")))
+    finally:
+        web._mark_to_market = real_mark
+    check("and tells of a stop crossed on one it does not list",
+          "<b>OPN0</b> long:" in front
+          and "None of your open positions is past its stop" not in front, front[:1500])
+
+    # Every open position's price is read by the background check each round.
+    for k in range(60, db.MAX_OPEN_TRADES - 1):        # and the one of the other name
+        conn.execute(put, ("paper", "OPN%d" % k, "open", NOW - 86400, 1, None, None, None, None,
+                           None, hal.id))
+    conn.commit()
+    one = {"symbol": "ZZM", "direction": "long", "entry": "100", "stop": "99"}
+    r = c.post("/trades/open", data=one)
+    check("a journal holds so many open positions and no more, said in words",
+          r.status_code == 400 and "can hold 200 open positions at once" in text(r), text(r)[:400])
+    db.close_trade(conn, conn.execute("SELECT id FROM trades WHERE symbol='OPN0'").fetchone()[0],
+                   101.0)
+    check("and takes another once one is closed",
+          c.post("/trades/open", data=one).status_code == 302)
+    web._RATE.clear()
+    sign_in(c, carol)
+    limit, web.TRADES_PER_HOUR = web.TRADES_PER_HOUR, 2
+    try:
+        got = [c.post("/trades/open", data=one).status_code for _ in range(3)]
+    finally:
+        web.TRADES_PER_HOUR = limit
+        web._RATE.clear()
+    check("logging trades has an hourly budget", got == [302, 302, 429], got)
+
+    # -----------------------------------------------------------------------
     head("THE EXPORT")
     # -----------------------------------------------------------------------
     rows = export.trades(conn, user=alice.id)

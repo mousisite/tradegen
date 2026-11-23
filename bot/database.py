@@ -925,7 +925,7 @@ def trade_parts(row, exits) -> Dict:
 
 
 def open_positions(conn: sqlite3.Connection, account: Optional[str] = None,
-                   limit: int = 100, user: Optional[int] = None) -> List[Dict]:
+                   limit: Optional[int] = 100, user: Optional[int] = None) -> List[Dict]:
     """Open trades as they are held now: quantity is what is still open.
 
     The portfolio and the routines size, value and risk what is held, so a
@@ -1032,7 +1032,12 @@ def delete_trade(conn: sqlite3.Connection, trade_id: int,
 
 def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
                 account: Optional[str] = None, symbol: Optional[str] = None,
-                limit: int = 100, user: Optional[int] = None) -> List[sqlite3.Row]:
+                limit: Optional[int] = 100, user: Optional[int] = None,
+                by_closed: bool = False, offset: int = 0) -> List[sqlite3.Row]:
+    """Trades, the latest opened first, or with by_closed the latest closed.
+
+    limit None lists them all. offset leaves out that many from the start.
+    """
     sql = "SELECT * FROM trades WHERE 1=1"
     args: List = []
     sql, args = _own(sql, args, user)
@@ -1045,8 +1050,10 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
     if symbol:
         sql += " AND symbol=?"
         args.append(symbol.upper())
-    sql += " ORDER BY ts_opened DESC LIMIT ?"
-    args.append(limit)
+    sql += (" ORDER BY ts_closed DESC, id DESC" if by_closed else " ORDER BY ts_opened DESC")
+    sql += " LIMIT ? OFFSET ?"
+    # SQLite reads a limit below zero as no limit.
+    args.extend([-1 if limit is None else limit, offset])
     return list(conn.execute(sql, args))
 
 
