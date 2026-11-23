@@ -659,6 +659,9 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
     six hours on. Whether a call is skipped depends only on the data, never
     on the price, so it cannot pick the calls that flatter the record.
 
+    A symbol taken off the popular list is not checked again, but its calls
+    still waiting are scored like any other (_off_the_list).
+
     Every run ends by fingerprinting the days of calls that are over
     (fingerprint_days), by the clock, not by now, which only says what is
     due.
@@ -679,11 +682,33 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
                 settle_calls(conn, symbol, daily)
         except Exception as exc:           # a delisted ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
+    for symbol in (_off_the_list(conn) if checked and bars is not None else ()):
+        sleep(pause)
+        try:
+            daily = bars(symbol)
+            mark_calls(conn, symbol, daily)
+            settle_calls(conn, symbol, daily)
+        except Exception as exc:
+            errors.append("%s: %s" % (symbol, exc))
     try:
         fingerprint_days(conn)
     except sqlite3.Error as exc:           # the next run takes it
         errors.append("fingerprints: %s" % exc)
     return {"checked": checked, "errors": errors}
+
+
+# A call on a symbol no longer on the popular list is tried this long. Its ten
+# trading days are over well before then, and past it the source has no
+# prices for the ticker, or has given the ticker to another company.
+OFF_THE_LIST_DAYS = 60
+
+
+def _off_the_list(conn: sqlite3.Connection, now: Optional[float] = None) -> List[str]:
+    """Symbols no longer popular that still have calls waiting to be scored."""
+    since = int((time.time() if now is None else now) - OFF_THE_LIST_DAYS * 86400)
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT symbol FROM calls WHERE outcome IS NULL AND at >= ? "
+        "ORDER BY symbol", (since,)) if r[0] not in NAMES]
 
 
 def blank_day(bars, now: Optional[float] = None) -> Optional[int]:

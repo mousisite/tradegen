@@ -390,6 +390,36 @@ try:
     check("the scoring rule on the page matches the code: half the stop distance",
           "half the distance to the stop" in page and "half a day" not in page)
 
+    # A symbol taken off the popular list: its calls still waiting are scored,
+    # and its page, gone, is not linked to.
+    conn = db.connect(DB)
+    gone_at = int(time.time()) - 30 * 86400
+    for sym, when in (("SQZZ", gone_at), ("OLDZZ", gone_at - 60 * 86400)):
+        conn.execute("INSERT INTO calls (symbol, day, action, price, stop, target, horizon, at) "
+                     "VALUES (?, '2026-01-05', 'BUY', 100, 97, 104.5, 10, ?)", (sym, when))
+    conn.commit()
+    asked = []
+
+    def gone_bars(symbol):
+        asked.append(symbol)
+        return SimpleNamespace(timestamp=[gone_at + 86400 * k for k in range(1, 4)],
+                               high=[106.0] * 3, low=[99.0] * 3, close=[105.0] * 3)
+
+    real_due = public.due
+    public.due = lambda conn, now=None: ["KO"]
+    try:
+        public.refresh(conn, lambda s: snap_for(s), sleep=slept.append, bars=gone_bars)
+        public.refresh(conn, lambda s: snap_for(s), sleep=slept.append, bars=gone_bars)
+    finally:
+        public.due = real_due
+    check("a call on a symbol no longer popular is still scored, and only once",
+          asked == ["KO", "SQZZ", "KO"] and conn.execute(
+              "SELECT outcome FROM calls WHERE symbol='SQZZ'").fetchone()[0] == "right", asked)
+    conn.close()
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("the record lists it, without a link to a page that is gone",
+          "<b>SQZZ</b>" in page and "/stock/sqzz" not in page and "/stock/amd" in page)
+
     conn = db.connect(DB)
     fetched = []
 

@@ -119,7 +119,7 @@
           <tbody>
           {% for r in rec.latest %}
             <tr>
-              <td><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a></td>
+              <td>{% if r.symbol in popular %}<a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a>{% else %}<b>{{ short(r.symbol) }}</b>{% endif %}</td>
               <td><span class="chip {{ 'long' if r.action == 'BUY' else 'short' if r.action == 'SHORT'
                    else 'hold' if r.action == 'WAIT' else 'mute' }}">{{ r.action }}</span></td>
               <td>{{ result(r) }}</td>

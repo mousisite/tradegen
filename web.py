@@ -5634,6 +5634,7 @@ def record():
     splits = "splits" in {f.name for f in dataclasses.fields(market_mod.Bars)}
     return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
+                           popular=public_mod.NAMES,
                            short=public_mod.short, slug=public_mod.slug,
                            how_words=public_mod.HOW_WORDS, splits=splits,
                            prints=prints)
