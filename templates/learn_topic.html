@@ -40,7 +40,7 @@
 <div class="plainbox">
   <span class="eyebrow">The short answer</span>
   {% if not page.measured %}
-    <p class="lead">Being tested. This fills in after the first nightly run.</p>
+    <p class="lead">{% if page.no_cases %}No cases in the days tested.{% else %}Being tested. This fills in after the first nightly run.{% endif %}</p>
   {% else %}
     {% set ns = namespace(said=false) %}
     {% for v in page.setups %}
@@ -133,7 +133,7 @@
       together:</p>
     <div class="card pad0">{{ pooled_table(v.lab.pooled) }}</div>
     <details class="card" style="margin-top:var(--s2)">
-      <summary>Every instrument ({{ v.lab.rows|length }})</summary>
+      <summary>Every instrument, bar size and target ({{ v.lab.rows|length }} row{{ 's' if v.lab.rows|length != 1 }})</summary>
       <div class="tablewrap" style="margin-top:var(--s2)">
         <table class="stack">
           <thead><tr><th>Instrument</th><th class="r">Trades</th><th class="r">Hit rate</th>
@@ -157,7 +157,7 @@
       </div>
       <p class="learn-source" style="margin-top:var(--s2)"><b>Later days</b>: whether
         the last third of the days, read on its own, kept or lost money the same
-        way as the whole.</p>
+        way as the first two thirds.</p>
     </details>
     {% if v.lab.k3 %}
       <p class="prose" style="margin-top:var(--s2)">With wider swings (three bars
@@ -166,10 +166,14 @@
           trades, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
           ±{{ '%.2f'|format(k.margin) }}{% endif %}{{ '; ' if not loop.last else '.' }}{% endfor %}</p>
     {% endif %}
-    {% if v.lab.tight or v.lab.no_control %}
+    {% if v.lab.left_out %}
       <p class="prose" style="margin-top:var(--s1)">Left out and counted:
-        {{ v.lab.tight }} with a stop too close to trade, {{ v.lab.no_control }}
-        with no random entries to compare.</p>
+        {{ v.lab.left_out|join('; ') }}.</p>
+    {% endif %}
+    {% if v.lab.no_control %}
+      <p class="prose" style="margin-top:var(--s1)">{{ "{:,}".format(v.lab.no_control) }}
+        {{ 'trade had no random entries to set beside it: it is' if v.lab.no_control == 1 else 'trades had no random entries to set beside them: they are' }}
+        in the result, not in the comparison.</p>
     {% endif %}
   {% else %}
     <div class="card"><p class="prose">Being tested on 5- and 15-minute prices. This
@@ -180,9 +184,10 @@
       years of daily prices of the popular stocks and coins, with Orenth's own stop and
       target, a trade averaged <span class="fig">{{ v.daily.kept|signed(2) }}R</span>{% if v.daily.margin is not none %}
       ±{{ '%.2f'|format(v.daily.margin) }}{% endif %}{% if v.daily.verdict is not none %}:
-      it {{ v.daily.words }}{% endif %}.{% else %}The
-      daily test on popular stocks and coins has no result for it yet.{% endif %}
-      <a href="{{ url_for('backtest_page', name=v.daily.slug) }}">The daily test &rarr;</a></p>
+      it {{ v.daily.words }}{% endif %}.{% elif v.setup.intraday_only %}It reads
+      the sessions inside a trading day, so it is not in the daily test.{% else %}The
+      daily test on popular stocks and coins has no result for it yet.{% endif %}{% if v.daily.tested or not v.setup.intraday_only %}
+      <a href="{{ url_for('backtest_page', name=v.daily.slug) }}">The daily test &rarr;</a>{% endif %}</p>
   {% endif %}
 </section>
 {% endfor %}
@@ -204,7 +209,7 @@
             {{ rate(e.base) }}{% if c.versus %} <span class="soft">· {{ c.versus }}</span>{% endif %}.</li>{% endfor %}
           {% for note in c.notes %}<li>{{ note }}</li>{% endfor %}
         {% else %}
-          <li><b>Result:</b> being tested. This fills in after the first nightly run.</li>
+          <li><b>Result:</b> {% if c.no_cases %}no cases in the days tested.{% else %}being tested. This fills in after the first nightly run.{% endif %}</li>
         {% endif %}
       </ul>
       {% if c.by_symbol %}

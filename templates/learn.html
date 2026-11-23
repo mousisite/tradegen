@@ -61,8 +61,9 @@
     {% if page.cells %}
       <p class="prose">{{ "{:,}".format(page.cells) }} results got a verdict here
         (each setup, instrument, bar size and target). About 1 in 20 can clear
-        its margin of error by luck alone, so one or two green results on their
-        own are weak evidence.</p>
+        its margin of error by luck alone{% if page.cells >= 40 %}, which is about
+        {{ (page.cells / 20)|round|int }} of these{% endif %}, so a few green results
+        on their own are weak evidence.</p>
     {% endif %}
     <p class="prose">These setups do not change Orenth's Buy, Wait or Avoid
       calls. They are measured and shown, nothing more.</p>
@@ -121,7 +122,7 @@
               <td class="r" data-label="Compared with">{{ claim_against(c) }}</td>
               <td class="wide">{{ c.words|capitalize }}</td>
             {% else %}
-              <td class="wide soft" colspan="3">Being tested</td>
+              <td class="wide soft" colspan="3">{{ 'No cases in the days tested' if c.no_cases else 'Being tested' }}</td>
             {% endif %}
           </tr>
         {% endfor %}
@@ -137,7 +138,7 @@
     <ul class="learn-topics">
       {% for t in page.topics %}
         <li><a href="{{ url_for('learn_topic', slug=t.slug) }}">{{ t.title }}</a>
-          <span class="chip {{ 'mute' if t.measured else 'hold' }}">{{ 'measured' if t.measured else 'being tested' }}</span></li>
+          {% if t.own %}<span class="chip {{ 'mute' if t.measured else 'hold' }}">{{ 'measured' if t.measured else 'being tested' }}</span>{% endif %}</li>
       {% endfor %}
     </ul>
   </div>

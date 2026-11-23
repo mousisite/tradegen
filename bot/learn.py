@@ -48,7 +48,10 @@ METHOD = (
     "as a loss, and a price that jumps past the stop fills where it opened.",
     "A setup whose stop would sit closer than a tenth of a usual bar's range is "
     "skipped, and counted.",
-    "Trading costs come off every trade.",
+    "Trading costs come off every trade. A cost is counted against the trade's "
+    "risk, so the same cost takes more off a trade whose stop is close, and can take "
+    "more than the whole risk. “Before costs” is the same trades with "
+    "nothing taken off. Hit rate is the share of trades that kept money after costs.",
     "Each trade is set beside random trades: five bars from other days at the same "
     "half hour of New York time, on the same side, with a stop and target the same "
     "size against the usual bar's range then, and the same exits and costs. A setup "
@@ -57,7 +60,8 @@ METHOD = (
     "Results are in R, the amount risked: +0.10R means 10 cents kept for every "
     "dollar risked, on average, after costs.",
     "The margin of error counts the trades of one day together, over all the "
-    "instruments added up, because they win or lose together. A result is called "
+    "instruments added up, because they win or lose together, and is wider when the "
+    "days are few. A result is called "
     "only when its whole margin is on one "
     "side of zero, with at least %d trades on at least %d separate days."
     % (labstore.MIN_TRADES, labstore.MIN_DAYS),
@@ -466,7 +470,8 @@ def interval_words(interval: str) -> str:
 
 
 def symbol_name(symbol: str) -> str:
-    return SYMBOL_NAMES.get(symbol, symbol)
+    """An instrument's name, or both names of a pair ("ES=F/NQ=F")."""
+    return " and ".join(SYMBOL_NAMES.get(part, part) for part in symbol.split("/"))
 
 
 def _cell(raw: Dict) -> Optional[Dict]:
@@ -496,14 +501,18 @@ def _cell(raw: Dict) -> Optional[Dict]:
         control = (_finite(c.get("sum_r")) or 0.0) / control_n if control_n else None
     diff, diff_se = _finite(raw.get("diff")), _finite(raw.get("diff_se"))
     verdict = labstore.verdict(mean, se, n, days=days)
-    diff_verdict = labstore.verdict(diff, diff_se, n, days=days)
+    # The comparison is judged on the trades that have random entries, and
+    # their days: the others are no part of it.
+    diff_days = raw["diff_days"] if "diff_days" in raw else labstore.paired_days(raw)
+    diff_verdict = labstore.verdict(diff, diff_se, control_n, days=diff_days)
     return {"n": n, "wins": wins, "hit": wins / float(n), "mean": mean, "se": se,
-            "margin": 2 * se if se is not None else None,
+            "margin": labstore.reach(days) * se if se is not None else None,
             "gross": gross / n if gross is not None else None,
             "days": int(days) if days is not None else None,
             "verdict": verdict, "words": labstore.words(verdict),
             "control": control, "control_n": control_n,
-            "diff": diff, "diff_margin": 2 * diff_se if diff_se is not None else None,
+            "diff": diff,
+            "diff_margin": labstore.reach(diff_days) * diff_se if diff_se is not None else None,
             "diff_verdict": diff_verdict, "diff_words": _diff_words(diff_verdict),
             "stable": raw.get("stable"),
             "symbols": raw.get("symbols")}
@@ -540,7 +549,7 @@ def claim_view(cl: setups.Claim, rec: Optional[Dict]) -> Dict:
             "control_words": control, "versus": cl.versus, "unit": cl.unit, "learn": cl.learn,
             "in_r": cl.unit == "trades", "extras": [],
             "title": setups.topic(cl.learn).title if cl.learn in setups.TOPICS_BY_SLUG
-            else "", "measured": False, "must": cl.must}
+            else "", "measured": False, "no_cases": False, "must": cl.must}
     if not rec:
         view.update(words="being tested", verdict=None)
         return view
@@ -549,14 +558,14 @@ def claim_view(cl: setups.Claim, rec: Optional[Dict]) -> Dict:
     trials, hits = int(pooled.get("trials") or 0), int(pooled.get("hits") or 0)
     base_trials, base_hits = int(pooled.get("base_trials") or 0), int(pooled.get("base_hits") or 0)
     verdict = rec.get("verdict")
-    view.update(measured=trials > 0, measure=measure, interval=rec.get("interval") or "",
-                verdict=verdict, notes=[n for n in rec.get("notes") or [] if n],
+    view.update(measured=trials > 0, no_cases=trials == 0, measure=measure,
+                interval=rec.get("interval") or "", verdict=verdict, notes=[n for n in rec.get("notes") or [] if n],
                 trials=trials, skipped=rec.get("skipped") or {})
     if measure == "mean":
         mean, se = _finite(pooled.get("mean")), _finite(pooled.get("se"))
         base, base_se = _finite(pooled.get("base_mean")), _finite(pooled.get("base_se"))
-        view.update(mean=mean, margin=2 * se if se is not None else None,
-                    base=base, base_margin=2 * base_se if base_se is not None else None)
+        view.update(mean=mean, margin=_margin(se, pooled.get("days")),
+                    base=base, base_margin=_margin(base_se, pooled.get("base_days")))
         if mean is None:
             view["measured"] = False
     else:
@@ -589,9 +598,14 @@ def claim_view(cl: setups.Claim, rec: Optional[Dict]) -> Dict:
     return view
 
 
+def _margin(se: Optional[float], days: Optional[int]) -> Optional[float]:
+    """A margin of error from a standard error and the days behind it."""
+    return labstore.reach(days) * se if se is not None else None
+
+
 def _order(symbol: str) -> Tuple[int, str]:
     for k, (sym, _, _) in enumerate(setups.LAB_SYMBOLS):
-        if sym == symbol:
+        if sym == symbol.split("/")[0]:
             return k, symbol
     return 99, symbol
 
@@ -628,11 +642,20 @@ def _has_setup(results: Sequence[Dict], name: str) -> bool:
     return False
 
 
+# Why a setup that appeared was not traded, as the lab counts it.
+LEFT_OUT = (("tight_stop", "with a stop too close to trade"),
+            ("left_out_day", "on a day with too few bars or a futures contract change"),
+            ("at_close", "on the last bar before 16:00, with no time left"),
+            ("still_open", "still open when the prices end"),
+            ("warmup", "too early in the prices to know a usual bar's range"))
+
+
 def setup_lab(results: Sequence[Dict], name: str) -> Dict:
     """One setup across the lab: pooled per bar size and target rule, and per
     instrument, with what was skipped."""
     pooled, rows = [], []
-    tight = no_control = 0
+    no_control = 0
+    out = {key: 0 for key, _ in LEFT_OUT}
     k3 = []
     for interval in setups.LAB_INTERVALS:
         those = [r for r in results if r.get("interval") == interval]
@@ -648,7 +671,8 @@ def setup_lab(results: Sequence[Dict], name: str) -> Dict:
         if not entry:
             continue
         skipped = entry.get("skipped") or {}
-        tight += int(skipped.get("tight_stop") or 0)
+        for key in out:
+            out[key] += int(skipped.get(key) or 0)
         no_control += int(skipped.get("no_control") or 0)
         for rule in labstore.RULES:
             cell = _cell((entry.get("rules") or {}).get(rule) or {})
@@ -666,8 +690,9 @@ def setup_lab(results: Sequence[Dict], name: str) -> Dict:
             k3.append({"symbol": res["symbol"], "name": symbol_name(res["symbol"]),
                        "interval_words": interval_words(res.get("interval")),
                        "n": n, "mean": mean,
-                       "margin": 2 * se if se is not None else None})
-    return {"pooled": pooled, "rows": rows, "tight": tight, "no_control": no_control,
+                       "margin": _margin(se, r.get("days"))})
+    return {"pooled": pooled, "rows": rows, "no_control": no_control,
+            "left_out": ["{:,} {}".format(out[key], said) for key, said in LEFT_OUT if out[key]],
             "k3": k3, "measured": bool(pooled)}
 
 
@@ -735,10 +760,15 @@ def _costs(results: Sequence[Dict]) -> List[Tuple[str, List[str]]]:
 
 
 def _skipped_days(results: Sequence[Dict]) -> Dict[str, int]:
+    """Days left out, added over the instruments. Each instrument's once: its
+    two bar sizes cover the same days, so the larger of the two counts."""
     out = {"incomplete": 0, "roll": 0}
-    for res in results:
-        for key in out:
-            out[key] += int((res.get("skipped_days") or {}).get(key) or 0)
+    for key in out:
+        most: Dict[str, int] = {}
+        for res in results:
+            count = int((res.get("skipped_days") or {}).get(key) or 0)
+            most[res.get("symbol", "")] = max(count, most.get(res.get("symbol", ""), 0))
+        out[key] = sum(most.values())
     return out
 
 
@@ -854,6 +884,8 @@ def hub(conn: sqlite3.Connection, registered: Sequence[str] = ()) -> Dict:
     for t in setups.TOPICS:
         topics.append({"slug": t.slug, "title": t.title,
                        "what": CONCEPTS[t.slug]["what"],
+                       # A topic with nothing of its own to measure gets no chip.
+                       "own": bool(t.setups or t.claims),
                        "measured": _topic_measured(store, t, verdict_rows, registered,
                                                    bias["measured"])})
     measured = bool(any(r["measured"] for r in setup_rows) or measured_claims
@@ -894,6 +926,7 @@ def topic(conn: sqlite3.Connection, slug: str,
     # "concept", not "copy": in a template page.copy is the dict's own method.
     return {"slug": slug, "title": t.title, "concept": copy, "setups": setup_views,
             "claims": claims, "bias": bias, "measured": measured, "has_lab": has_lab,
+            "no_cases": bool(claims) and not t.setups and all(c["no_cases"] for c in claims),
             "example": _example(results, t.setups), "cells": cells_tested(results),
             "costs": _costs(results), "skipped_days": _skipped_days(results),
             "fresh": freshness(store), "method": METHOD, "limits": LIMITS, "source": SOURCE,
@@ -941,6 +974,12 @@ def practice_items(conn: sqlite3.Connection) -> List[Dict]:
             except (KeyError, TypeError, ValueError):
                 continue
             if cut < 10 or cut + PRACTICE_AHEAD >= len(t):
+                continue
+            # The move must be one the chart shows. Across a night, a weekend or
+            # the futures' pause, the jump between two bars would decide it.
+            step = clock.interval_seconds(res.get("interval", ""))
+            ahead = t[cut:cut + PRACTICE_AHEAD + 1]
+            if any(b - a > step for a, b in zip(ahead, ahead[1:])):
                 continue
             out.append({"symbol": res["symbol"], "interval": res.get("interval", ""),
                         "setup": name, "t": t, "o": o, "h": h, "l": l, "c": c, "cut": cut})

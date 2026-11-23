@@ -44,8 +44,8 @@
   <table class="stack">
     <thead><tr>
       <th>Prices and target</th><th class="r">Trades</th><th class="r">Hit rate</th>
-      <th class="r">Kept a trade</th><th class="r">Random entries</th>
-      <th class="r">Difference</th><th>In words</th>
+      <th class="r">Before costs</th><th class="r">Kept a trade</th>
+      <th class="r">Random entries</th><th class="r">Difference</th><th>In words</th>
     </tr></thead>
     <tbody>
     {% for c in cells %}
@@ -54,6 +54,7 @@
           <span class="soft">· {{ c.instruments }} instrument{{ 's' if c.instruments != 1 }}</span></td>
         <td class="r fig" data-label="Trades">{{ "{:,}".format(c.n) }}</td>
         <td class="r fig" data-label="Hit rate">{{ c.hit|pct(0) }}</td>
+        <td class="r" data-label="Before costs">{% if c.gross is not none %}<span class="fig">{{ c.gross|signed(2) }}R</span>{% else %}—{% endif %}</td>
         <td class="r" data-label="Kept a trade" style="white-space:nowrap">{{ kept(c) }}</td>
         <td class="r" data-label="Random entries">{{ versus(c) }}</td>
         <td class="r" data-label="Difference" style="white-space:nowrap">{{ diff(c) }}</td>

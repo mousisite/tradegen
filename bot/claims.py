@@ -982,8 +982,9 @@ def sweep_alone_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
     if chain:
         notes.append("The four-step model: %s a trade after costs, and %s against its own "
                      "random entries. Set against their random entries, the model minus the "
-                     "sweeps: %s." % (_said(cm, cse, _dates(chain)), _said(co, cose, _dates(chain_own)),
-                        _said(diff, dse, _dates(chain_own))))
+                     "sweeps: %s." % (_said(cm, cse, _dates(chain)),
+                                      _said(co, cose, _dates(chain_own)),
+                                      _said(diff, dse, _dates(chain_own))))
     notes += ["The claim holds only when every part is clear: the sweeps lost money, did "
               "worse than random entries, and the model did better than they did. Random "
               "entries carry the same costs, which weigh more on a closer stop.", _WITHIN_NOTE]
@@ -1267,7 +1268,8 @@ def bias_works(study: Dict[str, Dict], skipped: Dict[str, int]) -> Optional[Dict
         lo, hi = labstore.wilson(pooled["hits"], pooled["trials"])
         notes.append("Against a coin flip: right on %s of %s days it leaned, a range of %d%% "
                      "to %d%%, %s one in two."
-                     % ("{:,}".format(pooled["hits"]), "{:,}".format(pooled["trials"]), round(lo * 100), round(hi * 100),
+                     % ("{:,}".format(pooled["hits"]), "{:,}".format(pooled["trials"]),
+                        round(lo * 100), round(hi * 100),
                         "above" if lo > 0.5 else "below" if hi < 0.5 else "which includes"))
     notes += _index_note(by)
     return _record("bias_works", "1h", by, notes, skipped)
