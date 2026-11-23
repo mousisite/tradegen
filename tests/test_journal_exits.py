@@ -988,7 +988,7 @@ try:
                                       "stop": "1e300", "interval": "1d"})
     check("and one of hundreds of digits, which would leave the breakdown unable to add up",
           r.status_code == 400 and "too large a number" in text(r)
-          and r2.status_code == 400 and "the stop is too large a number" in text(r2)
+          and r2.status_code == 400 and "The stop is too large a number." in text(r2)
           and c.get("/trades/breakdown").status_code == 200)
 
     r = c.post("/trades/trail", data={"trade_id": tt["id"], "trail": "10", "trail_kind": "pct"})
