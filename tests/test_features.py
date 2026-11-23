@@ -626,6 +626,13 @@ try:
         check("nor called bullish on Monitor",
               '<span class="chip mute"> No view </span>' in body,
               body[body.index("<h2>Saved theses</h2>"):][:2500])
+        conn.execute("UPDATE theses SET outcome='undecided', closed_price=150.0, "
+                     "closed_ts=? WHERE id=?", (NOW, row["id"]))
+        conn.commit()
+        body = flat(text(c.get("/monitor")))
+        check("nor once it is closed", '<span class="chip mute"> No view </span>' in body
+              and '<span class="chip long"> Bullish </span>' not in body,
+              body[body.index("<h2>Saved theses</h2>"):][:2500])
         market_mod.fetch_bars = must_not_run("a request for prices")
         conn.execute("DELETE FROM theses WHERE id=?", (row["id"],))
         conn.commit()

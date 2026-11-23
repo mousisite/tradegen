@@ -5578,6 +5578,7 @@ def monitor():
             # What the price did afterwards is no part of it.
             judged.append({"row": row, "now": float(row["closed_price"]),
                            "review": thesis_mod.review(stored, float(row["closed_price"])),
+                           "no_view": thesis_mod.no_view(row["verdict"]),
                            "proposed": None, "quoted": None, "split_words": ""})
             continue
         price, split = _thesis_price(row, bars_of[sym])
