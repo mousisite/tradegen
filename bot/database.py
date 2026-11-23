@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -1312,6 +1313,9 @@ def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
               note: str = "", user: int = 1, exact: bool = False) -> None:
     """Watch an instrument, or change the bar size and note of one watched.
 
+    Added again with no note, as by the button on its research page, it keeps
+    the note it has.
+
     exact says the symbol is Yahoo's own, such as LINK for Interlink
     Electronics, where a bare LINK is the Chainlink coin. A person has one
     entry per symbol, so an entry saved before there was an exact column,
@@ -1338,8 +1342,9 @@ def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
         "INSERT OR REPLACE INTO watchlist "
         "(symbol, interval, added_ts, note, last_run, user_id, exact) VALUES "
         "(?,?,COALESCE((SELECT added_ts FROM watchlist WHERE symbol=? AND user_id=?),?),"
-        "?,(SELECT last_run FROM watchlist WHERE symbol=? AND user_id=?),?,?)",
-        (sym, interval, sym, uid, now, note, sym, uid, uid, exact))
+        "COALESCE(NULLIF(?,''),(SELECT note FROM watchlist WHERE symbol=? AND user_id=?),''),"
+        "(SELECT last_run FROM watchlist WHERE symbol=? AND user_id=?),?,?)",
+        (sym, interval, sym, uid, now, note, sym, uid, sym, uid, uid, exact))
     conn.commit()
 
 
@@ -1578,9 +1583,10 @@ def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[floa
     """Change an alert's value and note. Its condition stays what it was.
 
     A new value is a new question, so the alert forgets whether the old one
-    was met: if the new one already is, the next check says so.
+    was met: if the new one already is, the next check says so. The same
+    value with another note is not, and tells nothing again.
     """
-    from .alerts import KINDS, problem
+    from .alerts import KINDS, _fraction, problem
     sql, args = _own("SELECT kind, threshold FROM alerts WHERE id=?", [alert_id], user)
     row = conn.execute(sql, args).fetchone()
     if row is None:
@@ -1593,12 +1599,16 @@ def alert_edit(conn: sqlite3.Connection, alert_id: int, threshold: Optional[floa
     # A level typed now is in today's shares, so no split before now may be
     # applied to it: split_ts moves to now. A note alone leaves it, so a
     # split not yet applied to the old level still is.
-    retyped = level is not None and (row["threshold"] is None
-                                     or float(row["threshold"]) != float(level))
+    old = row["threshold"]
+    if old is not None and spec.get("unit") == "percent":
+        old = _fraction(old)
+    # As near as the edit box prints it: 7% was once kept as 0.07000000000000002.
+    retyped = level is not None and (old is None or not math.isclose(
+        float(old), float(level), rel_tol=1e-9))
     sql, args = _own("UPDATE alerts SET threshold=?, note=?, state=CASE WHEN "
                      "? THEN state ELSE NULL END, split_ts=CASE WHEN ? THEN ? "
                      "ELSE split_ts END WHERE id=?",
-                     [level, (note or "")[:MAX_NOTE], 1 if spec.get("call") else 0,
+                     [level, (note or "")[:MAX_NOTE], 0 if retyped else 1,
                       1 if retyped else 0, int(time.time()), alert_id], user)
     conn.execute(sql, args)
     conn.commit()
@@ -1649,6 +1659,13 @@ def event_list(conn: sqlite3.Connection, user: int, limit: int = 20) -> List[sql
     conn.executescript(_EVENTS)
     return list(conn.execute("SELECT * FROM alert_events WHERE user_id=? "
                              "ORDER BY ts DESC, id DESC LIMIT ?", (int(user), limit)))
+
+
+def event_count(conn: sqlite3.Connection, user: int) -> int:
+    """How many events one person's history holds."""
+    conn.executescript(_EVENTS)
+    return int(conn.execute("SELECT COUNT(*) FROM alert_events WHERE user_id=?",
+                            (int(user),)).fetchone()[0])
 
 
 def events_after(conn: sqlite3.Connection, user: int, after: Optional[int] = None,

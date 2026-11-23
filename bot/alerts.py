@@ -1,11 +1,12 @@
 """Alerts: conditions worth being told about.
 
 Checked on demand, and by the server's background loop (web.start_alert_loop),
-which keeps going when nobody has the page open. Nothing here starts a thread
-or sends mail itself: the loop calls check() and check_stops(), and deliver()
-emails what fired, through whatever sender it is handed. The loop asks them to
-leave alone what cannot have changed, a stock whose market has been closed
-since its last good check (sessions.py); a check someone asks for checks all.
+which keeps going when nobody has the page open. Nothing here knows how to
+send mail: the loop calls check() and check_stops(), and deliver_later()
+emails what fired from a thread of its own, through whatever sender it is
+handed. The loop asks them to leave alone what cannot have changed, a stock
+whose market has been closed since its last good check (sessions.py); a check
+someone asks for checks all.
 
 Each alert states its condition in plain terms and, when it fires, records the
 value that triggered it. An alert that says only "AAPL alert triggered" is
@@ -37,6 +38,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import queue
 import re
 import threading
 import time
@@ -960,7 +962,8 @@ def _waits(row, now: float) -> bool:
 
 def check(conn, only_active: bool = True, user=None, call_of=None,
           limit_of: Optional[Callable[[int], Optional[int]]] = None,
-          skip_closed: bool = False, now: Optional[float] = None) -> Dict:
+          skip_closed: bool = False, now: Optional[float] = None,
+          fired: Optional[List[Fired]] = None) -> Dict:
     """Check alerts against fresh data and record anything that fired.
 
     With no user this checks every alert in the database, which is what the
@@ -976,11 +979,14 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
     skip_closed leaves alone an alert whose market has been closed since its
     last good check, which is what the loop wants; how many is "skipped". A
     person who asks for a check gets every one. `now` is the time the round is
-    judged at, the present unless given.
+    judged at, the present unless given. fired is a list to put what fired in
+    as it is recorded, so a caller whose round breaks off still has it to
+    tell: an alert that fired once is switched off, and will not say it again.
     """
     from . import database as db
 
     now = time.time() if now is None else now
+    fired = [] if fired is None else fired
     rows = [r for r in db.alert_list(conn, active_only=only_active, user=user)]
     if call_of is None:
         # Nothing here can work out a call, so a call alert is not checked at
@@ -1009,7 +1015,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         due = [r for r in rows if not _waits(r, now)]
         skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+        return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
     # One fetch per symbol and bar size, shared by every alert on it.
@@ -1054,7 +1060,6 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             except Exception:
                 calls[key] = None
 
-    fired: List[Fired] = []
     structure: Dict = {}
     for row in rows:
         key = (row["symbol"], _bars_for(row))
@@ -1138,11 +1143,11 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
                              state=state, was=was):
             continue
+        fired.append(hit)
         if hit.user_id is not None:
             hit.event_id = db.event_add(conn, hit.user_id, hit.kind, hit.symbol,
                                         hit.message, hit.value, hit.as_of,
                                         alert_id=hit.alert_id)
-        fired.append(hit)
 
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time()), "skipped": skipped}
@@ -1199,7 +1204,8 @@ _STOPS_LOCK = threading.Lock()
 
 
 def check_stops(conn, user=None, skip_closed: bool = False,
-                now: Optional[float] = None) -> Dict:
+                now: Optional[float] = None,
+                fired: Optional[List[Fired]] = None) -> Dict:
     """Tell the owner, once, when an open journal position crosses its stop.
 
     A stop in the journal is a plan, not an order: nothing closes the trade.
@@ -1209,11 +1215,13 @@ def check_stops(conn, user=None, skip_closed: bool = False,
     for the same position.
 
     skip_closed leaves alone a position whose stop was checked and whose
-    market has been closed since, as check() does for alerts.
+    market has been closed since, and fired is a list to put crossings in as
+    they are recorded, both as for check().
     """
     from . import database as db
 
     now = time.time() if now is None else now
+    fired = [] if fired is None else fired
     sql, args = db._own("SELECT * FROM trades WHERE status='open' "
                         "AND breach_noticed IS NULL", [], user)
     rows = list(conn.execute(sql, args))
@@ -1230,7 +1238,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                if sessions.can_change(r["symbol"], looked.get(int(r["id"])), now)]
         skipped, rows = len(rows) - len(due), due
     if not rows:
-        return {"checked": 0, "fired": [], "errors": [], "when": int(time.time()),
+        return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
     def bar_size(row) -> str:
@@ -1249,7 +1257,6 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         except Exception as exc:
             errors.append({"symbol": key[0], "error": _whole(exc)})
 
-    fired: List[Fired] = []
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))
         if bars is None:
@@ -1325,10 +1332,10 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         conn.commit()
         if cur.rowcount == 0:
             continue
+        fired.append(hit)
         if hit.user_id is not None:
             hit.event_id = db.event_add(conn, hit.user_id, "stop_breach", hit.symbol,
                                         message, price, hit.as_of, trade_id=hit.trade_id)
-        fired.append(hit)
     return {"checked": len(rows), "fired": fired, "errors": errors,
             "when": int(time.time()), "skipped": skipped}
 
@@ -1379,6 +1386,67 @@ def deliver(conn, fired: List[Fired], send, address_of, site: str = "") -> Dict:
             db.event_emailed(conn, events)
             sent += 1
     return {"sent": sent, "failed": failed}
+
+
+# Rounds of emails waiting to be sent, and the thread that sends them. A mail
+# server that does not answer is waited on for up to a minute a person, which
+# must hold up neither the next round of checks nor a page.
+_MAIL: "queue.Queue" = queue.Queue(maxsize=500)
+_MAIL_LOCK = threading.Lock()
+_MAILER: Dict[str, Optional[threading.Thread]] = {"thread": None}
+
+
+def deliver_later(db_path: Optional[str], fired: List[Fired], send, address_for,
+                  site: str = "") -> bool:
+    """deliver(), from the mail thread; returns at once.
+
+    address_for(conn) returns deliver's address_of, reading the thread's own
+    connection. Returns whether anything was queued.
+    """
+    hits = [h for h in fired if h.user_id is not None]
+    if not hits:
+        return False
+    with _MAIL_LOCK:
+        thread = _MAILER["thread"]
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(target=_send_mail, name="orenth-alert-mail",
+                                      daemon=True)
+            _MAILER["thread"] = thread
+            thread.start()
+    try:
+        _MAIL.put_nowait((db_path, hits, send, address_for, site))
+    except queue.Full:
+        log.warning("%d alert emails dropped, the mail queue is full", len(hits))
+        return False
+    return True
+
+
+def _send_mail() -> None:
+    from . import database as db
+    while True:
+        db_path, hits, send, address_for, site = _MAIL.get()
+        try:
+            conn = db.connect(db_path)
+            try:
+                deliver(conn, hits, send, address_for(conn), site=site)
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("a round of alert emails failed")
+        finally:
+            _MAIL.task_done()
+
+
+def mail_idle(timeout: float = 10.0) -> bool:
+    """Wait until every queued email has been tried. For tests."""
+    end = time.time() + timeout
+    with _MAIL.all_tasks_done:
+        while _MAIL.unfinished_tasks:
+            left = end - time.time()
+            if left <= 0:
+                return False
+            _MAIL.all_tasks_done.wait(left)
+    return True
 
 
 def suggest_for(symbol: str, plan=None, bars=None) -> List[Dict]:

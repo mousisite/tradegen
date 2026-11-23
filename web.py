@@ -27,7 +27,8 @@ import sys
 import threading
 import time
 import webbrowser
-from typing import Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -1736,7 +1737,7 @@ def _mark_to_market(open_trades):
     if not open_trades:
         return out
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
     workers = min(8, len(open_trades))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_mark_one, t): t["id"] for t in open_trades}
@@ -4835,6 +4836,7 @@ def monitor():
         thesis_rows = db_mod.thesis_list(conn, limit=start + THESES_SHOWN,
                                          user=uid())[start:]
         events = db_mod.event_list(conn, uid(), limit=15)
+        events_total = db_mod.event_count(conn, uid())
     finally:
         conn.close()
 
@@ -4842,9 +4844,23 @@ def monitor():
                  for r in alert_rows]
 
     # Price each open thesis so the page can say how it is doing, and propose
-    # the outcome the price supports. One quote per distinct symbol.
-    judged = []
+    # the outcome the price supports. One quote per distinct symbol, several
+    # at once: one after another, a slow source held up the whole page, which
+    # is the one a notification opens.
+    def quote(sym):
+        try:
+            return sym, market_mod.fetch_bars(sym, "1d")
+        except Exception:
+            # One unpriceable symbol must not take the whole page down.
+            return sym, None
+
+    wanted = sorted({r["symbol"] for r in thesis_rows
+                     if not (r["outcome"] and r["closed_price"])})
     bars_of = {}
+    if wanted:
+        with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
+            bars_of = dict(pool.map(quote, wanted))
+    judged = []
     for row in thesis_rows:
         sym = row["symbol"]
         stored = {"price": row["price"], "balance": row["balance"],
@@ -4856,12 +4872,6 @@ def monitor():
                            "review": thesis_mod.review(stored, float(row["closed_price"])),
                            "proposed": None, "quoted": None, "split_words": ""})
             continue
-        if sym not in bars_of:
-            try:
-                bars_of[sym] = market_mod.fetch_bars(sym, "1d")
-            except Exception:
-                # One unpriceable symbol must not take the whole page down.
-                bars_of[sym] = None
         price, split = _thesis_price(row, bars_of[sym])
         look = (thesis_mod.review(stored, price) if price else
                 {"usable": False, "reason": "Could not price %s today." % sym})
@@ -4885,7 +4895,7 @@ def monitor():
                            # their alerts, positions and watchlist.
                            last_run=(None if g.demo else
                                      app.config.get("LAST_WORKFLOW_BY_USER", {}).get(uid())),
-                           events=events,
+                           events=events, events_total=events_total,
                            loop=({k: v for k, v in ALERTS.status().items()
                                   if k in ("running", "interval", "last_run")}
                                  if ALERTS is not None else None),
@@ -4967,8 +4977,10 @@ def add_alert():
     # something that says it worked.
     back = _safe_back(request.form.get("back"), "")
     if back:
-        return redirect(back + ("alert_set=1" if back.endswith("?")
-                                else "&alert_set=1"))
+        # Once, however many have been set from that page already.
+        page, _, query = back.partition("?")
+        kept = [p for p in query.split("&") if p and p != "alert_set=1"]
+        return redirect("%s?%s" % (page, "&".join(kept + ["alert_set=1"])))
     return redirect(url_for("monitor"))
 
 
@@ -5020,7 +5032,8 @@ def check_alerts():
         result = _check_and_tell(conn, user=uid())
     finally:
         conn.close()
-    return redirect(url_for("monitor", checked=result["checked"],
+    return redirect(url_for("monitor", checked=result["alerts"],
+                            stops=result["stops"] or None,
                             fired=len(result["fired"])))
 
 
@@ -5412,8 +5425,9 @@ def settings():
                 start_alert_loop(cfg)
             else:
                 ALERTS.set_interval(float(minutes) * 60.0)
-                if not ALERTS.running:
-                    ALERTS.start()
+                # Whatever it was doing: one still finishing a round after
+                # being told to stop counts as running, and carries on.
+                ALERTS.start()
             return redirect(url_for("settings", saved="1"))
         except (ValueError, OverflowError):
             error = "Every numeric field needs a number."
@@ -6154,6 +6168,24 @@ def not_found(_exc):
     return render_template("notfound.html"), 404
 
 
+@app.errorhandler(405)
+def wrong_method(exc):
+    # An old bookmark or a typed address, such as /signout, that is now a
+    # button. The web server's own page for this is bare, with no way back.
+    if request.path.startswith("/api/"):
+        response = jsonify({"error": "That address is not used this way."})
+    else:
+        response = app.make_response(render_template(
+            "error.html", symbol="",
+            message=("That address only works from a button on the site."
+                     if request.method in ("GET", "HEAD") else
+                     "That page is for reading, and nothing can be sent to it.")))
+    response.status_code = 405
+    if getattr(exc, "valid_methods", None):
+        response.headers["Allow"] = ", ".join(sorted(exc.valid_methods))
+    return response
+
+
 @app.errorhandler(413)
 def too_large(_exc):
     # Typed fields have their own, much smaller, limit, and a padded note is
@@ -6277,27 +6309,44 @@ def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True,
     in its own words. skip_closed leaves what cannot have changed, a stock
     whose market has been closed since its last good check, for the open.
     """
-    result = alerts_mod.check(conn, user=user, call_of=_call_now,
-                              limit_of=_alert_limits(conn),
-                              skip_closed=skip_closed, now=now)
-    crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed, now=now)
-               if stops else {"checked": 0, "fired": [], "errors": [], "skipped": 0})
-    fired = list(result["fired"]) + list(crossed["fired"])
-    if fired:
-        # To the phones and browsers people switched on, from push_mod's own
-        # thread: a push service that is slow or down must never hold up a
-        # check or a page, and its failure is kept on each device instead.
-        try:
-            push_mod.deliver_later(app.config.get("DB_PATH"), fired,
-                                   _public_base_offline())
-        except Exception:
-            app.logger.exception("Could not hand fired alerts to the notification sender")
-    if fired and codes_mod.email_ready():
-        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn),
-                           site=_public_base_offline())
+    fired: List[alerts_mod.Fired] = []
+    try:
+        result = alerts_mod.check(conn, user=user, call_of=_call_now,
+                                  limit_of=_alert_limits(conn),
+                                  skip_closed=skip_closed, now=now, fired=fired)
+        crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed,
+                                          now=now, fired=fired)
+                   if stops else {"checked": 0, "errors": [], "skipped": 0})
+    finally:
+        # Told even when the round broke off part-way, a database too busy
+        # for the stops, say: what fired is recorded, and its alerts switched
+        # off, so no later round would say it. The failure itself goes on to
+        # the caller, and the next round looks at what this one did not.
+        if fired:
+            _tell(fired)
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
+            "alerts": result["checked"], "stops": crossed["checked"],
             "errors": result["errors"] + crossed["errors"], "when": result["when"],
             "skipped": result.get("skipped", 0) + crossed.get("skipped", 0)}
+
+
+def _tell(fired) -> None:
+    """Hand what fired to the phones and browsers people switched on, and to
+    the inboxes that asked, each from a thread of its own: a push service or
+    a mail server that is slow or down must never hold up a check or a page.
+    Its failure is kept on each device, or on each event, instead.
+    """
+    path, site = app.config.get("DB_PATH"), _public_base_offline()
+    try:
+        push_mod.deliver_later(path, fired, site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the notification sender")
+    try:
+        if codes_mod.email_ready():
+            alerts_mod.deliver_later(path, fired, codes_mod.send_mail, _alert_address,
+                                     site=site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the mail sender")
 
 
 def _check_alerts_job(now: Optional[float] = None):
@@ -6346,9 +6395,12 @@ def alert_status():
     def number(name, kind):
         try:
             raw = request.args.get(name)
-            return kind(raw) if raw not in (None, "") else None
-        except ValueError:
+            value = kind(raw) if raw not in (None, "") else None
+        except (ValueError, OverflowError):
             return None
+        # A marker past what the database can hold, or not a number at all
+        # (nan, inf), is no marker: false for every comparison with one.
+        return value if value is None or abs(value) < 2 ** 62 else None
 
     after, since = number("after", int), number("since", float)
     if after is None and not since:
