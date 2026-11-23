@@ -5335,26 +5335,49 @@ def _contact() -> str:
     return (os.environ.get("STOCKBOT_CONTACT") or "").strip()
 
 
+# Each is everything of one kind ever kept, written out again. Enough for every
+# one of them in both formats, several times over.
+EXPORTS_PER_HOUR = 60
+# One at a time: the measured record is seconds of work.
+_EXPORTING = threading.BoundedSemaphore(1)
+
+
 @app.route("/export/<dataset>.<fmt>")
 def export_data(dataset, fmt):
     """Hand back one dataset as a file. Your record, in a format you can read."""
+    import tempfile
+    if _rate_limited("export", EXPORTS_PER_HOUR):
+        return _too_often("downloaded files")
+    if not _EXPORTING.acquire(timeout=20):
+        return render_template("error.html", symbol="",
+                               message="Other files are being written just now. Try "
+                                       "again in a moment."), 503
+    # On disk rather than in memory, and gone once it has been sent.
+    made = tempfile.TemporaryFile()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        built = export_mod.build(conn, dataset, fmt, user=uid())
+        # A CSV is marked as UTF-8, or Excel opens it as something older and an
+        # accent or a currency sign in a note comes out as two or three others.
+        text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
+                                newline="")
+        mimetype = export_mod.write(conn, dataset, fmt, text, user=uid())
+        text.detach()
     except ValueError as exc:
+        made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
+    except BaseException:
+        made.close()
+        raise
     finally:
         conn.close()
-
-    body = built["body"]
-    if fmt == "csv":
-        # Marked as UTF-8, or Excel opens it as something older and an accent
-        # or a currency sign in a note comes out as two or three others.
-        body = "\ufeff" + body
+        _EXPORTING.release()
+    size = made.tell()
+    made.seek(0)
     return Response(
-        body, mimetype=built["mimetype"],
-        headers={"Content-Disposition":
-                 'attachment; filename="%s"' % built["filename"]})
+        wrap_file(request.environ, made), mimetype=mimetype, direct_passthrough=True,
+        headers={"Content-Length": str(size),
+                 "Content-Disposition": 'attachment; filename="%s"'
+                 % export_mod.filename(dataset, fmt)})
 
 
 def _utc_clock(ts) -> str:
