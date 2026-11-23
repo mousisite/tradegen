@@ -4214,12 +4214,14 @@ def delete_account():
         return render_template("error.html", symbol="",
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
+    cancelled = False
     try:
         # Stop the subscription first, or a deleted account keeps being
         # charged. If Stripe cannot be reached, nothing is deleted.
         customer = billing_mod.customer_of(conn, uid())
         if customer and billing_mod.ready():
             billing_mod.close_customer(customer)
+            cancelled = True
         _end_apple_sign_in(conn, uid())
         accounts_mod.delete_user(conn, uid())
     except billing_mod.BillingError:
@@ -4227,6 +4229,16 @@ def delete_account():
             "error.html", symbol="",
             message="Your subscription could not be cancelled just now, so "
                     "nothing was deleted. Try again in a minute."), 502
+    except sqlite3.Error:
+        # Deleting is all or nothing, so nothing of theirs is gone, and the
+        # steps before it are safe to take again.
+        app.logger.exception("Account %d could not be deleted", uid())
+        message = ("Your account could not be deleted just now, so everything in "
+                   "it is still here. Try again in a minute.")
+        if cancelled:
+            message += (" Any Pro you were paying for on the Orenth website has "
+                        "already been cancelled.")
+        return render_template("error.html", symbol="", message=message), 503
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:

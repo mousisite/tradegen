@@ -659,9 +659,9 @@ def forget_user(conn: sqlite3.Connection, user_id: int) -> None:
 
     Apple keeps billing until the person cancels with Apple. Renewals then
     arrive with nobody to own them, and follow the person if they restore
-    their purchases into a new account. The caller commits.
+    their purchases into a new account. The caller has made sure the tables
+    exist, and commits: making them here would commit its half-done deletion.
     """
-    ensure_schema(conn)
     conn.execute("DELETE FROM apple_tokens WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM apple_subs WHERE user_id=? AND MAX(expires_ms, grace_until_ms)<=?",
                  (user_id, _now_ms()))
