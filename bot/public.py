@@ -19,6 +19,8 @@ from __future__ import annotations
 import bisect
 import calendar
 import csv
+import datetime
+import functools
 import hashlib
 import io
 import json
@@ -26,6 +28,7 @@ import math
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Tuple
@@ -83,6 +86,10 @@ MIN_TRADES = 40
 MAX_AGE = 6 * 3600
 PAUSE = 3.0
 
+# A check older than this is not today's, whatever it said: its call is not
+# shown as today's and search engines are asked to wait for the next one.
+STALE_AFTER = 2 * 86400
+
 SHARES_PER_DAY = 30
 SHARE_REUSE = 3600
 
@@ -120,6 +127,15 @@ CREATE TABLE IF NOT EXISTS calls (
     excluded    TEXT,
     UNIQUE (symbol, day)
 );
+-- What a call said when it was written down, the columns its day's
+-- fingerprint is taken over, and that it is there at all. Its score, its
+-- session and why it is left out are filled in later.
+CREATE TRIGGER IF NOT EXISTS calls_never_edited
+BEFORE UPDATE OF symbol, at, action, price, stop, target, horizon ON calls
+BEGIN SELECT RAISE(ABORT, 'what a call said is never changed'); END;
+CREATE TRIGGER IF NOT EXISTS calls_never_removed
+BEFORE DELETE ON calls
+BEGIN SELECT RAISE(ABORT, 'a call is never removed'); END;
 -- A fingerprint of each UTC day's calls, taken once the day is over: the
 -- SHA-256 of the parts of them that never change (fingerprint_text). Written
 -- once and never changed or removed, which the triggers hold to: a second
@@ -155,6 +171,9 @@ class ShareError(RuntimeError):
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create what is missing. database.connect runs this once for each file a
+    process opens, so nothing that only reads, on every page view, runs it
+    again: what is read here comes through database.connect."""
     conn.executescript(_SCHEMA)
     have = {r[1] for r in conn.execute("PRAGMA table_info(calls)")}
     for name, kind in _CALL_COLUMNS:
@@ -225,11 +244,20 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
     separate = int(round(n_eff)) if n_eff and samples and n_eff < samples - 0.5 else None
     # The page leads with the counts, so the plain explanation's own opening
     # sentence saying the same thing is dropped rather than read twice.
-    from .plain import counted
+    from .plain import FALL_COUNTS, counted
     sure = plain.get("sure", "")
     said = counted(samples, worked)
     if sure.startswith(said):
         sure = sure[len(said):].strip()
+    # The examples are of the side the signals lean. Leaning down on a call
+    # that is not a short, they are bets on a fall, and counts_line says so
+    # wherever the counts go alone: a strong record of falls read as buying.
+    action = (plan.action or "").upper()
+    short_side = action == "SHORT" or (action == "WAIT" and
+                                       (getattr(plan, "direction", 0) or 0) < 0)
+    fall = (getattr(plan, "odds_direction", 0) or 0) < 0 and not short_side
+    if fall and sure.startswith(FALL_COUNTS.strip()):
+        sure = sure[len(FALL_COUNTS.strip()):].strip()
     return {"symbol": bars.symbol,
             "name": NAMES.get(bars.symbol) or getattr(bars, "name", "") or "",
             "action": (plan.action or "").upper(),
@@ -237,6 +265,7 @@ def snapshot(result, plain: Dict, stop_atr: float = 1.5, target_atr: float = 2.2
             "sure": sure,
             "points": list(plain.get("points") or [])[:3],
             "samples": samples, "worked": worked, "separate": separate,
+            "fall": fall,
             "reliable": bool(plan.prob_reliable),
             "price": float(bars.last_price),
             "currency": getattr(bars, "currency", "") or "USD",
@@ -438,15 +467,21 @@ def save_verdict(conn: sqlite3.Connection, snap: Dict) -> None:
 
 
 def verdict(conn: sqlite3.Connection, symbol: str) -> Optional[Dict]:
-    ensure_schema(conn)
     row = conn.execute("SELECT data FROM public_verdicts WHERE symbol=?",
                        (symbol,)).fetchone()
     return json.loads(row["data"]) if row else None
 
 
+def stale(snap: Optional[Dict], now: Optional[float] = None) -> bool:
+    """Whether a popular instrument's stored check is days old: its newer
+    ones have all failed."""
+    if not snap or not snap.get("at"):
+        return False
+    return (time.time() if now is None else now) - snap["at"] > STALE_AFTER
+
+
 def verdicts(conn: sqlite3.Connection) -> List[Dict]:
     """Every popular instrument in list order, checked or not yet."""
-    ensure_schema(conn)
     stored = {r["symbol"]: json.loads(r["data"]) for r in
               conn.execute("SELECT symbol, data FROM public_verdicts")}
     return [stored.get(sym) or {"symbol": sym, "name": name, "action": ""}
@@ -655,6 +690,9 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
     six hours on. Whether a call is skipped depends only on the data, never
     on the price, so it cannot pick the calls that flatter the record.
 
+    A symbol taken off the popular list is not checked again, but its calls
+    still waiting are scored like any other (_off_the_list).
+
     Every run ends by fingerprinting the days of calls that are over
     (fingerprint_days), by the clock, not by now, which only says what is
     due.
@@ -675,11 +713,33 @@ def refresh(conn: sqlite3.Connection, analyse: Callable[[str], Dict],
                 settle_calls(conn, symbol, daily)
         except Exception as exc:           # a delisted ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
+    for symbol in (_off_the_list(conn) if checked and bars is not None else ()):
+        sleep(pause)
+        try:
+            daily = bars(symbol)
+            mark_calls(conn, symbol, daily)
+            settle_calls(conn, symbol, daily)
+        except Exception as exc:
+            errors.append("%s: %s" % (symbol, exc))
     try:
         fingerprint_days(conn)
     except sqlite3.Error as exc:           # the next run takes it
         errors.append("fingerprints: %s" % exc)
     return {"checked": checked, "errors": errors}
+
+
+# A call on a symbol no longer on the popular list is tried this long. Its ten
+# trading days are over well before then, and past it the source has no
+# prices for the ticker, or has given the ticker to another company.
+OFF_THE_LIST_DAYS = 60
+
+
+def _off_the_list(conn: sqlite3.Connection, now: Optional[float] = None) -> List[str]:
+    """Symbols no longer popular that still have calls waiting to be scored."""
+    since = int((time.time() if now is None else now) - OFF_THE_LIST_DAYS * 86400)
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT symbol FROM calls WHERE outcome IS NULL AND at >= ? "
+        "ORDER BY symbol", (since,)) if r[0] not in NAMES]
 
 
 def blank_day(bars, now: Optional[float] = None) -> Optional[int]:
@@ -720,12 +780,15 @@ HOW_WORDS = {"target": "rose to the target", "stop": "fell to the stop",
 
 # A call counts in the scores only once this many days have passed since it
 # was made, by when every call made that day has had its full ten trading
-# days, with room for two holidays and the next check. Before that, the calls
-# already settled are mostly quick stop-outs, because the stop sits nearer
-# than the target: on random prices, a daily AVOID read eleven days into the
-# record was right on 62% of the calls settled by then, and on 58% once every
-# call had settled.
+# days. Before that, the calls already settled are mostly quick stop-outs,
+# because the stop sits nearer than the target: on random prices, a daily
+# AVOID read eleven days into the record was right on 62% of the calls settled
+# by then, and on 58% once every call had settled.
 MATURE_DAYS = 17
+# Two holidays, or one and a weekend after it, can put a stock call's last
+# session 18 days on: that call counts only this long after that session has
+# closed, by when the checks have scored it (_counts_at).
+SETTLE_WAIT = 2 * MAX_AGE
 
 # Instruments that are one test, not two: both hold the S&P 500, and a call
 # on one settles exactly as the call on the other does.
@@ -762,6 +825,40 @@ def _blank_error(bars, row, start: int, now: float) -> Optional[str]:
 
 def _is_coin(symbol: str) -> bool:
     return symbol.endswith("-USD")
+
+
+@functools.lru_cache(maxsize=4096)
+def _hours(day: datetime.date) -> Optional[Tuple[int, int]]:
+    from .sessions import us_session
+    return us_session(day)
+
+
+@functools.lru_cache(maxsize=4096)
+def _nth_close(first: datetime.date, sessions: int) -> int:
+    """When the last of this many New York sessions, the first of them on or
+    after a date, closes."""
+    day, shut = first, 0
+    while sessions > 0:
+        hours = _hours(day)
+        if hours is not None:
+            sessions, shut = sessions - 1, hours[1]
+        day += datetime.timedelta(days=1)
+    return shut
+
+
+def _counts_at(r) -> int:
+    """When a call is old enough to count in the scores: MATURE_DAYS after it
+    was made and, for a stock, once the market has been through every session
+    of its window, holidays allowed for."""
+    at = int(r["at"])
+    due = at + MATURE_DAYS * 86400
+    if _is_coin(r["symbol"]):
+        return due
+    day = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).date()
+    hours = _hours(day)
+    if hours is not None and hours[0] <= at:        # that day's session had begun
+        day += datetime.timedelta(days=1)
+    return max(due, _nth_close(day, int(r["horizon"] or 10)) + SETTLE_WAIT)
 
 
 def record_call(conn: sqlite3.Connection, snap: Dict) -> bool:
@@ -820,18 +917,48 @@ def _bar_session(bars, k: int) -> int:
     return (int(bars.timestamp[k]) + int(getattr(bars, "gmt_offset", 0) or 0)) // 86400
 
 
-def _split_factor(bars, at: int) -> float:
+def _already_split(bars, at: int, price: float, when: int, ratio: float) -> bool:
+    """Whether a call's price was already in the new shares of the split at when.
+
+    A call is written down after one close and before the next open, and
+    Yahoo can rescale a splitting stock's prices some hours before the open
+    it dates the split by. A call written in those hours holds the new price,
+    and dividing it by the split again would score a fall of nine tenths that
+    never happened. Only a split at the first session after the call can be
+    one, and the close the call was made at tells: rescaled, it is the call's
+    own price, or it is that price divided by the split.
+    """
+    stamps = [int(t) for t in bars.timestamp]
+    start = bisect.bisect_right(stamps, int(at))
+    if not 0 < start < len(stamps) or (start + 1 < len(stamps)
+                                       and int(when) >= stamps[start + 1]):
+        return False
+    close = float(bars.close[start - 1])
+    for later, r in bars.splits:            # back to the shares of that session
+        if int(later) > int(when) and r and float(r) > 0:
+            close *= float(r)
+    if close <= 0 or price <= 0:
+        return False
+    off = abs(math.log(price / close))
+    return off < 0.03 and off < abs(math.log(price / (close * ratio)))
+
+
+def _split_factor(bars, at: int, price: Optional[float] = None) -> float:
     """How many of today's shares one share was when the call was made.
 
     Yahoo rescales the prices before a split by its ratio, new shares per
     old (10.0 for a ten-for-one), so a price written down before a split is
     divided by the ratios of every split since to set it beside today's
     history. Bars without split events (market data before it carried them)
-    give 1.0.
+    give 1.0. With the call's price, a split that price already allowed for
+    is left out (_already_split).
     """
     factor = 1.0
     for when, ratio in getattr(bars, "splits", None) or ():
         if int(when) > int(at) and ratio and float(ratio) > 0:
+            if price is not None and _already_split(bars, at, float(price),
+                                                    int(when), float(ratio)):
+                continue
             factor *= float(ratio)
     return factor
 
@@ -850,13 +977,17 @@ def _split_error(bars, row, start: int) -> Optional[str]:
               if ratio and row["at"] < int(when) <= row["settled"]]
     if not inside:
         return None
-    f = _split_factor(bars, row["at"])
+    f = _split_factor(bars, row["at"], row["price"])
     how, exit_price = _walk(bars, start, row["price"] / f, row["stop"] / f,
                             row["target"] / f, row["horizon"])
     if how is None:
         return None
     if how == row["how"] and abs(exit_price * f / row["exit_price"] - 1.0) <= 0.01:
         return None
+    if f != _split_factor(bars, row["at"]):
+        return ("A stock split on %s was counted when it was scored, although its "
+                "price already allowed for it. Counted once, the price %s."
+                % (_date(min(inside)), HOW_WORDS[how]))
     return ("A stock split on %s fell inside its window and was not allowed for "
             "when it was scored. Allowing for it, the price %s."
             % (_date(min(inside)), HOW_WORDS[how]))
@@ -982,7 +1113,7 @@ def settle_calls(conn: sqlite3.Connection, symbol: str, bars) -> int:
     for row in rows:
         # The bar the call fell inside is skipped: part of it was already over.
         start = next((k for k in range(n) if int(bars.timestamp[k]) > row["at"]), n)
-        f = _split_factor(bars, row["at"])
+        f = _split_factor(bars, row["at"], row["price"])
         entry, stop, target = row["price"] / f, row["stop"] / f, row["target"] / f
         how, exit_price = _walk(bars, start, entry, stop, target, row["horizon"])
         if how is None:
@@ -1246,18 +1377,20 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     kind is set against the baseline, how often a buy at any of these calls
     worked, which is what saying the same thing every day would have scored.
 
-    The scores count only calls made at least MATURE_DAYS ago, by when every
-    one has had its full window. Newer calls already settled are counted
+    The scores count only calls made at least MATURE_DAYS ago that have had
+    their full window (_counts_at). Newer calls already settled are counted
     apart, as "early": they are mostly the ones whose stop was touched first.
     costs are round-trip fractions by asset kind, e.g. {"equity": 0.0002}.
     """
-    ensure_schema(conn)
     costs = costs or {}
-    cutoff = int(now or time.time()) - MATURE_DAYS * 86400
+    now = int(now or time.time())
     rows = [_dated(r) for r in conn.execute("SELECT * FROM calls ORDER BY at, id")]
     counted = [r for r in rows if not r["excluded"]]
     excluded = [r for r in rows if r["excluded"]]
-    mature = [r for r in counted if r["at"] <= cutoff]
+    for r in counted:
+        r["counts"] = (r["at"] + MATURE_DAYS * 86400 <= now
+                       and _counts_at(r) <= now)
+    mature = [r for r in counted if r["counts"]]
     scored = [r for r in mature if r["outcome"]]
     decided = [r for r in scored if r["how"] != "flat"]
     buy_worked = sum(1 for r in decided if r["how"] in ("target", "up"))
@@ -1270,7 +1403,7 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
     for action, label in CLASSES:
         group = [r for r in mature if r["action"] == action]
         waiting = sum(1 for r in counted if r["action"] == action
-                      and not (r["at"] <= cutoff and r["outcome"]))
+                      and not (r["counts"] and r["outcome"]))
         if group or waiting:
             stats = _stats(group, costs)
             # Chance level for this kind of call: what saying it every time
@@ -1289,15 +1422,23 @@ def record(conn: sqlite3.Connection, limit: int = 40, now: Optional[float] = Non
             "first_at": first_at,
             "all": _tally(counted),
             "scored": len(scored),
-            "early": sum(1 for r in settled if r["at"] > cutoff),
+            "early": sum(1 for r in settled if not r["counts"]),
             "mature_days": MATURE_DAYS,
             "range_weeks": int(round(MIN_SPELLS * stock_window / 7.0)),
-            "counts_from": first_at + MATURE_DAYS * 86400 if first_at else None,
+            "counts_from": _counts_at(counted[0]) if counted else None,
             "classes": classes,
             "baseline": base,
             "buy_worked": (buy_worked / len(decided)) if decided else None,
             "excluded": excluded,
             "latest": latest[:limit]}
+
+
+def record_mark(conn: sqlite3.Connection) -> Tuple:
+    """Changes whenever the record does: a call written, scored, marked as left
+    out or dated. For keeping what record() and calls_csv() worked out."""
+    return tuple(conn.execute(
+        "SELECT COUNT(*), MAX(id), COUNT(outcome), MAX(settled), COUNT(excluded), "
+        "COUNT(price_day) FROM calls").fetchone())
 
 
 def _dated(row) -> Dict:
@@ -1344,8 +1485,6 @@ def calls_csv(conn: sqlite3.Connection) -> str:
     any later stock split. Ordered by when each was written, then symbol,
     the order fingerprint_text takes them in.
     """
-    ensure_schema(conn)
-
     def num(x) -> str:
         return "" if x is None else "%.10g" % float(x)
 
@@ -1429,7 +1568,6 @@ def fingerprint_days(conn: sqlite3.Connection, now: Optional[float] = None) -> i
 def fingerprints(conn: sqlite3.Connection, limit: Optional[int] = None) -> List[Dict]:
     """The days' fingerprints, newest first. "late" marks one taken after the
     fact; "start" is the day's first second, for dating it on a page."""
-    ensure_schema(conn)
     sql = "SELECT * FROM record_fingerprints ORDER BY day DESC"
     rows = conn.execute(sql + (" LIMIT %d" % int(limit) if limit else "")).fetchall()
     out = []
@@ -1463,7 +1601,6 @@ def symbol_record(conn: sqlite3.Connection, symbol: str, limit: int = 6) -> Dict
     something else by the afternoon; on_record is the one being scored, with
     when it was written down ("written", in UTC).
     """
-    ensure_schema(conn)
     rows = [_dated(r) for r in conn.execute(
         "SELECT * FROM calls WHERE symbol=? AND excluded IS NULL "
         "ORDER BY at DESC, id DESC", (symbol,))]
@@ -1511,7 +1648,6 @@ def create_share(conn: sqlite3.Connection, user_id: int, snap: Dict,
 
 
 def get_share(conn: sqlite3.Connection, sid: str) -> Optional[Dict]:
-    ensure_schema(conn)
     row = conn.execute("SELECT data FROM shares WHERE id=?", (sid,)).fetchone()
     return json.loads(row["data"]) if row else None
 
@@ -1535,6 +1671,7 @@ MUTE = (SOFT, (232, 230, 224))
 WIDTH, HEIGHT, MARGIN = 1200, 630, 84
 
 _CARDS: "OrderedDict[str, bytes]" = OrderedDict()
+_CARDS_LOCK = threading.Lock()
 
 
 def _font(name: str, size: int):
@@ -1568,11 +1705,15 @@ def counts_line(snap: Dict, short: bool = False) -> str:
     counts, which is as large as a test of up to 2,500 sampled days goes."""
     if not snap.get("samples"):
         return "Too few past examples to count."
+    fall = bool(snap.get("fall"))
+    if short and fall:
+        return ("In tests on past prices, a bet on a fall worked %d of %d times."
+                % (snap["worked"], snap["samples"]))
     if short:
         return ("Tested on past prices: it hit its target before its stop "
                 "%d of %d times." % (snap["worked"], snap["samples"]))
     from .plain import counted
-    line = counted(snap["samples"], snap["worked"])
+    line = counted(snap["samples"], snap["worked"], fall)
     if snap.get("separate"):
         line += (" Many overlap in time, so together they are worth about %d "
                  "separate tests." % snap["separate"])
@@ -1582,9 +1723,11 @@ def counts_line(snap: Dict, short: bool = False) -> str:
 def render_card(snap: Dict) -> bytes:
     """The picture a pasted link unfurls to. Cached, since cards repeat."""
     key = json.dumps(snap, sort_keys=True)
-    if key in _CARDS:
-        _CARDS.move_to_end(key)
-        return _CARDS[key]
+    with _CARDS_LOCK:
+        kept = _CARDS.get(key)
+        if kept is not None:
+            _CARDS.move_to_end(key)
+            return kept
 
     from PIL import Image, ImageDraw
     from .market import format_price
@@ -1604,26 +1747,37 @@ def render_card(snap: Dict) -> bytes:
     pen.text((WIDTH - MARGIN - small.getlength(date), 64), date, font=small,
              fill=FAINT)
 
-    # The symbol, big, with the call beside it.
-    big = _font("source-serif-4-600.ttf", 104)
+    # The symbol, big, with the call beside it. A long one, as outside the US
+    # or for an option, is drawn smaller, on the same middle line, so that the
+    # call always fits on the card.
+    size = 104
+    big = _font("source-serif-4-600.ttf", size)
+    middle = sum(big.getbbox("X")[1::2]) / 2.0
     sym = short(snap["symbol"])
-    pen.text((MARGIN, 140), sym, font=big, fill=INK)
     word = snap.get("action") or "?"
     ink, wash = CHIPS.get(word, MUTE)
     chip_font = _font("inter-600.ttf", 38)
-    x = MARGIN + big.getlength(sym) + 36
     w = chip_font.getlength(word) + 56
+    while size > 30 and big.getlength(sym) + 36 + w > WIDTH - 2 * MARGIN:
+        size -= 2
+        big = _font("source-serif-4-600.ttf", size)
+    pen.text((MARGIN, 140 + middle - sum(big.getbbox("X")[1::2]) / 2.0), sym,
+             font=big, fill=INK)
+    x = MARGIN + big.getlength(sym) + 36
     pen.rounded_rectangle([x, 176, x + w, 246], radius=35, fill=wash,
                           outline=ink, width=3)
     pen.text((x + 28, 187), word, font=chip_font, fill=ink)
 
+    sub_font = _font("inter-400.ttf", 32)
     sub = snap.get("name") or ""
     if snap.get("price"):
         money = ("$" + format_price(snap["price"])
                  if snap.get("currency", "USD") == "USD"
                  else format_price(snap["price"], snap["currency"]))
-        sub = "%s · %s" % (sub, money) if sub else money
-    pen.text((MARGIN, 276), sub, font=_font("inter-400.ttf", 32), fill=SOFT)
+        # A long name is cut short, never the price after it.
+        room = WIDTH - 2 * MARGIN - sub_font.getlength(" · " + money)
+        sub = "%s · %s" % (_wrap(sub, sub_font, room, 1)[0], money) if sub.strip() else money
+    pen.text((MARGIN, 276), sub, font=sub_font, fill=SOFT)
 
     headline = _font("source-serif-4-600.ttf", 44)
     y = 344
@@ -1641,7 +1795,9 @@ def render_card(snap: Dict) -> bytes:
 
     buf = io.BytesIO()
     card.save(buf, "PNG", optimize=True)
-    _CARDS[key] = buf.getvalue()
-    while len(_CARDS) > 64:
-        _CARDS.popitem(last=False)
-    return _CARDS[key]
+    data = buf.getvalue()
+    with _CARDS_LOCK:
+        _CARDS[key] = data
+        while len(_CARDS) > 64:
+            _CARDS.popitem(last=False)
+    return data

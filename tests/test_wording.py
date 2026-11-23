@@ -280,10 +280,11 @@ try:
     visitor = web.app.test_client()
     front = flat(text(get(visitor, "visitor", "/")))
     check("the front page says the example's counts are a test on past prices",
-          "In tests on past prices, this same setup came up 59 times and worked "
-          "25 of them, reaching its target before its stop." in front, front[:300])
-    check("and that here a worked bet was one on the price falling",
-          "worked means a bet on the price falling paid off" in front)
+          "In tests on past prices, this same setup came up 59 times and a bet on the "
+          "price falling worked 25 of them, reaching its target before its stop." in front,
+          front[:300])
+    check("and that here a worked bet was one on the price falling, said once",
+          front.count("bet on the price falling") == 1, front.count("bet on the price falling"))
     check("and that it is a test, not a promise", "A test, not a promise." in front)
     check("the strategies card says they worked in tests on past prices",
           "trading strategies worked in tests on past prices." in front)
@@ -302,11 +303,20 @@ try:
     finally:
         conn.close()
     line = public.counts_line(snap, short=True)
-    check("the picture card's line says it was tested on past prices",
-          line.startswith("Tested on past prices: it hit its target before its stop"),
+    check("the picture card's line says it was tested on past prices, betting on a fall",
+          snap["fall"] and line.startswith("In tests on past prices, a bet on a fall worked"),
           line)
+    check("and that a buy reached its target before its stop, where it was one",
+          public.counts_line(dict(snap, fall=False), short=True).startswith(
+              "Tested on past prices: it hit its target before its stop"))
     font = public._font("inter-400.ttf", 30)
     widest = public.counts_line({"samples": 2500, "worked": 2500}, short=True)
+    widest_fall = public.counts_line({"samples": 2500, "worked": 2500, "fall": True},
+                                     short=True)
+    check("as does the one for bets on a fall",
+          "a bet on a fall" in widest_fall
+          and font.getlength(widest_fall) <= public.WIDTH - 2 * public.MARGIN,
+          int(font.getlength(widest_fall)))
     check("and fits the card's one line, even at the largest counts",
           font.getlength(widest) <= public.WIDTH - 2 * public.MARGIN,
           int(font.getlength(widest)))
@@ -318,6 +328,9 @@ try:
     check("Pro's card says its fair-use limits, from the server's own numbers",
           "Fair use: up to %d saved theses an hour, and Find scans wait their turn "
           "when the server is busy." % web.THESES_PER_HOUR in pricing, pricing[-900:])
+    check("and what a program may read, outside the app",
+          "A program of your own can read up to %d analyses an hour."
+          % web.JSON_READS_PER_HOUR in pricing, pricing[-900:])
     check("with no key set, it puts no limit on screenshots it does not read",
           "screenshot" not in pricing)
     check("and it links to how the results are measured",

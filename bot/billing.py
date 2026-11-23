@@ -810,9 +810,10 @@ def verify(payload: bytes, header: str, secret: str,
         return False
     expected = hmac.new(secret.encode("utf-8"),
                         ("%d." % ts).encode("utf-8") + payload,
-                        hashlib.sha256).hexdigest().encode("ascii")
-    # As bytes: given text, compare_digest raises on a letter outside ASCII.
-    return any(hmac.compare_digest(expected, s.encode("utf-8")) for s in signatures)
+                        hashlib.sha256).hexdigest()
+    # As bytes: text with a letter outside ASCII raises here.
+    return any(hmac.compare_digest(expected.encode("ascii"), s.encode("utf-8", "replace"))
+               for s in signatures)
 
 
 def _period_end(sub: Dict) -> int:

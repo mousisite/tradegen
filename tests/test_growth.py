@@ -110,6 +110,21 @@ try:
     check("the counts are not said twice on the page",
           said["sure"].startswith("When it worked"), said["sure"])
 
+    falling = fake_result("NVDA", "AVOID", 83, 61)
+    falling.plan.odds_direction = -1
+    from bot import plain as plain_words
+    down = public.snapshot(falling, plain_words.explain_plan(falling.plan, falling.bars))
+    check("a strong record of falls never reads as a record of buying",
+          "a bet on the price falling worked 61 of them" in public.counts_line(down)
+          and "a bet on a fall worked 61 of 83 times"
+          in public.counts_line(down, short=True), public.counts_line(down))
+    check("and the page does not say it twice", "Here, worked means" not in down["sure"],
+          down["sure"])
+    falling.plan.action, falling.plan.direction = "WAIT", -1
+    short = public.snapshot(falling, plain_words.explain_plan(falling.plan, falling.bars))
+    check("a plan to short says its counts as they are", not short["fall"]
+          and "a bet on" not in public.counts_line(short))
+
     conn = db.connect(DB)
     asked, slept = [], []
 
@@ -134,6 +149,12 @@ try:
                    sleep=slept.append)
     check("a day later everything is checked again",
           len(asked) == len(public.POPULAR), len(asked))
+    public.save_verdict(conn, down)
+    page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    said_by = [m for m in page.split("\n") if "61 of them" in m]
+    check("not in the page, its link preview, its FAQ answer or its share text",
+          len(said_by) >= 4 and all("a bet on the price falling worked 61" in m
+                                    for m in said_by), said_by)
     public.save_verdict(conn, snap)
     conn.close()
 
@@ -159,6 +180,61 @@ try:
     check("the sitemap lists the list and every page",
           "/stocks</loc>" in sitemap and "/stock/nvda</loc>" in sitemap
           and "/stock/btc-usd</loc>" in sitemap)
+
+    # Checks that fail for days leave the last one standing. It was still
+    # listed as a call under "checked daily" and titled "Today's check".
+    conn = db.connect(DB)
+    public.save_verdict(conn, dict(snap_for("GME", "BUY", 40, 30),
+                                   at=int(time.time()) - 9 * 86400))
+    conn.close()
+    listed = [m for m in c.get("/stocks").data.decode().split("<li>") if "/stock/gme" in m][0]
+    check("a check days old is not listed as a call", "BUY" not in listed
+          and ">checking<" in listed, listed)
+    page = " ".join(c.get("/stock/gme").data.decode("utf-8", "replace").split())
+    when = time.strftime("%d %b %Y", time.gmtime(time.time() - 9 * 86400)).lstrip("0")
+    check("and its page says when it was made, not that it is today's",
+          "Last check " + when in page and "Last checked on " + when in page
+          and "Today's check" not in page and "Today&#39;s check" not in page)
+    check("and asks search engines to wait for the next one",
+          'name="robots" content="noindex"' in page and '"FAQPage"' not in page)
+    check("a check two days old at most is today's",
+          not public.stale({"at": 100}, now=100 + 2 * 86400)
+          and public.stale({"at": 100}, now=101 + 2 * 86400) and not public.stale({}))
+
+    conn = db.connect(DB)
+    ran = []
+    conn.set_trace_callback(ran.append)
+    for read in (lambda: public.verdict(conn, "NVDA"), lambda: public.verdicts(conn),
+                 lambda: public.symbol_record(conn, "NVDA"), lambda: public.record(conn),
+                 lambda: public.record_mark(conn), lambda: public.calls_csv(conn),
+                 lambda: public.fingerprints(conn), lambda: public.get_share(conn, "x")):
+        read()
+    conn.set_trace_callback(None)
+    conn.close()
+    check("reading a public page's data only reads", len(ran) == 8
+          and all(s.startswith("SELECT") for s in ran), ran)
+
+    for other, own in (("/stock/NVDA", "/stock/nvda"), ("/stock/Nvda?utm=x", "/stock/nvda?utm=x"),
+                       ("/stock/NVDA/card.png", "/stock/nvda/card.png"),
+                       ("/backtest/rsi_reversion", "/backtest/rsi-reversion"),
+                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion")):
+        r = c.get(other)
+        check("%s is sent to the page's one address" % other,
+              r.status_code == 301 and r.headers["Location"].endswith(own),
+              (r.status_code, r.headers.get("Location")))
+
+    robots = c.get("/robots.txt").data.decode().splitlines()
+    check("robots are kept off every page of the example account",
+          all("Disallow: " + p in robots for p in (
+              "/analyse", "/research", "/ideas", "/screener", "/strategies", "/settings",
+              "/trades", "/portfolio", "/monitor")), robots)
+    check("with no plans for sale the sitemap lists no pricing page", "/pricing<" not in sitemap)
+    _os.environ.update(STRIPE)
+    try:
+        check("and lists it once there are", "/pricing</loc>" in c.get("/sitemap.xml").data.decode())
+    finally:
+        for key in STRIPE:
+            _os.environ.pop(key, None)
 
     print()
     print("=" * 72)
@@ -266,6 +342,26 @@ try:
     conn.commit()
     conn.close()
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    # Its colours say what the tests can: a gain or a loss beyond the margin.
+    # Without a margin, stored before one was measured, the sign is all there is.
+    conn = db.connect(DB)
+    s = public.verdict(conn, "NVDA")
+    s["tests"] = {"rsi_reversion": [50, 30, 25.0], "macd_momentum": [50, 20, 2.0],
+                  "pin_bar": [50, 20, -2.0], "cci_reversion": [50, 10, -25.0],
+                  "aroon_trend": [50, 20, 0.1], "obv_divergence": [50, 20, -5.0]}
+    s["spread"] = {name: [100.0, 50.0] for name in s["tests"]
+                   if name not in ("aroon_trend", "obv_divergence")}
+    kept_before = public.verdict(conn, "NVDA")
+    public.save_verdict(conn, s)
+    coloured = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    public.save_verdict(conn, kept_before)
+    conn.close()
+    shown = dict(re.findall(r'/backtest/([a-z-]+)">[^<]*</a>:.*?<span class="(fig[^"]*)">',
+                            coloured, re.S))
+    check("a result inside its margin, or of nothing, is neither green nor red",
+          shown == {"rsi-reversion": "fig gain", "macd-momentum": "fig", "pin-bar": "fig",
+                    "cci-reversion": "fig loss", "aroon-trend": "fig",
+                    "obv-divergence": "fig loss"}, shown)
     check("a stock page says which strategies worked there",
           "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)
     check("and answers its question for AI search", '"FAQPage"' in page
@@ -439,6 +535,36 @@ try:
     check("the scoring rule on the page matches the code: half the stop distance",
           "half the distance to the stop" in page and "half a day" not in page)
 
+    # A symbol taken off the popular list: its calls still waiting are scored,
+    # and its page, gone, is not linked to.
+    conn = db.connect(DB)
+    gone_at = int(time.time()) - 30 * 86400
+    for sym, when in (("SQZZ", gone_at), ("OLDZZ", gone_at - 60 * 86400)):
+        conn.execute("INSERT INTO calls (symbol, day, action, price, stop, target, horizon, at) "
+                     "VALUES (?, '2026-01-05', 'BUY', 100, 97, 104.5, 10, ?)", (sym, when))
+    conn.commit()
+    asked = []
+
+    def gone_bars(symbol):
+        asked.append(symbol)
+        return SimpleNamespace(timestamp=[gone_at + 86400 * k for k in range(1, 4)],
+                               high=[106.0] * 3, low=[99.0] * 3, close=[105.0] * 3)
+
+    real_due = public.due
+    public.due = lambda conn, now=None: ["KO"]
+    try:
+        public.refresh(conn, lambda s: snap_for(s), sleep=slept.append, bars=gone_bars)
+        public.refresh(conn, lambda s: snap_for(s), sleep=slept.append, bars=gone_bars)
+    finally:
+        public.due = real_due
+    check("a call on a symbol no longer popular is still scored, and only once",
+          asked == ["KO", "SQZZ", "KO"] and conn.execute(
+              "SELECT outcome FROM calls WHERE symbol='SQZZ'").fetchone()[0] == "right", asked)
+    conn.close()
+    page = c.get("/record").data.decode("utf-8", "replace")
+    check("the record lists it, without a link to a page that is gone",
+          "<b>SQZZ</b>" in page and "/stock/sqzz" not in page and "/stock/amd" in page)
+
     conn = db.connect(DB)
     fetched = []
 
@@ -473,6 +599,58 @@ try:
     r = c.get("/api/no-such-call")
     check("a wrong API address says so in JSON",
           r.status_code == 404 and r.get_json() == {"error": "No such address."})
+    # An unexpected failure is JSON too, for whatever reads the API, and so is
+    # an answer whose readings could not all be measured.
+    looker = user("looker@example.com")
+    sign_in(looker)
+    was_analysis = web.cached_analysis
+    was_propagate = web.app.config.get("PROPAGATE_EXCEPTIONS")
+
+    def broken_analysis(*a, **k):
+        raise RuntimeError("secret")
+
+    web.cached_analysis = broken_analysis
+    web.app.config["PROPAGATE_EXCEPTIONS"] = False
+    web.app.logger.disabled = True
+    _os.environ.update(STRIPE)
+    try:
+        r = c.get("/api/analyse?symbol=NVDA")
+        check("an API call that breaks says so in JSON", r.status_code == 500
+              and "broke on our side" in (r.get_json(silent=True) or {}).get("error", "")
+              and b"secret" not in r.data, (r.status_code, r.mimetype))
+        # Signed in a while ago: a link on another site costs no look.
+        conn = db.connect(DB)
+        conn.execute("UPDATE sessions SET created_ts=created_ts-3600 WHERE user_id=?",
+                     (looker.id,))
+        conn.commit()
+        conn.close()
+        r = c.get("/api/analyse?symbol=NVDA", headers={"Sec-Fetch-Site": "cross-site"})
+        check("one asked for from another site is told that, not that its looks are used up",
+              r.status_code == 402 and "another site" in r.get_json()["error"]
+              and "used up" not in r.get_json()["error"], r.data[:200])
+    finally:
+        web.cached_analysis = was_analysis
+        web.app.config["PROPAGATE_EXCEPTIONS"] = was_propagate
+        web.app.logger.disabled = False
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+        sign_out()
+    import json as json_mod
+    from bot import report as report_mod
+
+    def refuse(word):
+        raise ValueError(word)
+
+    class Anything(SimpleNamespace):
+        def __getattr__(self, name):
+            return float("nan") if name in ("adx", "reward_risk") else None
+
+    blank = Anything(samples=0, curve=[(1, float("inf"))], items=[], label=lambda: "neutral")
+    strict = json_mod.loads(report_mod.to_json(blank, blank, [], float("nan"), blank, blank,
+                                               blank), parse_constant=refuse)
+    check("a reading that could not be measured is null, never the bare word NaN",
+          strict["regime"]["adx"] is None and strict["call"]["reward_risk"] is None
+          and strict["odds"]["curve"] == [[1, None]], strict["regime"])
     r = c.get("/account")
     loc = r.headers.get("Location", "")
     check("a real page still asks them to sign in, with a clean return address",
@@ -574,6 +752,51 @@ try:
         r = c.get("/s/%s.png" % sid)
         check("and has its own card", r.status_code == 200 and r.data[:4] == b"\x89PNG")
         check("an unknown share is not found", c.get("/s/nope").status_code == 404)
+
+        # Priced in rupees: a bare 912.4 reads as dollars.
+        rupees = fake_result("TATAMOTORS.NS", "BUY")
+        rupees.bars.currency = "INR"
+        rupees.plan.entry = 912.4
+        told = public.snapshot(rupees, plain_words.explain_plan(rupees.plan, rupees.bars))
+        conn = db.connect(DB)
+        there = public.create_share(conn, sharer.id, told)
+        conn.close()
+        page = " ".join(c.get("/s/" + there).data.decode("utf-8", "replace").split())
+        check("a share of a stock not priced in dollars names its currency",
+              "Price INR 228.38 ·" in page and "buy price is INR 912.40." in page,
+              told["points"])
+
+        from PIL import Image
+        import io as io_mod
+        for sym, name in (("TATAMOTORS.NS", "Tata Motors Limited"),
+                          ("AAPL261218C00200000", "AAPL Dec 2026 200.000 call"),
+                          ("DRIP", "Direxion Daily S&P Oil & Gas Exp. & Prod. Bear 2X Shares "
+                                   "And More Words")):
+            card = Image.open(io_mod.BytesIO(public.render_card(
+                dict(told, symbol=sym, name=name, action="AVOID"))))
+            edge = card.crop((public.WIDTH - public.MARGIN + 1, 130, public.WIDTH, 330))
+            check("the card of %s keeps its call and its price inside the margin" % sym,
+                  edge.getcolors() == [(edge.width * edge.height, public.PAPER)])
+
+        class Emptied(type(public._CARDS)):
+            """A cache whose entry goes while it is being looked up, unless held."""
+            def __contains__(self, key):
+                held = super().__contains__(key)
+                if not public._CARDS_LOCK.locked():
+                    self.pop(key, None)
+                return held
+
+            def move_to_end(self, key, last=True):
+                assert public._CARDS_LOCK.locked()
+                super().move_to_end(key, last)
+
+        was_cards, public._CARDS = public._CARDS, Emptied()
+        try:
+            first = public.render_card(told)
+            check("a card is drawn once and kept, whoever else is asking",
+                  public.render_card(told) is first and len(public._CARDS) == 1)
+        finally:
+            public._CARDS = was_cards
 
         sign_in(sharer)
         old_limit = public.SHARES_PER_DAY
@@ -803,6 +1026,17 @@ try:
     digest.run(conn, web.app.secret_key, "https://orenth.app", look_up,
                send=send, now=monday + 7 * 86400)
     check("and again the next week", len(outbox) == 2)
+    day_old = dict(snap_for("GME", "BUY", 40, 30), at=monday - 9 * 86400)
+    today = dict(snap_for("KO", "BUY", 40, 20), at=monday - 3600)
+    check("a popular check nine days old is not one of this week's strongest",
+          [v["symbol"] for v in digest.strongest([day_old, today], now=monday)] == ["KO"])
+    check("one that says wait leaves none, which is a normal answer",
+          digest.strongest([dict(today, action="WAIT")], now=monday) == [])
+    stale = digest.strongest([day_old], now=monday)
+    _, said_stale = digest.compose(reader, [], stale, "https://orenth.app", stop)
+    check("but with nothing checked in time the email says that, not that nothing passed",
+          stale is None and "could not be checked today" in said_stale
+          and "clears the" not in said_stale, said_stale)
 
     def broken(*a, **k):
         raise RuntimeError("smtp down")
@@ -815,6 +1049,23 @@ try:
     check("and tried again later that week", len(outbox) == 3)
     conn.close()
 
+    ran_with = []
+    real_run = digest.run
+    digest.run = lambda conn, secret, base, *a, **k: (ran_with.append(base), {"checked": 1})[1]
+    try:
+        _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+        web.app.logger.disabled = True
+        none = web._weekly_email_job()
+        _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app/"
+        one = web._weekly_email_job()
+    finally:
+        digest.run = real_run
+        web.app.logger.disabled = False
+        _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+    check("with no public address for its stop link, no email is sent",
+          none == {"checked": 0} and one == {"checked": 1}
+          and ran_with == ["https://orenth.app"], (none, ran_with))
+
     sign_out()
     url = "/email/stop?u=%d&t=%s" % (reader.id, digest.token(web.app.secret_key, reader.id))
     page = c.get(url).data.decode("utf-8", "replace")
@@ -824,6 +1075,8 @@ try:
           c.post("/email/stop?u=%d&t=%s" % (reader.id, "0" * 32)).status_code == 404)
     check("nor one with a letter outside ASCII, which is no page here either",
           c.get("/email/stop?u=%d&t=%%C3%%A9" % reader.id).status_code == 404)
+    check("and a mangled one, with a letter no stop link has, is not a fault",
+          c.get("/email/stop?u=%d&t=caf%%C3%%A9" % reader.id).status_code == 404)
     r = c.post(url, data={"List-Unsubscribe": "One-Click"})
     check("pressing it, or the inbox button, stops it",
           r.status_code == 200 and not fresh(reader.id).weekly_email)

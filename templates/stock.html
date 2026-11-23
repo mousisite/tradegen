@@ -1,14 +1,18 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
 {% set label = name if name == short(symbol) else name ~ " (" ~ short(symbol) ~ ")" %}
+{# Checks that have failed for days leave the last one standing, and it is not
+   today's. #}
+{% set old = snap and not frozen and stale_check(snap) %}
 {% if snap %}
   {% set page_blurb = "Orenth's check on " ~ label ~ ": " ~ snap.action ~ ". " ~ counts(snap) ~ " Not financial advice." %}
 {% endif %}
-{% block title %}{% if frozen %}{{ short(symbol) }}: {{ snap.action }}, shared from Orenth{% else %}{{ label }}: buy, wait or avoid? Today's check · Orenth{% endif %}{% endblock %}
+{% block title %}{% if frozen %}{{ short(symbol) }}: {{ snap.action }}, shared from Orenth{% else %}{{ label }}: buy, wait or avoid? {% if old %}Last check {{ snap.at|day }}{% else %}Today's check{% endif %} · Orenth{% endif %}{% endblock %}
 {% block og_title %}{% if snap %}{{ short(symbol) }}: {{ snap.action }} · Orenth{% else %}{{ label }} · Orenth{% endif %}{% endblock %}
 {# A shared page is a copy of one moment, and an unchecked one has nothing on
-   it yet: neither is a page a search engine should send anyone to. #}
-{% block head_extra %}{% if frozen or not snap %}<meta name="robots" content="noindex">
+   it yet, and a check days old is not the answer to the title: none is a
+   page a search engine should send anyone to. #}
+{% block head_extra %}{% if frozen or not snap or old %}<meta name="robots" content="noindex">
 {% else %}
 {# The question the page title asks, answered in the form AI search engines
    quote. Only what is visible on the page itself. #}
@@ -23,7 +27,7 @@
 {% block content %}
 
 <div class="pagehead">
-  <span class="eyebrow">{% if frozen %}Shared from Orenth · {{ snap.at|day }}{% else %}Checked through the day{% if snap %} · updated {{ snap.at|ago }}{% endif %}{% endif %}</span>
+  <span class="eyebrow">{% if frozen %}Shared from Orenth · {{ snap.at|day }}{% elif old %}Last checked on {{ snap.at|day }}{% else %}Checked through the day{% if snap %} · updated {{ snap.at|ago }}{% endif %}{% endif %}</span>
   <h1>{{ label }}: buy, wait or avoid?</h1>
 </div>
 
@@ -49,7 +53,7 @@
       <ul class="list">{% for x in snap.points %}<li>{{ x }}</li>{% endfor %}</ul>
     {% endif %}
     <p class="prose faint" style="font-size:var(--t-xs)">
-      Price {{ '$' if snap.currency == 'USD' }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
+      Price {{ '$' if snap.currency == 'USD' else snap.currency ~ ' ' if snap.currency }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
       {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}{% endif %}
     </p>
   </div>
@@ -76,7 +80,7 @@
       {% for t in part %}
         <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:
           worked {{ t.wins }} of {{ t.n }} times, kept
-          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
+          <span class="fig{% if t.verdict == 1 %} gain{% elif t.verdict == -1 %} loss{% elif t.verdict is none %}{{ ' gain' if t.kept|round(2) > 0 else ' loss' if t.kept|round(2) < 0 }}{% endif %}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
           <span class="faint">&plusmn;&thinsp;{{ '%.2f'|format(2 * t.se) }}R{% if t.verdict == 0 %}, within its margin{% endif %}</span>{% endif %}</li>
       {% endfor %}
     </ul>

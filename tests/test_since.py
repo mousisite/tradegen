@@ -280,6 +280,58 @@ try:
     check("a source that says stop ends the run at once", len(asked) == 1
           and len(out["errors"]) == 1, (asked, out))
 
+    # Tickers that cannot be priced leave nothing saved, so they were always
+    # "never checked" and always first: twenty of them took every run.
+    conn = db.connect(DB)
+    conn.execute("DELETE FROM watch_calls")
+    conn.execute("DELETE FROM watchlist")
+    conn.commit()
+    conn.close()
+    digest._FAILED.clear()
+    for k in range(3):
+        watch(person("typos%d@example.com" % k), *["ZZN%d%d" % (k, j) for j in range(8)])
+    watch(pro, "IBM")
+
+    def unknown(symbol, with_call):
+        asked.append(symbol)
+        if symbol.startswith("ZZN"):
+            raise market_mod.SymbolNotFound("no data for %s" % symbol)
+        return {"action": "WAIT" if with_call else None, "day": TODAY,
+                "price": 100.0, "prev_close": 98.0}
+
+    seen_at, tries, per_run = [], {}, []
+    conn = db.connect(DB)
+    for hour in range(49):
+        del asked[:]
+        digest.check_watched(conn, unknown, full, now=NOW + hour * 3600, sleep=lambda s: None)
+        per_run.append(len(asked))
+        if "IBM" in asked:
+            seen_at.append(hour)
+        for symbol in asked:
+            tries[symbol] = tries.get(symbol, 0) + 1
+    conn.close()
+    check("twenty-four tickers that cannot be priced never hold up one that can",
+          seen_at == list(range(seen_at[0], 49, 6)) and seen_at[0] <= 1, seen_at)
+    check("they are still tried again, a few an hour and in turn",
+          max(per_run[2:]) <= digest.RETRY_PER_RUN + 1
+          and len([s for s in tries if s.startswith("ZZN")]) == 24
+          and min(tries.values()) >= 8, (per_run, tries))
+
+    def outage(symbol, with_call):
+        raise market_mod.DataUnavailable("took too long")
+
+    digest._FAILED.clear()
+    conn = db.connect(DB)
+    digest.check_watched(conn, outage, full, now=NOW + 100 * 3600, sleep=lambda s: None)
+    check("a source that did not answer is not held against the ticker",
+          not digest._FAILED, digest._FAILED)
+    conn.execute("DELETE FROM watch_calls")
+    conn.execute("DELETE FROM watchlist")
+    conn.commit()
+    conn.close()
+    watch(free, "NVDA", "ZZFREE", "ZZBOTH")
+    watch(pro, "ZZBOTH", "ZZPRO", "TSLA")
+
     head("THE CHECK ITSELF")
     conn = db.connect(DB)
     public_mod.save_verdict(conn, {"symbol": "NVDA", "name": "NVIDIA", "action": "BUY",
@@ -358,10 +410,8 @@ try:
         # The hourly job: the popular checks, then the watched instruments.
         # Everything checked just now but one, so it runs a single check.
         conn = db.connect(DB)
-        conn.execute("UPDATE watch_calls SET at=?", (int(time.time()),))
-        conn.execute("DELETE FROM watch_calls WHERE symbol='ZZPRO'")
-        conn.commit()
-        db.watch_call_save(conn, "ZZBROKEN", TODAY, None, 1.0, 1.0, int(time.time()))
+        for sym in ("NVDA", "TSLA", "ZZFREE", "ZZBOTH"):
+            db.watch_call_save(conn, sym, TODAY, "WAIT", 1.0, 1.0, int(time.time()))
         conn.close()
         real_refresh = public_mod.refresh
         public_mod.refresh = lambda conn, analyse, **kw: {"checked": 2, "errors": ["X: down"]}
@@ -563,15 +613,20 @@ try:
         digest.sending_window = real_window
     sent = {to: text for to, text in outbox}
     mail = sent.get("ana@example.com", "")
-    check("the weekly email carries the same list", "SINCE YESTERDAY" in mail
-          and "  NVDA   The daily call went from WAIT to BUY; up 2.81% since the previous "
-          "close." in mail, mail[:900] or (out, digest.sending_window(NOW)))
+    last = time.gmtime(TODAY * DAY)
+    last = "%s %d %s" % (time.strftime("%a", last), last.tm_mday, time.strftime("%b", last))
+    check("the weekly email carries the same list, each row with the session it is about",
+          "SINCE THE TRADING DAY BEFORE" in mail and "SINCE YESTERDAY" not in mail
+          and "  NVDA   %s: The daily call went from WAIT to BUY; up 2.81%% since the "
+          "previous close." % last in mail, mail[:900] or (out, digest.sending_window(NOW)))
+    check("no name means a plain greeting, not the start of an address",
+          mail.startswith("Hi,\n"), mail[:40])
     check("with the alert and the stop in full, since there is no page above them",
           "         Alert: ZZALERT rose above 5.00, at 5.02." in mail
           and "         Stop: ZZALERT is at 5.00, past the stop of 5.10" in mail)
     check("and the calm ones in a sentence", "The other 3 moved less than 2%" in mail)
     check("after the watchlist, before the popular setups",
-          mail.index("YOUR WATCHLIST") < mail.index("SINCE YESTERDAY")
+          mail.index("YOUR WATCHLIST") < mail.index("SINCE THE TRADING DAY BEFORE")
           < mail.index("STRONGEST SETUPS"))
 finally:
     web.engine.analyse = real["analyse"]

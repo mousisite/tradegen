@@ -565,6 +565,24 @@ try:
     check("and the API says so in JSON",
           r.status_code == 503 and (r.get_json() or {}).get("retry_after") == 60,
           (r.status_code, r.data[:120]))
+    # An account looping the API over a list of tickers is told to wait. Your
+    # own machine, which the rest of this suite runs as, never is.
+    real_limited, asked_of = web._rate_limited, []
+    web._rate_limited = lambda action, most: (asked_of.append((action, most)), True)[1]
+    real_search, web.market_mod.search = web.market_mod.search, lambda q: 1 / 0
+    try:
+        r = c.get("/api/analyse?symbol=AAPL")
+        check("past its hourly budget, the API is a 429 in JSON with a time to come back",
+              r.status_code == 429 and r.headers.get("Retry-After")
+              and (r.get_json() or {}).get("error"), (r.status_code, r.data[:120]))
+        r = c.get("/api/search?q=appl")
+        check("and the search box suggests nothing, without asking the source",
+              r.status_code == 200 and r.get_json() == [], (r.status_code, r.data[:120]))
+        check("each on its own budget", asked_of == [("json", web.JSON_READS_PER_HOUR),
+                                                      ("search", web.SEARCHES_PER_HOUR)],
+              asked_of)
+    finally:
+        web._rate_limited, web.market_mod.search = real_limited, real_search
 finally:
     web.cached_analysis = _real[3]
 

@@ -24,7 +24,9 @@ from .quality import strength_band
 def _money(value: Optional[float], currency: str = "") -> str:
     if value is None:
         return "?"
-    symbol = "$" if currency in ("", "USD") else ""
+    # Any other currency is named, as format_price names it: a bare number
+    # beside dollar prices reads as dollars.
+    symbol = "$" if not currency or currency == "USD" else currency + " "
     if abs(value) >= 1000:
         return "%s%s" % (symbol, format(value, ",.0f"))
     if abs(value) >= 1:
@@ -76,17 +78,25 @@ _SHORT_WAIT = "Do not short yet. The app expects a fall, but not from today's pr
 _FALLING_AVOID = "Leave this one alone. The signals point to a fall."
 
 
-def counted(samples: int, worked: int) -> str:
+# Said after the counts when they are of bets on a fall and the call is not a
+# short. The public pages say it inside their counts and drop this
+# (public.snapshot).
+FALL_COUNTS = (" Here, worked means a bet on the price falling paid off, because "
+               "that is the way the signals lean.")
+
+
+def counted(samples: int, worked: int, fall: bool = False) -> str:
     """The past examples behind a call, said the same way everywhere.
 
     They are pretend trades in a test on past prices, not trades anyone made,
     and "worked" is what the test measured: the trade reached its target
     before its stop. The public pages lead with this sentence and drop it
-    from the explanation below (public.snapshot), so it must not vary.
+    from the explanation below (public.snapshot), so it must not vary. fall is
+    for a page that gives the counts alone, when they are of bets on a fall.
     """
     return ("In tests on past prices, this same setup came up %d times and "
-            "worked %d of them, reaching its target before its stop."
-            % (samples, worked))
+            "%sworked %d of them, reaching its target before its stop."
+            % (samples, "a bet on the price falling " if fall else "", worked))
 
 
 def explain_plan(plan, bars, hold_text: str = "") -> Dict:
@@ -162,8 +172,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         worked = int(round(plan.probability * plan.prob_samples))
         sure = counted(plan.prob_samples, worked)
         if fall_odds:
-            sure += (" Here, worked means a bet on the price falling paid off, "
-                     "because that is the way the signals lean.")
+            sure += FALL_COUNTS
 
         # Saying only how often it worked invites the wrong conclusion, because
         # a loss here is usually not the whole stop: most trades that miss the
@@ -176,9 +185,21 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             win_x = avg_win
             lose_x = abs(avg_loss)
             sure += (" When it worked it made about %.1f times what you put at "
-                     "risk. When it did not, it usually lost about %.0f%% of "
-                     "what you put at risk, not all of it, because the trade "
-                     "is closed rather than left to run." % (win_x, lose_x * 100))
+                     "risk." % win_x)
+            # Trading costs can make the usual miss cost the whole stop or
+            # more, and misses closed part-way can come out ahead.
+            if avg_loss <= -0.995:
+                sure += (" When it did not, it usually lost about %.0f%% of what "
+                         "you put at risk: trading costs, and prices that jump "
+                         "past the stop, come on top of it." % (lose_x * 100))
+            elif avg_loss < 0:
+                sure += (" When it did not, it usually lost about %.0f%% of "
+                         "what you put at risk, not all of it, because the trade "
+                         "is closed rather than left to run." % (lose_x * 100))
+            else:
+                sure += (" When it did not reach its target, it was usually "
+                         "closed part-way and still made about %.0f%% of what "
+                         "you put at risk." % (lose_x * 100))
             # Those wins were made with the tested target. A plan whose target
             # was pulled in to a level in the way, or whose stop sits further
             # off, aims for something else, and a win of "1.5 times" would be
@@ -222,14 +243,18 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     risk = ""
     if position.get("risk_amount") and not position.get("error"):
         contracts = position.get("multiplier")         # futures come in contracts
-        risk = ("Buying %s %s would put %s at risk."
-                % (_trim(position.get("quantity")),
+        # A short is a sale, and the jump that hurts it is upward
+        # (decision._gap_risk measures that side for it).
+        risk = ("%s %s %s would put %s at risk."
+                % ("Shorting" if short_side else "Buying",
+                   _trim(position.get("quantity")),
                    position["unit_text"] if contracts else "of these",
                    _money(position["risk_amount"], currency)))
-        if position.get("gap_loss") and position.get("gap_multiple", 0) > 1.4:
-            risk += (" But if the price jumped down overnight, which happens, "
+        if position.get("gap_loss") and (position.get("gap_multiple") or 0) > 1.4:
+            risk += (" But if the price jumped %s overnight, which happens, "
                      "you could lose about %s instead."
-                     % _money(position["gap_loss"], currency))
+                     % ("up" if short_side else "down",
+                        _money(position["gap_loss"], currency)))
 
     hold = ""
     if hold_text:
