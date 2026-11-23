@@ -30,6 +30,7 @@ copies each automatic backup by itself; these are for doing it by hand:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import shutil
@@ -156,8 +157,23 @@ def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> 
         try:
             for name in export_mod.DATASETS:
                 path = os.path.join(out_dir, "stockbot-%s-%s.csv" % (name, taken))
-                with open(path, "w", encoding="utf-8", newline="") as fh:
-                    count = export_mod.write_csv(conn, name, fh)
+                try:
+                    with open(path, "w", encoding="utf-8", newline="") as fh:
+                        count = export_mod.write_csv(conn, name, fh)
+                except Exception as exc:
+                    # The copy is the backup. Failed over one of these, it
+                    # would be neither checked, copied off the server nor
+                    # pruned, at this run and every one after.
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    print("  %-9s could not be written: %s: %s"
+                          % (name, type(exc).__name__, exc))
+                    logging.getLogger("backup").error(
+                        "The %s export beside a backup could not be written", name,
+                        exc_info=True)
+                    continue
                 print("  %-9s %s  (%d rows)" % (name, path, count))
         finally:
             conn.close()

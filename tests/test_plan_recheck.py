@@ -512,6 +512,31 @@ try:
 finally:
     backup_mod.prune = real_prune
 check("nor does failing to delete old ones fail the new one", len(copied) == 1, copied)
+from bot import export as export_mod  # noqa: E402
+
+real_write = export_mod.write_csv
+
+
+def broken_export(conn, name, fh, user=None):
+    if name == "alerts":
+        fh.write("half of it")
+        raise ValueError("made up")
+    return real_write(conn, name, fh, user)
+
+
+export_mod.write_csv = broken_export
+had = set(_os.listdir(backup_mod.folder()))
+try:
+    code, said = start()
+finally:
+    export_mod.write_csv = real_write
+new = sorted(set(_os.listdir(backup_mod.folder())) - had)
+check("nor does one export that cannot be written: the copy is checked and "
+      "copied off the server, beside the exports that could be",
+      len(copied) == 1 and _os.path.basename(copied[0]) in new
+      and len([f for f in new if f.endswith(".csv")]) == len(export_mod.DATASETS) - 1
+      and not any("-alerts-" in f for f in new)
+      and "could not be written" in said, (copied, new, said[-300:]))
 code, said = start(STOCKBOT_BEHIND_PROXY="yes please")
 check("a proxy setting that is not understood is said to be off",
       code == 0 and "STOCKBOT_BEHIND_PROXY is 'yes please', which is read as off" in said,
