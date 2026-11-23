@@ -22,9 +22,6 @@
   .pricedoing details.card > summary { cursor: pointer; }
   .pricedoing details.card[open] > summary { margin-bottom: var(--s2); }
   .pricedoing tr.nowrow td { color: var(--ink-3); font-style: italic; }
-  /* The site's .stack layout class would make this table a column of flex
-     items on a wide screen, and its header would stop lining up. */
-  @media (min-width: 761px) { .pricedoing table.stack { display: table; } }
   .keychart .chart { max-height: 380px; }
   .keychart .narrow { display: none; }
   @media (max-width: 600px) {
