@@ -501,7 +501,7 @@ def _yesterday(bars, s: Dict[str, np.ndarray]) -> Tuple[float, float]:
     newer = live is not None and live >= start + clock.bar_seconds(bars)
     if newer and kind == "daily":
         return float(bars.high[-1]), float(bars.low[-1])
-    if newer and clock.trading_day(live, kind).toordinal() > int(s["ck_day"][-1]):
+    if newer and clock.trading_day(live, kind, bars).toordinal() > int(s["ck_day"][-1]):
         last = clock.day_table(bars)[-1]
         if last.complete:
             return float(last.high), float(last.low)
@@ -1213,7 +1213,7 @@ def _price_action_suggestions(bars) -> List[Dict]:
     if clock.kind_of(tail) != "daily" and _finite(s["ck_gap_lo"][-1], s["ck_gap_hi"][-1]) \
             and not s["ck_gap_filled"][-1]:
         live = _live_moment(bars)
-        today = (live is None or clock.trading_day(live, clock.kind_of(tail)).toordinal()
+        today = (live is None or clock.trading_day(live, clock.kind_of(tail), tail).toordinal()
                  == int(s["ck_day"][-1]))
         if today:
             d = int(s["ck_gap_dir"][-1])

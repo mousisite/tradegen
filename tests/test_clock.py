@@ -7,6 +7,7 @@ last whole day), the opening gaps of a day and a week and their fills, a
 contract roll, 4-hour bars built from hourly ones, and the date of a daily
 bar whatever time it is stamped at. No network.
 """
+import dataclasses
 import math
 import os as _os
 import sys as _sys
@@ -379,6 +380,125 @@ btc = sc.make([1.0] * 2, [1.0] * 2, [1.0] * 2, [1.0] * 2,
 check("a coin's day, stamped at midnight UTC, is the UTC date",
       [date.fromordinal(int(x)) for x in clock.series(btc)["ck_day"]]
       == [date(2026, 11, 18), date(2026, 11, 19)])
+
+# ---------------------------------------------------------------------------
+head("A THINLY TRADED STOCK")
+# ---------------------------------------------------------------------------
+# The source has no bar where nothing traded: two bars in three, all day long,
+# is the whole day; the same number of bars with one long hole is not.
+full = sc.stock_series(78 * 12)
+picks = np.sort(np.random.RandomState(3).choice(len(full.close), size=int(
+    len(full.close) * 0.66), replace=False))
+thin = sc.make(full.open[picks], full.high[picks], full.low[picks], full.close[picks],
+               full.timestamp[picks])
+days = clock.day_table(thin)
+check("its days are whole when no stretch over a fifth of the session is empty",
+      len(days) == 12 and all(d.complete for d in days) and max(d.bars for d in days) < 70,
+      [(d.bars, d.complete) for d in days])
+check("so yesterday's high is yesterday's",
+      clock.series(thin)["ck_pdh"][-1] == days[-2].high)
+late = full.timestamp >= ny(2026, 9, 1, 11, 30)
+check("a day whose first two hours are missing is still not whole",
+      not clock.day_table(sc.make(full.open[late], full.high[late], full.low[late],
+                                  full.close[late], full.timestamp[late]))[0].complete)
+whole = clock.day_table(full)
+check("a full day is, and the day under way is not until near its close",
+      all(d.complete for d in whole)
+      and not clock.day_table(clock.head(full, 78 + 60))[-1].complete
+      and clock.day_table(clock.head(full, 78 + 63))[-1].complete)
+
+# ---------------------------------------------------------------------------
+head("A LISTING THAT DOES NOT TRADE NEW YORK'S HOURS")
+# ---------------------------------------------------------------------------
+
+
+def listing(symbol, zone, gmt, spans, n_days=8, step=300, interval="5m"):
+    """Bars of another exchange's sessions; spans are minutes of its own day."""
+    ts, d = [], date(2026, 11, 9)
+    while len(set((t + gmt) // 86400 for t in ts)) < n_days or d.weekday() >= 5:
+        if d.weekday() < 5:
+            for a, z in spans:
+                ts.extend(range(utc(d.year, d.month, d.day) - gmt + a * 60,
+                                utc(d.year, d.month, d.day) - gmt + z * 60, step))
+        d += timedelta(days=1)
+    ts = np.array(ts, dtype=np.int64)
+    b = sc.walk(ts, seed=5, vol=0.001, price=3000.0, symbol=symbol, interval=interval)
+    return dataclasses.replace(b, gmt_offset=gmt, session_id=((ts + gmt) // 86400),
+                               meta={"instrumentType": "EQUITY", "exchangeTimezoneName": zone})
+
+
+TOKYO = ((9 * 60, 11 * 60 + 30), (12 * 60 + 30, 15 * 60 + 30))
+tokyo = listing("7203.T", "Asia/Tokyo", 9 * 3600, TOKYO)
+london = listing("VOD.L", "Europe/London", 0, ((8 * 60, 16 * 60 + 30),))
+for name, b in (("Tokyo", tokyo), ("London", london)):
+    ids = np.unique(b.session_id)
+    days = clock.day_table(b)
+    s = clock.series(b)
+    check("%s: its trading days are its exchange's own" % name,
+          [d.day.toordinal() - clock.EPOCH for d in days] == ids.tolist()
+          and [d.bars for d in days] == [int((b.session_id == k).sum()) for k in ids],
+          [(d.day, d.bars) for d in days])
+    check("%s: yesterday's high and low are its last session's" % name,
+          s["ck_pdh"][-1] == b.high[b.session_id == ids[-2]].max()
+          and s["ck_pdl"][-1] == b.low[b.session_id == ids[-2]].min())
+    check("%s: every day with the bars its days have is whole, the first not known" % name,
+          not days[0].complete and all(d.complete for d in days[1:]))
+    cut = clock.head(b, days[5].first + 20)
+    check("%s: a day under way is not, and what was known then has not changed" % name,
+          not clock.day_table(cut)[-1].complete
+          and all((math.isnan(v[-1]) and math.isnan(s[k][len(cut.close) - 1]))
+                  or v[-1] == s[k][len(cut.close) - 1] for k, v in clock.series(cut).items()))
+    check("%s: no New York sessions" % name, all(not x.complete for d in days
+                                                 for x in d.sessions.values()))
+check("it is told by its time zone, or the mark in its symbol",
+      clock.elsewhere(tokyo) and clock.elsewhere(london)
+      and not clock.elsewhere(sc.stock_series(100)) and not clock.elsewhere(sc.futures_series(100))
+      and not clock.elsewhere(sc.coin_series(100)) and not clock.elsewhere(
+          sc.walk(sc.stock_times(100), symbol="^GSPC"))
+      and clock.elsewhere(sc.walk(sc.stock_times(100), symbol="EURUSD=X")))
+check("a time's trading day is its exchange's date, a New York evening in Tokyo included",
+      clock.trading_day(ny(2026, 11, 17, 20, 0), "stock", tokyo) == date(2026, 11, 18)
+      and clock.trading_day(ny(2026, 11, 17, 20, 0), "stock") == date(2026, 11, 17))
+hours = listing("VOD.L", "Europe/London", 0, ((8 * 60, 16 * 60),), step=3600, interval="1h")
+four = clock.resample(hours, 4)
+check("4-hour bars run from the exchange's open, whatever New York is doing",
+      sorted(set(int(t) % 86400 // 3600 for t in four.timestamp)) == [8, 12]
+      and len(four.close) == 16 and four.high[-1] == hours.high[-4:].max())
+check("and one still forming is dropped",
+      len(clock.resample(clock.head(hours, len(hours.close) - 1), 4).close) == 15)
+
+# ---------------------------------------------------------------------------
+head("THE DAY OF THE LIVE PRICE")
+# ---------------------------------------------------------------------------
+
+
+def live(b, at, price=1.0):
+    return dataclasses.replace(b, live_price=price, meta=dict(b.meta, regularMarketTime=at))
+
+
+daily = sc.daily_series(60)                           # its last bar is 15 Feb 2022's
+last_day = date.fromordinal(int(clock.series(daily)["ck_day"][-1]))
+nxt = int(sc.daily_times(61)[-1])
+check("daily bars, the next session trading: its day",
+      clock.live_day(live(daily, nxt + 5400)) > last_day)
+check("the quote still from the last finished bar's day: none",
+      clock.live_day(live(daily, int(daily.timestamp[-1]) + 23400)) is None)
+check("no time given, or no live price: none", clock.live_day(daily) is None
+      and clock.live_day(dataclasses.replace(daily, live_price=1.0)) is None
+      and clock.live_day(clock.head(live(daily, nxt), 60)) is None)
+fut = futures(3)
+end = int(fut.timestamp[-1]) + 300
+check("a future at 17:00 is in its day still, and at 18:05 in the next",
+      clock.live_day(live(fut, end)) is None
+      and clock.live_day(live(fut, end + 3900)) == clock.day_table(fut)[-1].day + timedelta(days=1))
+fridays = sc.make([1.0] * 3, [1.0] * 3, [1.0] * 3, [1.0] * 3,
+                  [ny(2026, 7, d, 0, 0) for d in (8, 9, 10)], kind="future", interval="1d")
+check("on a future's daily bars Sunday's reopen is Monday, a new week",
+      clock.live_day(live(fridays, ny(2026, 7, 12, 19, 0))) == date(2026, 7, 13)
+      and clock.live_day(live(fridays, ny(2026, 7, 10, 17, 0))) is None)
+check("the last bars of a series keep their prices and drop nothing after them",
+      clock.tail(fut, 50).close.tolist() == fut.close[-50:].tolist()
+      and len(clock.tail(fut, 10 ** 6).close) == len(fut.close))
 
 
 print()
