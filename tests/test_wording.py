@@ -719,6 +719,9 @@ try:
     check("it says the counts are tests on past prices",
           "how often this setup came up in tests on past prices" in store
           and "did best in tests on past prices" in store)
+    from bot import strategies as strategies_mod
+    check("it gives the number of strategies the site gives",
+          "back-tests %d strategies" % len(strategies_mod.voting_names()) in store)
     privacy = store[store.index("PRIVACY"):store.index("Orenth is analysis software")]
     said = [s for s in re.split(r"(?<=\.)\s+", privacy) if "download" in s]
     exported = {"journal": "trades", "theses": "theses", "watchlist": "watchlist",

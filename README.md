@@ -3,7 +3,7 @@
 **Live at [orenth.app](https://orenth.app).** Free, no ads, no tracking scripts.
 
 Give it a screenshot of a chart. It identifies the instrument, pulls live market
-data, runs **34 trading strategies**, measures which of them actually work on
+data, runs **44 trading strategies**, measures which of them actually work on
 that instrument, reads the news and social chatter, and tells you to buy, wait,
 or stand aside. Everything it says and every trade you take is recorded in a
 database so the record accumulates.
@@ -41,7 +41,7 @@ required.
 | **Portfolio** | What you are exposed to: concentration, sector weights, correlation between holdings, a market-shock table |
 | **Trades** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
-| **Strategies** | Leaderboard of all 34 strategies, filterable by instrument and market conditions |
+| **Strategies** | Leaderboard of all 44 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
 | **Price action, tested** | `/learn`: the ideas a popular day-trading course teaches, each in plain words beside what the Setup lab measured, and a practice page for calling the next move |
 
@@ -113,7 +113,7 @@ otherwise. Each links to where the work happens.
 | | Capability | Where | What it actually does |
 |---|---|---|---|
 | 1 | Real-time market data | `bot/market.py` | OHLCV for equities, ETFs and crypto across seven intervals, with stub bars trimmed and the forming bar separated so signals do not flicker |
-| 2 | Technical analysis | `bot/indicators.py`, `bot/strategies.py` | 30+ indicators and 34 strategies, each scored, weighted by regime, and discounted when it duplicates a sibling in the same family |
+| 2 | Technical analysis | `bot/indicators.py`, `bot/strategies.py` | 30+ indicators and 44 strategies, each scored, weighted by regime, and discounted when it duplicates a sibling in the same family |
 | 3 | Backtesting | `bot/calibrate.py` | Walk-forward replay with Wilson confidence intervals, striding to decorrelate samples, and a pessimistic tie-break when a bar touches both stop and target |
 | 4 | Real-time news and sentiment | `bot/sentiment.py` | Google News and StockTwits, scored by a finance lexicon that handles negation, or by an LLM when a key is present |
 | 5 | SEC filings analysis | `bot/sec.py` | Filing history, XBRL company facts, and full-text search, each result linked back to the document |
@@ -279,8 +279,7 @@ A partial run leaves the claims alone; add `--claims` to measure them anyway.
 ## The strategy library
 
 44 strategies in seven families. Each returns a directional score from -1 to
-+1 with a plain-language reading. 34 of them, in the first six families,
-decide the call; the 10 in the liquidity family are measured on trial.
++1 with a plain-language reading, and all of them have a say in the call.
 
 **Trend (10)** — `trend_stack`, `macd_momentum`, `supertrend_follow`,
 `adx_di_cross`, `ichimoku_cloud`, `parabolic_sar_flip`, `linreg_channel`,
@@ -301,7 +300,7 @@ decide the call; the 10 in the liquidity family are measured on trial.
 
 **Pattern (3)** — `engulfing_pattern`, `pin_bar`, `momentum_thrust`
 
-**Liquidity (10), on trial** — `sweep_reclaim`, `prior_day_sweep`,
+**Liquidity (10)** — `sweep_reclaim`, `prior_day_sweep`,
 `equal_levels_sweep`, `session_sweep`, `structure_flip`, `sweep_then_flip`,
 `fvg_retest`, `ifvg_flip`, `premium_discount`, `liquidity_model`
 
@@ -314,13 +313,14 @@ video timestamps live in `bot/setups.py`; the price structure they read is
 `bot/structure.py`, `bot/clock.py` and `bot/liquidity.py`. `session_sweep`
 needs intraday bars, like `opening_range_break`.
 
-**On trial** means measured, not used. Every analysis scores them and every
-back-test (the per-instrument one and the daily test on the popular names)
-measures them with the house stop, target and costs, but `Strategy.votes` is
-False: `evaluate()` leaves them out of the composite, so the composite, the
-odds and every BUY / WAIT / AVOID are exactly what they would be without
-them (`tests/test_liquidity_strategies.py` proves it). Pages tag them "on
-trial". Promoting one to a vote is a later, separate decision, on its record.
+These ten have voted in the composite since 19 November 2026, at the owner's
+choice: each starts at a weight of 0.7, weighted by regime and by its measured
+record and discounted inside its family like any other strategy. Before that
+they were on trial, scored and measured with no say in the call, and calls
+came from the other 34. The switch is `Strategy.votes`: set to False, it puts
+a strategy on trial, and the pages then tag it "on trial". If the price
+structure cannot be read on some history, the ten sit out and the call is the
+one the other 34 make (`tests/test_liquidity_strategies.py` checks both).
 
 The alerts follow the same levels (`bot/alerts.py`, the "Price action"
 group): yesterday's high or low traded through, or taken and closed back
@@ -365,8 +365,10 @@ Design choices that keep it honest:
 - **Wilson confidence intervals**, which stay sensible at small sample sizes.
 - **A holdout check** on the most recent third. If the edge exists only in older
   data, the report says so.
-- **Break-even includes cost.** With cost `c` and reward:risk `R`, break-even is
-  `(1+c)/(1+R)`, not `1/(1+R)`.
+- **Break-even is measured.** It is the hit rate at which the average win and
+  the average loss of those same trades, after costs, cancel out:
+  `loss / (win + loss)`. Not every losing trade loses the full stop, so
+  `(1+c)/(1+R)`, which assumes it, asks for too much.
 
 ---
 
@@ -377,7 +379,7 @@ SQLite at `data/stockbot.db`, created on first run.
 | Table | Holds |
 |---|---|
 | `runs` | Every analysis: price, regime, composite, action, levels, odds |
-| `run_signals` | All 34 strategy scores for every run |
+| `run_signals` | All 44 strategy scores for every run |
 | `strategy_stats` | Measured performance per symbol, strategy and regime |
 | `trades` | The journal: entry, stop, exit, realised R, P&L, and any trailing stop |
 | `trade_exits` | Parts of a position closed while the rest stayed open |
@@ -468,7 +470,7 @@ run.bat [image] [options]
   --no-llm              never call Claude for sentiment
   --no-learn            fixed weights, skip per-strategy measurement
   --no-db               do not record this run
-  --all-signals         print all 34 strategies, not just top contributors
+  --all-signals         print all 44 strategies, not just top contributors
   --json PATH           write the full analysis as JSON
   --config PATH         use a different config.json
 ```
@@ -478,7 +480,9 @@ paper.bat <command> [options]
 
   take SYMBOL           open from the bot's last plan for that symbol
   open SYMBOL           open with explicit --entry --stop --target --qty
-  close ID --price P    close a position
+  close ID --price P    close a position, or part of it with --qty
+  trail ID --pct P      trail its stop behind the best price (or --atr N)
+  delete ID             remove a trade entirely
   check                 mark open positions to market
   list [--all]          show trades
   stats                 realised performance
@@ -821,30 +825,27 @@ decisions are recorded in `design-system/stock-bot/MASTER.md`.
 
 ## Putting it on the internet
 
-The web app runs on your machine. `http://127.0.0.1:8000` only works there,
-which is deliberate: your API key, your trades and your positions stay local.
+Double-clicked, the web app runs on your machine. `http://127.0.0.1:8000` only
+works there, which is deliberate: your API key, your trades and your positions
+stay local.
 
-To give other people a public URL, three things have to change.
+The same code serves [orenth.app](https://orenth.app), and DEPLOY.md is the
+step-by-step guide to putting it online.
 
-**Hosting.** The Flask development server that ships here is single-process and
-explicitly not meant for public traffic. A real deployment needs a production
-server such as gunicorn or waitress behind a reverse proxy, on a host like
-Fly.io, Render or a small VPS. Expect a few dollars a month for one instance.
+**Hosting.** `serve.py` runs it under waitress, a production server, in the
+container the `Dockerfile` builds, behind the host's own proxy.
 
-**Concurrency.** One analysis pins a CPU core for two to five seconds, and the
-cache is per-process and in-memory. With more than a handful of simultaneous
-users you need a job queue and a shared cache rather than doing the work inside
-the request.
+**Concurrency.** One analysis pins a CPU core for seconds, and the cache is
+per-process and in memory, so this is one instance on one machine. Many more
+simultaneous users would need a job queue and a shared cache.
 
-**Multi-user data.** Everything currently assumes one person: one SQLite file,
-one config, one journal, no accounts. Serving several people means user
-accounts, per-user trade isolation, and a database that tolerates concurrent
-writes better than SQLite does.
+**Multi-user data.** With sign-in switched on, each person has their own
+trades, watchlist, alerts and theses (see Accounts above), in one SQLite file
+on a persistent disk.
 
-None of that is exotic, but it is a different project from the one that exists
-now, and it should follow rather than precede a forward-tested edge. There is
-also licensing to check: publishing trading signals for money is regulated in
-many countries, and the rules differ by where you and your users are.
+There is also licensing to check before running your own: publishing trading
+signals for money is regulated in many countries, and the rules differ by
+where you and your users are.
 
 ---
 
@@ -874,7 +875,7 @@ bot/
   market.py         data fetching, symbol resolution, cleaning
   indicators.py     30+ indicators in pure NumPy
   levels.py         swing pivots, support/resistance, session ranges
-  strategies.py     34 strategies, families, regime classification
+  strategies.py     44 strategies, families, regime classification
   learning.py       per-strategy measurement and weight learning
   calibrate.py      walk-forward backtest and probability calibration
   database.py       SQLite persistence

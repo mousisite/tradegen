@@ -5,6 +5,7 @@ the payload is built by hand. Each section pins one way the method used to
 mislead, and says how.
 """
 import os as _os
+import re
 import sys as _sys
 import time
 import types
@@ -615,13 +616,26 @@ from bot import reasoning, thesis  # noqa: E402
 bull, bear_case = thesis.Case("bull"), thesis.Case("bear")
 thesis._technical_points({"composite": 0.4, "regime": "trending", "expectancy": 0.1,
                           "hit_rate": 0.4, "samples": 120}, bull, bear_case, "today")
-# Only the strategies that vote make the composite; those on trial do not.
+# Only the strategies that vote make the composite: all of them today.
 check("the case for a stock counts the strategies it ran",
       bull.points and ("across %d strategies" % len(S.voting_names()))
       in bull.points[0].detail, bull.points[0].detail if bull.points else "")
 brief = reasoning.build_payload("TEST", 100.0, plan=clear)
 check("and so does the brief given to the reasoning step",
       ("Technical plan (%d-strategy engine)" % len(S.voting_names())) in brief, list(brief))
+
+# The README is the repository's front page. It said 34 for days after 44 voted.
+readme = open(_os.path.join(harness.ROOT, "README.md"), encoding="utf-8").read()
+said = set(re.findall(r"\b(\d+)(?:\*\*)? (?:trading )?strateg(?:y|ies)\b", readme)) 
+check("the README gives the registry's number of strategies",
+      str(len(S.REGISTRY)) in said and said <= {str(len(S.REGISTRY))}, sorted(said))
+wrong = [(label, n) for label, fam in
+         (("Trend", S.TREND), ("Mean reversion", S.REVERSION), ("Breakout", S.BREAKOUT),
+          ("Volume", S.VOLUME), ("Structure", S.STRUCTURE), ("Pattern", S.PATTERN),
+          ("Liquidity", S.LIQUIDITY))
+         for n in [sum(1 for s in S.REGISTRY if s.family == fam)]
+         if "**%s (%d)**" % (label, n) not in readme]
+check("and each family's own", not wrong, wrong)
 
 # A bearish call's odds are the short side's: a record of betting on a fall
 # that paid argues the bear case, and must not be filed as "this has paid".
