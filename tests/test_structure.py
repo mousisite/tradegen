@@ -217,6 +217,30 @@ chain = next(e for e in ev if e["kind"] == "chain")
 check("in words, with prices and New York time",
       "99.8" in chain["words"] and "New York time" in chain["words"]
       and "an earlier swing low" in chain["words"], chain["words"])
+# The move can also be confirmed by a close back through a gap, with the last
+# swing still unbroken. The words said it had been broken all the same, on more
+# than half of the setups.
+from bot import strategies as _strategies  # noqa: E402
+
+wrong, by_gap = [], 0
+for seed in (1, 2, 3):
+    walk_ = sc.stock_series(2500, seed=seed)
+    ws = liquidity.series(walk_)
+    wctx = _strategies.Context(walk_, ws, warmup=0)
+    told = {e["i"]: e["words"] for e in liquidity.events(walk_, ws, limit=10 ** 6)
+            if e["kind"] == "chain"}
+    for i in np.flatnonzero(ws["lq_chain"]):
+        i, d = int(i), int(ws["lq_chain"][i])
+        j = int(ws["lq_chain_conf_at"][i])
+        broke = d in (int(ws["st_flip"][j]), int(ws["st_ext"][j]))
+        by_gap += 0 if broke else 1
+        right = ("broke its last swing %s" % ("high" if d == 1 else "low") if broke
+                 else "closed back through a gap the %s left" % ("fall" if d == 1 else "rise"))
+        for words in (_strategies.liquidity_model(wctx, i).reason, told.get(i, right)):
+            if right not in words:
+                wrong.append((seed, i, words))
+check("a move confirmed by a gap alone is not said to have broken its last swing",
+      by_gap > 20 and not wrong, (by_gap, wrong[:2]))
 said = " ".join(e["words"] for e in ev).lower()
 check("and no None, nan or forecast in them",
       not any(w in said for w in ("none", "nan", " will ", "guarantee", "smart money")))

@@ -15,6 +15,7 @@ Rules held to deliberately:
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional
 
 
@@ -26,6 +27,10 @@ def _money(value: Optional[float], currency: str = "") -> str:
         return "%s%s" % (symbol, format(value, ",.0f"))
     if abs(value) >= 1:
         return "%s%.2f" % (symbol, value)
+    if 0 < abs(value) < 0.01:
+        # Four figures, however small: "$0.0000" is no price to watch for.
+        digits = 3 - math.floor(math.log10(abs(value)))
+        return symbol + ("%.*f" % (digits, value)).rstrip("0")
     return "%s%.4f" % (symbol, value)
 
 
@@ -199,9 +204,11 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     # What a bad day costs, which is the number beginners never see.
     position = plan.position or {}
     risk = ""
-    if position.get("risk_amount"):
-        risk = ("Buying %s of these would put %s at risk."
+    if position.get("risk_amount") and not position.get("error"):
+        contracts = position.get("multiplier")         # futures come in contracts
+        risk = ("Buying %s %s would put %s at risk."
                 % (_trim(position.get("quantity")),
+                   position["unit_text"] if contracts else "of these",
                    _money(position["risk_amount"], currency)))
         if position.get("gap_loss") and position.get("gap_multiple", 0) > 1.4:
             risk += (" But if the price jumped down overnight, which happens, "
@@ -339,7 +346,8 @@ HELP: Dict[str, Dict[str, str]] = {
         "How many shares or coins the plan would buy: enough that reaching the "
         "stop loses {risk}% of the {account} account set in Settings, rounded "
         "down to whole shares for a stock, and never more than {cap}% of the "
-        "account in one position.")},
+        "account in one position. Futures are whole contracts, sized by what a "
+        "point in one is worth, without that second limit.")},
     "risk": {"name": "the amount at risk", "text": (
         "What reaching the stop would lose: the size times the distance from "
         "entry to stop, before trading costs, and that as a share of the "

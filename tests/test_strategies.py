@@ -297,5 +297,6 @@ check("and the plain words say what a win and a loss were worth",
 
 # --- exit code so a runner can tell pass from fail -------------------------
 import sys as _exit_sys
-_bad = bool(globals().get("fails")) or bool(globals().get("fail"))     or (globals().get("ok") is False)
+_bad = (bool(globals().get("fails")) or bool(globals().get("fail"))
+        or (globals().get("ok") is False))
 _exit_sys.exit(1 if _bad else 0)

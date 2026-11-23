@@ -92,6 +92,25 @@ class Analysis:
         return self.bars.symbol
 
 
+def house_method(cfg: Dict, symbol: str, asset_class: str, interval: str) -> bool:
+    """Whether a run measured its strategies the way this copy's own settings do.
+
+    The strategy record is one table everyone reads. Written by each run under
+    whoever's settings it ran with, it was rewritten by the last person to
+    open an instrument: a stop of a twentieth of an ATR, or costs of three
+    per cent, put nonsense on the Strategies page for every visitor.
+    """
+    house = config_mod.load()
+
+    def method(c: Dict):
+        return (float(c["stop_atr_multiple"]), float(c["target_atr_multiple"]),
+                int(c["calibration_stride"]), config_mod.horizon_for(interval, c),
+                float(config_mod.cost_bps_for_symbol(symbol, asset_class, c)),
+                dict(c["strategy_weights"] or {}))
+
+    return method(cfg) == method(house)
+
+
 def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             with_news: bool = True, with_learning: bool = True,
             record: bool = True, db_path: Optional[str] = None,
@@ -230,6 +249,15 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
         if note not in plan.risks:
             plan.risks.append(note)
 
+    # What the call could not rest on, said on the page rather than only known
+    # to the code that went without it.
+    if len(bars) < ctx.warmup:
+        plan.risks.append("Only %d bars of history. The indicators need about 200 to "
+                          "settle, and there is no past record to measure." % len(bars))
+    if "lq_chain" not in ctx.s:
+        plan.risks.append("The price structure could not be read here, so the price-action "
+                          "setups took no part in this call.")
+
     run_id = None
     if record:
         try:
@@ -238,14 +266,16 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
                 run_id = db_mod.record_run(conn, bars, plan, signals, composite,
                                            regime, calib, sentiment,
                                            source=source, user=user)
-                if report is not None:
+                if report is not None and house_method(
+                        cfg, bars.symbol, bars.asset_class, bars.interval):
                     db_mod.save_strategy_stats(conn, bars.symbol, bars.interval,
                                                report)
             finally:
                 conn.close()
         except Exception:
-            # A database problem must never destroy a completed analysis.
-            run_id = None
+            # A database problem must never destroy a completed analysis, and
+            # must not pass unseen: history and paper trades stop without it.
+            log.exception("Could not record the analysis of %s", bars.symbol)
 
     return Analysis(bars=bars, context=ctx, signals=signals, composite=composite,
                     regime=regime, levels=levels, calibration=calib,

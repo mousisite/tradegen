@@ -128,8 +128,8 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
             t.add_row("Position", "[yellow]%s[/]" % pos["error"])
         else:
             # Cash amounts get two decimals, not the instrument's tick size.
-            t.add_row("Position", "%s units   ·   %s %s notional   ·   risking %s %s (%.2f%%)" % (
-                _fmt(pos["quantity"], 8), bars.currency,
+            t.add_row("Position", "%s %s   ·   %s %s notional   ·   risking %s %s (%.2f%%)" % (
+                _fmt(pos["quantity"], 8), pos.get("unit_text", "units"), bars.currency,
                 "{:,.2f}".format(pos["notional"]), bars.currency,
                 "{:,.2f}".format(pos["risk_amount"]),
                 pos["risk_pct_of_account"]))

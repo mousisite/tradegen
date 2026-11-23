@@ -591,9 +591,8 @@ def cmd_db(args, conn) -> int:
     t = Table(show_header=False, box=None, padding=(0, 2))
     t.add_column(style="dim", width=18)
     t.add_column(justify="right")
-    for key, label in (("runs", "Analyses"), ("run_signals", "Signals stored"),
+    for key, label in (("runs", "Analyses"),
                        ("strategy_stats", "Strategy records"), ("trades", "Trades"),
-                       ("run_news", "Headlines stored"),
                        ("symbols_seen", "Instruments seen")):
         t.add_row(label, "{:,}".format(s[key]))
     console.print(Panel(t, title="Database: %s" % db.default_path(),

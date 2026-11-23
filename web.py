@@ -57,6 +57,7 @@ from bot import codes as codes_mod
 from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
+from bot import decision as decision_mod
 from bot import demo as demo_mod
 from bot import digest as digest_mod
 from bot import engine
@@ -1975,6 +1976,9 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
     direction = 1 if stop < entry else -1
     per_unit = abs(entry - stop)
     account = float(cfg["account_size"])
+    symbol = str(row["symbol"] if "symbol" in row.keys() else "").upper()
+    if symbol.endswith("=F"):
+        return _paper_contracts(row, symbol, direction, entry, stop, split, cfg)
     qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
                if per_unit > 0 else 0)
     cap = account * cfg["max_position_pct"] / 100.0
@@ -1999,6 +2003,33 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
             "notional": qty * entry, "risk": qty * per_unit,
             "risk_pct": (qty * per_unit / account * 100.0) if account else 0.0,
             "account": account, "capped": capped,
+            "reward_risk": (abs(target - entry) / per_unit
+                            if target and per_unit > 0 else None)}
+
+
+def _paper_contracts(row, symbol: str, direction: int, entry: float, stop: float,
+                     split: float, cfg: Dict) -> Dict:
+    """_paper_size for a futures plan: the contracts the analysis page sized.
+
+    The journal counts a unit as one dollar a point, so a contract is written
+    down as its dollars a point: the gain or loss it later shows is then the
+    contract's own.
+    """
+    sized = decision_mod.size_futures(symbol, entry, stop, cfg)
+    if "error" in sized:
+        raise _NoTrade(sized["error"])
+    target = float(row["target1"]) / split if row["target1"] else None
+    second = row["target2"] if "target2" in row.keys() else None
+    units = sized["quantity"] * sized["multiplier"]
+    per_unit = abs(entry - stop)
+    return {"direction": direction, "entry": entry, "stop": stop, "target": target,
+            "per_unit": per_unit, "quantity": units,
+            "target2": float(second) / split if second else None, "split_words": "",
+            "quantity_text": "{:,.2f}".format(units).rstrip("0").rstrip("."),
+            "contract_words": "%s %s" % (sized["quantity_text"], sized["unit_text"]),
+            "multiplier": sized["multiplier"], "notional": sized["notional"],
+            "risk": sized["risk_amount"], "risk_pct": sized["risk_pct_of_account"],
+            "account": float(cfg["account_size"]), "capped": False,
             "reward_risk": (abs(target - entry) / per_unit
                             if target and per_unit > 0 else None)}
 
@@ -6399,6 +6430,9 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     app.config["CFG_PATH"] = args.config
+    if args.config:
+        # Code that loads the settings itself then reads the same file.
+        os.environ["STOCKBOT_CONFIG"] = os.path.abspath(args.config)
     app.config["DB_PATH"] = args.db
 
     # Fail loudly when the port is taken. Otherwise a server left running from

@@ -26,8 +26,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .market import format_price
+
 DEFAULT_MODEL = "claude-sonnet-5"
-_MAX_TOKENS = 2000
+# Room for the model's own thinking as well as the answer: where a model
+# thinks by default, that counts against the same limit, and a cut-off answer
+# cannot be read. Only what is used is charged for.
+_MAX_TOKENS = 8000
 
 log = logging.getLogger(__name__)
 
@@ -176,9 +181,15 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
 
     parsed = _parse(text)
     if parsed is None:
-        return Reasoning(False, raw=text, reason_unavailable=_FAILED,
-                         detail="The model's reply could not be read as "
-                                "structured output.")
+        # Why it stopped tells a reply cut off at the limit, or declined, from
+        # one that was simply not the JSON asked for.
+        stopped = getattr(response, "stop_reason", None)
+        detail = {"max_tokens": "The model's reply was cut off at the %d-token limit."
+                                % _MAX_TOKENS,
+                  "refusal": "The model declined to answer."}.get(
+            stopped, "The model's reply could not be read as structured output.")
+        log.warning("The reasoning reply was unusable (stop reason %s): %s", stopped, detail)
+        return Reasoning(False, raw=text, reason_unavailable=_FAILED, detail=detail)
 
     result = Reasoning(
         available=True,
@@ -200,8 +211,12 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
 # Checking the answer against the evidence
 # ---------------------------------------------------------------------------
 
-# A figure inside prose. Captures 28%, 1,234.5, -0.31, $4.2B.
-_FIGURE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bn|bp|B|M|K|k|x)?")
+# A figure inside prose. Captures 28%, 1,234.5, -0.31, $4.2B. A hyphen straight
+# after a figure or a letter joins two things, as in "25.9%-24.0%", "383.3B-391.0B"
+# or "FY2021-2024", and is not a minus sign.
+_FIGURE = re.compile(r"(?:(?<![\d%A-Za-z])-)?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bn|bp|B|M|K|k|x)?")
+# The number in an index's name is not a figure about the company.
+_NAMES = re.compile(r"(?:S&P|Russell|Nasdaq|FTSE|Nikkei|Dow)[\s-]+\d+", re.IGNORECASE)
 
 
 def _numbers_in(text: str) -> List[str]:
@@ -228,9 +243,11 @@ def _grounded(value: float, evidence: List[float]) -> bool:
 
     Tolerant on purpose. The model is asked to write plainly, so it will round
     0.2812 to 28% and 416,161,000,000 to 416B, and neither is an invention. The
-    check is for figures with no relative anywhere in the evidence at all.
+    check is for figures with no relative anywhere in the evidence at all. The
+    sign is left out: "fell 32%" is how a measured -32% is said.
     """
-    for known in evidence:
+    value = abs(value)
+    for known in (abs(k) for k in evidence):
         if known == 0:
             if abs(value) < 1e-9:
                 return True
@@ -266,7 +283,7 @@ def verify(reasoning: "Reasoning", facts_text: str) -> "Reasoning":
     ])
 
     unverified, checked = [], 0
-    for token in _numbers_in(prose):
+    for token in _numbers_in(_NAMES.sub(" ", prose)):
         value = _as_float(token)
         if value is None:
             continue
@@ -310,7 +327,9 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
                   calibration=None, sentiment=None, sec_history=None,
                   filings=None, options_stats=None, thesis=None) -> Dict:
     """Collect everything measured into a compact, labelled brief."""
-    out: Dict = {"Instrument": {"symbol": symbol, "price": round(price, 4)}}
+    # A coin far below a cent keeps its figures, written out in full.
+    out: Dict = {"Instrument": {"symbol": symbol, "price":
+                                round(price, 4) if price >= 1 else format_price(price)}}
 
     if fundamentals is not None:
         f = fundamentals
@@ -328,7 +347,7 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         if block:
             out["Fundamentals (Yahoo Finance)"] = block
         if f.summary:
-            out["Business description (from SEC profile)"] = f.summary[:900]
+            out["Business description (Yahoo Finance)"] = f.summary[:900]
 
     if quality and quality.get("known"):
         out["Quality checks"] = {
@@ -392,9 +411,9 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}
         if plan.entry:
-            block["entry"] = "%.4g" % plan.entry
-            block["stop"] = "%.4g" % plan.stop
-            block["first target"] = "%.4g" % plan.target1
+            block["entry"] = format_price(plan.entry)
+            block["stop"] = format_price(plan.stop)
+            block["first target"] = format_price(plan.target1)
             block["reward to risk"] = "%.2f" % (plan.reward_risk or 0)
         out["Technical plan (%d-strategy engine)" % len(voting_names())] = block
 

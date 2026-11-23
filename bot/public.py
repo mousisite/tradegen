@@ -271,8 +271,9 @@ def tests(report) -> Dict[str, List]:
     [times, worked, R kept, variance of R kept, separate trades].
 
     Kept with the popular snapshot rather than read from strategy_stats,
-    because that table also takes the numbers from anyone's own run, under
-    their own stop, target and costs. A public page has to show one method.
+    because that table is written when somebody opens an instrument, at any
+    time and on any bars, and may still hold rows measured under a person's
+    own stop, target and costs. A public page has to show one method.
     """
     if report is None:
         return {}

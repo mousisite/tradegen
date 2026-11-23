@@ -74,6 +74,14 @@
         <dd><span class="fig">{{ "%.2f"|format(size.risk_pct) }}%</span>
           <span class="faint">of {{ size.account|money }}</span></dd>
       </dl>
+      {% if size.contract_words %}
+      <p class="prose" style="margin-top:var(--s2)">That is {{ size.contract_words }}.
+        The journal counts each contract as {{ '%g'|format(size.multiplier) }} units,
+        because a one-point move in it is worth {{ '%g'|format(size.multiplier) }} dollars.
+        Sized by your settings: at most {{ '%g'|format(cfg.risk_per_trade_pct) }}% of the
+        account lost at the stop.
+        <a href="{{ url_for('settings') }}">Change them</a>.</p>
+      {% else %}
       <p class="prose" style="margin-top:var(--s2)">Sized by your settings: at
         most {{ '%g'|format(cfg.risk_per_trade_pct) }}% of the account lost at
         the stop, and no position worth more than
@@ -81,6 +89,7 @@
         second limit applied here, so less than
         {{ '%g'|format(cfg.risk_per_trade_pct) }}% is at risk.{% endif %}
         <a href="{{ url_for('settings') }}">Change them</a>.</p>
+      {% endif %}
     </div>
   </div>
 </div>

@@ -17,7 +17,7 @@
     fewer than {{ method.min }} separate trades on every stock and coin tested so
     far, too few to list here.{% endif %}
     {% if inside %}{{ inside }} of them {{ 'reads' if inside == 1 else 'read' }} the inside
-    of a trading day, so {{ 'it only fires' if inside == 1 else 'they only fire' }} on hourly or
+    of a trading day, so {{ 'it only fires' if inside == 1 else 'they only fire' }} on
     shorter bars and {{ 'is' if inside == 1 else 'are' }} not in this daily test.{% endif %}</p>
   {% if trial_count %}
   <p>{{ trial_count }} more {{ 'strategy is' if trial_count == 1 else 'strategies are' }} on trial: marked
@@ -31,7 +31,7 @@
     are exactly that: a buy, and a short, on every tested day. Set each
     strategy beside the one on its side.</p>
   <p>How the same strategies did across the analyses people run on this site,
-    under their own settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
+    with its standard settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
   <p>Each result has a margin of error after it. It is green only when the
     whole margin is above zero, and red only when it is all below. With
     {{ shown }} strategies tested, one or two can look this good by luck alone.</p>
