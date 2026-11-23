@@ -42,11 +42,12 @@
   <div class="card">
     <span class="eyebrow">The trade</span>
     <dl class="pairs">
-      <dt>Entry</dt><dd class="fig">{{ t['entry']|price }}</dd>
-      <dt>Stop</dt><dd class="fig loss">{{ t['stop']|price }}</dd>
-      <dt>Target</dt><dd class="fig gain">{{ t['target1']|price if t['target1'] else 'none set' }}</dd>
+      {% set out = parts.avg_exit if t['status'] == 'closed' else none %}
+      <dt>Entry</dt><dd class="fig">{{ t['entry']|price(t['stop'], t['target1'], out) }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ t['stop']|price(t['entry'], t['target1'], out) }}</dd>
+      <dt>Target</dt><dd class="fig gain">{{ t['target1']|price(t['entry'], t['stop'], out) if t['target1'] else 'none set' }}</dd>
       {% if t['status'] == 'closed' %}
-        <dt>Exit</dt><dd class="fig">{{ parts.avg_exit|price }}{% if parts.parts %}
+        <dt>Exit</dt><dd class="fig">{{ out|price(t['entry'], t['stop'], t['target1']) }}{% if parts.parts %}
           <span class="faint">average of {{ parts.exits|length }} exits</span>{% endif %}</dd>
         <dt>Result</dt><dd class="fig {{ 'gain' if (parts.r or 0) > 0 else 'loss' if (parts.r or 0) < 0 }}">{{ parts.r|signed }}R
           <span class="faint">before costs</span></dd>

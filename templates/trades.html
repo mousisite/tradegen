@@ -136,17 +136,18 @@
               <div style="font-size:var(--t-xs)"><a href="{{ url_for('trade_picture', trade_id=t['id']) }}">See the trade</a></div></td>
             <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
               {{ 'Long' if long else 'Short' }}</span></td>
-            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
+            {% set stop_now = m.stop if m.stop is defined else t['stop'] %}
+            <td class="r fig" data-label="Entry">{{ t['entry']|price(stop_now, t['target1']) }}</td>
             {# The stop in force now. A trail moves it with the best price
                since opening, and only ever tighter; the plan's R stays
                measured from the stop it was opened with. #}
-            <td class="r fig loss" data-label="Stop">{{ (m.stop if m.stop is defined else t['stop'])|price }}
+            <td class="r fig loss" data-label="Stop">{{ stop_now|price(t['entry'], t['target1']) }}
               {% if m.trail %}<div class="faint" style="font-size:var(--t-xs)">{{ m.trail.words() }}
                 {{ 'under' if long else 'over' }} {{ m.best|price }}</div>
               <div class="faint" style="font-size:var(--t-xs)">{% if m.moved %}{{ 'up' if long else 'down' }}
                 from {{ t['stop']|price }}{% else %}not moved yet{% endif %}</div>
               {% elif t['trail_pct'] or t['trail_dist'] %}<div class="faint" style="font-size:var(--t-xs)">trailing</div>{% endif %}</td>
-            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price(t['entry'], stop_now) }}
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
             <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
               {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
@@ -395,10 +396,10 @@
               </details></td>
             <td data-label="Side"><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
-            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
-            <td class="r fig soft" data-label="Stop">{{ t['stop']|price }}</td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price(t['stop'], p.avg_exit) }}</td>
+            <td class="r fig soft" data-label="Stop">{{ t['stop']|price(t['entry'], p.avg_exit) }}</td>
             {# Closed in parts: the average exit, with each part beside it. #}
-            <td class="r fig" data-label="Exit">{{ p.avg_exit|price }}
+            <td class="r fig" data-label="Exit">{{ p.avg_exit|price(t['entry'], t['stop']) }}
               {% if p.parts %}
               <details style="text-align:left">
                 <summary class="faint" style="font-size:var(--t-xs);cursor:pointer">average

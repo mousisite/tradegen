@@ -144,11 +144,11 @@
     <span class="eyebrow">The plan</span>
     <dl class="pairs">
       <dt>Entry</dt>
-      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
+      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price(plan.stop, plan.target1, plan.target2) }}</b>
           <span class="faint">{{ plan.entry_type }}</span>{{ help('entry') }}</dd>
-      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}{{ help('stop') }}</dd>
-      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}{{ help('target') }}</dd>
-      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}{{ help('runner') }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price(plan.entry, plan.target1, plan.target2) }}{{ help('stop') }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price(plan.entry, plan.stop, plan.target2) }}{{ help('target') }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price(plan.entry, plan.stop, plan.target1) }}{{ help('runner') }}</dd>
       <dt>Reward to risk</dt>
       {# The break-even belongs to the trade the odds were measured on. When
          this plan's own levels give a different reward, pairing the two
@@ -205,7 +205,7 @@
     {% elif r.run_id and a == 'WAIT' %}
       <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
         A wait is not a trade yet, so there is nothing to log. To hear when the
-        price reaches {{ plan.entry|price }}, set the entry alert further down.</p>
+        price reaches {{ plan.entry|price(plan.stop, plan.target1, plan.target2) }}, set the entry alert further down.</p>
     {% endif %}
   </div>
 </div>

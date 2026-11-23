@@ -103,10 +103,10 @@
     <p class="prose" style="margin-top:var(--s3)">One R, the amount at risk, is
       {{ result.at_risk|money }}. {% if result.one_r.price is none %}A short
       from here cannot make 1R: the price would have to fall to zero or below.
-      {% else %}At {{ result.one_r.price|price }} the trade makes 1R,
+      {% else %}At {{ result.one_r.price|price(result.two_r.price) }} the trade makes 1R,
       {{ result.one_r.cash|money }} after costs{% if result.two_r.price is none %}. A short
       from here cannot make 2R: the price would have to fall to zero or below.
-      {% else %}; at {{ result.two_r.price|price }} it makes
+      {% else %}; at {{ result.two_r.price|price(result.one_r.price) }} it makes
       2R, {{ result.two_r.cash|money }}.{% endif %}{% endif %} A price that opens past the stop fills worse
       than the stop, so a loss can be bigger than 1R.</p>
     {% if result.notional > account %}

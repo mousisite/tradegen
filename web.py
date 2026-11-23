@@ -1143,9 +1143,11 @@ def _number(value) -> Optional[float]:
 
 
 @app.template_filter("price")
-def _price(value):
+def _price(value, *beside):
+    """A price. beside is the others it is read against (a stop beside its
+    entry), so that two which differ never read the same."""
     number = _number(value)
-    return format_price(number) if number is not None else "-"
+    return format_price(number, beside=beside) if number is not None else "-"
 
 
 @app.template_filter("money")
