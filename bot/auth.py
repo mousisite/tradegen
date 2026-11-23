@@ -219,8 +219,8 @@ def check_domain(email: str) -> None:
     domain = (email or "").rsplit("@", 1)[-1].lower()
     if domain not in domains:
         raise AuthError(
-            "%s is not allowed to sign in here. This installation only accepts "
-            "%s addresses." % (email, " or ".join("@" + d for d in domains)))
+            "%s is not allowed to sign in here. Only %s addresses are."
+            % (email, " or ".join("@" + d for d in domains)))
 
 
 def sign_in(code: str, redirect_uri: str, verifier: str) -> Dict:

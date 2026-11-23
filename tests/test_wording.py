@@ -520,7 +520,7 @@ try:
           and "BOOM" in page and "do not exist" not in page, status)
     status, page = SEEN[("free", "/usage")]
     check("the operator's page refuses them without naming a setting",
-          status == 403 and "runs this installation" in page, status)
+          status == 403 and "runs this site" in page, status)
 
     # -----------------------------------------------------------------------
     head("INSIDE THE IPHONE APP: HEADLINES, NOT STRANGERS' POSTS")

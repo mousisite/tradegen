@@ -21,7 +21,7 @@
 
 <div class="pagehead">
   <h1>Your trading journal</h1>
-  <p>Log what you actually took, let Orenth mark it to market, and find out
+  <p>Log what you actually took, let Orenth follow its price, and find out
     whether the process works before real money is involved.</p>
 </div>
 
@@ -67,8 +67,10 @@
     <div class="f"><div class="k">Worst drawdown</div>
       <div class="v fig">{{ "%.2f"|format(summary.max_drawdown_r) }}R</div></div>
   </div>
+  <p class="prose" style="margin-top:var(--s3)">R is what a trade risked, from
+    its entry to its stop: +2R made twice that, and -1R lost it.</p>
   {% if summary.trades < 30 %}
-    <p class="prose" style="margin-top:var(--s3)">
+    <p class="prose" style="margin-top:var(--s2)">
       {{ summary.trades }} closed trade{{ '' if summary.trades == 1 else 's' }} is
       not enough to separate skill from luck. Thirty is a reasonable minimum
       before any of these numbers mean something.
@@ -298,7 +300,7 @@
               <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
             {% endfor %}
           </select>
-          <div class="hint">Used when marking the position to market.</div>
+          <div class="hint">The bar size its prices are read on.</div>
         </div>
         <div class="setfield">
           <label for="m-trail">Trailing stop <span class="faint">optional</span></label>

@@ -767,7 +767,7 @@ try:
     response = stranger.get("/usage")
     check("an ordinary account is refused", response.status_code == 403,
           response.status_code)
-    check("and told why", "runs this installation"
+    check("and told why", "runs this site"
           in response.data.decode("utf-8", "replace"))
 
     _os.environ["STOCKBOT_ADMIN_EMAIL"] = "ordinary@example.com"
