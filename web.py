@@ -1930,19 +1930,13 @@ def _mark_one(trade):
 
 
 def _touched_day(trade, bars, when: Optional[int]) -> str:
-    """The day a stop was traded through, for the journal and the front page.
+    """The day a stop was traded through, for the journal and the front page."""
+    day = portfolio_mod.crossed_day(portfolio_mod.trade_interval(trade), bars, when)
+    return day.strftime("%d %b %Y").lstrip("0") if day else ""
 
-    The New York date, as the journal counts its days. A daily bar is named
-    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
-    session opens, while it is still the evening before in New York.
-    """
-    if when is None:
-        return ""
-    times = getattr(bars, "timestamp", None)
-    a_bar = times is not None and int(when) in {int(t) for t in times}
-    if a_bar and portfolio_mod.trade_interval(trade) == "1d":
-        return _day(when)
-    return _day_ny(when)
+
+# Seconds the journal goes on asking for the prices of its open positions.
+MARK_FOR = 25.0
 
 
 def _mark_to_market(open_trades):

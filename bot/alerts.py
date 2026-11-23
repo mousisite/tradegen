@@ -1302,7 +1302,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         # Past the stop now, or traded through it since opening and come back:
         # the journal marks both as stopped, by the one rule they all read a
         # position through (portfolio.read_stop), trail and split included.
-        from .portfolio import read_trade_stop
+        from .portfolio import crossed_day, day_words, read_trade_stop
         read = read_trade_stop(row, bars, split)
         if read.trail is not None:
             # The highs this round saw hold the trail up for every reader.
@@ -1334,7 +1334,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                        "you are out." % (row["symbol"], said, kind,
                                          format_price(stop), side_word, moved))
         else:
-            when = time.strftime("%d %b", time.gmtime(read.touched_at)).lstrip("0")
+            when = day_words(crossed_day(bar_size(row), bars, read.touched_at))
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it there once "

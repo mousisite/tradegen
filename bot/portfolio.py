@@ -14,12 +14,14 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
+from .clock import ny_clock
 from .market import DataError, fetch_bars, split_factor_since, split_words
 
 
@@ -325,6 +327,7 @@ class Position:
     breached: bool = False
     touched: Optional[float] = None       # the price that crossed the stop since opening
     touched_at: Optional[int] = None
+    touched_day: Optional[date] = None    # the day to say it was crossed on (crossed_day)
     touched_stop: Optional[float] = None  # the stop in force when it was crossed
     beta_assumed: bool = False
     status: str = "open"
@@ -578,6 +581,7 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             p.price, p.stop = read.price, read.stop
             p.touched_at, p.touched = read.touched_at, read.touched
             p.touched_stop = read.touched_stop
+            p.touched_day = crossed_day(p.interval or "1d", bars, read.touched_at)
             p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
@@ -634,7 +638,7 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         if (p.price - p.stop) * p.direction > 0 and p.touched is not None:
             crossed = p.touched_stop if p.touched_stop is not None else p.stop
             where = ("traded through its %s of %s on %s (at %s) and is back at %s"
-                     % (kind, _px(crossed), _day(p.touched_at), _px(p.touched),
+                     % (kind, _px(crossed), day_words(p.touched_day), _px(p.touched),
                         _px(p.price)))
         else:
             where = "is at %s against a %s of %s" % (_px(p.price), kind, _px(p.stop))
@@ -757,9 +761,25 @@ def _px(value: float) -> str:
     return format_price(value)
 
 
-def _day(ts: Optional[int]) -> str:
-    import time
-    return time.strftime("%d %b", time.gmtime(int(ts))).lstrip("0") if ts else "a recent day"
+def crossed_day(interval: str, bars, when: Optional[int]):
+    """The date a stop was traded through, the same wherever it is said, or None.
+
+    The New York date, as the journal counts its days. A daily bar is named
+    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
+    session opens, while it is still the evening before in New York.
+    """
+    if when is None:
+        return None
+    times = getattr(bars, "timestamp", None)
+    if (interval == "1d" and times is not None
+            and int(when) in {int(t) for t in times}):
+        return datetime.fromtimestamp(int(when), timezone.utc).date()
+    return ny_clock(when)[0]
+
+
+def day_words(day) -> str:
+    """'5 Nov' for a date."""
+    return day.strftime("%d %b").lstrip("0") if day else "a recent day"
 
 
 def what_if(view: PortfolioView, shock_pct: float) -> Dict:
