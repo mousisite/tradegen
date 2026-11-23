@@ -279,6 +279,20 @@ except sqlite3.OperationalError as exc:
 finally:
     again.close()
 
+# Deleting an account deletes its analyses, and each one is looked for in the
+# trades by its foreign key. A file from before the index has none until opened.
+again = db.connect(old)
+again.execute("DROP INDEX IF EXISTS idx_trades_run")
+again.commit()
+again.close()
+db.migrate(old)
+again = db.connect(old)
+how = " ".join(r["detail"] for r in again.execute(
+    "EXPLAIN QUERY PLAN SELECT 1 FROM trades WHERE run_id=?", (1,)))
+again.close()
+check("a trade is found by its analysis without reading every trade",
+      "SEARCH" in how and "idx_trades_run" in how, how)
+
 # paper.py --db journal.db: a file name with no folder is one in this folder.
 here = os.getcwd()
 os.chdir(tempfile.mkdtemp(prefix="stockbot-bare-"))

@@ -49,7 +49,9 @@
        numbers the server enforces. #}
     <p class="fine">Fair use: up to {% if fair.images %}{{ fair.images }}
       screenshot reads and {% endif %}{{ fair.theses }} saved theses an hour,
-      and Find scans wait their turn when the server is busy.{% if not in_app %}
+      and Find scans wait their turn when the server is busy. Also up to
+      {{ fair.screens }} stock screens and {{ fair.routines }} routines an
+      hour.{% if not in_app %}
       A program of your own can read up to {{ fair.json }} analyses an
       hour.{% endif %}</p>
     {% if in_app %}
