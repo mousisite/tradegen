@@ -328,6 +328,9 @@ try:
     check("Pro's card says its fair-use limits, from the server's own numbers",
           "Fair use: up to %d saved theses an hour, and Find scans wait their turn "
           "when the server is busy." % web.THESES_PER_HOUR in pricing, pricing[-900:])
+    check("the hourly limits on screens and routines among them",
+          "Also up to %d stock screens and %d routines an hour."
+          % (web.SCREENS_PER_HOUR, web.ROUTINES_PER_HOUR) in pricing, pricing[-900:])
     check("and what a program may read, outside the app",
           "A program of your own can read up to %d analyses an hour."
           % web.JSON_READS_PER_HOUR in pricing, pricing[-900:])

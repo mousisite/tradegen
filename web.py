@@ -489,7 +489,8 @@ def _fair_use() -> Dict[str, int]:
     """
     return {"images": (IMAGE_READS_PER_HOUR
                        if os.environ.get("ANTHROPIC_API_KEY") else 0),
-            "theses": THESES_PER_HOUR, "json": JSON_READS_PER_HOUR}
+            "theses": THESES_PER_HOUR, "json": JSON_READS_PER_HOUR,
+            "screens": SCREENS_PER_HOUR, "routines": ROUTINES_PER_HOUR}
 
 
 def _upgrade(reason: str):
