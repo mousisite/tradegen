@@ -373,7 +373,17 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
 
     # Published models applied to the filed figures. Runs on data already
     # fetched, so it costs no extra network request.
-    if out.sec_history:
+    unread = out.fundamentals is None or getattr(out.fundamentals, "unread", False)
+    if (unread and (out.sec_history or {}).get("available")
+            and not (out.sec_history.get("table") or {}).get("current_assets")):
+        # What sector it is in came from Yahoo, which did not answer. A bank's
+        # balance sheet is not split into current and long-term, and a sound
+        # bank scores as a company in trouble on these models.
+        out.scores = {"available": False,
+                      "reason": "The scored models were not run. They do not suit a "
+                                "bank or an insurer, and whether this is one could not "
+                                "be read just now."}
+    elif out.sec_history:
         from . import quality as quality_mod
         try:
             out.scores = quality_mod.assess(
@@ -419,11 +429,12 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
         sec_history=out.sec_history)
 
     if chain is not None and out.thesis is not None:
-        view = ("bullish" if out.thesis.balance > 0.15
-                else "bearish" if out.thesis.balance < -0.15 else "neutral")
+        # A case too thin to mean anything is no view: its one or two points
+        # lean all the way to a side, and a trade was offered that "fits" it.
+        lean = 0.0 if thesis_mod.no_view(out.thesis.verdict) else out.thesis.balance
+        view = ("bullish" if lean > 0.15 else "bearish" if lean < -0.15 else "neutral")
         try:
-            out.option_ideas = options_mod.suggest(chain, view,
-                                                   abs(out.thesis.balance))
+            out.option_ideas = options_mod.suggest(chain, view, abs(lean))
         except Exception:
             pass
 
