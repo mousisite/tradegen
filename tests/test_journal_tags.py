@@ -265,14 +265,40 @@ try:
     check("with a way to see the trade", "/trades/%d/picture" % t1 in page)
     check("and nothing unfinished on the page", ">None<" not in page and not NAN.search(page)
           and "undefined" not in page)
+    check("saying once that it is kept", "Your review is kept with the trade." in page
+          and "Your review is kept" not in text(c.get("/trades?reviewed=1")))
     r = c.post("/trades/review", data={"trade_id": str(t1), "followed_plan": "maybe"})
     check("a made-up answer is refused", r.status_code == 400)
     sign_in(c, bob)
     r = c.post("/trades/review", data={"trade_id": str(t1), "followed_plan": "no"})
+    check("and nothing thanks them for it", "Your review is kept" not in text(c.get("/trades")))
     check("nobody reviews someone else's trade", r.status_code == 400
           and conn.execute("SELECT followed_plan FROM trades WHERE id=?",
                            (t1,)).fetchone()[0] == "partly")
     db.delete_trade(conn, t1)
+
+    # The form always sends the setup and the feeling, so a press of Save on an
+    # untouched form was kept, and announced, as a review.
+    sign_in(c, alice)
+    blank = db.open_trade(conn, "ZZA", "5m", 1, 100.0, 99.0, user=alice.id, setup="own")
+    db.close_trade(conn, blank, 101.0, user=alice.id)
+    r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": "",
+                                       "lesson": " ", "setup": "own", "emotion": ""})
+    row = conn.execute("SELECT * FROM trades WHERE id=?", (blank,)).fetchone()
+    check("a review with nothing in it is refused, and nothing is kept",
+          r.status_code == 400 and "Say whether you followed your plan" in text(r)
+          and row["reviewed_ts"] is None, r.status_code)
+    r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": "",
+                                       "lesson": "", "setup": "own", "emotion": "calm"})
+    check("but a feeling set on it is kept", r.status_code == 302 and conn.execute(
+        "SELECT emotion FROM trades WHERE id=?", (blank,)).fetchone()[0] == "calm")
+    for answer in ("yes", ""):
+        r = c.post("/trades/review", data={"trade_id": str(blank), "followed_plan": answer,
+                                           "lesson": "", "setup": "own", "emotion": "calm"})
+    check("and an answer given by mistake can be taken back", r.status_code == 302
+          and conn.execute("SELECT followed_plan FROM trades WHERE id=?",
+                           (blank,)).fetchone()[0] is None)
+    db.delete_trade(conn, blank)
 
     # -----------------------------------------------------------------------
     head("THE BREAKDOWN, ON 40 SCRIPTED TRADES")
@@ -383,6 +409,47 @@ try:
     limited = flat(text(c.get("/trades/breakdown?limit=1.5&target=3")))
     check("the loss-limit check answers", "A fixed limit, 1.5R below where you started" in
           limited and "A profit target of 3R" in limited)
+    for typed in ("-5", "2000"):
+        page = flat(text(c.get("/trades/breakdown?limit=5&target=" + typed)))
+        check("a profit target of %sR is refused by its rule, and not then reported on" % typed,
+              "must be more than 0 and at most 1000R" in page
+              and "A profit target of" not in page)
+    check("no help sits inside a heading", not re.search(
+        r"<h2[^>]*>(?:(?!</h2>).)*<details", limited))
+    # 5 November 2026 at 20:30 in New York is the 6th in London.
+    evening = clock.ny(2026, 11, 5, 20, 30)
+    check("a journal date is the New York one", web._day_ny(evening) == "5 Nov 2026"
+          and web._day(evening) == "6 Nov 2026" and web._day_ny(None) == "-")
+    late = A.upsert_email_user(conn, "late@example.com")
+    tid = db.open_trade(conn, "ZZL", "1h", 1, 100.0, 98.0, quantity=2, user=late.id)
+    db.exit_trade(conn, tid, 98.0, 1, "stop", user=late.id)
+    db.exit_trade(conn, tid, 97.0, 1, "stop", user=late.id)
+    evening = ny_at(2, 23, 30)
+    conn.execute("UPDATE trades SET ts_closed=? WHERE id=?", (evening, tid))
+    conn.execute("UPDATE trade_exits SET ts=? WHERE trade_id=?", (evening, tid))
+    conn.commit()
+    sign_in(c, late)
+    there = (TODAY - timedelta(days=2)).strftime("%d %b %Y").lstrip("0")
+    page = flat(text(c.get("/trades/breakdown?limit=1")))
+    check("the breakdown dates a limit hit in New York", "<b>hit</b> on " + there in page
+          and "<b>hit</b> on " + web._day(evening) not in page, page[-1500:])
+    page = flat(text(c.get("/trades")))
+    check("and the journal each exit", page.count("stop, " + there) == 2, page[-3000:])
+    db.delete_trade(conn, tid)
+    sign_in(c, alice)
+    midnight = NOW - NOW % 86400 - 3 * 86400            # 00:00 UTC, the evening before there
+    coin = make_bars("ZZC-USD", "1d", midnight - 9 * 86400, 86400, 12)
+    check("a daily coin bar keeps its own day, and any other moment is New York's",
+          web._touched_day({"interval": "1d"}, coin, midnight) == web._day(midnight)
+          and web._touched_day({"interval": "1h"}, coin, midnight) == web._day_ny(midnight)
+          and web._day_ny(midnight) != web._day(midnight)
+          and web._touched_day({"interval": "1d"}, coin, midnight + 90 * 60)
+          == web._day_ny(midnight)
+          and web._touched_day({"interval": "1d"}, coin, None) == "")
+    check("a price is filled in without a feed's noise, and no coarser than it matters",
+          [web._plain_price(x) for x in (85.90824904048138, 101.0, 63012.341796875, 1.07345,
+                                         0.0000084213, 5000, None, float("nan"))]
+          == ["85.9082", "101", "63012.34", "1.07345", "0.0000084213", "5000", "", ""])
 
     # -----------------------------------------------------------------------
     head("FEWER THAN 30, AND NONE")
@@ -434,6 +501,22 @@ try:
     check("rules switched off say nothing",
           not journal.rules_check(conn, dan.id, web.config_mod.DEFAULTS, then, costs=COSTS))
 
+    # A trade typed in later is told about its own day, not about today.
+    late = journal.rules_check(conn, dan.id, dict(timed, max_trades_per_day=1), ny_at(1, 10, 31),
+                               present=ny_at(0, 12, 0))
+    check("a trade from an earlier day is told when it was entered",
+          journal.rules_words(late) == "Your rule said stop that day: you entered at 10:31 New "
+          "York time, after your last entry time of 10:30.", journal.rules_words(late))
+    late = journal.rules_check(conn, dan.id, dict(cfg, max_trades_per_day=1), then, costs=COSTS,
+                               present=NOW)
+    check("and so for the loss and the count", journal.rules_words(late) ==
+          "Your rules said stop that day: you had lost 2.1R that day (limit 2R) and you had "
+          "taken 3 trades that day (most 1).", journal.rules_words(late))
+    late = journal.rules_check(conn, dan.id, timed, ny_at(1, 10, 31), present=ny_at(1, 13, 0))
+    check("one from earlier today is still today's", journal.rules_words(late) ==
+          "Your rule says stop for today: you entered at 10:31 New York time, after your last "
+          "entry time of 10:30.", journal.rules_words(late))
+
     erin = A.upsert_email_user(conn, "erin@example.com")
     A.save_settings(conn, erin.id, {"max_trades_per_day": 2})
     sign_in(c, erin)
@@ -465,6 +548,15 @@ try:
     tagged = {g["key"]: g["trades"] for g in journal.breakdown(conn, erin.id, COSTS,
                                                                "broke_rule")}
     check("broken rules show up in the breakdown", tagged == {"yes": 1}, tagged)
+
+    # One typed in for yesterday is held to yesterday, and the page says so.
+    A.save_settings(conn, erin.id, {"max_trades_per_day": 2, "last_entry_time": "00:01"})
+    page = flat(text(c.post("/trades/open", data=dict(
+        form, opened=journal.entry_field(ny_at(1, 9, 45)),
+        opened_shown=journal.entry_field(NOW)))))
+    check("the stop page for an earlier day's trade never says today",
+          "Your rule said stop that day: you entered at 9:45 New York time" in page
+          and "Log it anyway?" in page and "Stop for today?" not in page, page[:1500])
 
     # The settings page keeps the rules.
     r = c.post("/settings", data={"daily_loss_limit_r": "2", "max_trades_per_day": "3",
@@ -527,6 +619,173 @@ try:
                                          opened_shown=shown))
     check("40 days back is refused in words", r.status_code == 400
           and "30 days" in text(r))
+
+    # -----------------------------------------------------------------------
+    head("EVERY TRADE CAN BE REACHED, AND THE COUNTS AGREE")
+    # -----------------------------------------------------------------------
+    hal = A.upsert_email_user(conn, "hal@example.com")
+    sign_in(c, hal)
+    put = ("INSERT INTO trades (account, symbol, interval, direction, status, ts_opened, entry, "
+           "stop, quantity, ts_closed, exit_price, exit_reason, r_multiple, pnl, user_id) "
+           "VALUES (?,?,'1d',1,?,?,100,99,?,?,?,?,?,?,?)")
+    for k in range(60):
+        conn.execute(put, ("paper", "OPN%d" % k, "open", NOW - 20 * 86400 + k, 1, None, None,
+                           None, None, None, hal.id))
+    # Opened in one order and closed in the other.
+    for k in range(130):
+        conn.execute(put, ("paper", "CLS%d" % k, "closed", NOW - 40 * 86400 + k, None,
+                           NOW - 1000 - k, 100.0, "manual", 0.0, 0.0, hal.id))
+    conn.execute(put, ("live", "LIVE1", "open", NOW, 1, None, None, None, None, None, hal.id))
+    conn.execute(put, ("live", "LIVE2", "closed", NOW, 1, NOW, 101.0, "manual", 1.0, 1.0,
+                       hal.id))
+    conn.commit()
+    page = text(c.get("/trades"))
+    check("every open position has its Close form",
+          page.count('action="/trades/close"') == 60 and "60 positions" in page
+          and "<b>OPN0</b>" in page, page.count('action="/trades/close"'))
+    check("the closed ones are a page at a time, and the heading gives the real number",
+          "130 trades, 1 to 100 shown" in flat(page) and "Page 1 of 2" in page
+          and page.count('action="/trades/review"') == 100, flat(page)[-600:])
+    check("the latest closed first", page.index("<b>CLS0</b>") < page.index("<b>CLS99</b>")
+          and "<b>CLS100</b>" not in page)
+    older = text(c.get("/trades?page=2"))
+    check("and the rest on the next page", "130 trades, 101 to 130 shown" in flat(older)
+          and "<b>CLS129</b>" in older and older.count('action="/trades/review"') == 30
+          and "?page=1#closed" in older and "?page=3" not in older)
+    check("a page that does not exist is the last one, and nonsense the first",
+          "<b>CLS129</b>" in text(c.get("/trades?page=99"))
+          and "<b>CLS0</b>" in text(c.get("/trades?page=x"))
+          and "<b>CLS0</b>" in text(c.get("/trades?page=-4")))
+    check("a journal of another name, which the figures leave out, is not listed",
+          "LIVE1" not in page and "LIVE2" not in page
+          and "LIVE1" not in text(c.get("/portfolio")))
+    check("an even trade is not coloured as a loss, and one with no size has no cash",
+          'class="r fig loss" data-label="R"' not in page
+          and not re.search(r'data-label="Cash">\s*0\.00', page))
+    check("the page says which figures are after costs and which before",
+          "These figures are after trading costs." in flat(page)
+          and "R and cash before costs" in flat(page))
+    last = conn.execute("SELECT id FROM trades WHERE symbol='CLS129'").fetchone()[0]
+    r = c.post("/trades/review", data={"trade_id": str(last), "followed_plan": "yes",
+                                       "lesson": "", "page": "2"})
+    check("a review on the second page comes back to it",
+          "page=2" in r.headers["Location"] and r.headers["Location"].endswith("#t%d" % last))
+    r = c.post("/trades/delete", data={"trade_id": str(last), "page": "2"})
+    check("and so does a delete", r.headers["Location"].endswith("/trades?page=2"))
+    front = flat(text(c.get("/")))
+    check("the front page shows 20 and says how many more", front.count("<td><b>OPN") == 20
+          and "The newest 20. 40 more in" in front)
+    # The oldest of them goes through its stop: it is not among the 20 listed.
+    real_mark = web._mark_to_market
+    web._mark_to_market = lambda trades: {
+        t["id"]: {"price": 98.0 if t["symbol"] == "OPN0" else 100.0, "r": 0.0, "as_of": "now",
+                  "status": "past stop" if t["symbol"] == "OPN0" else "open"} for t in trades}
+    try:
+        front = flat(text(c.get("/")))
+    finally:
+        web._mark_to_market = real_mark
+    check("and tells of a stop crossed on one it does not list",
+          "<b>OPN0</b> long:" in front
+          and "None of your open positions is past its stop" not in front, front[:1500])
+
+    # Every open position's price is read by the background check each round.
+    for k in range(60, db.MAX_OPEN_TRADES - 1):        # and the one of the other name
+        conn.execute(put, ("paper", "OPN%d" % k, "open", NOW - 86400, 1, None, None, None, None,
+                           None, hal.id))
+    conn.commit()
+    one = {"symbol": "ZZM", "direction": "long", "entry": "100", "stop": "99"}
+    r = c.post("/trades/open", data=one)
+    check("a journal holds so many open positions and no more, said in words",
+          r.status_code == 400 and "can hold 200 open positions at once" in text(r), text(r)[:400])
+    db.close_trade(conn, conn.execute("SELECT id FROM trades WHERE symbol='OPN0'").fetchone()[0],
+                   101.0)
+    check("and takes another once one is closed",
+          c.post("/trades/open", data=one).status_code == 302)
+    web._RATE.clear()
+    sign_in(c, carol)
+    limit, web.TRADES_PER_HOUR = web.TRADES_PER_HOUR, 2
+    try:
+        got = [c.post("/trades/open", data=one).status_code for _ in range(3)]
+    finally:
+        web.TRADES_PER_HOUR = limit
+        web._RATE.clear()
+    check("logging trades has an hourly budget", got == [302, 302, 429], got)
+
+    # -----------------------------------------------------------------------
+    head("A FORM SENT TWICE, AND NUMBERS NOTHING HAS")
+    # -----------------------------------------------------------------------
+    ivy = A.upsert_email_user(conn, "ivy@example.com")
+    sign_in(c, ivy)
+
+    def held():
+        return conn.execute("SELECT COUNT(*) FROM trades WHERE user_id=?",
+                            (ivy.id,)).fetchone()[0]
+
+    names = [re.search(r'name="form_id" value="([^"]+)"', text(c.get("/trades"))).group(1)
+             for _ in range(2)]
+    check("each journal page names its form", names[0] != names[1] and len(names[0]) > 10)
+    twice = dict(one, form_id=names[0], quantity="3", target="104")
+    got = [c.post("/trades/open", data=twice).status_code for _ in range(2)]
+    check("Add to journal pressed twice logs one trade", got == [302, 302] and held() == 1,
+          (got, held()))
+    c.post("/trades/open", data=dict(twice, entry="101"))
+    check("the same form sent again with another price is another trade", held() == 2, held())
+    c.post("/trades/open", data=dict(twice, form_id=names[1]))
+    check("and so is the same trade from a fresh form", held() == 3, held())
+    for _ in range(2):
+        c.post("/trades/open", data=one)
+    check("a form with no name is logged as it always was", held() == 5, held())
+    # Two presses at once: both get past the first look.
+    import threading
+    gate = threading.Barrier(2)
+    real_trail = web._trail_asked
+
+    def slow_trail(symbol, interval):
+        gate.wait(10)
+        return real_trail(symbol, interval)
+
+    answers = []
+
+    def press():
+        own = web.app.test_client()
+        sign_in(own, ivy)
+        answers.append(own.post("/trades/open",
+                                data=dict(twice, form_id="pressed-twice")).status_code)
+
+    web._trail_asked = slow_trail
+    try:
+        presses = [threading.Thread(target=press) for _ in range(2)]
+        for p in presses:
+            p.start()
+        for p in presses:
+            p.join()
+    finally:
+        web._trail_asked = real_trail
+    check("two presses at once log one", answers == [302, 302] and held() == 6,
+          (answers, held()))
+
+    huge = "99999999999999999999"
+    for path, form in (("/trades/close", {"price": "100"}),
+                       ("/trades/trail", {"trail": "5", "trail_kind": "pct"}),
+                       ("/trades/review", {"followed_plan": "yes"}), ("/trades/delete", {})):
+        r = c.post(path, data=dict(form, trade_id=huge))
+        check("%s with a number nothing has says there is no such trade" % path,
+              r.status_code == 400 and ("no such trade in your journal" in text(r)
+                                        or "not in your journal" in text(r)), r.status_code)
+        for bad in ({}, {"trade_id": "x"}):
+            r = c.post(path, data=dict(form, **bad))
+            check("and without one, that the form was incomplete", r.status_code == 400
+                  and "That form was incomplete. Go back and try again." in text(r),
+                  r.status_code)
+    r = c.post("/trades/take", data={"run_id": huge})
+    check("a plan nothing has is refused in words", r.status_code == 400
+          and "Something broke" not in text(r), r.status_code)
+    r = c.post("/trades/take", data={})
+    check("and one not named at all", r.status_code == 400
+          and "That form was incomplete." in text(r), r.status_code)
+    check("the review page and the picture are not found",
+          c.get("/trades/simulate?run_id=" + huge).status_code == 404
+          and c.get("/trades/%s/picture" % huge).status_code == 404)
 
     # -----------------------------------------------------------------------
     head("THE EXPORT")

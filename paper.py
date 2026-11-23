@@ -4,18 +4,18 @@
 Record what you actually took, let the bot mark it to market, and measure
 whether the process works before any real money is involved.
 
-    python paper.py take AAPL              open a trade from the bot's last plan
-    python paper.py open AAPL --entry 315 --stop 313.5 --target 317.5 --qty 60
-    python paper.py check                  mark open trades to market
-    python paper.py close 3 --price 317.5  close a position
-    python paper.py close 3 --price 317.5 --qty 20   close part of it
-    python paper.py trail 3 --pct 5        trail its stop 5% behind the best price
-    python paper.py list                   show open positions
-    python paper.py stats                  realised performance so far
-    python paper.py leaderboard            which strategies measure best
-    python paper.py runs                   recent analyses
+    paper.bat take AAPL              open a trade from the bot's last plan
+    paper.bat open AAPL --entry 315 --stop 313.5 --target 317.5 --qty 60
+    paper.bat check                  mark open trades to market
+    paper.bat close 3 --price 317.5  close a position
+    paper.bat close 3 --price 317.5 --qty 20   close part of it
+    paper.bat trail 3 --pct 5        trail its stop 5% behind the best price
+    paper.bat list                   show open positions
+    paper.bat stats                  realised performance so far
+    paper.bat leaderboard            which strategies measure best
+    paper.bat runs                   recent analyses
 
-Run with --help, or `python paper.py <command> --help`, for the full options.
+Run with --help, or `paper.bat <command> --help`, for the full options.
 """
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ from rich.table import Table
 
 from bot import config as config_mod
 from bot import database as db
-from bot.market import DataError, fetch_bars, format_price, split_factor_since
+from bot.market import (DataError, fetch_bars, format_price, normalise_symbol,
+                        split_factor_since)
 from bot.portfolio import atr_of, read_trade_stop, trade_interval, trail_from, trail_problem
 
 console = Console()
@@ -80,6 +81,7 @@ def _trade(conn, trade_id: int):
 def cmd_open(args, conn) -> int:
     """Open a position from explicit numbers."""
     direction = -1 if args.short else 1
+    interval = args.interval or config_mod.load()["interval"]
     trail = {}
     try:
         if args.trail is not None and args.trail_atr is not None:
@@ -88,7 +90,7 @@ def cmd_open(args, conn) -> int:
             trail = {"trail_pct": args.trail / 100.0}
         elif args.trail_atr is not None:
             try:
-                unit = atr_of(fetch_bars(args.symbol.upper(), args.interval))
+                unit = atr_of(fetch_bars(args.symbol.upper(), interval))
             except DataError as exc:
                 raise ValueError("could not read %s's prices to measure its ATR: %s"
                                  % (args.symbol.upper(), exc))
@@ -97,7 +99,7 @@ def cmd_open(args, conn) -> int:
                                  "use --trail with a percentage" % args.symbol.upper())
             trail = {"trail_dist": args.trail_atr * unit, "trail_atr": args.trail_atr}
         trade_id = db.open_trade(
-            conn, symbol=args.symbol, interval=args.interval, direction=direction,
+            conn, symbol=args.symbol, interval=interval, direction=direction,
             entry=args.entry, stop=args.stop, target1=args.target,
             target2=args.target2, quantity=args.qty,
             risk_amount=(abs(args.entry - args.stop) * args.qty) if args.qty else None,
@@ -133,49 +135,66 @@ def cmd_take(args, conn) -> int:
     This is the path that keeps the journal honest: the trade recorded is the
     trade the bot actually proposed, not a remembered version of it.
     """
-    rows = db.recent_runs(conn, symbol=args.symbol, limit=10)
-    usable = [r for r in rows if r["action"] in ("BUY", "SHORT", "WAIT")
-              and r["entry"] and r["stop"]]
-    if not usable:
+    # The ticker an analysis would use, so "btc" finds the run of BTC-USD; as
+    # typed when there is none, which is the fund listed as BTC.
+    try:
+        sym = normalise_symbol(args.symbol)
+    except DataError:
         sym = args.symbol.upper()
-        if not rows:
-            console.print("[yellow]No analysis recorded for %s yet.[/]" % sym)
-            console.print("[dim]Run: run.bat --symbol %s[/]" % sym)
-            return 1
+    rows = db.recent_runs(conn, symbol=sym, limit=1)
+    if not rows and sym != args.symbol.upper():
+        rows = db.recent_runs(conn, symbol=args.symbol, limit=1)
+        sym = args.symbol.upper() if rows else sym
+    if not rows:
+        console.print("[yellow]No analysis recorded for %s yet.[/]" % sym)
+        console.print("[dim]Run: run.bat --symbol %s[/]" % sym)
+        return 1
+    # Only the newest: an older plan is one the bot has since replaced.
+    run = latest = rows[0]
+    if not (run["action"] in ("BUY", "SHORT", "WAIT") and run["entry"] and run["stop"]):
         # Distinguish "never analysed" from "analysed and told you not to".
-        latest = rows[0]
         console.print(Panel(
             "The most recent %s analysis said [bold]%s[/], %s ago.\n\n%s\n\n"
             "[dim]The journal only takes plans the bot actually proposed. To "
-            "record a trade it advised against, use `paper.py open` with "
+            "record a trade it advised against, use `paper.bat open` with "
             "explicit numbers.[/]" % (
                 sym, latest["action"], _age(latest["ts"]),
                 latest["headline"] or ""),
             title="Nothing to take", border_style="yellow"))
         return 1
 
-    run = usable[0]
     age_min = (int(time.time()) - int(run["ts"])) / 60.0
     if age_min > args.max_age and not args.force:
         console.print("[yellow]The most recent %s plan is %.0f minutes old, past "
-                      "the %d minute limit.[/]" % (args.symbol.upper(), age_min, args.max_age))
+                      "the %d minute limit.[/]" % (sym, age_min, args.max_age))
         console.print("[dim]Re-run the analysis, or pass --force to take it anyway.[/]")
         return 1
 
-    direction = 1 if run["action"] in ("BUY", "WAIT") else -1
+    # Read off the plan itself, as the website does: a WAIT may be either side.
+    direction = 1 if run["stop"] < run["entry"] else -1
     if run["action"] == "WAIT" and not args.force:
         console.print("[yellow]That plan said WAIT for %s, meaning price had not "
                       "reached the entry yet.[/]" % format_price(run["entry"]))
         console.print("[dim]Pass --force if the level has since been reached.[/]")
         return 1
 
+    held = conn.execute("SELECT id FROM trades WHERE run_id=? AND account=? AND "
+                        "status='open' ORDER BY id LIMIT 1",
+                        (run["id"], args.account)).fetchone()
+    if held is not None and not args.force:
+        console.print("[yellow]That plan is already in the journal, as #%d.[/]" % held["id"])
+        console.print("[dim]Pass --force to open it a second time.[/]")
+        return 1
+
+    per_unit = abs(run["entry"] - run["stop"])
     qty = args.qty
-    risk_amount = None
     if qty is None:
         cfg = config_mod.load()
-        account = args.account_size or cfg["account_size"]
+        account = args.account_size if args.account_size is not None else cfg["account_size"]
+        if not 0 < account < float("inf"):
+            console.print("[red]Rejected:[/] the account size must be more than zero")
+            return 2
         risk_amount = account * cfg["risk_per_trade_pct"] / 100.0
-        per_unit = abs(run["entry"] - run["stop"])
         qty = (risk_amount / per_unit) if per_unit > 0 else 0
         cap = account * cfg["max_position_pct"] / 100.0
         if qty * run["entry"] > cap:
@@ -184,13 +203,15 @@ def cmd_take(args, conn) -> int:
         if qty <= 0:
             console.print("[red]Account too small for one unit at this stop distance.[/]")
             return 2
-        risk_amount = qty * per_unit
+    risk_amount = qty * per_unit
 
     try:
         trade_id = db.open_trade(
             conn, symbol=run["symbol"], interval=run["interval"], direction=direction,
             entry=float(run["entry"]), stop=float(run["stop"]),
-            target1=run["target1"], target2=run["target2"], quantity=qty,
+            # A target at or below zero is no price the market can reach.
+            target1=run["target1"] if (run["target1"] or 0) > 0 else None,
+            target2=run["target2"] if (run["target2"] or 0) > 0 else None, quantity=qty,
             risk_amount=risk_amount, run_id=int(run["id"]), account=args.account,
             strategy_note="from run #%d (%s)" % (run["id"], run["action"]))
     except ValueError as exc:
@@ -203,7 +224,7 @@ def cmd_take(args, conn) -> int:
             trade_id, _side(direction), run["symbol"], run["id"], _age(run["ts"]),
             format_price(run["entry"]), format_price(run["stop"]),
             format_price(run["target1"]) if run["target1"] else "-",
-            qty, format_price(risk_amount or 0)),
+            qty, format_price(risk_amount)),
         title="Opened from plan", border_style="green"))
     return 0
 
@@ -331,7 +352,7 @@ def cmd_check(args, conn) -> int:
     was touched intraday and recovered is still a stop that would have filled,
     and only checking the current price would hide that.
     """
-    open_trades = db.list_trades(conn, status="open", account=args.account)
+    open_trades = db.list_trades(conn, status="open", account=args.account, limit=None)
     if not open_trades:
         console.print("[dim]No open positions.[/]")
         return 0
@@ -445,7 +466,7 @@ def cmd_check(args, conn) -> int:
         lines = ["#%d %s is at or beyond its %s" % (
             i, s, "stop" if "STOP" in st else "target") for i, s, st in alerts]
         console.print(Panel("\n".join(lines) +
-                            "\n\n[dim]Close them with: python paper.py close <id> "
+                            "\n\n[dim]Close them with: paper.bat close <id> "
                             "--price <fill> --reason stop|target[/]",
                             title="Action needed", border_style="yellow"))
     return 0
@@ -488,7 +509,11 @@ def cmd_list(args, conn) -> int:
 
 
 def cmd_stats(args, conn) -> int:
-    s = db.journal_summary(conn, account=args.account)
+    # After costs, as the website counts the same trades.
+    cfg = config_mod.load()
+    s = db.journal_summary(conn, account=args.account, costs={
+        kind: float(cfg["cost_bps_" + kind]) / 10000.0
+        for kind in ("equity", "crypto", "futures", "other")})
     if s["trades"] == 0:
         console.print(Panel("No closed trades yet. %d open.\n\n"
                             "[dim]Record trades as you take them, then run this "
@@ -505,7 +530,8 @@ def cmd_stats(args, conn) -> int:
     t.add_row("Hit rate", "%.0f%%   (%d wins, %d losses)" % (
         s["hit_rate"] * 100, s["wins"], s["losses"]))
     colour = "green" if s["expectancy_r"] > 0 else "red"
-    t.add_row("Expectancy", "[%s]%+.3fR[/] per trade" % (colour, s["expectancy_r"]))
+    t.add_row("Expectancy", "[%s]%+.3fR[/] per trade, after costs" % (
+        colour, s["expectancy_r"]))
     t.add_row("Total", "[%s]%+.2fR[/]   ·   P&L %.2f" % (
         colour, s["total_r"], s["pnl"]))
     t.add_row("Average win", "%+.2fR" % s["avg_win_r"])
@@ -519,6 +545,8 @@ def cmd_stats(args, conn) -> int:
                 "Treat everything above as provisional until you pass about "
                 "thirty.[/]" % s["trades"])
     console.print(Panel(t, title="Paper trading performance", border_style="blue"))
+    console.print("[dim]Every figure here is after trading costs. The R of each trade "
+                  "in `paper.bat list --all` is before them.[/]")
     if s.get("open_in_part"):
         console.print("[dim]Not counted above: %.2f taken by closing part of %d "
                       "position%s still open. A trade counts once it is closed in "
@@ -595,7 +623,8 @@ def cmd_db(args, conn) -> int:
                        ("strategy_stats", "Strategy records"), ("trades", "Trades"),
                        ("symbols_seen", "Instruments seen")):
         t.add_row(label, "{:,}".format(s[key]))
-    console.print(Panel(t, title="Database: %s" % db.default_path(),
+    console.print(Panel(t, title="Database: %s" % (
+        os.path.abspath(args.db) if args.db else db.default_path()),
                         border_style="blue"))
     return 0
 
@@ -622,7 +651,8 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--target2", type=float)
     o.add_argument("--qty", type=float)
     o.add_argument("--short", action="store_true", help="record a short instead of a long")
-    o.add_argument("--interval", default="5m")
+    o.add_argument("--interval", help="bar size it is marked on (default: the one in "
+                                      "your settings)")
     o.add_argument("--note", help="which strategy or reason drove this")
     o.add_argument("--notes")
     o.add_argument("--trail", type=float, metavar="PCT",
@@ -638,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--max-age", type=int, default=120,
                    help="reject plans older than this many minutes (default 120)")
     t.add_argument("--force", action="store_true",
-                   help="take the plan even if stale or marked WAIT")
+                   help="take the plan even if stale, marked WAIT or already taken")
     t.set_defaults(func=cmd_take)
 
     c = sub.add_parser("close", help="close an open position, or part of it")

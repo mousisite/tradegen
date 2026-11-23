@@ -39,7 +39,7 @@ import numpy as np
 from . import clock, liquidity
 from . import indicators as ind
 from . import sessions
-from .market import (DataError, fetch_bars, format_price, split_factor_since,
+from .market import (DataError, SymbolNotFound, fetch_bars, format_price, split_factor_since,
                      split_words, splits_since)
 
 # The groups the Monitor form lists the kinds under, in this order.
@@ -954,6 +954,14 @@ def _after_splits(conn, row, bars):
 # once more, which is the safe way to forget.
 _STOPS_LOOKED: Dict[int, float] = {}
 _STOPS_LOCK = threading.Lock()
+# Symbols, with a bar size, in somebody's journal that the source has nothing
+# under, as (times running, when last asked). A made-up ticker would otherwise
+# be asked for, and refused, every round for ever: after twice running the
+# background loop asks once an hour. Twice, because a real ticker can be
+# missing for a moment.
+_STOPS_MISSING: Dict[Tuple[str, str], Tuple[int, float]] = {}
+MISSING_TRIES = 2
+MISSING_WAIT = 3600.0
 
 
 def check_stops(conn, user=None, skip_closed: bool = False,
@@ -981,6 +989,10 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             still = {int(r["id"]) for r in rows}
             for gone in [k for k in _STOPS_LOOKED if k not in still]:
                 del _STOPS_LOOKED[gone]
+            held = {r["symbol"] for r in rows}
+            for gone in [k for k in _STOPS_MISSING if k[0] not in held]:
+                del _STOPS_MISSING[gone]
+        missing = dict(_STOPS_MISSING)
         looked = dict(_STOPS_LOOKED)
     skipped = 0
     if skip_closed:
@@ -999,13 +1011,21 @@ def check_stops(conn, user=None, skip_closed: bool = False,
 
     data, errors = {}, []
     for key in sorted({(r["symbol"], bar_size(r)) for r in rows}):
+        tries, asked = missing.get(key, (0, 0.0))
+        if skip_closed and tries >= MISSING_TRIES and now - asked < MISSING_WAIT:
+            continue
         try:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
             data[key] = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
             sessions.note(key[0], data[key], now)
+            with _STOPS_LOCK:
+                _STOPS_MISSING.pop(key, None)
         except Exception as exc:
             errors.append({"symbol": key[0], "error": str(exc)[:120]})
+            if isinstance(exc, SymbolNotFound):
+                with _STOPS_LOCK:
+                    _STOPS_MISSING[key] = (tries + 1, now)
 
     fired: List[Fired] = []
     for row in rows:

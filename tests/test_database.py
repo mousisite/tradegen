@@ -1,9 +1,17 @@
-"""Exercise the database: schema, runs, signals, stats, journal, invariants."""
+"""Exercise the database: schema, runs, signals, stats, journal, invariants.
+
+No network: the bars are scripted ones from tests/scenarios.py.
+"""
 import sys, os, tempfile
+import sqlite3
+import threading
+import time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness
+import scenarios
 from bot import config as config_mod, database as db
-from bot.market import fetch_bars
 from bot.strategies import build_context, evaluate
 from bot.levels import build_levels
 from bot.calibrate import calibrate
@@ -11,20 +19,33 @@ from bot.learning import measure_strategies
 from bot.sentiment import Sentiment
 from bot.decision import decide
 
-tmp = os.path.join(tempfile.gettempdir(), "t_stockbot.db")
-for suffix in ("", "-wal", "-shm"):
-    if os.path.exists(tmp + suffix):
-        os.remove(tmp + suffix)
+# A folder of its own, so two copies of this suite at once do not share a file.
+tmp, _cfg_path = harness.isolate("database")
+fails = []
 
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+
+def close(a, b, tol=1e-9):
+    return a is not None and b is not None and abs(float(a) - float(b)) < tol
+
+
+print("--- runs and statistics ---")
 conn = db.connect(tmp)
-print("connected, schema created ->", tmp)
-print("initial stats:", db.stats(conn))
+check("a new file starts empty", not any(db.stats(conn).values()), db.stats(conn))
 
 cfg = config_mod.load()
 flat = Sentiment(0.0, 0.0, 0.0, 0, 0, 0, 0, "skipped")
+reports, saved = {}, 0
 
-for sym in ["AAPL", "BTC-USD"]:
-    bars = fetch_bars(sym, "5m")
+for sym, bars in (("AAPL", scenarios.stock_series(2000)),
+                  ("BTC-USD", scenarios.coin_series(2000))):
+    bars.symbol = sym
     ctx = build_context(bars)
     i = len(bars) - 1
     sigs, comp, reg = evaluate(ctx, i, cfg["strategy_weights"])
@@ -37,18 +58,53 @@ for sym in ["AAPL", "BTC-USD"]:
     rid = db.record_run(conn, bars, plan, sigs, comp, reg, cal, flat, source="test")
     rep = measure_strategies(ctx, cfg["stop_atr_multiple"], cfg["target_atr_multiple"],
                              config_mod.horizon_for(bars.interval, cfg), cfg["calibration_stride"], bps)
-    nrows = db.save_strategy_stats(conn, bars.symbol, bars.interval, rep)
-    print("  %-9s run_id=%d action=%-5s signals=%d strategy_stat_rows=%d" % (
-        sym, rid, plan.action, len(sigs), nrows))
+    wrote = db.save_strategy_stats(conn, bars.symbol, bars.interval, rep)
+    reports[sym] = rep
+    saved += wrote
+    row = conn.execute("SELECT * FROM runs WHERE id=?", (rid,)).fetchone()
+    check("the run of %s is kept as it was made" % sym,
+          row["symbol"] == sym and row["action"] == plan.action and row["source"] == "test"
+          and row["interval"] == "5m" and row["regime_trend"] == reg.trend
+          and close(row["composite"], float(getattr(comp, "score", comp)))
+          and close(row["price"], bars.last_price), dict(row))
+    check("with a row for each strategy measured", wrote > 30, wrote)
 
-print("\nafter runs:", db.stats(conn))
+now = db.stats(conn)
+check("both runs and every statistic are counted",
+      now["runs"] == 2 and now["strategy_stats"] == saved and now["symbols_seen"] == 2,
+      (now, saved))
+check("and no strategy scores or headlines are kept with them",
+      now["run_signals"] == 0 and now["run_news"] == 0, now)
+conn.execute("UPDATE runs SET ts=ts-60 WHERE symbol='AAPL'")
+conn.commit()
+check("the newest run is listed first", [r["symbol"] for r in db.recent_runs(conn, limit=5)]
+      == ["BTC-USD", "AAPL"]
+      and [r["symbol"] for r in db.recent_runs(conn, symbol="aapl")] == ["AAPL"])
 
-# Idempotency: saving the same snapshot again must not inflate the sample count.
-before = db.stats(conn)["strategy_stats"]
-db.save_strategy_stats(conn, bars.symbol, bars.interval, rep)
-after = db.stats(conn)["strategy_stats"]
-assert after == before, "re-saving the same stats added %d rows" % (after - before)
-print("re-saving stats added no rows: OK")
+# Saving the same snapshot again must not inflate the sample count.
+samples = conn.execute("SELECT SUM(n) FROM strategy_stats").fetchone()[0]
+again = db.save_strategy_stats(conn, "AAPL", "5m", reports["AAPL"])
+check("saving the same report again adds no row and no sample",
+      again > 0 and db.stats(conn)["strategy_stats"] == saved
+      and conn.execute("SELECT SUM(n) FROM strategy_stats").fetchone()[0] == samples)
+
+print("\n--- leaderboard across instruments ---")
+board = db.strategy_leaderboard(conn, minimum=40, limit=8)
+check("it ranks on skill before costs, best first, from enough examples",
+      0 < len(board) <= 8 and all(r["n"] >= 40 for r in board)
+      and [r["gross_exp"] for r in board] == sorted((r["gross_exp"] for r in board),
+                                                    reverse=True),
+      [dict(r) for r in board])
+# The stored statistics of one strategy, added up by hand.
+if board:
+    top = board[0]
+    parts = conn.execute("SELECT * FROM strategy_stats WHERE strategy=? AND regime='all'",
+                         (top["strategy"],)).fetchall()
+    check("its figures are the stored ones added up over instruments",
+          top["n"] == sum(r["n"] for r in parts) and top["symbols"] == len(parts)
+          and close(top["gross_exp"], sum(r["sum_r_gross"] for r in parts) / top["n"])
+          and close(top["net_exp"], sum(r["sum_r"] for r in parts) / top["n"])
+          and close(top["hit_rate"], sum(r["wins"] for r in parts) / top["n"]), dict(top))
 
 print("\n--- journal ---")
 t1 = db.open_trade(conn, "AAPL", "5m", 1, entry=315.00, stop=313.50, target1=317.25,
@@ -57,61 +113,74 @@ t2 = db.open_trade(conn, "BTC-USD", "5m", -1, entry=78000, stop=78400, target1=7
                    quantity=0.05, risk_amount=20.0)
 t3 = db.open_trade(conn, "NVDA", "1h", 1, entry=220.0, stop=218.0, target1=224.0,
                    quantity=40, risk_amount=80.0)
-print("opened trades:", t1, t2, t3, " open count:", db.count_open(conn))
+check("three trades are open", db.count_open(conn) == 3 and len({t1, t2, t3}) == 3)
 
 r = db.close_trade(conn, t1, exit_price=317.25, exit_reason="target")
-print("closed long at target -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a long closed at its target makes its planned R, 1.5, and 135 cash",
+      close(r["r_multiple"], 1.5) and close(r["pnl"], 135.0), r)
 r = db.close_trade(conn, t2, exit_price=78400, exit_reason="stop")
-print("closed short at stop  -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a short closed at its stop loses 1R, 20 cash",
+      close(r["r_multiple"], -1.0) and close(r["pnl"], -20.0), r)
 r = db.close_trade(conn, t3, exit_price=219.0, exit_reason="manual")
-print("closed long partial   -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a long closed by hand half way to its stop loses 0.5R, 40 cash",
+      close(r["r_multiple"], -0.5) and close(r["pnl"], -40.0), r)
+kept = {row["id"]: row for row in db.list_trades(conn, status="closed")}
+check("the closed rows keep it, with the price and the reason",
+      len(kept) == 3 and close(kept[t1]["r_multiple"], 1.5)
+      and close(kept[t2]["exit_price"], 78400) and kept[t3]["exit_reason"] == "manual"
+      and all(row["ts_closed"] for row in kept.values()))
 
-print("\nsummary:", {k: (round(v, 4) if isinstance(v, float) else v)
-                     for k, v in db.journal_summary(conn).items()})
+whole = db.journal_summary(conn)
+check("the summary adds them up: one won, two lost, 0R and 75 cash in all",
+      whole["trades"] == 3 and whole["open"] == 0 and whole["wins"] == 1
+      and whole["losses"] == 2 and close(whole["hit_rate"], 1 / 3)
+      and close(whole["expectancy_r"], 0.0) and close(whole["total_r"], 0.0)
+      and close(whole["pnl"], 75.0) and close(whole["avg_win_r"], 1.5)
+      and close(whole["avg_loss_r"], -0.75) and close(whole["profit_factor"], 1.0)
+      and close(abs(whole["max_drawdown_r"]), 1.5), whole)
+costly = db.journal_summary(conn, costs={"equity": 0.001, "crypto": 0.002})
+paid = (315 * 0.001 / 1.5 + 78000 * 0.002 / 400 + 220 * 0.001 / 2) / 3
+check("and after costs, each on its own kind of instrument",
+      close(costly["expectancy_r"], -paid)
+      and close(costly["pnl"], 75 - 315 * 60 * 0.001 - 78000 * 0.05 * 0.002 - 220 * 40 * 0.001),
+      costly)
 
 print("\n--- validation guards ---")
+held = db.stats(conn)["trades"]
+nan, inf = float("nan"), float("inf")
 for desc, fn in [
     ("long with stop above entry", lambda: db.open_trade(conn, "X", "5m", 1, 100, 101)),
     ("short with stop below entry", lambda: db.open_trade(conn, "X", "5m", -1, 100, 99)),
     ("bad direction", lambda: db.open_trade(conn, "X", "5m", 0, 100, 99)),
+    ("an entry of zero", lambda: db.open_trade(conn, "X", "5m", -1, 0, 99)),
+    ("a stop below zero", lambda: db.open_trade(conn, "X", "5m", 1, 100, -1)),
+    ("an entry that is no number", lambda: db.open_trade(conn, "X", "5m", 1, nan, 99)),
+    ("a size of zero", lambda: db.open_trade(conn, "X", "5m", 1, 100, 99, quantity=0)),
+    ("a target on the losing side", lambda: db.open_trade(conn, "X", "5m", 1, 100, 99,
+                                                          target1=98)),
     ("closing an already-closed trade", lambda: db.close_trade(conn, t1, 300)),
     ("closing a nonexistent trade", lambda: db.close_trade(conn, 9999, 300)),
+    ("deleting a nonexistent trade", lambda: db.delete_trade(conn, 9999)),
 ]:
     try:
         fn()
-        print("  BAD  %s was accepted" % desc)
+        check("%s is refused" % desc, False, "it was accepted")
     except ValueError as e:
-        print("  OK   %s rejected: %s" % (desc, str(e)[:52]))
-
-print("\n--- leaderboard across instruments ---")
-for row in db.strategy_leaderboard(conn, minimum=100, limit=8):
-    print("  %-22s %-14s n=%-6d gross=%+.3fR net=%+.3fR hit=%.0f%% symbols=%d" % (
-        row["strategy"], row["family"], row["n"], row["gross_exp"],
-        row["net_exp"], row["hit_rate"]*100, row["symbols"]))
-
-print("\n--- recent runs ---")
-for row in db.recent_runs(conn, limit=5):
-    print("  #%d %-9s %-5s %-5s comp=%+.2f action=%s" % (
-        row["id"], row["symbol"], row["interval"], row["regime_trend"],
-        row["composite"], row["action"]))
-
-print("\nfinal stats:", db.stats(conn))
+        check("%s is refused" % desc, True, e)
+t4 = db.open_trade(conn, "X", "5m", 1, 100, 99, quantity=2)
+for desc, price in (("zero", 0), ("no number", nan), ("no end", inf)):
+    try:
+        db.close_trade(conn, t4, price)
+        check("closing at a price of %s is refused" % desc, False, "it was accepted")
+    except ValueError:
+        check("closing at a price of %s is refused" % desc, True)
+check("and nothing refused is kept", db.stats(conn)["trades"] == held + 1
+      and conn.execute("SELECT status FROM trades WHERE id=?", (t4,)).fetchone()[0] == "open"
+      and close(conn.execute("SELECT exit_price FROM trades WHERE id=?",
+                             (t1,)).fetchone()[0], 317.25))
 conn.close()
 
 print("\n--- opening a connection, and migrating ---")
-import sqlite3
-import threading
-import time
-
-fails = []
-
-
-def check(name, ok, detail=""):
-    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
-                         ("  " + str(detail)) if detail and not ok else ""))
-    if not ok:
-        fails.append(name)
-
 
 # Every request opens a connection. Doing the migrations each time needed the
 # write lock, so a long write made every page, and the health check, wait.
@@ -139,7 +208,7 @@ def old_file(path):
     raw = sqlite3.connect(path)
     for table, column in (("users", "digest_week"), ("users", "weekly_email"),
                           ("strategy_stats", "sum_r_gross"), ("alerts", "state"),
-                          ("trades", "breach_noticed"), ("calls", "excluded")):
+                          ("trades", "breach_noticed"), ("trades", "form_id"), ("calls", "excluded")):
         raw.execute("ALTER TABLE %s DROP COLUMN %s" % (table, column))
     raw.commit()
     raw.close()
@@ -153,13 +222,14 @@ def columns(path, table):
         raw.close()
 
 
-old = os.path.join(tempfile.gettempdir(), "t_stockbot_old.db")
+old = os.path.join(os.path.dirname(tmp), "older.db")
 old_file(old)
 db.migrate(old)
 check("migrating an older file adds what it lacks",
       {"digest_week", "weekly_email"} <= columns(old, "users")
       and "sum_r_gross" in columns(old, "strategy_stats")
       and "state" in columns(old, "alerts")
+      and {"breach_noticed", "form_id"} <= columns(old, "trades")
       and "excluded" in columns(old, "calls"))
 try:
     db.migrate(old)
@@ -208,6 +278,19 @@ except sqlite3.OperationalError as exc:
     check("a file deleted and opened again gets its schema", False, exc)
 finally:
     again.close()
+
+# paper.py --db journal.db: a file name with no folder is one in this folder.
+here = os.getcwd()
+os.chdir(tempfile.mkdtemp(prefix="stockbot-bare-"))
+try:
+    bare = db.connect("bare.db")
+    bare.execute("SELECT COUNT(*) FROM trades").fetchone()
+    bare.close()
+    check("a database named without a folder opens", os.path.exists("bare.db"))
+except OSError as exc:
+    check("a database named without a folder opens", False, exc)
+finally:
+    os.chdir(here)
 
 print("\nDATABASE OK" if not fails else "\nFAILURES: %s" % fails)
 

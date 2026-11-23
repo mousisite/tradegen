@@ -59,7 +59,7 @@
 {% if result %}
 {% set src = result.source %}
 <section>
-  <div class="sechead"><h2>Over {{ result.trades }} trades {{ help('survival') }}</h2>
+  <div class="sechead"><div><h2 style="display:inline">Over {{ result.trades }} trades</h2>{{ help('survival') }}</div>
     <span class="tail">{{ '{:,}'.format(result.paths) }} reshuffles</span></div>
   <p class="prose" style="margin-bottom:var(--s2)">
     {% if src.from == 'journal' %}Drawn from your {{ src.trades }} closed trades, after

@@ -37,7 +37,7 @@
               {% if m.touched_at and not beyond %}
                 traded through its {{ 'trailing ' if m.trail }}stop of
                 {{ (m.touched_stop or stop)|price }} at {{ m.touched|price }}
-                on {{ m.touched_at|day }}, and is at {{ m.price|price }} now.
+                on {{ m.touched_day }}, and is at {{ m.price|price }} now.
               {% else %}
                 at {{ m.price|price }}, past its {{ 'trailing ' if m.trail }}stop of {{ stop|price }}.
               {% endif %}
@@ -365,11 +365,11 @@
         <div class="v fig">{{ summary.hit_rate|pct }}</div>
         <div class="n">{{ summary.wins }} won · {{ summary.losses }} lost{% if summary.scratches %} · {{ summary.scratches }} even{% endif %}</div></div>
       <div class="f"><div class="k">Expectancy</div>
-        <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' }}">
+        <div class="v fig {{ 'gain' if summary.expectancy_r > 0 else 'loss' if summary.expectancy_r < 0 }}">
           {{ summary.expectancy_r|signed(3) }}R</div>
         <div class="n">per trade{% if summary.after_costs %}, after costs{% endif %}</div></div>
       <div class="f"><div class="k">Total</div>
-        <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' }}">
+        <div class="v fig {{ 'gain' if summary.total_r > 0 else 'loss' if summary.total_r < 0 }}">
           {{ summary.total_r|signed(2) }}R</div>
         <div class="n">{{ summary.pnl|money }} cash</div></div>
       <div class="f"><div class="k">Worst drawdown</div>
@@ -408,6 +408,11 @@
         </tbody>
       </table>
     </div>
+    {% if open_more %}
+      <p class="prose" style="padding:var(--s2) var(--s3) var(--s3);margin:0">The newest
+        {{ open_trades|length }}. {{ open_more }} more in
+        <a href="{{ url_for('trades') }}">the journal</a>.</p>
+    {% endif %}
   </div>
   {% endif %}
 </section>
@@ -446,7 +451,7 @@
                 {{ a|capitalize }}</span>
             </td>
             <td class="r fig" data-label="Entry">{{ r['entry']|price }}</td>
-            <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' }}" data-label="Expectancy">
+            <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' if (r['expectancy_r'] or 0) < 0 }}" data-label="Expectancy">
               {{ r['expectancy_r']|signed(3) ~ 'R' if r['expectancy_r'] is not none else '—' }}</td>
             <td class="r"><a data-working
               href="{{ url_for('analyse', symbol=r['symbol'], interval=r['interval'],

@@ -11,6 +11,7 @@ import json
 import os as _os
 import re
 import sys as _sys
+import threading
 import time
 from types import SimpleNamespace as NS
 
@@ -360,6 +361,37 @@ try:
     check("pressing Confirm twice logs it once",
           len(db.list_trades(conn, symbol="ZZBUY", user=alice.id)) == 1)
     conn.close()
+    # Two presses at once: both get past the first look while prices are read.
+    both = add_run(alice, "ZZBOTH", "BUY", 100.0, 95.0, 110.0)
+    gate = threading.Barrier(2)
+    real_trail = web._trail_asked
+
+    def slow_trail(symbol, interval):
+        gate.wait(10)
+        return real_trail(symbol, interval)
+
+    answers = []
+
+    def press():
+        own = web.app.test_client()
+        sign_in(own, alice)
+        answers.append(own.post("/trades/take", data={"run_id": both}).status_code)
+
+    web._trail_asked = slow_trail
+    try:
+        presses = [threading.Thread(target=press) for _ in range(2)]
+        for p in presses:
+            p.start()
+        for p in presses:
+            p.join()
+    finally:
+        web._trail_asked = real_trail
+    conn = db.connect(DB)
+    check("pressing it twice at once logs it once too", answers == [302, 302]
+          and len(db.list_trades(conn, symbol="ZZBOTH", user=alice.id)) == 1, answers)
+    for x in db.list_trades(conn, symbol="ZZBOTH", user=alice.id):
+        db.delete_trade(conn, x["id"])
+    conn.close()
     body = text(c.get("/trades/simulate?run_id=%d" % buy))
     check("and the review then says it is already in the journal",
           "already in your journal" in body and 'action="/trades/take"' not in body)
@@ -368,6 +400,19 @@ try:
     body = text(c.get("/trades/simulate?run_id=%d" % short))
     check("a SHORT is shown as a short", '<span class="word">Short</span>' in body
           and "it gains if the price falls" in body)
+    # A short whose second target is below zero, a price nothing reaches, can
+    # still be confirmed: that target is left out.
+    deep = add_run(alice, "ZZDEEP", "SHORT", 1.0, 1.5, 0.2)
+    conn = db.connect(DB)
+    conn.execute("UPDATE runs SET target2=-0.4 WHERE id=?", (deep,))
+    conn.commit()
+    r = c.post("/trades/take", data={"run_id": deep})
+    got = db.list_trades(conn, symbol="ZZDEEP", user=alice.id)
+    check("a plan with a target below zero is logged without that target",
+          r.status_code == 302 and len(got) == 1 and got[0]["target2"] is None
+          and got[0]["target1"] == 0.2, (r.status_code, [dict(x) for x in got]))
+    db.delete_trade(conn, got[0]["id"]) if got else None
+    conn.close()
     wait = add_run(alice, "ZZWAIT", "WAIT", 95.0, 90.0, 105.0)
     r = c.get("/trades/simulate?run_id=%d" % wait)
     check("a WAIT has nothing to review", r.status_code == 400

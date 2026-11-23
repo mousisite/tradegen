@@ -438,7 +438,8 @@ to show what risking 0.5% to 10% a trade does over 100 trades. The tags,
 review and rule columns are on the trades table and in the journal export.
 
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
-where price never reached the entry, and plans older than two hours. It records
+where price never reached the entry, plans older than two hours, and a plan
+already open in the journal. It reads the newest analysis only. It records
 the trade the bot actually recommended rather than a remembered version. Use
 `paper.bat open` with explicit numbers to log anything else.
 

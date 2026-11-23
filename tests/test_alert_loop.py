@@ -192,6 +192,34 @@ try:
     check("and it is in the owner's history",
           any(e["kind"] == "stop_breach" and e["trade_id"] == long_id
               for e in db.event_list(conn, alice.id)))
+    # A made-up ticker in a journal was asked for, and refused, every round.
+    made_up = db.open_trade(conn, "NOSUCH", "1d", 1, entry=22.0, stop=21.0, user=alice.id)
+
+    def nothing_there(interval):
+        raise web.market_mod.SymbolNotFound("nothing under that symbol")
+
+    SERIES["NOSUCH"] = nothing_there
+    began = time.time()
+
+    def asked_at(when, **how):
+        del ASKED[:]
+        alerts.check_stops(conn, now=began + when, **how)
+        return ("NOSUCH", "1d") in ASKED
+
+    check("a ticker the source has nothing under is asked for twice running, then left",
+          [asked_at(when, skip_closed=True) for when in (0, 300, 600, 3500)]
+          == [True, True, False, False])
+    check("but not by a check someone asked for", asked_at(700, user=alice.id))
+    check("and it is asked for again an hour later", asked_at(700 + 3601, skip_closed=True))
+    del SERIES["NOSUCH"]
+    PRICE["NOSUCH"] = 20.0
+    asked_at(8000 + 700, skip_closed=True)
+    check("a ticker that comes back is watched as before", asked_at(9000, skip_closed=True)
+          or conn.execute("SELECT breach_noticed FROM trades WHERE id=?",
+                          (made_up,)).fetchone()[0] is not None)
+    db.delete_trade(conn, made_up)
+    alerts._STOPS_MISSING.clear()
+    del PRICE["NOSUCH"]
     conn.close()
 
     print()

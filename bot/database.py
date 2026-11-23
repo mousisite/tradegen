@@ -23,7 +23,6 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 SCHEMA_VERSION = 1
@@ -172,9 +171,7 @@ CREATE TABLE IF NOT EXISTS watch_calls (
 CREATE TABLE IF NOT EXISTS alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol      TEXT NOT NULL,
-    kind        TEXT NOT NULL,      -- price_above | price_below | pct_move |
-                                    -- rsi_above | rsi_below | signal_flip |
-                                    -- near_stop | near_target
+    kind        TEXT NOT NULL,      -- one of bot.alerts.KINDS
     threshold   REAL,
     interval    TEXT NOT NULL DEFAULT '1d',
     note        TEXT,
@@ -248,7 +245,8 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
     migrations write, so running them each time made every page and the health
     check wait for the write lock behind whatever else was writing.
     """
-    path = path or default_path()
+    # In full, so a bare file name (--db journal.db) is one in this folder.
+    path = os.path.abspath(path or default_path())
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # The web server is threaded, so two requests can want the database at once.
     # Without a busy timeout the loser raises "database is locked" immediately
@@ -400,7 +398,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                    # tagged" and nothing else about it changes.
                    ("setup", "TEXT"), ("emotion", "TEXT"), ("followed_plan", "TEXT"),
                    ("checklist", "TEXT"), ("lesson", "TEXT"), ("broke_rule", "TEXT"),
-                   ("reviewed_ts", "INTEGER")],
+                   ("reviewed_ts", "INTEGER"),
+                   # The random name of the log-a-trade form it came from, so a
+                   # form sent twice is logged once. Empty for any other trade.
+                   ("form_id", "TEXT")],
         "trade_exits": [("split", "REAL")],
         "watchlist": [("exact", "INTEGER NOT NULL DEFAULT 0")],
     }
@@ -563,31 +564,15 @@ def save_strategy_stats(conn: sqlite3.Connection, symbol: str, interval: str,
     return len(rows)
 
 
-def load_strategy_stats(conn: sqlite3.Connection, symbol: str,
-                        interval: str) -> List[sqlite3.Row]:
-    return list(conn.execute(
-        "SELECT * FROM strategy_stats WHERE symbol=? AND interval=? "
-        "ORDER BY regime, strategy", (symbol, interval)))
-
-
 # ---------------------------------------------------------------------------
 # The trade journal
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TradeRecord:
-    """A trade as stored. Mirrors the trades table."""
-    id: int
-    symbol: str
-    direction: int
-    status: str
-    entry: float
-    stop: float
-    target1: Optional[float]
-    quantity: Optional[float]
-    ts_opened: int
-    r_multiple: Optional[float] = None
-    pnl: Optional[float] = None
+# The most positions one account's journal may hold open at once. The background
+# check reads the price of every open position's instrument each round, so there
+# has to be a ceiling somewhere. The web layer asks for it; the command line,
+# which is one person on their own machine, does not.
+MAX_OPEN_TRADES = 200
 
 
 def check_trail(pct: Optional[float], distance: Optional[float],
@@ -616,7 +601,8 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                trail_pct: Optional[float] = None, trail_dist: Optional[float] = None,
                trail_atr: Optional[float] = None, setup: Optional[str] = None,
                emotion: Optional[str] = None, checklist=None,
-               broke_rule: Optional[str] = None, opened_ts: Optional[int] = None) -> int:
+               broke_rule: Optional[str] = None, opened_ts: Optional[int] = None,
+               cap: Optional[int] = None, form_id: Optional[str] = None) -> int:
     """Record a newly opened position, with a trailing stop if one is given.
 
     trail_pct is a share of the best price (0.05 for 5%); trail_dist is a
@@ -628,6 +614,9 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
     daily rules it was logged against. opened_ts is when the person entered,
     when that was earlier than now: at most 30 days back and never in the
     future. Each raises ValueError in words when it is not right.
+
+    cap is the most positions this account may hold open, None for no limit.
+    form_id names the form it was typed into (already_logged).
     """
     import math
     from .journal import check_opened, check_tags
@@ -649,6 +638,16 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
         raise ValueError("for a long, the stop must sit below the entry")
     if direction < 0 and stop <= entry:
         raise ValueError("for a short, the stop must sit above the entry")
+    # A target on the losing side reads as reached the moment it is logged.
+    for label, value in (("target", target1), ("second target", target2)):
+        if value is None:
+            continue
+        if float(value) <= 0:
+            raise ValueError("the %s must be a positive price, or left empty" % label)
+        if (float(value) - entry) * direction <= 0:
+            raise ValueError("for a %s, the %s must sit %s the entry" % (
+                ("long", label, "above") if direction > 0 else ("short", label, "below")))
+    sym = _symbol(symbol)
     check_trail(trail_pct, trail_dist, trail_atr)
     trails = trail_pct is not None or trail_dist is not None
     ticked = None if checklist is None else sorted(set(checklist))
@@ -659,22 +658,47 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
     now = int(time.time())
     opened = check_opened(opened_ts, now)
     opened = now if opened is None else opened
+    if cap is not None:
+        held = conn.execute("SELECT COUNT(*) FROM trades WHERE status='open' AND user_id=?",
+                            (int(user),)).fetchone()[0]
+        if held >= cap:
+            raise ValueError("A journal can hold %d open positions at once, and yours has "
+                             "%d. Close or delete one first." % (cap, held))
     cur = conn.execute(
         """INSERT INTO trades (run_id, account, symbol, interval, direction,
                status, ts_opened, entry, stop, target1, target2, quantity,
                risk_amount, strategy_note, notes, user_id, trail_pct, trail_dist,
                trail_atr, trail_ts, trail_best, trail_best_ts, setup, emotion,
-               checklist, broke_rule)
-           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (run_id, account, symbol.upper(), interval, direction, opened,
+               checklist, broke_rule, form_id)
+           VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (run_id, account, sym, interval, direction, opened,
          float(entry), float(stop), target1, target2, quantity, risk_amount,
          strategy_note, notes, int(user), trail_pct, trail_dist,
          trail_atr if trail_dist is not None else None,
          now if trails else None, float(entry) if trails else None,
          now if trails else None, setup or None, emotion or None,
-         None if ticked is None else json.dumps(ticked), broke_rule or None))
+         None if ticked is None else json.dumps(ticked), broke_rule or None,
+         form_id or None))
     conn.commit()
     return int(cur.lastrowid)
+
+
+def already_logged(conn: sqlite3.Connection, form_id: Optional[str], symbol: str,
+                   direction: int, entry: float, stop: float, target1: Optional[float],
+                   quantity: Optional[float], opened_ts: Optional[int], user: int) -> bool:
+    """Whether this very form, with these very numbers, was logged already.
+
+    The numbers as well as the form: someone who goes back to a form they
+    sent and changes it is logging another trade.
+    """
+    if not form_id:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM trades WHERE user_id=? AND form_id=? AND symbol=? AND direction=? "
+        "AND entry=? AND stop=? AND target1 IS ? AND quantity IS ? "
+        "AND (? IS NULL OR ts_opened=?) LIMIT 1",
+        (int(user), form_id, _symbol(symbol), direction, float(entry), float(stop),
+         target1, quantity, opened_ts, opened_ts)).fetchone() is not None
 
 
 class TradeChanged(ValueError):
@@ -915,7 +939,7 @@ def trade_parts(row, exits) -> Dict:
 
 
 def open_positions(conn: sqlite3.Connection, account: Optional[str] = None,
-                   limit: int = 100, user: Optional[int] = None) -> List[Dict]:
+                   limit: Optional[int] = 100, user: Optional[int] = None) -> List[Dict]:
     """Open trades as they are held now: quantity is what is still open.
 
     The portfolio and the routines size, value and risk what is held, so a
@@ -1022,7 +1046,12 @@ def delete_trade(conn: sqlite3.Connection, trade_id: int,
 
 def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
                 account: Optional[str] = None, symbol: Optional[str] = None,
-                limit: int = 100, user: Optional[int] = None) -> List[sqlite3.Row]:
+                limit: Optional[int] = 100, user: Optional[int] = None,
+                by_closed: bool = False, offset: int = 0) -> List[sqlite3.Row]:
+    """Trades, the latest opened first, or with by_closed the latest closed.
+
+    limit None lists them all. offset leaves out that many from the start.
+    """
     sql = "SELECT * FROM trades WHERE 1=1"
     args: List = []
     sql, args = _own(sql, args, user)
@@ -1035,21 +1064,45 @@ def list_trades(conn: sqlite3.Connection, status: Optional[str] = None,
     if symbol:
         sql += " AND symbol=?"
         args.append(symbol.upper())
-    sql += " ORDER BY ts_opened DESC LIMIT ?"
-    args.append(limit)
+    sql += (" ORDER BY ts_closed DESC, id DESC" if by_closed else " ORDER BY ts_opened DESC")
+    sql += " LIMIT ? OFFSET ?"
+    # SQLite reads a limit below zero as no limit.
+    args.extend([-1 if limit is None else limit, offset])
     return list(conn.execute(sql, args))
+
+
+# What Yahoo prices a coin in: the part of its symbol after the last dash, as
+# in BTC-USD or ETH-EUR. A share's class or kind after a dash is never one of
+# these (BRK-B, BAC-PL, REI-UN.TO).
+_COIN_QUOTES = {"USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "KRW", "CNY",
+                "INR", "BTC", "ETH"}
+
+
+def _cost_kind(symbol: str) -> str:
+    """Which cost an instrument pays, from its symbol: the analysis's own split.
+
+    "futures" (=F), "other" (a currency pair =X, an index ^), "crypto" (a coin
+    in any currency) or "equity". The journal keeps no asset class, only the
+    symbol, and Yahoo's symbols say these plainly.
+    """
+    if symbol.endswith("=F"):
+        return "futures"
+    if symbol.endswith("=X") or symbol.startswith("^"):
+        return "other"
+    base, dash, quote = symbol.rpartition("-")
+    return "crypto" if dash and base and quote in _COIN_QUOTES else "equity"
 
 
 def _cost_of(row, costs: Dict[str, float]) -> float:
     """A trade's round-trip cost as a fraction of the price.
 
-    A futures contract (Yahoo's symbol ends =F) pays costs["futures"] when
-    the caller gives one, and the stock rate otherwise, as it always did.
+    A future, or a currency pair or an index, pays costs["futures"] or
+    costs["other"] when the caller gives one, and the stock rate otherwise.
     """
-    symbol = row["symbol"]
-    if symbol.endswith("=F") and "futures" in costs:
-        return float(costs["futures"])
-    return float(costs.get("crypto" if symbol.endswith("-USD") else "equity", 0.0))
+    kind = _cost_kind(row["symbol"])
+    if kind in ("futures", "other") and kind not in costs:
+        kind = "equity"
+    return float(costs.get(kind, 0.0))
 
 
 # The longest lesson kept; a longer one is cut, not refused.
@@ -1075,7 +1128,13 @@ def review_trade(conn: sqlite3.Connection, trade_id: int, followed_plan: Optiona
         raise ValueError("There is no such trade in your journal.")
     if row["status"] != "closed":
         raise ValueError("A trade is reviewed once it is closed.")
-    if followed_plan is None and not lesson and setup is None and emotion is None:
+    # The form always sends the setup and the feeling, so they say something
+    # only when changed. Emptying a review that had something in it is allowed.
+    same = all(sent is None or (sent or "") == (row[key] or "")
+               for key, sent in (("setup", setup), ("emotion", emotion)))
+    emptied = (setup is not None or emotion is not None) and (
+        row["followed_plan"] or row["lesson"])
+    if followed_plan is None and not lesson and same and not emptied:
         raise ValueError("Say whether you followed your plan, or write what you learned.")
     sets, values = ["followed_plan=?", "lesson=?", "reviewed_ts=?"], [
         followed_plan, lesson or None, int(time.time())]
@@ -1117,9 +1176,9 @@ def journal_summary(conn: sqlite3.Connection, account: str = "paper",
     instruments and position sizes, which is what makes it the honest measure
     of whether a process works.
 
-    costs maps "equity" and "crypto" to a round-trip cost as a fraction of the
-    price. Given them, every figure is after costs, which is what the account
-    would really show; the before-cost expectancy is kept beside it.
+    costs maps "equity" and "crypto" (and "futures" and "other", where known)
+    to a round-trip cost as a fraction of the price. Given them, every figure
+    is after costs, which is what the account would really show; the before-cost expectancy is kept beside it.
 
     A trade counts once it is closed in full, at the R of the whole position:
     each part's R weighted by its share of it. The drawdown is walked exit by

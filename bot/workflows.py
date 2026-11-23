@@ -238,8 +238,7 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     step("Marking positions to market")
     # What is held: a position closed in part counts only what is left.
-    # All of them: SQLite reads a limit below zero as none.
-    rows = db.open_positions(conn, limit=-1, user=user)
+    rows = db.open_positions(conn, limit=None, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return

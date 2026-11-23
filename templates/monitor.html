@@ -89,13 +89,13 @@
   <div class="sechead">
     <h2>Alerts</h2>
     <span class="count">{{ alerts|length }}</span>
-    <span class="tail">
+    <div class="tail">
       <form method="post" action="{{ url_for('check_alerts') }}" style="display:inline" data-working
             data-working-title="Checking your alerts"
             data-working-note="Asking for the price behind each one.">
         <button class="btn quiet sm" type="submit">Check them all now</button>
       </form>
-    </span>
+    </div>
   </div>
 
   <div class="card">
@@ -105,7 +105,7 @@
           <label for="a-symbol">Instrument</label>
           <input class="field fig" id="a-symbol" name="symbol" type="text" data-suggest="fill"
                  placeholder="AAPL" required autocomplete="off" autocapitalize="characters"
-                 autocorrect="off" spellcheck="false" enterkeyhint="go">
+                 autocorrect="off" spellcheck="false" enterkeyhint="next">
         </div>
         <div class="setfield">
           <label for="a-kind">Tell me when it</label>
