@@ -329,7 +329,7 @@ WHAT IT DOES
 - Analyse any stock or coin. Orenth back-tests 44 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how often this setup came up in tests on past prices, and how often it reached its target first.
 - Says so when there is no edge. Often the honest answer is to wait, and Orenth says it plainly.
 - Find: choose stocks or crypto and a risk level, and Orenth ranks what is worth a closer look.
-- Screener: filter companies by the numbers in their SEC filings. Company figures on the research page link to the filing they came from.
+- Screener: filter companies by price, size, valuation, growth, margins and debt. The research page links a company's yearly financials to the SEC filing they came from.
 - Journal: log practice trades with an entry, a stop and a target, then find out whether you were right or just lucky.
 - Portfolio: see what your logged positions add up to, and what a bad day could cost.
 - Alerts: pick a price or watch a stock, and get a notification when something happens.
@@ -347,7 +347,7 @@ Orenth Pro is an auto-renewing subscription: Orenth Pro Monthly (1 month) or Ore
 PRIVACY
 No ads and no tracking. Your journal, watchlist and alerts belong to your account. Your account can be deleted at any time from the Account page, and your journal and saved theses downloaded from the Orenth website.
 
-Orenth is analysis software, not financial advice. Every figure is measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
+Orenth is analysis software, not financial advice. Its tests are measured on past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
 
 Terms of Use (EULA): https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
 Orenth terms: https://orenth.app/terms
@@ -524,7 +524,9 @@ Connect does not ask. If it ever does: "Does your app use encryption?" Yes.
 prices, company filings, news headlines, and StockTwits posts (counted, not
 shown).
 
-- Company figures come from SEC EDGAR, which is public US government data.
+- A company's filings and yearly financials come from SEC EDGAR, which is
+  public US government data. The ratios beside them and the screener's numbers
+  come from Yahoo Finance, so the point about prices below covers them too.
 - **Headlines come from Google News, and posts from StockTwits.** The app
   shows the headlines on the research page. StockTwits posts are read only
   to count them and to tell bullish from bearish: inside the app their
@@ -545,7 +547,7 @@ app, it works on the website; bought on the website, it works in the app.
 The app's Pricing screen already does the selling. These steps set up the
 two things it sells. Do them once, in order.
 
-Before selling anything, read **Content rights** below: the prices Orenth
+Before selling anything, read **Content rights** above: the prices Orenth
 shows need a licence that covers a paid app.
 
 **A. Money and agreements.** The **Account Holder** does these (the parent,
@@ -726,7 +728,7 @@ LOOK AROUND WITHOUT SIGNING IN
 Signed out, "Look around first" on the first screen opens a full example account with no sign-in.
 
 DATA
-Prices: [the price provider and its licence]. Company figures: SEC EDGAR (public). Headlines: Google News. StockTwits posts are only counted in the app; their text is not shown. No ads, no tracking, no third-party analytics in the app.
+Prices and company ratios: [the price provider and its licence]. Filings and yearly financials: SEC EDGAR (public). Headlines: Google News. StockTwits posts are only counted in the app; their text is not shown. No ads, no tracking, no third-party analytics in the app.
 ```
 
 ### Submit
