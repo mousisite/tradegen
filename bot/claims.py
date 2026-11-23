@@ -1,4 +1,4 @@
-"""The video's checkable claims, each set beside what usually happens.
+"""The video's checkable claims, each set beside something to compare it with.
 
 TJR's video says many things about how price behaves: London takes one side
 of Asia's range and then reaches the other, the 9:50-10:10 window is the
@@ -8,22 +8,30 @@ Orenth's words, with the video's timestamps). Each is measured here on the
 prices the Setup lab downloaded, against a control: the same test on a band
 or window of the same size, or on random bars, because "London reached the
 other side on 60% of days" means nothing until it is set beside how often a
-band that size is crossed anyway.
+band that size is crossed anyway. A control must have the same chance as the
+claim on prices with no pattern in them (tests/test_claims.py tries several on
+random walks): a band is the real range mirrored around the price (a
+band centred on the price has its first side further away), a later window
+has ranges that ended just as lately, a gap is set beside the level the same
+distance the other way, and a setup's trades are judged against their own
+random entries (a close stop makes the same cost more units of risk).
 
 How a claim is judged (labstore):
 - a rate against its control: the difference must be more than two standard
   errors either way (labstore.rate_verdict), with 30 trials on each side;
-- an average (claims about the lab's trades, or bar sizes by time of day):
-  the same two-margins rule on the difference, days counted together;
-- a rate with no control ("the gap fills"): its 95% range must sit wholly
-  above one in two for the claim to hold, wholly below for it to fail.
+- an average (claims about the lab's trades, or bar sizes by time of day),
+  and a gap against the level the other way: the same two-margins rule on the
+  difference, with everything on one date, whatever the instrument, counted
+  together.
 
 The verdict's sign always means the same thing: +1 the claim was seen, by
 more than its margin; -1 the opposite was seen, by more than its margin; 0
 the two cannot be told apart; None too few. So for "buying the breakout
-loses", +1 means it lost money by more than its margin. For claims measured
-by an average, "hits" count the trades (or days) that kept money (or moved
-less), so the page can say "on 41 of 90".
+loses", +1 means it lost money, and did worse than its random entries, each
+by more than its margin. For claims measured by an average, "hits" count the
+trades (or days) that kept money (or moved less), so the page can say "on 41
+of 90". A change to how a claim is measured raises its number in
+labstore.CLAIM_METHODS, so that an old figure is never shown under new words.
 
 Days with too few bars and futures roll days are left out and counted
 ("skipped"). Instruments that follow the same index (ES and SPY, NQ and
@@ -77,7 +85,7 @@ _ONE_REGIME = ("Five-minute prices go back about 60 days at the data source, so 
 class _View:
     """One series' bars placed in New York time, with its trading days."""
 
-    def __init__(self, bars):
+    def __init__(self, bars, series=None):
         self.bars = bars
         self.symbol = bars.symbol
         self.interval = bars.interval
@@ -102,7 +110,8 @@ class _View:
             if self.usable(d):
                 self.usable_bar[d.first:d.last + 1] = True
         self.roll_cum = np.concatenate([[0], np.cumsum(self.roll.astype(np.int64))])
-        self._s = None
+        # structure.series of these bars, or setuplab.CLAIM_SERIES of it.
+        self._s = series
 
     def at(self, minute):
         """New York minutes as minutes since the trading day began (18:00 for
@@ -169,6 +178,15 @@ def _range_test(v: _View, rows: np.ndarray, hi: float, lo: float, until: np.ndar
     return True, reached, False
 
 
+def _mirrored(mid: float, hi: float, lo: float) -> Tuple[float, float]:
+    """A range's mirror around a price, as (high, low): its high as far above
+    the price as the range's low is below it, and the other way round. Prices
+    with no pattern treat the two alike. (A band centred on the price would
+    not be: a real range usually has the price nearer one end, so its first
+    side goes sooner and leaves more of the day to reach the other.)"""
+    return mid + (mid - lo), mid - (hi - mid)
+
+
 def _cell() -> Dict:
     return {"trials": 0, "hits": 0, "base_trials": 0, "base_hits": 0}
 
@@ -203,23 +221,11 @@ def _record(cid: str, interval: str, by_symbol: Dict[str, Dict], notes: List[str
     if verdict == "rate":
         verdict = labstore.rate_verdict(pooled["hits"], pooled["trials"],
                                         pooled["base_hits"], pooled["base_trials"])
-    elif verdict == "half":
-        verdict = _half_verdict(pooled["hits"], pooled["trials"])
-        pooled["base_rate"] = 0.5
     rec = {"claim": cid, "unit": setups.claim(cid).unit, "interval": interval,
            "pooled": pooled, "by_symbol": by_symbol, "notes": notes, "verdict": verdict,
            "measure": measure, "skipped": {k: int(v) for k, v in skipped.items()}}
     labstore.validate_claim(rec)
     return rec
-
-
-def _half_verdict(hits: int, n: int) -> Optional[int]:
-    """+1 when the 95% range of a rate is wholly above one in two, -1 wholly
-    below, 0 when it holds one in two, None under 30 trials."""
-    if n < labstore.MIN_TRADES:
-        return None
-    lo, hi = labstore.wilson(hits, n)
-    return 1 if lo > 0.5 else -1 if hi < 0.5 else 0
 
 
 def _index_note(symbols: Sequence[str]) -> List[str]:
@@ -230,13 +236,15 @@ def _index_note(symbols: Sequence[str]) -> List[str]:
 
 
 def _intraday(bars_list, interval: str = "5m", kinds=("future", "coin", "stock")):
+    """Views of the series of this bar size and these kinds, from bars or views."""
     out = []
-    for b in bars_list:
+    for item in bars_list:
+        b = item.bars if isinstance(item, _View) else item
         if b is None or b.interval != interval or len(b.close) < 50:
             continue
         if clock.kind_of(b) == "daily" or clock.instrument_of(b) not in kinds:
             continue
-        out.append(_View(b))
+        out.append(item if isinstance(item, _View) else _View(b))
     return out
 
 
@@ -267,10 +275,8 @@ def london_takes_asia(bars_list) -> Optional[Dict]:
                 _skip(skipped, "both_sides")
             cell["trials"] += trial
             cell["hits"] += hit
-            # The control: a band as wide as the Asia range, centred on 03:00.
-            half = (asia.high - asia.low) / 2.0
-            mid = v.o[lon.first]
-            trial, hit, _ = _range_test(v, rows, mid + half, mid - half, until)
+            hi, lo = _mirrored(float(v.o[lon.first]), asia.high, asia.low)
+            trial, hit, _ = _range_test(v, rows, hi, lo, until)
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME, "Days where one London bar went past both sides of the Asia range "
@@ -305,9 +311,8 @@ def ny_takes_london(bars_list) -> Optional[Dict]:
                 _skip(skipped, "both_sides")
             cell["trials"] += trial
             cell["hits"] += hit
-            half = (lon.high - lon.low) / 2.0
-            mid = v.o[rows[0]]
-            trial, hit, _ = _range_test(v, rows, mid + half, mid - half, rows)
+            hi, lo = _mirrored(float(v.o[rows[0]]), lon.high, lon.low)
+            trial, hit, _ = _range_test(v, rows, hi, lo, rows)
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME]
@@ -340,8 +345,8 @@ def pd_sweep_reverse(bars_list) -> Optional[Dict]:
                 _skip(skipped, "both_sides")
             cell["trials"] += trial
             cell["hits"] += hit
-            half = (prev.high - prev.low) / 2.0
-            trial, hit, _ = _range_test(v, rows, d.open + half, d.open - half, rows)
+            hi, lo = _mirrored(d.open, prev.high, prev.low)
+            trial, hit, _ = _range_test(v, rows, hi, lo, rows)
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME] + _index_note(by)
@@ -385,10 +390,37 @@ def _window_hit(v: _View, d, levels, w0: int, w1: int):
     return True, False
 
 
+# The ranges the open's test reads (start and end, New York minutes), and the
+# last bar it counts: one that ends by 9:50.
+OPEN_RANGES = ((18 * 60, 3 * 60), (3 * 60, 8 * 60 + 30), (8 * 60 + 30, 9 * 60 + 30))
+OPEN_FROM, OPEN_TO = 9 * 60 + 30, 9 * 60 + 45
+OPEN_LATER = 60                    # app choice: the control is the same, an hour on
+
+
+def _open_levels(v: _View, d, prev, later: int) -> List[Tuple[float, int, int]]:
+    """The levels the open's test reads, with every clock time `later` minutes
+    on: yesterday's high and low, and each of OPEN_RANGES with enough bars.
+    (The price, +1 a high or -1 a low, the minute it is known from.)"""
+    out: List[Tuple[float, int, int]] = []
+    if prev is not None:
+        known = 18 * 60 + later
+        out += [(prev.high, 1, known), (prev.low, -1, known)]
+    step_min = max(1, v.step // 60)
+    for start, end in OPEN_RANGES:
+        idx = v.rows(d, start + later, end + later)
+        want = ((end - start) % (24 * 60)) // step_min
+        if idx.size and idx.size >= clock.COMPLETE_SHARE * want:
+            out += [(float(np.max(v.h[idx])), 1, end + later),
+                    (float(np.min(v.l[idx])), -1, end + later)]
+    return out
+
+
 def open_manipulation(bars_list) -> Optional[Dict]:
     """video 4:33:23, 4:35:34: between 9:30 and 9:50 price trades past a level
     set before the open and closes back inside within half an hour. Control:
-    the same test from 10:30 to 10:55."""
+    the same test with every time an hour later, so that it too has a range
+    that ended the moment it starts; the 9:30 levels at 10:30 had no such
+    range, and read as a pattern on prices that had none."""
     views = _intraday(bars_list, "5m", ("future", "coin"))
     if not views:
         return None
@@ -403,25 +435,18 @@ def open_manipulation(bars_list) -> Optional[Dict]:
             if not d.complete:
                 _skip(skipped, "incomplete")
                 continue
-            levels = []
-            if b > 0 and v.usable(v.days[b - 1]):
-                prev = v.days[b - 1]
-                levels += [(prev.high, 1, 18 * 60), (prev.low, -1, 18 * 60)]
-            for name, known in (("asia", 3 * 60), ("london", 8 * 60 + 30),
-                                ("ny_pre", 9 * 60 + 30)):
-                sess = d.sessions.get(name)
-                if sess is not None and sess.complete:
-                    levels += [(sess.high, 1, known), (sess.low, -1, known)]
-            trial, hit = _window_hit(v, d, levels, 9 * 60 + 30, 9 * 60 + 55)
+            prev = v.days[b - 1] if b > 0 and v.usable(v.days[b - 1]) else None
+            trial, hit = _window_hit(v, d, _open_levels(v, d, prev, 0), OPEN_FROM, OPEN_TO)
             cell["trials"] += trial
             cell["hits"] += hit
-            trial, hit = _window_hit(v, d, levels, 10 * 60 + 30, 10 * 60 + 55)
+            trial, hit = _window_hit(v, d, _open_levels(v, d, prev, OPEN_LATER),
+                                     OPEN_FROM + OPEN_LATER, OPEN_TO + OPEN_LATER)
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME, "Levels: yesterday's high and low, and today's Asia, London and "
              "before-the-open ranges, if price had not already gone past them that day.",
-             "By 10:30 the levels nearest the price have often been taken already, so fewer "
-             "are left to take; that alone makes the later window's share lower."]
+             "The hour from 9:30 is usually the day's busiest, so the range an hour later is "
+             "wider and harder to go past than the one before the open."]
     return _record("open_manipulation", "5m", by, notes, skipped)
 
 
@@ -602,6 +627,14 @@ def _subset(bars, idx: np.ndarray):
         session_id=bars.session_id[idx], live_price=None, dividend_factor=None)
 
 
+def _part(item, idx: np.ndarray) -> _View:
+    """These bars' view, kept to the bars at idx; the same view when that is all."""
+    bars = item.bars if isinstance(item, _View) else item
+    if isinstance(item, _View) and idx.size == item.n:
+        return item
+    return _View(_subset(bars, idx))
+
+
 def smt_at_sweep(bars_by_symbol: Dict[str, object]) -> Optional[Dict]:
     """video 4:13:16-4:28:04: when two related markets disagree at a high (one
     makes a higher high past an old high, the other a lower high), the leader
@@ -614,11 +647,11 @@ def smt_at_sweep(bars_by_symbol: Dict[str, object]) -> Optional[Dict]:
         A, B = bars_by_symbol.get(a_sym), bars_by_symbol.get(b_sym)
         if A is None or B is None:
             continue
-        _, ia, ib = np.intersect1d(np.asarray(A.timestamp), np.asarray(B.timestamp),
-                                   return_indices=True)
+        times = [np.asarray((x.bars if isinstance(x, _View) else x).timestamp) for x in (A, B)]
+        _, ia, ib = np.intersect1d(times[0], times[1], return_indices=True)
         if ia.size < 200:
             continue
-        va, vb = _View(_subset(A, ia)), _View(_subset(B, ib))
+        va, vb = _part(A, ia), _part(B, ib)
         sa, sb = va.s, vb.s
         cell = by.setdefault("%s/%s" % (a_sym, b_sym), _cell())
         n = va.n
@@ -692,14 +725,50 @@ def _lab(trades: Dict[str, Dict], setup: str, rule: str = "2r") -> List[Tuple[st
     return out
 
 
+def _parts(rows: List[Tuple[str, Trade]], value) -> Dict[str, Tuple]:
+    """Each instrument's (trades, average, {date: (trades, sum)}), as
+    labstore.day_error reads them."""
+    per: Dict[str, Dict[int, List[float]]] = {}
+    for sym, t in rows:
+        per.setdefault(sym, {}).setdefault(t.day, []).append(float(value(t)))
+    out = {}
+    for sym, days in per.items():
+        vals = [x for got in days.values() for x in got]
+        out[sym] = (len(vals), sum(vals) / len(vals),
+                    {day: (len(got), sum(got)) for day, got in days.items()})
+    return out
+
+
 def _mean_se(rows: List[Tuple[str, Trade]], value=lambda t: t.r):
-    """(mean, clustered se, n) of trades, with trades of one instrument on one
-    day counted together."""
+    """(mean, its standard error, n) of trades. Trades on one date count
+    together whatever the instrument, as in the lab's own tables
+    (labstore.pooled): one day's news moves them all."""
     if not rows:
         return None, None, 0
     vals = [value(t) for _, t in rows]
-    groups = ["%s|%d" % (sym, t.day) for sym, t in rows]
-    return float(np.mean(vals)), clustered_se(vals, groups), len(vals)
+    return (float(np.mean(vals)), labstore.day_error(list(_parts(rows, value).values())),
+            len(vals))
+
+
+def _against_random(t: Trade) -> float:
+    """A trade's result minus its own random entries' (see setuplab)."""
+    return t.r - t.control_r
+
+
+def _paired(rows: List[Tuple[str, Trade]]) -> List[Tuple[str, Trade]]:
+    return [x for x in rows if x[1].control_r is not None]
+
+
+def _dates(rows: List[Tuple[str, Trade]]) -> int:
+    return len(set(t.day for _, t in rows))
+
+
+def _said(mean: Optional[float], se: Optional[float]) -> str:
+    """A figure in R with its margin of error, for a note."""
+    if mean is None:
+        return "not measured"
+    text = "%+.2fR" % (round(mean, 2) + 0.0)
+    return text if se is None else "%s (±%.2f)" % (text, 2 * se)
 
 
 def _round(x):
@@ -719,35 +788,33 @@ def _means(by: Dict[str, Dict], rows: List[Tuple[str, Trade]], base: bool = Fals
         cell["base_se" if base else "se"] = _round(se)
 
 
-def _within(rows_a: List[Tuple[str, Trade]], rows_b: List[Tuple[str, Trade]]):
+def _within(rows_a: List[Tuple[str, Trade]], rows_b: List[Tuple[str, Trade]],
+            value=lambda t: t.r):
     """The difference a minus b taken inside each instrument, then averaged
     with each instrument weighted by its count in a: (difference, its standard
     error, trades in a). Pooling the trades first would let the mix of
     instruments decide it: coins cost ten times what futures do and trade all
-    night, so any window or setup with more coin trades would look worse."""
-    by_a: Dict[str, List] = {}
-    by_b: Dict[str, List] = {}
-    for sym, t in rows_a:
-        by_a.setdefault(sym, []).append((sym, t))
-    for sym, t in rows_b:
-        by_b.setdefault(sym, []).append((sym, t))
+    night, so any window or setup with more coin trades would look worse. The
+    error counts one date's trades together, both sides and every instrument."""
+    by_a, by_b = _parts(rows_a, value), _parts(rows_b, value)
     total = 0.0
     weight = 0
-    var = 0.0
-    for sym, a in by_a.items():
-        b = by_b.get(sym)
-        if not b:
+    left: Dict[int, float] = {}
+    for sym, (na, ma, days_a) in by_a.items():
+        if sym not in by_b:
             continue
-        ma, sa, na = _mean_se(a)
-        mb, sb, _ = _mean_se(b)
-        if sa is None or sb is None:
+        nb, mb, days_b = by_b[sym]
+        if len(days_a) < 2 or len(days_b) < 2:
             continue
         total += na * (ma - mb)
-        var += na * na * (sa * sa + sb * sb)
         weight += na
+        for day, (k, s) in days_a.items():
+            left[day] = left.get(day, 0.0) + (s - k * ma)
+        for day, (k, s) in days_b.items():
+            left[day] = left.get(day, 0.0) - (s - k * mb) * na / nb
     if not weight:
         return None, None, 0
-    return total / weight, math.sqrt(var) / weight, weight
+    return total / weight, math.sqrt(sum(x * x for x in left.values())) / weight, weight
 
 
 _WITHIN_NOTE = ("The difference is taken inside each instrument and then averaged, so an "
@@ -790,8 +857,10 @@ def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
 def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
     """video 1:19:23-1:29:56: buying the break of a high with the stop under the
     last low loses. The lab's breakout buys (the claim is about buying; the
-    lab measures the sells too) with a twice-the-risk target, against zero,
-    and beside their random entries."""
+    lab measures the sells too) with a twice-the-risk target. Holds when they
+    lost money and did worse than their own random entries, each by more than
+    its margin; the opposite when both went the other way. Against zero alone
+    the trading costs would decide it, whatever the setup did."""
     rows = [x for x in _lab(trades, "crowd_breakout") if x[1].direction > 0]
     if not rows:
         return None
@@ -804,65 +873,85 @@ def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
             cell["base_trials"] += 1
             cell["base_hits"] += 1 if t.control_r > 0 else 0
     m, se, n = _mean_se(rows)
-    paired = [x for x in rows if x[1].control_r is not None]
+    paired = _paired(rows)
     _means(by, rows)
     _means(by, paired, base=True, value=lambda t: t.control_r)
     bm, bse, _ = _mean_se(paired, lambda t: t.control_r)
-    dm, dse, _ = _mean_se(paired, lambda t: t.r - t.control_r)
+    dm, dse, dn = _mean_se(paired, _against_random)
     pooled = _pool(by)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
                    "base_se": _round(bse), "diff": _round(dm), "diff_se": _round(dse)})
-    days = len(set((sym, t.day) for sym, t in rows))
-    v = labstore.verdict(m, se, n, days=days)
+    kept = labstore.verdict(m, se, n, days=_dates(rows))
+    beat = labstore.verdict(dm, dse, dn, days=_dates(paired))
+    if kept is None or beat is None:
+        v = None
+    else:
+        v = -kept if kept == beat else 0
     notes = [_ONE_REGIME, "Only the buys are counted. A win here means a trade that kept "
-             "money after costs. The claim holds when the trades lost money by more than "
-             "their margin of error.",
+             "money after costs. The claim holds when the trades lost money and did worse "
+             "than their own random entries, each by more than its margin of error: costs "
+             "alone make random trades lose too.",
+             "Against their random entries: %s a trade." % _said(dm, dse),
              "Coins cost far more to trade on five-minute bars than futures or stocks, which "
              "weighs on the pooled figure; each instrument's own figure is kept beside it."]
     notes += _index_note(by)
     return _record("crowd_breakout_loses", "5m", by, notes, {}, measure="mean",
-                   pooled=pooled, verdict=None if v is None else -v)
+                   pooled=pooled, verdict=v)
 
 
 def sweep_alone_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
     """video 1:40:27-1:43:34: trading against every sweep loses, and the full
-    four-step model does better. Holds when both are seen by more than their
-    margins; fails when either is contradicted by more than its margin."""
+    four-step model does better. Each is judged against its own random entries
+    as well: a sweep's stop is close, so the same cost is many more units of
+    risk, and in units of risk the model would look better on prices with no
+    pattern in them at all. Holds when the sweeps lost money and did worse
+    than their random entries, and the model did better against its own than
+    the sweeps did against theirs, each by more than its margin; fails when
+    either half is contradicted by more than its margin."""
     sweeps = _lab(trades, "sweep_reclaim")
     chain = _lab(trades, "liquidity_model")
     if not sweeps:
         return None
+    own, chain_own = _paired(sweeps), _paired(chain)
     by: Dict[str, Dict] = {}
     for sym, t in sweeps:
         cell = by.setdefault(sym, _cell())
         cell["trials"] += 1
         cell["hits"] += 1 if t.r > 0 else 0
-    for sym, t in chain:
-        cell = by.setdefault(sym, _cell())
-        cell["base_trials"] += 1
-        cell["base_hits"] += 1 if t.r > 0 else 0
+        if t.control_r is not None:
+            cell["base_trials"] += 1
+            cell["base_hits"] += 1 if t.control_r > 0 else 0
     _means(by, sweeps)
-    _means(by, chain, base=True)
+    _means(by, own, base=True, value=lambda t: t.control_r)
     m, se, n = _mean_se(sweeps)
-    bm, bse, bn = _mean_se(chain)
-    diff, dse, dn = _within(chain, sweeps)
-    days = len(set((sym, t.day) for sym, t in sweeps))
-    first = labstore.verdict(m, se, n, days=days)
-    second = labstore.verdict(diff, dse, dn) if dn else None
-    if first is None or second is None:
+    bm, bse, _ = _mean_se(own, lambda t: t.control_r)
+    om, ose, on = _mean_se(own, _against_random)
+    cm, cse, _ = _mean_se(chain)
+    co, cose, _ = _mean_se(chain_own, _against_random)
+    diff, dse, dn = _within(chain_own, own, _against_random)
+    kept = labstore.verdict(m, se, n, days=_dates(sweeps))
+    beat = labstore.verdict(om, ose, on, days=_dates(own))
+    better = labstore.verdict(diff, dse, dn, days=_dates(chain_own))
+    if kept is None or beat is None or better is None:
         v = None
-    elif first == -1 and second == 1:
+    elif kept == -1 and beat == -1 and better == 1:
         v = 1
-    elif first == 1 or second == -1:
+    elif (kept == 1 and beat == 1) or better == -1:
         v = -1
     else:
         v = 0
     pooled = _pool(by)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
                    "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse)})
-    notes = [_ONE_REGIME, "First: the sweep-and-reclaim trades against zero. Second: the "
-             "four-step model's result per trade minus theirs. The claim holds only when "
-             "both parts are clear.", _WITHIN_NOTE]
+    notes = [_ONE_REGIME, "The sweep-and-reclaim trades are the result shown. Against their "
+             "own random entries: %s a trade." % _said(om, ose)]
+    if chain:
+        notes.append("The four-step model: %s a trade after costs, and %s against its own "
+                     "random entries. Set against their random entries, the model minus the "
+                     "sweeps: %s." % (_said(cm, cse), _said(co, cose), _said(diff, dse)))
+    notes += ["The claim holds only when every part is clear: the sweeps lost money, did "
+              "worse than random entries, and the model did better than they did. Random "
+              "entries carry the same costs, which weigh more on a closer stop.", _WITHIN_NOTE]
     notes += _index_note(by)
     return _record("sweep_alone_loses", "5m", by, notes, {}, measure="mean", pooled=pooled,
                    verdict=v)
@@ -907,18 +996,53 @@ def not_every_day_green(trades: Dict[str, Dict]) -> Optional[Dict]:
 
 # --- opening gaps -------------------------------------------------------------------
 
+_GAP_NOTE = ("A small gap is crossed by ordinary movement, so beside it is how often price "
+             "went as far the other way, past the open, by the same time. A pull back to the "
+             "old close would show as more gaps filled than that.")
+
+
+def _reached(v: _View, idx: np.ndarray, price: float, above: bool) -> bool:
+    """Whether any of these bars traded at a price above (or below) them."""
+    if not idx.size:
+        return False
+    return bool(np.any(v.h[idx] >= price)) if above else bool(np.any(v.l[idx] <= price))
+
+
+def _gap_test(v: _View, d, idx: np.ndarray) -> Tuple[int, int]:
+    """An opening gap against its mirror, over these bars: whether price traded
+    back to the close before it, and whether it went as far the other way past
+    the open. A gap that small price crosses anyway is crossed both ways."""
+    up = d.gap > 0
+    return (int(_reached(v, idx, d.prev_close, not up)),
+            int(_reached(v, idx, d.open + d.gap, up)))
+
+
+def _gap_verdict(pooled: Dict, diffs: Sequence[int], dates: Sequence[int]) -> Optional[int]:
+    """Filled minus the other way, with one date's gaps (two futures that follow
+    each other, usually) counted together; kept in the pooled figures."""
+    if not diffs:
+        return None
+    mean, se = float(np.mean(diffs)), clustered_se(diffs, dates)
+    pooled["diff"], pooled["diff_se"] = _round(mean), _round(se)
+    return labstore.verdict(mean, se, len(diffs), days=len(set(dates)))
+
+
 def ndog_fills(bars_list) -> Optional[Dict]:
     """video 3:16:24-3:23:47: the jump between the 17:00 close and the 18:00
     reopen gets filled. Each weekday's opening gap (Monday's is the weekend's,
-    measured by nwog_fills): filled within an hour, four hours, and by 9:30."""
+    measured by nwog_fills): filled within an hour, four hours, and by 9:30,
+    beside how often price went as far the other way in the same time."""
     views = _intraday(bars_list, "5m", ("future",))
     if not views:
         return None
     by: Dict[str, Dict] = {}
     skipped: Dict[str, int] = {}
+    diffs: List[int] = []
+    dates: List[int] = []
     for v in views:
         cell = by.setdefault(v.symbol, _cell())
-        cell["hit_1h"] = cell["hit_4h"] = 0
+        for key in ("hit_1h", "base_hit_1h", "hit_4h", "base_hit_4h"):
+            cell[key] = 0
         for b, d in enumerate(v.days):
             if b == 0 or d.weekday == 0:
                 continue
@@ -930,37 +1054,45 @@ def ndog_fills(bars_list) -> Optional[Dict]:
                 continue
             if not (d.gap == d.gap) or d.gap == 0:
                 continue
+            rows = v.rows(d, 18 * 60, 9 * 60 + 30)
+            waited = v.ts[rows] - int(v.ts[d.first])
             cell["trials"] += 1
-            if not d.gap_filled_at:
-                continue
-            wait = d.gap_filled_at - int(v.ts[d.first])
-            cell["hit_1h"] += 1 if wait < 3600 else 0
-            cell["hit_4h"] += 1 if wait < 4 * 3600 else 0
-            at = int(np.searchsorted(v.ts, d.gap_filled_at))
-            cell["hits"] += 1 if v.since[at] < int(v.at(9 * 60 + 30)) else 0
+            cell["base_trials"] += 1
+            filled, other = _gap_test(v, d, rows)
+            cell["hits"] += filled
+            cell["base_hits"] += other
+            diffs.append(filled - other)
+            dates.append(d.day.toordinal())
+            for key, limit in (("hit_1h", 3600), ("hit_4h", 4 * 3600)):
+                filled, other = _gap_test(v, d, rows[waited < limit])
+                cell[key] += filled
+                cell["base_" + key] += other
     if not any(c["trials"] for c in by.values()):
         return None
     pooled = _pool(by)
-    pooled["hit_1h"] = sum(c["hit_1h"] for c in by.values())
-    pooled["hit_4h"] = sum(c["hit_4h"] for c in by.values())
+    for key in ("hit_1h", "base_hit_1h", "hit_4h", "base_hit_4h"):
+        pooled[key] = sum(c[key] for c in by.values())
+    v_ = _gap_verdict(pooled, diffs, dates)
     notes = [_ONE_REGIME, "Filled means price traded back to the 17:00 close before the "
-             "pause. The share filled by 9:30 is set against one in two.",
+             "pause. The verdict is on the gaps filled by 9:30.", _GAP_NOTE,
              "Monday's opening gap is the weekend's, counted with the weekly gaps."]
-    return _record("ndog_fills", "5m", by, notes, skipped, pooled=pooled, verdict="half")
+    return _record("ndog_fills", "5m", by, notes, skipped, pooled=pooled, verdict=v_)
 
 
 def nwog_fills(bars_list) -> Optional[Dict]:
     """video 3:19:32, 3:25:57: the gap between Friday's close and Sunday's 18:00
     reopen gets filled, often by Monday. Hourly prices: filled by Monday 16:00,
-    and by Friday 16:00."""
+    and by Friday 16:00, beside how often price went as far the other way."""
     views = _intraday(bars_list, "1h", ("future",))
     if not views:
         return None
     by: Dict[str, Dict] = {}
     skipped: Dict[str, int] = {}
+    diffs: List[int] = []
+    dates: List[int] = []
     for v in views:
         cell = by.setdefault(v.symbol, _cell())
-        cell["hit_monday"] = 0
+        cell["hit_monday"] = cell["base_hit_monday"] = 0
         for b, d in enumerate(v.days):
             if b == 0 or v.days[b - 1].week == d.week:
                 continue                            # not the week's first day
@@ -972,33 +1104,35 @@ def nwog_fills(bars_list) -> Optional[Dict]:
                 continue
             if not (d.gap == d.gap) or d.gap == 0:
                 continue
-            prev = d.prev_close
-            up = d.gap > 0
             week = [x for x in v.days[b:] if x.week == d.week]
-            monday = v.rows(d, 18 * 60, 16 * 60)
-            rows = np.concatenate([v.rows(x, 18 * 60, 16 * 60) for x in week])
-
-            def filled(idx):
-                if not idx.size:
-                    return False
-                return bool(np.any(v.l[idx] <= prev)) if up else bool(np.any(v.h[idx] >= prev))
-
-            week_filled = filled(rows)
+            # A week still under way counts once it is over, filled or not:
+            # counting it early only when filled would count more fills.
             over = any(x.weekday == 4 for x in week) or b + len(week) < len(v.days)
-            if not week_filled and not over:
+            if not over:
                 _skip(skipped, "week_not_over")
                 continue
+            monday = v.rows(d, 18 * 60, 16 * 60)
+            rows = np.concatenate([v.rows(x, 18 * 60, 16 * 60) for x in week])
             cell["trials"] += 1
-            cell["hit_monday"] += 1 if filled(monday) else 0
-            cell["hits"] += 1 if week_filled else 0
+            cell["base_trials"] += 1
+            filled, other = _gap_test(v, d, rows)
+            cell["hits"] += filled
+            cell["base_hits"] += other
+            diffs.append(filled - other)
+            dates.append(d.day.toordinal())
+            filled, other = _gap_test(v, d, monday)
+            cell["hit_monday"] += filled
+            cell["base_hit_monday"] += other
     if not any(c["trials"] for c in by.values()):
         return None
     pooled = _pool(by)
-    pooled["hit_monday"] = sum(c["hit_monday"] for c in by.values())
+    for key in ("hit_monday", "base_hit_monday"):
+        pooled[key] = sum(c[key] for c in by.values())
+    v_ = _gap_verdict(pooled, diffs, dates)
     notes = ["Hourly prices, about two years. Filled means price traded back to Friday's "
-             "close. The share filled by Friday 16:00 is set against one in two; the share "
-             "filled by Monday 16:00 is shown beside it."]
-    return _record("nwog_fills", "1h", by, notes, skipped, pooled=pooled, verdict="half")
+             "close. The verdict is on the gaps filled by Friday 16:00; the share filled by "
+             "Monday 16:00 is shown beside it.", _GAP_NOTE]
+    return _record("nwog_fills", "1h", by, notes, skipped, pooled=pooled, verdict=v_)
 
 
 # --- the bias study --------------------------------------------------------------------
@@ -1108,29 +1242,38 @@ def bias_works(study: Dict[str, Dict], skipped: Dict[str, int]) -> Optional[Dict
 
 def run(conn, bars_by_key: Dict[Tuple[str, str], object], fetch: Callable = market.fetch_bars,
         trades: Optional[Dict[str, Dict]] = None, pause: float = 3.0,
-        sleep: Callable[[float], None] = time.sleep, now: Optional[float] = None) -> Dict:
+        sleep: Callable[[float], None] = time.sleep, now: Optional[float] = None,
+        series: Optional[Dict[Tuple[str, str], Dict]] = None) -> Dict:
     """Measure every must-have claim and the bias study, and store them.
 
     bars_by_key holds the lab's downloads by (symbol, interval); hourly prices
-    for the bias study and the weekly gaps are fetched here. A claim with
-    nothing to measure is not written, so an earlier record stays. One
-    failing claim is recorded and the rest carry on.
+    for the bias study and the weekly gaps are fetched here. series holds what
+    the lab kept of each one's price structure (setuplab.CLAIM_SERIES), which
+    is worked out here for any that has none. A claim with nothing to measure
+    is not written, so an earlier record stays. One failing claim is recorded
+    and the rest carry on.
     """
     errors: List[str] = []
     written: List[str] = []
-    five = [b for (sym, iv), b in sorted(bars_by_key.items()) if iv == "5m"]
-    both = [b for (sym, iv), b in sorted(bars_by_key.items()) if iv in ("5m", "15m")]
-    by_symbol_5m = {sym: b for (sym, iv), b in bars_by_key.items() if iv == "5m"}
+    views = {key: _View(b, (series or {}).get(key)) for key, b in sorted(bars_by_key.items())}
+    five = [v for (sym, iv), v in views.items() if iv == "5m"]
+    both = [v for (sym, iv), v in views.items() if iv in ("5m", "15m")]
+    by_symbol_5m = {sym: v for (sym, iv), v in views.items() if iv == "5m"}
     symbols = []
-    for sym, _ in sorted(bars_by_key):
+    future = set()
+    for (sym, _), v in views.items():
         if sym not in symbols:
             symbols.append(sym)
+        if v.instrument == "future":
+            future.add(sym)
     hourly = []
+    came = set()
     for sym in symbols:
         if pause:
             sleep(pause)
         try:
             hourly.append(fetch(sym, "1h"))
+            came.add(sym)
         except market.DataThrottled as exc:
             errors.append("%s 1h: %s" % (sym, exc))
             break
@@ -1153,6 +1296,12 @@ def run(conn, bars_by_key: Dict[Tuple[str, str], object], fetch: Callable = mark
         ("smt_at_sweep", lambda: smt_at_sweep(by_symbol_5m)),
     ]
     for cid, job in jobs:
+        if cid == "nwog_fills" and future - came:
+            # Measured on some of the futures, it would replace the whole
+            # with a part, as the pooled lean below.
+            errors.append("claim nwog_fills: left as it was, no hourly prices for %s"
+                          % ", ".join(sorted(future - came)))
+            continue
         try:
             rec = job()
             if rec is not None and (rec["pooled"]["trials"] or rec["pooled"]["base_trials"]):

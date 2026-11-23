@@ -40,6 +40,19 @@ _TABLES = (
 MIN_TRADES = 30
 MIN_DAYS = 10
 
+# How a claim is measured, where that has changed since the first release (1).
+# A stored record measured an earlier way is not read: it would be an old
+# figure under new words. The page says the claim is being tested until the
+# next run.
+CLAIM_METHODS = {
+    "london_takes_asia": 2, "ny_takes_london": 2,     # the control is the range mirrored
+    "pd_sweep_reverse": 2,
+    "open_manipulation": 2,                           # the control has fresh ranges too
+    "macro_window": 2,                                # one date's trades count together
+    "crowd_breakout_loses": 2, "sweep_alone_loses": 2,    # judged on random entries too
+    "ndog_fills": 2, "nwog_fills": 2,                 # against the level the other way
+}
+
 RULES = ("2r", "level")
 WINDOW_KEYS = tuple(w[0] for w in clock.LAB_WINDOWS)
 POOL_ALL = "_all"
@@ -80,10 +93,12 @@ _WORDS = {1: "kept money by more than its margin of error",
           0: "cannot be told apart from luck",
           None: "too few to say"}
 
-_CLAIM_WORDS = {1: "happens more often than usual",
-                -1: "happens less often than usual",
-                0: "cannot be told apart from what usually happens",
-                None: "too few to say"}
+# Each reads after "it": a claim can be a rate, an average or a comparison with
+# nothing at all, so the words say only which way the measurement came out.
+_CLAIM_WORDS = {1: "held, by more than its margin of error",
+                -1: "went the other way, by more than its margin of error",
+                0: "cannot be told either way",
+                None: "has too few cases to say"}
 
 
 def words(v: Optional[int]) -> str:
@@ -92,7 +107,7 @@ def words(v: Optional[int]) -> str:
 
 
 def claim_words(v: Optional[int]) -> str:
-    """A claim's verdict in words: against what usually happens, not zero."""
+    """A claim's verdict in words, to follow "it"."""
     return _CLAIM_WORDS.get(v, _CLAIM_WORDS[None])
 
 
@@ -116,6 +131,37 @@ def rate_verdict(hits: int, n: int, base_hits: int, base_n: int,
     p, q = hits / float(n), base_hits / float(base_n)
     se = math.sqrt(p * (1 - p) / n + q * (1 - q) / base_n)
     return verdict(p - q, se, n, minimum)
+
+
+def day_error(parts: Sequence, other: Sequence = ()) -> Optional[float]:
+    """The standard error of an average over several instruments' trades.
+
+    parts holds each instrument's (trades, average, {date: (trades, sum)}).
+    What is left of each date's results once each instrument's own average is
+    taken out is added over the instruments before it is squared, so
+    instruments that move together on a day count as one day's evidence, and
+    unrelated ones cancel. For one instrument it is setuplab.clustered_se.
+    other holds (trades, standard error) of instruments whose dates are not
+    known: theirs are added in full, as if they moved with all the rest.
+    None when an instrument's error cannot be worked out.
+    """
+    total = 0
+    left: Dict[int, float] = {}
+    for n, mean, days in parts:
+        if n >= 2 and len(days) < 2:
+            return None
+        total += n
+        for day, (k, s) in days.items():
+            left[day] = left.get(day, 0.0) + (s - k * mean)
+    added = 0.0
+    for n, se in other:
+        if se is None and n >= 2:
+            return None
+        total += n
+        added += (se or 0.0) * n
+    if total < 2 or (not other and len(left) < 2):
+        return None
+    return (math.sqrt(sum(x * x for x in left.values())) + added) / total
 
 
 # --- checking a record ------------------------------------------------------------
@@ -199,6 +245,21 @@ def _rule(where: str, r) -> None:
     _int(where + ".green_days[1]", green[1])
     if green[0] > green[1]:
         raise ValueError("%s.green_days has more green days than days" % where)
+    if "by_day" in r:
+        # [date, trades, their sum, trades with random entries, the sum of
+        # their results minus those]; absent from older records.
+        if not isinstance(r["by_day"], list):
+            raise ValueError("%s.by_day must be a list" % where)
+        for k, row in enumerate(r["by_day"]):
+            spot = "%s.by_day[%d]" % (where, k)
+            if not isinstance(row, list) or len(row) != 5:
+                raise ValueError("%s must be [date, trades, sum, paired, sum of differences]" % spot)
+            for j in (0, 1, 3):
+                _int("%s[%d]" % (spot, j), row[j])
+            for j in (2, 4):
+                _num("%s[%d]" % (spot, j), row[j])
+        if sum(row[1] for row in r["by_day"]) != r["n"]:
+            raise ValueError("%s.by_day does not add up to %s.n" % (where, where))
     if "avg_target_r" in r:
         _num(where + ".avg_target_r", r["avg_target_r"], none_ok=True)
 
@@ -231,7 +292,7 @@ def validate_result(data) -> Dict:
     """Check one (symbol, interval) record of the Setup lab. Returns it."""
     _dict("result", data)
     _need("result", data, ("symbol", "interval", "group", "from", "to", "days", "bars",
-                           "cost_bps", "k", "skipped_days", "method", "setups"))
+                           "cost_bps", "k", "skipped_days", "setups"))
     _str("result.symbol", data["symbol"])
     _str("result.interval", data["interval"])
     _str("result.group", data["group"])
@@ -242,12 +303,6 @@ def validate_result(data) -> Dict:
     _need("result.skipped_days", skipped, ("incomplete", "roll"))
     for key, value in skipped.items():
         _int("result.skipped_days." + key, value)
-    method = _dict("result.method", data["method"])
-    _need("result.method", method, ("entry", "exit", "targets", "control"))
-    for key in ("entry", "exit", "control"):
-        _str("result.method." + key, method[key])
-    if not isinstance(method["targets"], list) or not method["targets"]:
-        raise ValueError("result.method.targets must be a list of words")
     for name, cell in _dict("result.setups", data["setups"]).items():
         where = "result.setups.%s" % name
         if name not in setups.BY_NAME:
@@ -285,6 +340,9 @@ def validate_result(data) -> Dict:
 _COUNTS = ("trials", "hits", "base_trials", "base_hits")
 _EXTRA_FIGURES = ("mean", "se", "base_mean", "base_se", "diff", "diff_se", "rate",
                   "base_rate", "low", "high")
+# Counts a claim may carry beside its own, and its control's: by an earlier time.
+EXTRA_COUNTS = ("hit_1h", "base_hit_1h", "hit_4h", "base_hit_4h", "hit_monday",
+                "base_hit_monday")
 
 
 def _counts(where: str, cell) -> None:
@@ -299,6 +357,11 @@ def _counts(where: str, cell) -> None:
     for key in _EXTRA_FIGURES:
         if key in cell:
             _num("%s.%s" % (where, key), cell[key], none_ok=True)
+    for key in EXTRA_COUNTS:
+        if key in cell:
+            _int("%s.%s" % (where, key), cell[key])
+            if cell[key] > cell["base_trials" if key.startswith("base_") else "trials"]:
+                raise ValueError("%s.%s is more than its trials" % (where, key))
 
 
 def validate_claim(data) -> Dict:
@@ -374,23 +437,38 @@ def result(conn: sqlite3.Connection, symbol: str, interval: str) -> Optional[Dic
 
 
 def results(conn: sqlite3.Connection, interval: Optional[str] = None) -> List[Dict]:
-    """Every stored (symbol, interval) record, in setups.LAB_SYMBOLS order."""
+    """The stored record of each of the lab's instruments and bar sizes, in
+    setups.LAB_SYMBOLS order. One measured on its own from the command line
+    for another symbol is kept (result) but is no part of the lab's results."""
     ensure_schema(conn)
     if interval:
         rows = conn.execute("SELECT data, updated FROM lab_results WHERE interval=?",
                             (interval,)).fetchall()
     else:
         rows = conn.execute("SELECT data, updated FROM lab_results").fetchall()
-    out = [r for r in (_row(row) for row in rows) if r is not None]
     order = {sym: k for k, (sym, _, _) in enumerate(setups.LAB_SYMBOLS)}
-    out.sort(key=lambda r: (order.get(r["symbol"], 99), r["symbol"],
-                            setups.LAB_INTERVALS.index(r["interval"])
-                            if r["interval"] in setups.LAB_INTERVALS else 99))
+    out = [r for r in (_row(row) for row in rows) if r is not None
+           and r.get("symbol") in order and r.get("interval") in setups.LAB_INTERVALS]
+    out.sort(key=lambda r: (order[r["symbol"]], setups.LAB_INTERVALS.index(r["interval"])))
     return out
+
+
+def claim_method(cid: str) -> int:
+    """Which way of measuring a claim this build uses (see CLAIM_METHODS)."""
+    return CLAIM_METHODS.get(cid, 1)
+
+
+def _claim_row(row) -> Optional[Dict]:
+    """A stored claim, or None when it was measured an earlier way."""
+    rec = _row(row)
+    if rec is None or int(rec.get("version") or 1) != claim_method(rec.get("claim")):
+        return None
+    return rec
 
 
 def save_claim(conn: sqlite3.Connection, data: Dict, now: Optional[int] = None) -> None:
     validate_claim(data)
+    data = dict(data, version=claim_method(data["claim"]))
     ensure_schema(conn)
     conn.execute("INSERT OR REPLACE INTO lab_claims (claim, data, updated) VALUES (?, ?, ?)",
                  (data["claim"], _dumps(data), int(now if now is not None else time.time())))
@@ -400,15 +478,15 @@ def save_claim(conn: sqlite3.Connection, data: Dict, now: Optional[int] = None) 
 def claim(conn: sqlite3.Connection, cid: str) -> Optional[Dict]:
     ensure_schema(conn)
     row = conn.execute("SELECT data, updated FROM lab_claims WHERE claim=?", (cid,)).fetchone()
-    return _row(row)
+    return _claim_row(row)
 
 
 def claims(conn: sqlite3.Connection) -> Dict[str, Dict]:
-    """Every stored claim record, by claim id."""
+    """Every stored claim record measured this build's way, by claim id."""
     ensure_schema(conn)
     out = {}
     for row in conn.execute("SELECT data, updated FROM lab_claims"):
-        rec = _row(row)
+        rec = _claim_row(row)
         if rec is not None:
             out[rec["claim"]] = rec
     return out
@@ -477,17 +555,18 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
            group: Optional[str] = None) -> Optional[Dict]:
     """One setup and target rule over several instruments, as one cell.
 
-    Trades are summed and the margin of error combines each instrument's
-    (their errors are added as if independent: instruments that follow the
-    same index are not, so a page showing this says so). None when no
-    instrument has a trade.
+    Trades are summed and the margin of error counts one date's trades
+    together, whatever the instrument (day_error): most of them follow the
+    same market, so their results on a day are not separate evidence. Days
+    are separate dates, too. None when no instrument has a trade.
     """
-    n = wins = days = longs = cn = 0
+    n = wins = longs = cn = 0
     sum_r = gross = csum = 0.0
-    var = dvar = 0.0
     dsum = 0.0
     dn = 0
-    have_var = have_dvar = True
+    parts, other, dparts, dother = [], [], [], []
+    dates = set()
+    most_days = 0
     symbols = []
     for res in results_:
         if group is not None and res.get("group") != group:
@@ -499,30 +578,38 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
         symbols.append(res.get("symbol"))
         n += k
         wins += int(cell["wins"])
-        days += int(cell["days"])
+        most_days = max(most_days, int(cell["days"]))
         longs += int(cell["longs"])
         sum_r += float(cell["sum_r"])
         gross += float(cell["sum_r_gross"])
-        if cell.get("se") is None:
-            have_var = have_var and k < 2
+        by_day = cell.get("by_day")
+        if by_day:
+            dates.update(row[0] for row in by_day)
+            parts.append((k, float(cell["sum_r"]) / k,
+                          {row[0]: (row[1], row[2]) for row in by_day}))
         else:
-            var += (float(cell["se"]) * k) ** 2
+            # Written before the days were kept: until the next run its
+            # dates are not known, so its days are not added to the others'.
+            other.append((k, cell.get("se")))
         control = cell.get("control") or {}
-        cn += int(control.get("n") or 0)
+        m = int(control.get("n") or 0)
+        cn += m
         csum += float(control.get("sum_r") or 0.0)
-        if cell.get("diff") is not None:
-            dsum += float(cell["diff"]) * k
-            dn += k
-            if cell.get("diff_se") is None:
-                have_dvar = False
+        if cell.get("diff") is not None and m:
+            dsum += float(cell["diff"]) * m
+            dn += m
+            if by_day:
+                dparts.append((m, float(cell["diff"]),
+                               {row[0]: (row[3], row[4]) for row in by_day if row[3]}))
             else:
-                dvar += (float(cell["diff_se"]) * k) ** 2
+                dother.append((m, cell.get("diff_se")))
     if n == 0:
         return None
     mean = sum_r / n
-    se = math.sqrt(var) / n if have_var and n >= 2 else None
+    days = max(len(dates), most_days)
+    se = day_error(parts, other)
     diff = dsum / dn if dn else None
-    diff_se = math.sqrt(dvar) / dn if dn and have_dvar else None
+    diff_se = day_error(dparts, dother) if dn else None
     return {"n": n, "wins": wins, "days": days, "longs": longs, "sum_r": sum_r,
             "sum_r_gross": gross, "mean": mean, "se": se,
             "verdict": verdict(mean, se, n, days=days),
@@ -535,10 +622,20 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
 # --- fixtures, for tests only ------------------------------------------------------------
 
 def _sample_rule(n: int, wins: int, sum_r: float, se: float, days: int) -> Dict:
+    diff, diff_se = 0.02, 0.18
+    # Days whose results add up to sum_r, and give the standard errors above:
+    # each is its share, and as far above it one day as below it the next.
+    by_day = []
+    for k in range(days):
+        m = n // days + (1 if k < n % days else 0)
+        off = 1 if k % 2 == 0 else -1
+        by_day.append([740000 + k, m,
+                       round(m * sum_r / n + off * se * n / math.sqrt(days), 4), m,
+                       round(m * diff + off * diff_se * n / math.sqrt(days), 4)])
     return {"n": n, "wins": wins, "sum_r": sum_r, "sum_r_gross": sum_r + 0.05 * n,
             "se": se, "days": days, "longs": n // 2, "avg_bars": 9.5,
             "control": {"n": n, "sum_r": sum_r - 0.8},
-            "diff": 0.02, "diff_se": 0.18,
+            "diff": diff, "diff_se": diff_se, "by_day": by_day,
             "holdout": {"n": n // 3, "mean_r": -0.1}, "stable": True,
             "by_window": {"open_drive": [3, 1, -0.4], "macro": [5, 2, 0.6]},
             "green_days": [days // 2, days]}
@@ -553,14 +650,11 @@ def sample_result(symbol: str = "ES=F", interval: str = "5m") -> Dict:
     return {"symbol": symbol, "interval": interval, "group": "index",
             "from": 1789000000, "to": 1795000000, "days": 59, "bars": 16500,
             "cost_bps": 1.0, "k": 2, "skipped_days": {"incomplete": 2, "roll": 1},
-            "method": {"entry": "the close of the bar the setup appears on",
-                       "exit": "the stop, the target, or the 16:00 New York close",
-                       "targets": ["twice the risk", "the next old high or low"],
-                       "control": "five random entries at the same time of day on other days"},
             "setups": {"liquidity_model": {
                 "rules": {"2r": _sample_rule(41, 15, -3.2, 0.14, 30), "level": level},
                 "skipped": {"tight_stop": 3, "no_control": 0},
-                "k3": {"2r": {"n": 30, "wins": 11, "sum_r": -1.0, "se": 0.2}},
+                "k3": {"2r": {"n": 30, "wins": 11, "sum_r": -1.0, "se": 0.2},
+                       "level": {"n": 31, "wins": 9, "sum_r": -2.0, "se": 0.2}},
                 "example": {"t": t, "o": [x - 0.5 for x in c], "h": [x + 1.0 for x in c],
                             "l": [x - 1.0 for x in c], "c": c, "entry_i": 45, "exit_i": 52,
                             "entry": c[45], "stop": c[45] - 4.0, "target": c[45] + 8.0,

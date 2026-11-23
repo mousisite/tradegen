@@ -138,6 +138,7 @@ class Claim:
     control: str              # what it is compared with
     learn: str                # the Learn topic's slug
     must: bool                # measured from the first release; False: later
+    versus: str = ""          # what it is compared with, in a few words beside the figure
 
 
 CLAIMS: Tuple[Claim, ...] = (
@@ -148,53 +149,58 @@ CLAIMS: Tuple[Claim, ...] = (
           "Futures and coins, 5-minute bars: the first London bar beyond the Asia range "
           "(days where one bar goes past both sides are left out). It counts when the "
           "other side trades by 12:00 New York time.",
-          "A band as wide as the Asia range, centred on the price at 03:00, measured the "
-          "same way.", "sessions", True),
+          "The same range mirrored around the price at 03:00: its high as far above the "
+          "price as Asia's low was below it, and its low as far below as Asia's high was "
+          "above, measured the same way.", "sessions", True, "the range mirrored"),
     Claim("ny_takes_london",
           "New York trades past one side of London's range, then reaches the other side "
           "the same day.",
           ("2:03:41", "2:18:35", "4:31:11"), "days",
           "Futures and coins, 5-minute bars: the first bar from 08:30 beyond London's "
           "range. It counts when the other side trades by 16:00.",
-          "A band as wide as London's range, centred on the price at 08:30.",
-          "sessions", True),
+          "The same range mirrored around the price at 08:30: its high as far above the "
+          "price as London's low was below it, and its low as far below as London's high "
+          "was above.", "sessions", True, "the range mirrored"),
     Claim("pd_sweep_reverse",
           "After yesterday's high is taken, price reaches yesterday's low the same day, "
           "and the other way round.",
           ("2:06:52-2:07:57",), "days",
           "Every instrument, 5-minute bars: the first time today trades past yesterday's "
           "high or low. It counts when the other one trades by 16:00.",
-          "A band as wide as yesterday's range, centred on today's opening price.",
-          "previous-day-levels", True),
+          "The same range mirrored around today's opening price: its high as far above "
+          "the open as yesterday's low was below it, and its low as far below as "
+          "yesterday's high was above.", "previous-day-levels", True, "the range mirrored"),
     Claim("open_manipulation",
           "Between 9:30 and 9:50 price trades past a level from before the open, then "
           "closes back inside within half an hour.",
           ("4:33:23", "4:35:34"), "days",
-          "Futures and coins, 5-minute bars: a bar from 9:30 to 9:55 trades past the "
-          "Asia, London, before-the-open or yesterday's high or low, and a close back "
-          "inside follows within 30 minutes.",
-          "The same test from 10:30 to 10:55.", "sessions", True),
+          "Futures and coins, 5-minute bars: a bar that starts from 9:30 to 9:45, so is "
+          "over by 9:50, trades past the Asia, London, before-the-open or yesterday's high "
+          "or low, and a close back inside follows within 30 minutes.",
+          "The same test with every time an hour later: bars that start from 10:30 to "
+          "10:45, past yesterday's high or low or the ranges from 19:00 to 4:00, 4:00 to "
+          "9:30 and 9:30 to 10:30.", "sessions", True, "an hour later"),
     Claim("macro_window",
           "Trades entered between 9:50 and 10:10 do better than trades entered at other "
           "times.",
           ("4:33:23", "4:37:38"), "trades",
           "The Setup lab's sweep, break and retest trades, grouped by the time they were "
           "entered.",
-          "The same trades entered at other times.", "sessions", True),
+          "The same trades entered at other times.", "sessions", True, "other times"),
     Claim("after_1030_slower",
           "The market moves less after 10:30 than in the first hour.",
           ("4:33:23",), "days",
           "Every instrument, 5-minute bars: the average bar's size from 10:30 to 12:00 "
           "against 9:30 to 10:30, each over that day's own average bar, each day "
           "counted once.",
-          "The 9:30 to 10:30 window.", "sessions", True),
+          "The 9:30 to 10:30 window.", "sessions", True, "9:30 to 10:30"),
     Claim("fvg_gets_retested",
           "Price comes back into a fresh stretch of prices that a fast move jumped over.",
           ("2:51:15",), "gaps",
           "Every instrument, 5- and 15-minute bars: a new gap counts when price trades "
           "back into it within 20 bars, before closing through it.",
           "A zone of the same size, the same distance from the price, at a random bar "
-          "(the same random bars on every run).", "fair-value-gap", True),
+          "(the same random bars on every run).", "fair-value-gap", True, "random zones"),
     Claim("close_beats_wick",
           "A close past a swing point carries on; a wick past it that closes back "
           "does not.",
@@ -202,7 +208,7 @@ CLAIMS: Tuple[Claim, ...] = (
           "Every instrument, 5-minute bars: the first time price goes past an old swing "
           "point. It counts when price goes one usual bar's range further before it "
           "comes one usual bar's range back, within 20 bars.",
-          "The times only a wick went past.", "break-of-structure", True),
+          "The times only a wick went past.", "break-of-structure", True, "only a wick past"),
     Claim("bias_works",
           "The lean read before the open calls the day's direction more often than "
           "chance.",
@@ -210,20 +216,23 @@ CLAIMS: Tuple[Claim, ...] = (
           "Every instrument, hourly bars over about two years: the lean read from the "
           "bars closed by 9:00 (futures and coins) or 9:30 (stocks), against the 16:00 "
           "close.",
-          "Always saying up, and a coin flip.", "daily-bias", True),
+          "Always saying up, and a coin flip.", "daily-bias", True, "always saying up"),
     Claim("crowd_breakout_loses",
           "Buying the break of a high, with the stop under the last low, loses money.",
           ("1:19:23-1:29:56",), "trades",
-          "The Setup lab's breakout trades, with a target twice the risk.",
-          "Zero, and the same number of random trades at the same times of day.",
-          "breakouts", True),
+          "The Setup lab's breakout buys, with a target twice the risk.",
+          "Zero, and each buy's own random entries: buys at the same time of day on other "
+          "days, with the same costs.",
+          "breakouts", True, "random entries"),
     Claim("sweep_alone_loses",
           "Trading against every run past an old high or low loses; the full four-step "
           "model does better.",
           ("1:40:27-1:43:34",), "trades",
-          "The Setup lab's sweep-and-reclaim trades, and the four-step model's result "
-          "minus theirs.",
-          "Zero.", "liquidity-sweep", True),
+          "The Setup lab's sweep-and-reclaim trades, and the four-step model's trades, "
+          "with a target twice the risk.",
+          "Zero, and each trade's own random entries at the same time of day on other "
+          "days, with the same costs; and the four-step model, against its own.",
+          "liquidity-sweep", True, "random entries"),
     Claim("not_every_day_green",
           "Even a method that works has losing days.",
           ("0:32:45",), "days",
@@ -237,15 +246,16 @@ CLAIMS: Tuple[Claim, ...] = (
           "Futures, 5-minute bars: each day's opening jump (roll days left out), and "
           "whether price traded back to the close before it within 1 hour, 4 hours, "
           "and by 9:30.",
-          "None: it holds when even the low end of its margin of error is above one in "
-          "two.", "opening-gaps", True),
+          "The level the same distance the other way, past the open, by the same time.",
+          "opening-gaps", True, "the same distance the other way"),
     Claim("nwog_fills",
           "The jump between Friday's close and Sunday's reopen gets filled, often by "
           "Monday.",
           ("3:19:32", "3:25:57"), "weeks",
           "Futures, hourly bars: Friday's close against the Sunday 18:00 open, filled by "
           "Monday 16:00, and by Friday 16:00.",
-          "None: this describes what happened.", "opening-gaps", True),
+          "The level the same distance the other way, past the open, by the same time.",
+          "opening-gaps", True, "the same distance the other way"),
     Claim("smt_at_sweep",
           "When two related markets disagree at a high (one makes a higher high, the "
           "other does not), both fall next, and the other way round at lows.",
@@ -254,7 +264,8 @@ CLAIMS: Tuple[Claim, ...] = (
           "bars: swing highs paired within 2 bars, one higher and one lower, the higher "
           "one past an old high. It counts when the leader falls one usual bar's range "
           "before it rises one, within 36 bars.",
-          "Old highs taken where both made higher highs.", "smt-divergence", True),
+          "Old highs taken where both made higher highs.", "smt-divergence", True,
+          "when both agreed"),
     Claim("equal_highs_magnet",
           "Price is drawn to equal highs and lows more than to single ones.",
           ("2:21:45",), "levels",
@@ -372,8 +383,3 @@ def seconds(stamp: str) -> int:
     if len(parts[1]) != 2 or len(parts[2]) != 2 or m > 59 or s > 59:
         raise ValueError("not h:mm:ss: %r" % stamp)
     return h * 3600 + m * 60 + s
-
-
-def video_link(stamp: str) -> str:
-    """The video at a timestamp (the start of a range). Hidden in the iPhone app."""
-    return "%s?t=%d" % (VIDEO["url"], seconds(stamp.split("-")[0]))

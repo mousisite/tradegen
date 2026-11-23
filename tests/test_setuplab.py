@@ -218,6 +218,7 @@ check("no trade is entered on a bar that ends at 16:00 (no time left)",
       all(not (clock.fmt_ny(int(es.timestamp[t.i]) + 300) == "16:00")
           for rules in trades.values() for t in rules["2r"]))
 late = []
+open_bars = 0
 for i in range(0, len(es.close) - 1, 7):
     end = int(es.timestamp[i]) + 300
     day_, minute, _ = clock.ny_clock(end)
@@ -225,11 +226,37 @@ for i in range(0, len(es.close) - 1, 7):
         day_ = date.fromordinal(day_.toordinal() + 1)
     x = clock.ny(day_.year, day_.month, day_.day, 16, 0)
     j = int(p.exit_i[i])
-    if not (int(es.timestamp[j]) + 300 <= x
+    if x > int(es.timestamp[-1]) + 300:
+        if j != -1:
+            late.append(i)
+        open_bars += 1
+    elif not (int(es.timestamp[j]) + 300 <= x
             and (j + 1 >= len(es.close) or int(es.timestamp[j + 1]) + 300 > x)):
         late.append(i)
 check("each bar's last bar is the last one ending by the next 16:00 New York time",
       not late, late[:5])
+# ES's last whole bar ends at 17:00 here, an hour past the 16:00 before it, so
+# the bars of that last hour have their 16:00 still to come.
+check("and the bars whose 16:00 is not in the prices yet have none", open_bars >= 1, open_bars)
+counted = {}
+for name in setuplab.SETUP_NAMES:
+    for key, n_ in res["setups"][name]["skipped"].items():
+        counted[key] = counted.get(key, 0) + n_
+missing = [i for name in setuplab.SETUP_NAMES for i in setuplab.events(name, full, es)[0]
+           if p.good[i] and p.exit_i[i] == -1]
+check("a trade whose exit time is not in the prices yet is counted as still open, not scored",
+      missing and counted["still_open"] == len(missing)
+      and not any(t.i in missing for rules in trades.values() for t in rules["2r"]),
+      (counted, len(missing)))
+short = clock.head(es, len(es.close) - 20)
+s_short = liquidity.series(short)
+ended = [(t.i, t.exit_i) for t in setuplab.trades_for(
+    short, s_short, "sweep_reclaim", "2r", prep=setuplab.prepare(short, s_short, 1.0, "ES=F", "5m"),
+    with_controls=False)]
+whole_ = {t.i: t.exit_i for t in trades["sweep_reclaim"]["2r"]}
+check("so a result once counted does not change when more prices come",
+      ended and all(whole_.get(i) == at for i, at in ended),
+      [(i, at, whole_.get(i)) for i, at in ended if whole_.get(i) != at][:4])
 check("and every trade ends by then",
       all(t.exit_i <= p.exit_i[t.i] for rules in trades.values() for t in rules["2r"]))
 
@@ -352,6 +379,12 @@ check("in the lab's order", [r["symbol"] for r in stored[::2]]
 check("every claim measured on a full run is stored",
       set(labstore.claims(conn)) == set(c_.id for c_ in setups.CLAIMS if c_.must),
       sorted(set(c_.id for c_ in setups.CLAIMS if c_.must) - set(labstore.claims(conn))))
+five_min = [r for r in stored if r["interval"] == "5m"]
+table_se = labstore.pooled(five_min, "sweep_reclaim", "2r")
+claim_se = labstore.claim(conn, "sweep_alone_loses")["pooled"]
+check("the claims and the setups' table give the same trades the same margin",
+      abs(table_se["mean"] - claim_se["mean"]) < 1e-5 and abs(table_se["se"] - claim_se["se"]) < 1e-4
+      and claim_se["trials"] == table_se["n"], (table_se["se"], claim_se["se"]))
 check("and the bias study, per instrument and pooled",
       labstore.bias(conn, labstore.POOL_ALL) is not None
       and all(labstore.bias(conn, s_[0]) for s_ in setups.LAB_SYMBOLS))

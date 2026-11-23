@@ -76,17 +76,6 @@ LAB_WINDOWS = (("asia", 18 * 60, 3 * 60), ("london", 3 * 60, 8 * 60 + 30),
                ("late_morning", 10 * 60 + 10, 10 * 60 + 30),
                ("midday", 10 * 60 + 30, 12 * 60), ("afternoon", 12 * 60, 16 * 60),
                ("after", 16 * 60, 18 * 60))
-LAB_WINDOW_LABELS = {
-    "asia": "Asia (18:00 to 03:00)",
-    "london": "London (03:00 to 08:30)",
-    "ny_pre": "Before the open (08:30 to 09:30)",
-    "open_drive": "9:30 to 9:50",
-    "macro": "9:50 to 10:10",
-    "late_morning": "10:10 to 10:30",
-    "midday": "10:30 to 12:00",
-    "afternoon": "12:00 to 16:00",
-    "after": "After 16:00",
-}
 
 # app choice: a session (or day) with under 80% of its bars is not a range;
 # the data source leaves holes, and a range with a hole in it is too narrow.

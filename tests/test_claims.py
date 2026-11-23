@@ -1,13 +1,14 @@
 """The video's claims, each measured on prices scripted so the answer is known.
 
 Each must-have claim in setups.CLAIMS on a series built for it: days where
-London always reaches the other side of Asia's range (and a band the same
-size, centred on 03:00, never does), New York and London's range likewise,
-yesterday's levels, the open's spikes, bar sizes before and after 10:30,
-gaps that are always retested, the 18:00 and weekend gaps filled at known
-times, the lab's trades by window and setup, the daily lean on a market that
-rises every day. Then: incomplete and roll days are left out and counted, a
-claim with under 30 trials has no verdict, every record passes
+London always reaches the other side of Asia's range (and the range mirrored
+around 03:00 never has its other side reached), New York and London's range
+likewise, yesterday's levels, the open's spikes, bar sizes before and after
+10:30, gaps that are always retested, the 18:00 and weekend gaps filled at
+known times, the lab's trades by window and setup, the daily lean on a market
+that rises every day. Then random walks with nothing in them, where no claim
+may be found to hold. Then: incomplete and roll days are left out and
+counted, a claim with under 30 trials has no verdict, every record passes
 labstore.validate_claim, and claims.run stores them. No network.
 """
 import os as _os
@@ -25,7 +26,7 @@ import numpy as np  # noqa: E402
 
 import scenarios as sc  # noqa: E402
 from bot import claims, clock, labstore, setups, structure  # noqa: E402
-from bot.setuplab import Trade  # noqa: E402
+from bot.setuplab import CLAIM_SERIES, Trade  # noqa: E402
 
 fails = []
 
@@ -95,10 +96,11 @@ DAYS = 40
 # ---------------------------------------------------------------------------
 head("LONDON TAKES ONE SIDE OF ASIA, THEN REACHES THE OTHER")
 # ---------------------------------------------------------------------------
-# Asia: 99 to 101. 03:00 opens at 100.5, so a band as wide as Asia centred
-# there runs 99.45 to 101.55. London goes to 101.4 (past Asia's high, not the
-# band's), then to 98.8 by 07:00 (past both lows): London reached Asia's other
-# side; the band's other side was never reached.
+# Asia: 99 to 101. 03:00 opens at about 100.5, so Asia mirrored there runs
+# from about 100 (as far below as Asia's high is above) to 102 (as far above as
+# Asia's low is below). London goes to 101.4 (past Asia's high, not the
+# mirror's), then to 98.8 by 07:00 (past both lows): London reached Asia's
+# other side; the mirror's other side was never reached.
 LONDON = [(0, 100), (since(1), 101), (since(2, 30), 99), (since(3), 100.5),
           (since(5), 101.4), (since(7), 98.8), (since(12), 98.8), (since(17), 100)]
 b = futures_days([LONDON] * DAYS)
@@ -106,9 +108,9 @@ rec = claims.london_takes_asia([b])
 p = rec["pooled"]
 check("every day London took Asia's high and then reached its low",
       p["trials"] == DAYS and p["hits"] == DAYS, p)
-check("the band centred on 03:00 was taken on one side and never reached on the other",
+check("Asia mirrored around 03:00 was taken on one side and never reached on the other",
       p["base_trials"] == DAYS and p["base_hits"] == 0, p)
-check("so it happens more often than usual", rec["verdict"] == 1, rec["verdict"])
+check("so the claim holds", rec["verdict"] == 1, rec["verdict"])
 check("with the rate and its range", p["rate"] == 1.0 and 0.9 < p["low"] < 1.0, p)
 few = claims.london_takes_asia([futures_days([LONDON] * 10)])
 check("ten days are too few for a verdict", few["verdict"] is None and few["pooled"]["trials"] == 10)
@@ -122,9 +124,9 @@ rec = claims.ny_takes_london([futures_days([NY] * DAYS)])
 p = rec["pooled"]
 check("every day New York took London's high and then its low by 16:00",
       p["trials"] == DAYS and p["hits"] == DAYS, p)
-check("the band centred on 08:30 never had its other side reached",
+check("London mirrored around 08:30 never had its other side reached",
       p["base_trials"] == DAYS and p["base_hits"] == 0, p)
-check("verdict: more often than usual", rec["verdict"] == 1)
+check("verdict: it holds", rec["verdict"] == 1)
 
 # ---------------------------------------------------------------------------
 head("YESTERDAY'S HIGH TAKEN, THEN YESTERDAY'S LOW")
@@ -135,9 +137,12 @@ rec = claims.pd_sweep_reverse([futures_days(paths)])
 p = rec["pooled"]
 check("each day after the first took yesterday's high, then reached its low",
       p["trials"] == DAYS - 1 and p["hits"] == DAYS - 1, p)
-check("a band as wide as yesterday's, centred on today's open, is yesterday's range here, "
+check("yesterday's range mirrored around today's open is yesterday's range here, "
       "so it did the same", p["base_trials"] == DAYS - 1 and p["base_hits"] == DAYS - 1, p)
 check("and the verdict is that the two cannot be told apart", rec["verdict"] == 0)
+
+check("a range is mirrored: as far above as it was below, and the other way round",
+      claims._mirrored(100.0, 101.0, 96.0) == (104.0, 99.0))
 
 # ---------------------------------------------------------------------------
 head("9:30 TO 9:50 TAKES A LEVEL AND CLOSES BACK; 10:30 DOES NOT")
@@ -149,8 +154,16 @@ rec = claims.open_manipulation([futures_days([OPEN] * DAYS, spikes=spikes)])
 p = rec["pooled"]
 check("every day the 9:35 bar went past the levels and closed back inside",
       p["trials"] == DAYS and p["hits"] == DAYS, p)
-check("from 10:30 to 10:55 nothing was taken", p["base_trials"] == DAYS and p["base_hits"] == 0, p)
-check("verdict: more often than usual", rec["verdict"] == 1)
+check("an hour later nothing was taken", p["base_trials"] == DAYS and p["base_hits"] == 0, p)
+check("verdict: it holds", rec["verdict"] == 1)
+late_spikes = {(k, since(9, 50)): 100.8 for k in range(DAYS)}
+rec = claims.open_manipulation([futures_days([OPEN] * DAYS, spikes=late_spikes)])
+check("a bar that starts at 9:50 is past the window, and is not counted",
+      rec["pooled"]["trials"] == DAYS and rec["pooled"]["hits"] == 0, rec["pooled"])
+hour_on = {(k, since(10, 35)): 100.8 for k in range(DAYS)}
+rec = claims.open_manipulation([futures_days([OPEN] * DAYS, spikes=hour_on)])
+check("the same spike an hour later is the comparison's, past a range that ended at 10:30",
+      rec["pooled"]["hits"] == 0 and rec["pooled"]["base_hits"] == DAYS, rec["pooled"])
 
 # ---------------------------------------------------------------------------
 head("THE MARKET MOVES LESS AFTER 10:30")
@@ -245,7 +258,16 @@ check("Monday's gap (the weekend's) and the first day are left out",
 check("filled within the hour, within four hours, and by 9:30 as scripted",
       p["hit_1h"] == counted.count(0) and p["hit_4h"] == counted.count(0) + counted.count(1)
       and p["hits"] == counted.count(0) + counted.count(1), p)
-check("set against one in two", p["base_rate"] == 0.5 and rec["verdict"] in (1, 0), rec["verdict"])
+check("set against the level the same distance the other way, which was never reached",
+      p["base_trials"] == len(counted) and p["base_hits"] == 0 and p["base_hit_1h"] == 0
+      and p["base_hit_4h"] == 0 and rec["verdict"] == 1, p)
+# A gap that fills only because price swings both ways past the open.
+swings = [[(0, 100.5), (30, 99.9), (90, 101.2), (since(3), 100), (since(17), 100)]] * DAYS
+rec = claims.ndog_fills([futures_days(swings)])
+p = rec["pooled"]
+check("gaps filled every day, and as far the other way every day, show no pull back",
+      p["hits"] == p["trials"] == p["base_hits"] and p["trials"] >= 30
+      and rec["verdict"] == 0, (p, rec["verdict"]))
 
 # ---------------------------------------------------------------------------
 head("THE WEEKEND GAP: FILLED MONDAY, LATER IN THE WEEK, OR NOT")
@@ -268,11 +290,19 @@ for w in range(DAYS // 5):
         else:
             path = [(0, f + 1), (since(17), f + 1)]
         paths.append(path)
+week_paths = list(paths)
 hourly = futures_days(paths, step=3600)
 rec = claims.nwog_fills([hourly])
 p = rec["pooled"]
 weeks = plan[1:]
 check("each week after the first is counted", p["trials"] == len(weeks), (p, weeks))
+check("and as far the other way: the weeks that rose 1 point past the open by Friday 16:00",
+      p["base_trials"] == len(weeks) and p["base_hit_monday"] == 0, p)
+cut = futures_days(paths[:-2], step=3600)
+rec = claims.nwog_fills([cut])
+check("a week still under way is left out, filled or not",
+      rec["pooled"]["trials"] == len(weeks) - 1 and rec["skipped"].get("week_not_over") == 1,
+      (rec["pooled"], rec["skipped"]))
 check("filled on Monday, and by Friday, as scripted",
       p["hit_monday"] == weeks.count(0) and p["hits"] == weeks.count(0) + weeks.count(1), p)
 
@@ -316,20 +346,49 @@ check("each instrument's own averages are kept", rec["by_symbol"]["ES=F"]["mean"
 crowd = [trade("crowd_breakout", -1.0, 700000 + k // 2, control=-0.1) for k in range(40)]
 sells = [Trade(**dict(t.__dict__, direction=-1, r=5.0)) for t in crowd[:20]]
 rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": crowd + sells}}})
-check("breakout buys that all lost: the claim that it loses holds",
+check("breakout buys that all lost, and lost more than random entries: the claim holds",
       rec["verdict"] == 1 and rec["pooled"]["mean"] == -1.0
       and abs(rec["pooled"]["diff"] + 0.9) < 1e-9, rec["pooled"])
 check("the sells the lab also measures are not counted in a claim about buying",
       rec["pooled"]["trials"] == 40, rec["pooled"])
-won = [trade("crowd_breakout", 0.5 + 0.01 * (k % 3), 700000 + k) for k in range(40)]
+costs = [trade("crowd_breakout", -0.3 + 0.1 * (k % 3), 700000 + k, control=-0.2)
+         for k in range(42)]
+rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": costs}}})
+check("buys that lost to costs as much as random entries did: it cannot be told either way",
+      labstore.verdict(rec["pooled"]["mean"], rec["pooled"]["se"], 42) == -1
+      and rec["verdict"] == 0, (rec["pooled"], rec["verdict"]))
+won = [trade("crowd_breakout", 0.5 + 0.01 * (k % 3), 700000 + k, control=0.0)
+       for k in range(40)]
 rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": won}}})
-check("breakout trades that all won: the claim fails", rec["verdict"] == -1)
-sweeps = [trade("sweep_reclaim", -0.5 + 0.01 * (k % 4), 700000 + k) for k in range(40)]
-chain = [trade("liquidity_model", 0.5 + 0.01 * (k % 4), 700000 + k) for k in range(40)]
+check("breakout trades that all won, and beat random entries: the claim fails",
+      rec["verdict"] == -1)
+sweeps = [trade("sweep_reclaim", -0.5 + 0.01 * (k % 4), 700000 + k, control=-0.2)
+          for k in range(40)]
+chain = [trade("liquidity_model", 0.5 + 0.01 * (k % 4), 700000 + k, control=-0.1)
+         for k in range(40)]
 rec = claims.sweep_alone_loses({"ES=F": {"sweep_reclaim": {"2r": sweeps},
                                          "liquidity_model": {"2r": chain}}})
-check("sweeps alone lost and the four steps did better: it holds", rec["verdict"] == 1,
-      rec["pooled"])
+check("sweeps alone lost, more than random entries, and the four steps did better: it holds",
+      rec["verdict"] == 1, rec["pooled"])
+check("set beside the sweeps' own random entries, with the four steps' figures in the notes",
+      abs(rec["pooled"]["base_mean"] + 0.2) < 1e-9 and "+0.52R" in " ".join(rec["notes"]),
+      (rec["pooled"], rec["notes"]))
+# Nothing but costs: each setup does what its random entries do, and a close
+# stop makes the sweeps' costs many more units of risk than the model's.
+sweeps = [trade("sweep_reclaim", -2.0 + 0.2 * (k % 5 - 2), 700000 + k, control=-2.0)
+          for k in range(40)]
+chain = [trade("liquidity_model", -0.4 + 0.2 * (k % 5 - 2), 700000 + k, control=-0.4)
+         for k in range(40)]
+rec = claims.sweep_alone_loses({"ES=F": {"sweep_reclaim": {"2r": sweeps},
+                                         "liquidity_model": {"2r": chain}}})
+check("sweeps that lose only their costs are not called worse than the four steps",
+      rec["verdict"] == 0 and abs(rec["pooled"]["diff"]) < 1e-9, (rec["pooled"], rec["verdict"]))
+# Two instruments that had the same days are one market's evidence, not two.
+days_ = [trade("liquidity_model", 0.3 if k % 2 else -0.2, 700000 + k) for k in range(40)]
+one = claims._mean_se([("ES=F", t) for t in days_])
+two = claims._mean_se([(sym, t) for sym in ("ES=F", "SPY") for t in days_])
+check("the same days in two instruments leave the margin as wide as one's",
+      abs(one[1] - two[1]) < 1e-12 and two[2] == 80, (one, two))
 pattern = [1.0, 1.0, -1.0, -1.0, -1.0, 1.0, -0.5]
 days_ = [trade("liquidity_model", r, 700000 + k) for k, r in enumerate(pattern)]
 rec = claims.not_every_day_green({"ES=F": {"liquidity_model": {"2r": days_}}})
@@ -385,6 +444,60 @@ unrelated = sc.walk(sc.futures_times(6000, start=date(2026, 10, 4)), seed=9, kin
                     price=21000.0, vol=0.001, symbol="NQ=F")
 rec = claims.smt_at_sweep({"ES=F": w, "NQ=F": unrelated})
 check("two unrelated markets disagree often", rec["pooled"]["trials"] > 50, rec["pooled"])
+
+# ---------------------------------------------------------------------------
+head("PRICES WITH NOTHING IN THEM: NO CLAIM IS FOUND TO HOLD")
+# ---------------------------------------------------------------------------
+# Random walks: no drift, no memory, no time of day. Each claim and its
+# control must come out alike, or the test itself makes the pattern.
+
+
+def nothing(seed, symbol, kind="future", days=60, jump=0.0, step=300):
+    """A random walk; with jump, the price steps at each reopen and the walk
+    goes on from there, with nothing pulling it back."""
+    n = int(days * (23 if kind == "future" else 24) * 3600 / step)
+    ts_ = (sc.futures_times(n, start=date(2026, 10, 4), step=step) if kind == "future"
+           else sc.coin_times(n, step=step))
+    rng = np.random.RandomState(seed)
+    vol = 0.0008 * (step / 300.0) ** 0.5
+    rets = rng.normal(0.0, vol, n)
+    steps_ = np.where(np.diff(ts_, prepend=ts_[0]) > 1.5 * step,
+                      rng.normal(0.0, vol * jump, n), 0.0) if jump else np.zeros(n)
+    level = np.cumsum(rets + steps_)
+    close, open_ = 6000.0 * np.exp(level), 6000.0 * np.exp(level - rets)
+    high = np.maximum(open_, close) * np.exp(np.abs(rng.normal(0.0, vol * 0.5, n)))
+    low = np.minimum(open_, close) * np.exp(-np.abs(rng.normal(0.0, vol * 0.5, n)))
+    return sc.make(open_, high, low, close, ts_, kind=kind,
+                   interval="1h" if step == 3600 else "5m", symbol=symbol)
+
+
+flat = [nothing(51, "ES=F"), nothing(52, "NQ=F"), nothing(53, "BTC-USD", "coin"),
+        nothing(54, "ETH-USD", "coin")]
+rec = claims.open_manipulation(flat)
+p = rec["pooled"]
+check("9:30 to 9:50 and the hour later take and lose their levels alike",
+      p["trials"] > 200 and abs(p["rate"] - p["base_rate"]) < 0.12 and rec["verdict"] == 0,
+      (p, rec["verdict"]))
+tally = [0, 0, 0, 0]
+for k in range(6):
+    many = [nothing(100 + 10 * k + j, s_) for j, s_ in enumerate(("ES=F", "NQ=F"))] \
+        + [nothing(105 + 10 * k + j, s_, "coin") for j, s_ in enumerate(("BTC-USD", "ETH-USD"))]
+    p = claims.ny_takes_london(many)["pooled"]
+    tally = [a + b_ for a, b_ in zip(tally, (p["hits"], p["trials"], p["base_hits"],
+                                             p["base_trials"]))]
+gap_ = (tally[0] / float(tally[1]) - tally[2] / float(tally[3])) * 100
+check("London's range and its mirror are crossed as often as each other (%.1f points apart "
+      "over %d days)" % (gap_, tally[1]), tally[1] > 1200 and abs(gap_) < 2.5
+      and abs(tally[1] - tally[3]) < 0.04 * tally[1], tally)
+rec = claims.ndog_fills([nothing(61, "ES=F", jump=2.0), nothing(62, "NQ=F", jump=2.0)])
+p = rec["pooled"]
+check("small opening gaps are nearly all filled, and nothing is made of it",
+      p["trials"] > 80 and p["rate"] > 0.8 and rec["verdict"] == 0, (p, rec["verdict"]))
+rec = claims.nwog_fills([nothing(s_, sym, days=500, jump=2.0, step=3600)
+                         for s_, sym in ((63, "ES=F"), (64, "NQ=F"))])
+p = rec["pooled"]
+check("nor of the weekend's", p["trials"] > 150 and p["rate"] > 0.6 and rec["verdict"] == 0,
+      (p, rec["verdict"]))
 
 # ---------------------------------------------------------------------------
 head("BAD DAYS ARE LEFT OUT AND COUNTED")
@@ -445,6 +558,38 @@ check("when one instrument's hourly prices fail, its lean is not written and the
       and labstore.bias(conn2, labstore.POOL_ALL) is None
       and labstore.claim(conn2, "bias_works") is None
       and any("NQ=F" in e for e in out["errors"]), out)
+def weekend(symbol, interval, missing=""):
+    if symbol == missing:
+        raise RuntimeError("no hourly prices")
+    return futures_days(week_paths, step=3600, symbol=symbol)
+
+
+pair = {("ES=F", "5m"): five, ("NQ=F", "5m"): futures_days([LONDON] * DAYS, symbol="NQ=F")}
+claims.run(conn, pair, fetch=weekend, pause=0)
+weekly = labstore.claim(conn, "nwog_fills")
+check("the weekend gaps are measured when every future's hourly prices came",
+      weekly is not None and sorted(weekly["by_symbol"]) == ["ES=F", "NQ=F"], weekly)
+out = claims.run(conn, pair, fetch=lambda s_, iv: weekend(s_, iv, "NQ=F"), pause=0)
+check("and left as they were when one future's did not", any("nwog_fills" in e for e in out["errors"])
+      and "nwog_fills" not in out["claims"]
+      and labstore.claim(conn, "nwog_fills")["pooled"] == weekly["pooled"], out)
+out = claims.run(conn, {("ES=F", "5m"): five, ("SPY", "5m"): stock},
+                 fetch=lambda s_, iv: weekend(s_, iv, "SPY"), pause=0)
+check("a fund's missing hourly prices leave the futures' weekend gaps alone",
+      "nwog_fills" in out["claims"], out)
+whole = structure.series(walk)
+kept = {key: whole[key] for key in CLAIM_SERIES}
+real_series = structure.series
+worked = []
+structure.series = lambda bars_, *a, **k: worked.append(bars_) or real_series(bars_, *a, **k)
+try:
+    conn3 = sqlite3.connect(":memory:")
+    claims.run(conn3, {("ES=F", "5m"): walk}, fetch=fetch, pause=0, series={("ES=F", "5m"): kept})
+finally:
+    structure.series = real_series
+check("the structure the lab worked out is used, not worked out again, with the same result",
+      not any(b_ is walk for b_ in worked) and labstore.claim(conn3, "close_beats_wick")["pooled"]
+      == claims.close_beats_wick([walk])["pooled"], len(worked))
 words = " ".join(" ".join(r["notes"]) for r in stored.values()).lower()
 check("the notes use no jargon",
       not any(j in words for j in ("expectancy", "r-multiple", "confidence interval", " atr",
