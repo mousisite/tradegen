@@ -686,8 +686,19 @@ try:
                   "status": "past stop" if t["symbol"] == "OPN0" else "open"} for t in trades}
     try:
         front = flat(text(c.get("/")))
+        # And with all the rest at their target, it is still among those told.
+        web._mark_to_market = lambda trades: {
+            t["id"]: {"price": 98.0, "r": 0.0, "as_of": "now",
+                      "status": "past stop" if t["symbol"] == "OPN0" else "past target"}
+            for t in trades}
+        many = flat(text(c.get("/")))
     finally:
         web._mark_to_market = real_mark
+    check("a front page with sixty positions past a level lists twenty, the crossed stop "
+          "first, and says how many more",
+          many.count("</b> long:") == 20 and many.index("<b>OPN0</b> long:")
+          < many.index("at or past its target") and "And 40 more in" in many,
+          many.count("</b> long:"))
     check("and tells of a stop crossed on one it does not list",
           "<b>OPN0</b> long:" in front
           and "None of your open positions is past its stop" not in front, front[:1500])

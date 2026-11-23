@@ -1408,6 +1408,8 @@ def _attention(stored: Dict, open_trades) -> Dict:
     positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
                  if (marks.get(t["id"]) or {}).get("status") in ("past stop",
                                                                  "past target")]
+    # Those past their stop first, so they are the ones listed when not all are.
+    positions.sort(key=lambda p: p["mark"]["status"] != "past stop")
     crossed = {p["trade"]["id"] for p in positions
                if p["mark"]["status"] == "past stop"}
     # The background check writes a crossed stop into the alert history as
@@ -1419,7 +1421,9 @@ def _attention(stored: Dict, open_trades) -> Dict:
     unchecked = sum(1 for t in open_trades
                     if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
-    return {"positions": positions, "late": late, "crossed": len(crossed),
+    return {"positions": positions[:POSITIONS_SHOWN],
+            "positions_more": max(0, len(positions) - POSITIONS_SHOWN),
+            "late": late, "crossed": len(crossed),
             "unchecked": unchecked, "marks": marks,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
