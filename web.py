@@ -5167,10 +5167,11 @@ def sitemap():
         conn.close()
     # A strategy built for intraday prices never fires on the daily ones these
     # tests use, and its page would stay empty: not one to send a robot to.
+    # Nor is a stock page whose check is days old, which asks them to wait.
     plans = [("/pricing", "monthly", "0.6")] if billing_mod.ready() else []
     pages = PUBLIC_PAGES + plans + [("/stocks", "daily", "0.8")] + [
-        ("/stock/" + public_mod.slug(sym), "daily", "0.7")
-        for sym, _ in public_mod.POPULAR] + [
+        ("/stock/" + public_mod.slug(v["symbol"]), "daily", "0.7")
+        for v in rows if not public_mod.stale(v)] + [
         ("/backtests", "daily", "0.8"), ("/record", "daily", "0.8")] + [
         ("/backtest/" + public_mod.strategy_slug(name), "daily", "0.7")
         for name in strategies_mod.strategy_names()

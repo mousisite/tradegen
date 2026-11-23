@@ -1020,6 +1020,33 @@ def run(browser, site, base, check, head):
           "current, and no Menu above it", not tabs, tabs[:5])
 
     # -----------------------------------------------------------------------
+    head("ON A WIDE SCREEN A TABLE'S HEADER IS OVER ITS COLUMNS")
+    # -----------------------------------------------------------------------
+    # The tables that are cards on a phone: their class is also a layout's, a
+    # column of flex items, and as that the header sat out of line.
+    ctx = browser.new_context(viewport={"width": 1200, "height": 900},
+                              service_workers="block")
+    ctx.set_default_timeout(15000)
+    ctx.route("**/*", lambda route: route.continue_()
+              if route.request.url.startswith(base + "/") else route.abort())
+    page = ctx.new_page()
+    seen, off = 0, []
+    for path in ("/backtests", "/backtest/pin-bar", "/trades", "/monitor"):
+        page.goto(base + path)
+        for lefts in page.evaluate("""() => [...document.querySelectorAll('table.stack')]
+                .filter(t => t.tHead && t.tBodies[0].rows.length
+                             && getComputedStyle(t).visibility === 'visible'
+                             && t.getBoundingClientRect().width > 0)
+                .map(t => [t.tHead.rows[0], t.tBodies[0].rows[0]].map(
+                    r => [...r.cells].map(c => Math.round(c.getBoundingClientRect().left))))"""):
+            seen += 1
+            if any(abs(a - b) > 1 for a, b in zip(*lefts)):
+                off.append((path, lefts))
+    check("every header starts where its column does (%d tables)" % seen,
+          seen >= 3 and not off, off[:3] or seen)
+    ctx.close()
+
+    # -----------------------------------------------------------------------
     head("A NOTCH AND A HOME BAR")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)

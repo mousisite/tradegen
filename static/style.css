@@ -366,6 +366,9 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 /* ---------- layout ---------- */
 
 .stack { display: flex; flex-direction: column; gap: var(--s3); }
+/* A table of that name (cards on a phone, below) stays a table on a wide
+   screen: as a column of flex items its header left its columns. */
+table.stack { display: table; }
 .cols  { display: grid; gap: var(--s3); }
 .cols.a { grid-template-columns: 5fr 7fr; }
 .cols.b { grid-template-columns: 1fr 1fr; }

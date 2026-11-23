@@ -1,5 +1,6 @@
 """Popular pages, sharing, invites and the weekly email."""
 import calendar
+import json
 import os as _os
 import re
 import sys as _sys
@@ -172,6 +173,13 @@ try:
           and r.data[:8] == b"\x89PNG\r\n\x1a\n", r.status_code)
     check("that a cache may keep for an hour",
           "max-age=3600" in r.headers.get("Cache-Control", ""))
+    block = re.search(r'(?s)<script type="application/ld\+json">\s*(\{[^<]*"@graph".*?)</script>',
+                      page)
+    nodes = json.loads(block.group(1))["@graph"] if block else []
+    check("what it tells a search engine Orenth is does not become one stock's call",
+          len(nodes) == 2 and all("NVIDIA" not in n["description"]
+                                  and "/stock/" not in n.get("image", "") for n in nodes),
+          nodes)
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("the list shows every popular symbol",
           all(">%s<" % public.short(s) in page for s, _ in public.POPULAR))
@@ -197,6 +205,13 @@ try:
           and "Today's check" not in page and "Today&#39;s check" not in page)
     check("and asks search engines to wait for the next one",
           'name="robots" content="noindex"' in page and '"FAQPage"' not in page)
+    check("and its link preview and share text date it",
+          "Orenth&#39;s check on GameStop (GME) on %s: BUY." % when in page
+          and "GME: BUY on %s · Orenth" % when in page
+          and "Orenth said BUY on GME on %s." % when in page
+          and "Orenth says" not in page, page[:2500])
+    check("and the sitemap leaves it out until then",
+          "/stock/gme</loc>" not in c.get("/sitemap.xml").data.decode())
     check("a check two days old at most is today's",
           not public.stale({"at": 100}, now=100 + 2 * 86400)
           and public.stale({"at": 100}, now=101 + 2 * 86400) and not public.stale({}))
@@ -409,7 +424,8 @@ try:
 
     page = c.get("/record").data.decode("utf-8", "replace")
     check("the record says when the method changed, and from what to what",
-          "Calls before 19 November 2026 came from 34 strategies" in " ".join(page.split())
+          "Calls up to 19 November 2026 came from 34 strategies. Early on 20 November "
+          "(UTC)" in " ".join(page.split())
           and "so calls since come from 44" in " ".join(page.split()))
     check("before any call, the record page says it is starting",
           "first calls are written down" in page and "noindex" in page)
