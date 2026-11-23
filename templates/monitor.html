@@ -54,6 +54,9 @@
         {{ last_run.headline }}</p>
       <div class="tablewrap" style="margin-top:var(--s2)">
         <table>
+          <thead><tr><th style="padding:0;border:0"><span class="sr">Result</span></th>
+            <th style="padding:0;border:0"><span class="sr">What it found</span></th>
+            <th style="padding:0;border:0"><span class="sr">Where to look</span></th></tr></thead>
           <tbody>
           {% for s in last_run.steps %}
             <tr>
@@ -87,7 +90,9 @@
     <h2>Alerts</h2>
     <span class="count">{{ alerts|length }}</span>
     <span class="tail">
-      <form method="post" action="{{ url_for('check_alerts') }}" style="display:inline">
+      <form method="post" action="{{ url_for('check_alerts') }}" style="display:inline" data-working
+            data-working-title="Checking your alerts"
+            data-working-note="Asking for the price behind each one.">
         <button class="btn quiet sm" type="submit">Check them all now</button>
       </form>
     </span>
@@ -387,13 +392,15 @@
                  if (row['closed_price'] or t.now) else '—' }}
               {% if t.split_words and not row['closed_price'] %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ t.quoted|price }} today, after a {{ t.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' }}" data-label="Move">
+            <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' if (t.review.move or 0) < 0 else '' }}" data-label="Move">
               {{ t.review.move|pct(1) if t.review.usable else '—' }}</td>
             <td data-label="Called">
-              <span class="chip {{ 'long' if (row['balance'] or 0) > 0.15
+              <span class="chip {{ 'mute' if t.no_view
+                                   else 'long' if (row['balance'] or 0) > 0.15
                                    else 'short' if (row['balance'] or 0) < -0.15
                                    else 'mute' }}">
-                {{ 'Bullish' if (row['balance'] or 0) > 0.15
+                {{ 'No view' if t.no_view
+                   else 'Bullish' if (row['balance'] or 0) > 0.15
                    else 'Bearish' if (row['balance'] or 0) < -0.15 else 'Balanced' }}
               </span></td>
             <td data-label="How it turned out">

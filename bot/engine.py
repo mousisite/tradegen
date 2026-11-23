@@ -34,6 +34,12 @@ _PIECES = {"fundamentals": "Company figures", "sec_history": "Filed accounts",
            "valuation": "Valuation"}
 
 
+# How long a research page waits for its sources, in seconds. EDGAR not
+# answering at all takes about half of it to give up on; Cloudflare gives up on
+# the whole page at 100.
+RESEARCH_WAIT = 45.0
+
+
 @dataclass
 class Research:
     """The fundamental side: what the business is, worth, and risks.
@@ -300,7 +306,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
     recorded in `unavailable` rather than taking the whole report down: a
     company with no options listed should still get a valuation.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
     from . import fundamentals as fund_mod
     from . import options as options_mod
@@ -328,14 +334,26 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
 
     step("Gathering fundamentals, filings and risk")
     results: Dict[str, object] = {}
-    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    # Waited for together, up to one limit: a source that has stopped
+    # answering costs the page that piece, not the page. Its thread is left to
+    # run out on its own timeouts.
+    pool = ThreadPoolExecutor(max_workers=len(jobs))
+    try:
         futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+        give_up = time.monotonic() + RESEARCH_WAIT
         for name, future in futures.items():
             try:
-                results[name] = future.result()
+                results[name] = future.result(
+                    timeout=max(0.0, give_up - time.monotonic()))
+            except FutureTimeout as exc:
+                results[name] = None
+                out.left_out(name, exc if future.done() else TimeoutError(
+                    "no answer in %.0f seconds" % RESEARCH_WAIT))
             except Exception as exc:
                 results[name] = None
                 out.left_out(name, exc)
+    finally:
+        pool.shutdown(wait=False)
 
     out.fundamentals = results.get("fundamentals")
     out.sec_history = results.get("sec_history")
@@ -367,6 +385,9 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             out.scores = {"available": False,
                           "reason": "The scored models could not be run on these "
                                     "filings."}
+
+    # Built on Yahoo's figures, so it does not wait on EDGAR having answered.
+    if out.fundamentals is not None:
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),
@@ -383,6 +404,10 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             "expectancy": analysis.calibration.expectancy_r,
             "hit_rate": analysis.calibration.hit_rate,
             "samples": analysis.calibration.bucket_samples,
+            # The side those odds were measured on, which the news can tip the
+            # other way from the signals; guessed from the signals alone, a
+            # short's winning record was filed under the case for buying.
+            "side": analysis.calibration.direction or None,
         }
 
     step("Building the case")

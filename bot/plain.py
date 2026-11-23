@@ -18,6 +18,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
+from .quality import strength_band
+
 
 def _money(value: Optional[float], currency: str = "") -> str:
     if value is None:
@@ -34,14 +36,28 @@ def _money(value: Optional[float], currency: str = "") -> str:
     return "%s%.4f" % (symbol, value)
 
 
-def _big(value: Optional[float]) -> str:
-    """A large amount as a person would say it out loud."""
+# The currencies companies file in here, said the way people say them. One
+# not listed is named by its code.
+_CURRENCIES = {"AUD": "Australian dollars", "BRL": "Brazilian reais",
+               "CAD": "Canadian dollars", "CHF": "Swiss francs", "CNY": "Chinese yuan",
+               "DKK": "Danish kroner", "EUR": "euros", "GBP": "British pounds",
+               "HKD": "Hong Kong dollars", "ILS": "Israeli shekels",
+               "INR": "Indian rupees", "JPY": "Japanese yen", "KRW": "South Korean won",
+               "MXN": "Mexican pesos", "NOK": "Norwegian kroner", "RMB": "Chinese yuan",
+               "SEK": "Swedish kronor", "SGD": "Singapore dollars",
+               "TWD": "Taiwan dollars", "ZAR": "South African rand"}
+
+
+def _big(value: Optional[float], currency: str = "USD") -> str:
+    """A large amount as a person would say it out loud, in its own currency."""
     if value is None:
         return "?"
+    sign, after = ("$", "") if currency == "USD" else (
+        "", " " + _CURRENCIES.get(currency, currency))
     for limit, word in ((1e12, "trillion"), (1e9, "billion"), (1e6, "million")):
         if abs(value) >= limit:
-            return "$%.1f %s" % (value / limit, word)
-    return _money(value)
+            return "%s%.1f %s%s" % (sign, value / limit, word, after)
+    return _money(value, currency) + after
 
 
 # --- the call ---------------------------------------------------------------
@@ -580,6 +596,11 @@ def explain_company(research) -> Dict:
                 "why": ("Its filed accounts could not be read just now, so there "
                         "are no company numbers to put into plain words here. "
                         "The price side of the app still works.")}
+    if not history.get("available") and history.get("entity"):
+        # It does file; why its figures could not be read is already known.
+        return {"available": False,
+                "why": "%s The price side of the app still works."
+                       % history.get("reason", "Its filed figures could not be read.")}
     if not history.get("available"):
         return {"available": False,
                 "why": ("This is not a company that files accounts with the US "
@@ -590,30 +611,43 @@ def explain_company(research) -> Dict:
     table = history.get("table") or {}
     currency = history.get("currency") or "USD"
 
-    def latest(concept):
-        rows = table.get(concept) or []
-        return rows[-1]["value"] if rows else None
+    def by_year(concept):
+        """Each financial year's figure and the currency it was filed in."""
+        return {r["fy"]: (r["value"], (r.get("unit") or currency).split("/")[0])
+                for r in table.get(concept) or []
+                if r.get("fy") is not None and r.get("value") is not None}
 
-    revenue, profit = latest("revenue"), latest("net_income")
-    if revenue:
-        points.append("Last year it sold %s worth of things." % _big(revenue))
-    if revenue and profit is not None:
-        kept = profit / revenue
-        if profit < 0:
-            points.append("It lost money doing it.")
-        else:
-            points.append(
-                "It kept about %.0f cents of every dollar as profit." % (kept * 100))
+    # Sales and profit of one and the same year, and the year is named: the
+    # two series can end in different years, and the newest filed year is not
+    # always last year.
+    sold, earned = by_year("revenue"), by_year("net_income")
+    shared = set(sold) & set(earned) if sold and earned else set(sold)
+    year = max(shared) if shared else None
+    if year is not None and sold[year][0] > 0:
+        revenue, unit = sold[year]
+        points.append("In its %d financial year it sold %s worth of things."
+                      % (year, _big(revenue, unit)))
+        if year in earned:
+            profit, profit_unit = earned[year]
+            if profit < 0:
+                points.append("It lost money doing it.")
+            elif profit_unit != unit:
+                pass        # no exchange rate in the filing, so no share either
+            elif unit == "USD":
+                points.append("It kept about %.0f cents of every dollar as profit."
+                              % (profit / revenue * 100))
+            else:
+                points.append("It kept about %.0f%% of what it sold as profit."
+                              % (profit / revenue * 100))
 
     # Turn each score into one sentence a person can act on.
     f = scores.get("scores", {}).get("piotroski") if scores.get("available") else None
-    if f is not None and f.usable:
-        if f.value >= 7:
-            points.append("Its finances got better in most ways last year.")
-        elif f.value <= 3:
-            points.append("Its finances got worse in most ways last year.")
-        else:
-            points.append("Some parts got better last year, some got worse.")
+    band = strength_band(f)
+    if band:
+        when = "in its %d financial year" % f.year if f.year else "last year"
+        points.append({"strong": "Its finances got better in most ways %s.",
+                       "weak": "Its finances got worse in most ways %s.",
+                       "mixed": "Some parts got better %s, some got worse."}[band] % when)
 
     z = scores.get("scores", {}).get("altman") if scores.get("available") else None
     if z is not None and z.usable:
@@ -626,9 +660,12 @@ def explain_company(research) -> Dict:
 
     a = scores.get("scores", {}).get("accruals") if scores.get("available") else None
     if a is not None and a.usable and a.value > 0.10:
-        points.append(
-            "Its profit on paper is much bigger than the cash it actually "
-            "collected. That gap often shrinks later.")
+        if a.inputs.get("net income", 1.0) > 0:
+            points.append(
+                "Its profit on paper is much bigger than the cash it actually "
+                "collected. That gap often shrinks later.")
+        else:
+            points.append("Much more cash went out than its accounts show it losing.")
 
     value = getattr(research, "valuation", None) or {}
     if value.get("usable") and value.get("upside") is not None:

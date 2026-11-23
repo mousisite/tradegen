@@ -116,7 +116,7 @@ otherwise. Each links to where the work happens.
 | 2 | Technical analysis | `bot/indicators.py`, `bot/strategies.py` | 30+ indicators and 44 strategies, each scored, weighted by regime, and discounted when it duplicates a sibling in the same family |
 | 3 | Backtesting | `bot/calibrate.py` | Walk-forward replay with Wilson confidence intervals, striding to decorrelate samples, and a pessimistic tie-break when a bar touches both stop and target |
 | 4 | Real-time news and sentiment | `bot/sentiment.py` | Google News and StockTwits, scored by a finance lexicon that handles negation, or by an LLM when a key is present |
-| 5 | SEC filings analysis | `bot/sec.py` | Filing history, XBRL company facts, and full-text search, each result linked back to the document |
+| 5 | SEC filings analysis | `bot/sec.py` | Filing history and XBRL company facts, each linked back to the document |
 | 6 | Fundamental analysis | `bot/fundamentals.py` | Forty-odd ratios, each carrying its source, with Yahoo reconciled against what was actually filed, and a quality score that refuses to answer on too little data |
 | 7 | Financial modeling | `bot/valuation.py` | Discounted cash flow on a three-year average of filed free cash flow, growth fading toward terminal, a 5x5 sensitivity grid, plus a reverse DCF that solves for the growth the price implies |
 | 8 | Advanced stock screener | `bot/screener.py` | Two stages: bulk quotes first, full fundamentals only for names that already passed, so a wide screen stays fast |
@@ -566,9 +566,10 @@ a perfectly plausible Altman score that is wrong by the exchange rate, and the
 filing contains no rate to correct it with. Every model refuses on those, and
 names the currencies it found.
 
-**Models applied outside their domain.** No Altman Z for a bank: the
-coefficients were fitted on manufacturers, and a balance sheet that is mostly
-other people's money by design reads as distressed however healthy it is.
+**Models applied outside their domain.** No scores for a bank or an insurer:
+Altman's coefficients were fitted on manufacturers, and a balance sheet that is
+mostly other people's money by design reads as distressed however healthy it is.
+The cash flow and margin tests of the other three do not fit one either.
 
 **Partial evidence.** A Piotroski score computed from seven available tests
 says "6 of 7" and names the two it could not measure, rather than grading out
@@ -603,10 +604,11 @@ decades of filings, and can be looked up.
 
 Three things they deliberately will not do:
 
-**Score a bank on Altman.** The coefficients were fitted on manufacturers, and
+**Score a bank.** Altman's coefficients were fitted on manufacturers, and
 a balance sheet that is mostly other people's money by design reads as
-distressed however healthy it is. A number there would mislead, so none is
-given.
+distressed however healthy it is. The other three models' cash flow, debt and
+margin tests do not fit a lender either. A number there would mislead, so none
+is given.
 
 **Rescale a partial score.** If only seven of the nine Piotroski tests can be
 measured, it says "6 of 7" and names what was missing, rather than quietly
@@ -764,7 +766,7 @@ on the order it runs in.
 | Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, crypto. |
 | Yahoo Finance quoteSummary | Ratios, profile, balance sheet, cash flow | Free, but needs a cookie and crumb handshake, which `bot/yahoo.py` performs and refreshes |
 | Yahoo Finance options | Chains, open interest, implied volatility | Same handshake. Greeks are computed here, not taken on trust |
-| SEC EDGAR | Filed financials (XBRL company facts), filing history, full text search | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
+| SEC EDGAR | Filed financials (XBRL company facts), filing history | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
 | Google News RSS | Headlines | Free, no key |
 | StockTwits | Retail trader posts | Free public endpoint |
 
@@ -901,7 +903,7 @@ bot/
   scheduler.py      the background loop that actually checks alerts
   sessions.py       market hours, so the loop leaves a closed market alone
   export.py         your journal and measurements as CSV or JSON
-  sec.py            EDGAR filings, XBRL company facts, full text search
+  sec.py            EDGAR filings and XBRL company facts
   fundamentals.py   ratios from Yahoo, reconciled against what was filed
   valuation.py      discounted cash flow, reverse DCF, multiples
   options.py        Black-Scholes, Greeks, implied volatility, chain quality

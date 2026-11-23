@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .fundamentals import big_number
 from .market import format_price
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -359,15 +360,17 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
     if sec_history and sec_history.get("available"):
         block = {}
         cagr = sec_history.get("cagr") or {}
-        for key, label in (("revenue", "Revenue 5-year CAGR"),
-                           ("net_income", "Net income 5-year CAGR"),
-                           ("operating_income", "Operating income 5-year CAGR")):
+        for key, label in (("revenue", "Revenue growth a year"),
+                           ("net_income", "Net income growth a year"),
+                           ("operating_income", "Operating income growth a year")):
             if cagr.get(key) is not None:
-                block[label] = "%.1f%%" % (cagr[key] * 100)
+                span = (sec_history.get("cagr_years") or {}).get(key)
+                block[label + (", FY%d to FY%d" % span if span else "")] = (
+                    "%.1f%%" % (cagr[key] * 100))
         rev = (sec_history.get("table") or {}).get("revenue") or []
         if rev:
             block["Revenue by fiscal year (as filed)"] = ", ".join(
-                "FY%s %.1fB" % (r["fy"], r["value"] / 1e9) for r in rev[-5:])
+                "FY%s %s" % (r["fy"], big_number(r["value"])) for r in rev[-5:])
         derived = sec_history.get("derived") or {}
         margins = [(y, derived[y]["net_margin"]) for y in sorted(derived)
                    if "net_margin" in derived[y]]
@@ -380,13 +383,18 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
     if valuation and valuation.get("usable"):
         block = {"modelled range": "%.2f to %.2f" % (valuation["low"], valuation["high"]),
                  "midpoint": "%.2f" % valuation["midpoint"],
-                 "agreement between models": valuation.get("agreement", "")}
+                 "agreement between models": (
+                     "none, only one model gave a value"
+                     if valuation.get("agreement") == "single"
+                     else valuation.get("agreement_words", ""))}
         if valuation.get("upside") is not None:
             block["gap to price"] = "%.1f%%" % (valuation["upside"] * 100)
         for model in valuation.get("models", []):
-            if getattr(model, "implied_growth", None) is not None:
-                block["growth the current price implies"] = \
-                    "%.1f%% a year for a decade" % (model.implied_growth * 100)
+            if getattr(model, "implied_average", None) is not None:
+                block["free cash flow growth the current price implies"] = (
+                    "%s%.1f%% a year on average over ten years, starting at %.1f%%"
+                    % ("below " if model.implied_at_limit else "",
+                       model.implied_average * 100, model.implied_growth * 100))
         out["Valuation models"] = block
 
     if risk_profile is not None:
