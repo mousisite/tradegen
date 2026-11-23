@@ -28,6 +28,7 @@ import math
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Tuple
@@ -1640,6 +1641,7 @@ MUTE = (SOFT, (232, 230, 224))
 WIDTH, HEIGHT, MARGIN = 1200, 630, 84
 
 _CARDS: "OrderedDict[str, bytes]" = OrderedDict()
+_CARDS_LOCK = threading.Lock()
 
 
 def _font(name: str, size: int):
@@ -1691,9 +1693,11 @@ def counts_line(snap: Dict, short: bool = False) -> str:
 def render_card(snap: Dict) -> bytes:
     """The picture a pasted link unfurls to. Cached, since cards repeat."""
     key = json.dumps(snap, sort_keys=True)
-    if key in _CARDS:
-        _CARDS.move_to_end(key)
-        return _CARDS[key]
+    with _CARDS_LOCK:
+        kept = _CARDS.get(key)
+        if kept is not None:
+            _CARDS.move_to_end(key)
+            return kept
 
     from PIL import Image, ImageDraw
     from .market import format_price
@@ -1713,26 +1717,37 @@ def render_card(snap: Dict) -> bytes:
     pen.text((WIDTH - MARGIN - small.getlength(date), 64), date, font=small,
              fill=FAINT)
 
-    # The symbol, big, with the call beside it.
-    big = _font("source-serif-4-600.ttf", 104)
+    # The symbol, big, with the call beside it. A long one, as outside the US
+    # or for an option, is drawn smaller, on the same middle line, so that the
+    # call always fits on the card.
+    size = 104
+    big = _font("source-serif-4-600.ttf", size)
+    middle = sum(big.getbbox("X")[1::2]) / 2.0
     sym = short(snap["symbol"])
-    pen.text((MARGIN, 140), sym, font=big, fill=INK)
     word = snap.get("action") or "?"
     ink, wash = CHIPS.get(word, MUTE)
     chip_font = _font("inter-600.ttf", 38)
-    x = MARGIN + big.getlength(sym) + 36
     w = chip_font.getlength(word) + 56
+    while size > 30 and big.getlength(sym) + 36 + w > WIDTH - 2 * MARGIN:
+        size -= 2
+        big = _font("source-serif-4-600.ttf", size)
+    pen.text((MARGIN, 140 + middle - sum(big.getbbox("X")[1::2]) / 2.0), sym,
+             font=big, fill=INK)
+    x = MARGIN + big.getlength(sym) + 36
     pen.rounded_rectangle([x, 176, x + w, 246], radius=35, fill=wash,
                           outline=ink, width=3)
     pen.text((x + 28, 187), word, font=chip_font, fill=ink)
 
+    sub_font = _font("inter-400.ttf", 32)
     sub = snap.get("name") or ""
     if snap.get("price"):
         money = ("$" + format_price(snap["price"])
                  if snap.get("currency", "USD") == "USD"
                  else format_price(snap["price"], snap["currency"]))
-        sub = "%s · %s" % (sub, money) if sub else money
-    pen.text((MARGIN, 276), sub, font=_font("inter-400.ttf", 32), fill=SOFT)
+        # A long name is cut short, never the price after it.
+        room = WIDTH - 2 * MARGIN - sub_font.getlength(" · " + money)
+        sub = "%s · %s" % (_wrap(sub, sub_font, room, 1)[0], money) if sub.strip() else money
+    pen.text((MARGIN, 276), sub, font=sub_font, fill=SOFT)
 
     headline = _font("source-serif-4-600.ttf", 44)
     y = 344
@@ -1750,7 +1765,9 @@ def render_card(snap: Dict) -> bytes:
 
     buf = io.BytesIO()
     card.save(buf, "PNG", optimize=True)
-    _CARDS[key] = buf.getvalue()
-    while len(_CARDS) > 64:
-        _CARDS.popitem(last=False)
-    return _CARDS[key]
+    data = buf.getvalue()
+    with _CARDS_LOCK:
+        _CARDS[key] = data
+        while len(_CARDS) > 64:
+            _CARDS.popitem(last=False)
+    return data
