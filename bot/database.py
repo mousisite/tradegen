@@ -597,6 +597,12 @@ def check_trail(pct: Optional[float], distance: Optional[float],
         raise ValueError("an ATR trail must be more than 0 and at most 50 ATR")
 
 
+# The bounds of what a trade can be written down with, far past anything
+# traded. One price of 300 digits, and the figures worked out from every trade
+# no longer came to a number, so the pages that show them could not be drawn.
+PRICE_LEAST, PRICE_MOST, SIZE_MOST = 1e-12, 1e12, 1e15
+
+
 def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                direction: int, entry: float, stop: float,
                target1: Optional[float] = None, target2: Optional[float] = None,
@@ -631,6 +637,10 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                          ("second target", target2), ("size", quantity)):
         if value is not None and not math.isfinite(float(value)):
             raise ValueError("the %s must be a real number" % label)
+        if value is not None and float(value) > (SIZE_MOST if label == "size" else PRICE_MOST):
+            raise ValueError("the %s is too large a number" % label)
+    if 0 < entry < PRICE_LEAST:
+        raise ValueError("the entry is too small a number")
     if entry <= 0:
         raise ValueError("entry price must be positive")
     if stop <= 0:
@@ -770,6 +780,8 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
     price = float(exit_price)
     if not math.isfinite(price) or price <= 0:
         raise ValueError("the exit price must be a positive number")
+    if price > PRICE_MOST:
+        raise ValueError("the exit price is too large a number")
     if quantity is not None:
         quantity = float(quantity)
         if not math.isfinite(quantity) or quantity <= 0:
