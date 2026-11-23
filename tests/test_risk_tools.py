@@ -97,6 +97,14 @@ s = journal.size(100000, 2, 80.0, 79.5, "futures", "own", point_value=1000)
 check("which fits on a larger account", s["quantity"] == 4)
 check("one with no dollars a point is refused", refused(
     journal.size, "dollars per point", 10000, 1, 80, 79, "futures", "own"))
+down = journal.size(10000, 1, 10, 16)
+check("a short is told no price at or below zero", close(down["one_r"]["price"], 4.0)
+      and down["two_r"]["price"] is None, down)
+check("nor is one at exactly zero", journal.size(10000, 1, 10, 20)["one_r"]["price"] is None)
+check("a long always has both", close(journal.size(10000, 1, 10, 1)["two_r"]["price"], 28.0))
+check("a hit rate of 0% or 100% is refused by the rule it breaks", all(refused(
+    journal.survival, "more than 0% and less than 100%", p=p, win=1.5, loss=1.0)
+    for p in (0.0, 1.0)))
 check("a stop at the entry is refused", refused(journal.size, "away from the entry",
                                                 10000, 1, 100, 100))
 check("a target on the wrong side is refused", refused(
@@ -173,7 +181,7 @@ check("the source is said", losing["source"]["from"] == "typed"
 drawn = journal.survival(rs=[2.0, -1.0, -1.0, 0.5])
 check("results can be drawn from a record", drawn["source"]["from"] == "journal"
       and drawn["source"]["trades"] == 4 and close(drawn["source"]["avg_r"], 0.125))
-check("a hit rate of 100% is refused", refused(journal.survival, "between 0% and 100%",
+check("a hit rate of 100% is refused", refused(journal.survival, "more than 0% and less than 100%",
                                                p=1.0, win=1, loss=1))
 check("a balance cannot go under zero", all(
     r["median_end"] >= 0 for r in journal.survival(p=0.1, win=1, loss=20)["rows"]))
@@ -238,7 +246,29 @@ check("the survival check opens for a visitor, worked out on its example numbers
       r.status_code == 200 and "Fell 50% from a high" in page and "of runs" in page
       and "Signed in, with 20 or more" in page)
 r = visitor.get("/tools/survival?hit=150")
-check("a hit rate over 100% is said plainly", "between 0% and 100%" in flat(r))
+check("a hit rate over 100% is said plainly", "more than 0% and less than 100%" in flat(r))
+page = flat(visitor.get("/tools/size?entry=10&stop=16"))
+check("a short that cannot make 2R says so, and shows no price below zero",
+      "At 4 the trade makes 1R" in page and "A short from here cannot make 2R" in page
+      and "at -2" not in page, page)
+check("the dollars a point read as money", "Micro E-mini Dow, $0.50 a point" in page
+      and "$1,000 a point" in page and "$0.5 a" not in page, page)
+page = flat(visitor.get("/tools/size?entry=10&stop=25"))
+check("nor one that cannot make 1R", "A short from here cannot make 1R" in page
+      and "at -" not in page, page)
+real_cfg = web._cfg
+for account, shown in ((1234567, "1234567"), (125430.75, "125430.75"), (10000, "10000")):
+    web._cfg = lambda: dict(real_cfg(), account_size=account)
+    try:
+        page = visitor.get("/tools/size").data.decode("utf-8")
+    finally:
+        web._cfg = real_cfg
+    check("an account of %s is filled in as it is" % shown,
+          'id="account" name="account" type="number" step="any" min="0" '
+          'inputmode="decimal" value="%s"' % shown in " ".join(page.split()))
+for path in ("/tools/size", "/tools/survival"):
+    check("%s keeps its help out of its headings" % path, not re.search(
+        r"<h2[^>]*>(?:(?!</h2>).)*<details", flat(visitor.get(path))))
 for path in ("/tools/size?entry=100&stop=97", "/tools/survival"):
     page = flat(visitor.get(path))
     check("%s has nothing unfinished" % path, ">None<" not in page

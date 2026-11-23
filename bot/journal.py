@@ -583,6 +583,11 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
     cost_r = (entry * cost_bps / 10000.0) / distance
     unit = {"shares": "share", "coins": "coin", "futures": "contract"}[kind]
 
+    def at(multiple):
+        """The price that makes this many R, None for a short when it would be zero or below."""
+        price = entry + direction * multiple * distance
+        return price if price > 0 else None
+
     out = {"kind": kind, "unit": unit, "direction": direction, "quantity": qty,
            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if kind == "coins"
                              else "{:,.0f}".format(qty)),
@@ -590,9 +595,8 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
            "pct": at_risk / account * 100.0, "notional": qty * entry * multiplier,
            "cost_r": cost_r, "cost_bps": cost_bps, "contract": name, "label": label,
            "multiplier": multiplier, "distance": distance,
-           "one_r": {"price": entry + direction * distance, "cash": at_risk * (1 - cost_r)},
-           "two_r": {"price": entry + direction * 2 * distance,
-                     "cash": at_risk * (2 - cost_r)},
+           "one_r": {"price": at(1), "cash": at_risk * (1 - cost_r)},
+           "two_r": {"price": at(2), "cash": at_risk * (2 - cost_r)},
            "fits": qty > 0, "why_none": ""}
     rows = []
     for reward in BREAKEVEN_RS:
@@ -675,7 +679,7 @@ def survival(rs: Optional[Sequence[float]] = None, p: Optional[float] = None,
         if p is None or win is None or loss is None:
             raise ValueError("Give a hit rate, an average win and an average loss.")
         if not 0 < p < 1:
-            raise ValueError("The hit rate must be between 0% and 100%.")
+            raise ValueError("The hit rate must be more than 0% and less than 100%.")
         if not win > 0 or not loss > 0:
             raise ValueError("The average win and loss must be more than zero.")
         if win > 50 or loss > 50:
