@@ -244,9 +244,9 @@ same costs. A setup that keeps money but no more than random trades at that
 time of day has shown nothing about itself.
 
 **Margin.** Two standard errors, with trades on the same trading day counted
-together. A setup needs 30 trades on 10 separate days before it gets a
-verdict: kept money by more than its margin, lost money by more than it, or
-cannot be told apart from luck. About 1 cell in 20 crosses its margin by
+together, and more when the days are few (2.4 on 10 days). A setup needs 30
+trades on 10 separate days before it gets a verdict: kept money by more than
+its margin, lost money by more than it, or cannot be told apart from luck. About 1 cell in 20 crosses its margin by
 luck alone, and many cells are tested, so a single green cell proves little.
 ES and SPY (and NQ and QQQ) follow the same indexes: pooled together, they
 overstate the evidence.
@@ -260,10 +260,12 @@ trades that would carry through a roll. Each is counted.
 
 **Claims.** Each checkable claim is measured against a control of the same
 size: London taking one side of the Asia range and reaching the other is set
-beside a band as wide as Asia's centred on the 03:00 price; the 9:30-9:50
-window beside 10:30-10:55; a close past a swing beside a wick past it; gaps
+beside that range mirrored around the 03:00 price; the 9:30-9:50 window beside
+the same test an hour later; a close past a swing beside a wick past it; gaps
 beside random zones of the same size; the daily lean beside always saying up.
-Gap fills are set against one in two.
+An opening gap is set beside the level the same distance the other way. Coins'
+Saturdays and Sundays are left out of the claims about the sessions and the
+New York open.
 
 **When.** Nightly on the server after 17:05 New York time, or by hand:
 
@@ -273,6 +275,7 @@ python -m bot.setuplab              # print what is stored
 ```
 
 A partial run leaves the claims alone; add `--claims` to measure them anyway.
+It does not stand for the night's run, which still goes.
 
 ---
 

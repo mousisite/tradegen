@@ -45,12 +45,14 @@ MIN_DAYS = 10
 # figure under new words. The page says the claim is being tested until the
 # next run.
 CLAIM_METHODS = {
-    "london_takes_asia": 2, "ny_takes_london": 2,     # the control is the range mirrored
-    "pd_sweep_reverse": 2,
-    "open_manipulation": 2,                           # the control has fresh ranges too
-    "macro_window": 2,                                # one date's trades count together
-    "crowd_breakout_loses": 2, "sweep_alone_loses": 2,    # judged on random entries too
-    "ndog_fills": 2, "nwog_fills": 2,                 # against the level the other way
+    # the control is the range mirrored; then, coins' weekends are left out
+    "london_takes_asia": 3, "ny_takes_london": 3,
+    "pd_sweep_reverse": 2,                            # the control is the range mirrored
+    "open_manipulation": 3,           # the control has fresh ranges; coins' weekends left out
+    "macro_window": 3,     # one date's trades count together; coins' weekends left out; reach()
+    "after_1030_slower": 2,                           # coins' weekends left out; reach()
+    "crowd_breakout_loses": 3, "sweep_alone_loses": 3,    # judged on random entries too; reach()
+    "ndog_fills": 3, "nwog_fills": 3,                 # against the level the other way; reach()
 }
 
 RULES = ("2r", "level")
@@ -67,14 +69,33 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 # --- the one rule ---------------------------------------------------------------
 
+def reach(days: Optional[int]) -> float:
+    """How many standard errors make a margin of error.
+
+    Two, the usual figure, when the days are many or not known. A standard
+    error read off a few days' results is itself uncertain, and a little small
+    on average: with two of them, nothing at all clears its margin about 1
+    time in 11 on 10 days, not the 1 in 20 the pages state. So it is Student's
+    t for one day fewer (its usual expansion around 1.96), widened by the
+    share the error runs small: 2.4 on 10 days, 2.02 on 60.
+    """
+    if days is None or days < 2:
+        return 2.0
+    v, z = float(days - 1), 1.96
+    t = (z + (z ** 3 + z) / (4 * v) + (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * v ** 2)
+         + (3 * z ** 7 + 19 * z ** 5 + 17 * z ** 3 - 15 * z) / (384 * v ** 3))
+    return max(2.0, t * math.sqrt(days / v))
+
+
 def verdict(mean: Optional[float], se: Optional[float], n: int,
             minimum: int = MIN_TRADES, days: Optional[int] = None,
             min_days: int = MIN_DAYS) -> Optional[int]:
-    """+1 when the whole range of mean +/- 2 standard errors is above zero, -1
-    when it is all below, 0 when it straddles zero, None when there are fewer
-    than `minimum` or no error was measured (public._verdict's rule), or,
+    """+1 when the whole range of mean +/- its margin of error is above zero,
+    -1 when it is all below, 0 when it straddles zero, None when there are
+    fewer than `minimum` or no error was measured (public._verdict's rule), or,
     when `days` is given, when the trades came on fewer than `min_days`
-    separate trading days."""
+    separate trading days. The margin is reach(days) standard errors, two when
+    the days are not given."""
     if mean is None or se is None or n is None or n < minimum:
         return None
     if days is not None and days < min_days:
@@ -85,7 +106,8 @@ def verdict(mean: Optional[float], se: Optional[float], n: int,
         return None
     if not (math.isfinite(mean) and math.isfinite(se)):
         return None
-    return 1 if mean - 2 * se > 0 else -1 if mean + 2 * se < 0 else 0
+    margin = reach(days) * se
+    return 1 if mean - margin > 0 else -1 if mean + margin < 0 else 0
 
 
 _WORDS = {1: "kept money by more than its margin of error",
@@ -520,19 +542,22 @@ def save_run(conn: sqlite3.Connection, started: int, finished: Optional[int],
     return int(cur.lastrowid)
 
 
-def last_run(conn: sqlite3.Connection) -> Optional[Dict]:
-    """The newest run: {"id", "started", "finished", "summary"}, or None."""
+def last_run(conn: sqlite3.Connection, full: bool = False) -> Optional[Dict]:
+    """The newest run: {"id", "started", "finished", "summary"}, or None. With
+    full, the newest over every instrument and bar size: a run whose summary
+    says "full": false is passed over (older runs do not say, and count)."""
     ensure_schema(conn)
-    row = conn.execute("SELECT id, started, finished, summary FROM lab_runs "
-                       "ORDER BY started DESC, id DESC LIMIT 1").fetchone()
-    if row is None:
-        return None
-    try:
-        summary = json.loads(row[3]) if row[3] else {}
-    except (TypeError, ValueError):
-        summary = {}
-    return {"id": int(row[0]), "started": int(row[1]),
-            "finished": None if row[2] is None else int(row[2]), "summary": summary}
+    for row in conn.execute("SELECT id, started, finished, summary FROM lab_runs "
+                            "ORDER BY started DESC, id DESC"):
+        try:
+            summary = json.loads(row[3]) if row[3] else {}
+        except (TypeError, ValueError):
+            summary = {}
+        if full and summary.get("full") is False:
+            continue
+        return {"id": int(row[0]), "started": int(row[1]),
+                "finished": None if row[2] is None else int(row[2]), "summary": summary}
+    return None
 
 
 def _row(row) -> Optional[Dict]:
@@ -551,6 +576,15 @@ def _row(row) -> Optional[Dict]:
 
 # --- pooling ------------------------------------------------------------------------
 
+def paired_days(cell: Dict) -> int:
+    """On how many days one stored cell has trades with random entries to set
+    beside them (an older record does not say, so all its days)."""
+    by_day = cell.get("by_day")
+    if by_day:
+        return sum(1 for row in by_day if row[3])
+    return int(cell.get("days") or 0)
+
+
 def pooled(results_: Sequence[Dict], setup: str, rule: str,
            group: Optional[str] = None) -> Optional[Dict]:
     """One setup and target rule over several instruments, as one cell.
@@ -565,8 +599,8 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
     dsum = 0.0
     dn = 0
     parts, other, dparts, dother = [], [], [], []
-    dates = set()
-    most_days = 0
+    dates, ddates = set(), set()
+    most_days = most_ddays = 0
     symbols = []
     for res in results_:
         if group is not None and res.get("group") != group:
@@ -598,7 +632,9 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
         if cell.get("diff") is not None and m:
             dsum += float(cell["diff"]) * m
             dn += m
+            most_ddays = max(most_ddays, paired_days(cell))
             if by_day:
+                ddates.update(row[0] for row in by_day if row[3])
                 dparts.append((m, float(cell["diff"]),
                                {row[0]: (row[3], row[4]) for row in by_day if row[3]}))
             else:
@@ -610,12 +646,13 @@ def pooled(results_: Sequence[Dict], setup: str, rule: str,
     se = day_error(parts, other)
     diff = dsum / dn if dn else None
     diff_se = day_error(dparts, dother) if dn else None
+    diff_days = max(len(ddates), most_ddays)
     return {"n": n, "wins": wins, "days": days, "longs": longs, "sum_r": sum_r,
             "sum_r_gross": gross, "mean": mean, "se": se,
             "verdict": verdict(mean, se, n, days=days),
             "control_n": cn, "control_mean": (csum / cn) if cn else None,
-            "diff": diff, "diff_se": diff_se,
-            "diff_verdict": verdict(diff, diff_se, dn, days=days),
+            "diff": diff, "diff_se": diff_se, "diff_days": diff_days,
+            "diff_verdict": verdict(diff, diff_se, dn, days=diff_days),
             "symbols": symbols}
 
 

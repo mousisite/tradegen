@@ -30,7 +30,8 @@ setups.LAB_INTERVALS:
   and costs. The control's result is their average.
 
 The margin of error clusters trades by trading day (trades on one day share
-its news and win or lose together); the last third of the days is kept apart
+its news and win or lose together), and is wider when the days are few
+(labstore.reach); the last third of the days is kept apart
 as a check that the first two thirds' sign holds. A cell needs 30 trades on
 10 separate days before it gets a verdict (labstore.verdict).
 
@@ -71,7 +72,9 @@ CONTROLS = 5
 # inside the bar-to-bar noise: no one could hold it, so the trade is counted
 # as skipped rather than scored as a huge win or loss in units of risk.
 MIN_STOP_ATR = 0.1
-TARGET_R = 2.0                     # video 6:24:12-6:30:28: at least twice the risk
+# app choice: the course aims for old highs and lows (video 6:24:12-6:30:28) and
+# gives no multiple of the risk. Twice is the plainest target to measure beside them.
+TARGET_R = 2.0
 EXIT_MINUTE = 16 * 60              # video 4:33:23: done by the New York afternoon
 # The job runs once a day after the futures' 17:00 pause has begun, so the
 # day's bars are all in.
@@ -423,18 +426,31 @@ def _seed(*parts) -> int:
     return zlib.crc32("|".join(str(x) for x in parts).encode("utf-8")) & 0x7FFFFFFF
 
 
+def shuffled(ts: np.ndarray, seed: int) -> np.ndarray:
+    """A random number for each bar, from the bar's own time and a seed. Choosing
+    the bars with the smallest is choosing at random, and the choice does not
+    change when other bars join or leave: the 60 days of prices slide on every
+    night, so a choice by position in them would be a new one each time."""
+    z = np.asarray(ts).astype(np.uint64)
+    z = z + np.uint64((int(seed) * 0x9E3779B97F4A7C15 + 0x9E3779B97F4A7C15) & (2 ** 64 - 1))
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
 def controls(p: Prep, setup: str, i: int, count: int = CONTROLS) -> List[int]:
     """Up to `count` random bars on other trading days in the same New York half
-    hour as bar i, the same on every run (seeded by symbol, interval, setup and i)."""
+    hour as bar i, the same on every run (seeded by symbol, interval, setup and
+    the time of bar i) while the prices still hold them."""
     pool = p.buckets.get(int(p.minute[i]) // 30)
     if pool is None or not pool.size:
         return []
     pool = pool[p.day[pool] != p.day[i]]
     if not pool.size:
         return []
-    rng = np.random.RandomState(_seed(p.symbol, p.interval, setup, i))
+    z = shuffled(p.ts[pool], _seed(p.symbol, p.interval, setup, int(p.ts[i])))
     k = min(count, int(pool.size))
-    return sorted(int(j) for j in rng.choice(pool, size=k, replace=False))
+    return sorted(int(j) for j in pool[np.argpartition(z, k - 1)[:k]])
 
 
 def _control_r(p: Prep, js: List[int], i: int, d: int, risk: float,
@@ -679,7 +695,7 @@ def measure(bars, symbol: Optional[str] = None, interval: Optional[str] = None,
     k3 = trades_for(bars, s3, "liquidity_model", prep=p3, with_controls=False)
     wider = {rule: aggregate(k3[rule], p3.days_used) for rule in labstore.RULES}
     result["setups"]["liquidity_model"]["k3"] = {
-        rule: {key: wider[rule][key] for key in ("n", "wins", "sum_r", "se")}
+        rule: {key: wider[rule][key] for key in ("n", "wins", "sum_r", "se", "days")}
         for rule in labstore.RULES}
     labstore.validate_result(result)
     return result, all_trades
@@ -718,6 +734,8 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
     cfg = cfg if cfg is not None else dict(config_mod.DEFAULTS)
     pairs = _symbols(symbols)
     intervals = list(intervals)
+    full = (set(sym for sym, _ in pairs) >= set(s[0] for s in setups.LAB_SYMBOLS)
+            and set(intervals) >= set(setups.LAB_INTERVALS))
     if with_claims is None:
         with_claims = (set(sym for sym, _ in pairs) == set(s[0] for s in setups.LAB_SYMBOLS)
                        and set(intervals) == set(setups.LAB_INTERVALS))
@@ -773,7 +791,7 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
             claimed = {"claims": [], "bias": [], "errors": ["claims: %s" % exc]}
         errors.extend(claimed.get("errors") or [])
     finished = int(time.time()) if now is None else started
-    summary = {"cells": cells, "errors": errors, "checked": len(cells),
+    summary = {"cells": cells, "errors": errors, "checked": len(cells), "full": full,
                "claims": list(claimed.get("claims") or []),
                "bias": list(claimed.get("bias") or [])}
     try:
@@ -791,9 +809,11 @@ def due(conn, now: Optional[float] = None) -> bool:
     Yes when it never ran; else when the last run is over 20 hours old and it
     is 17:05 or later in New York (the day's bars are in by then). A run that
     stored nothing (every download refused) is tried again after two hours.
+    Only runs over every instrument and bar size count: one instrument measured
+    by hand does not stand for the night's run.
     """
     now = int(now if now is not None else time.time())
-    last = labstore.last_run(conn)
+    last = labstore.last_run(conn, full=True)
     if last is None:
         return True
     age = now - int(last["started"])
@@ -823,7 +843,8 @@ def table(results: Sequence[Dict]) -> str:
                 n = rec["n"]
                 mean = rec["sum_r"] / n if n else None
                 se = rec["se"]
-                kept = ("%+.3f +/- %.3f" % (mean, 2 * se) if mean is not None and se is not None
+                kept = ("%+.3f +/- %.3f" % (mean, labstore.reach(rec["days"]) * se)
+                        if mean is not None and se is not None
                         else ("%+.3f" % mean if mean is not None else "-"))
                 ctrl = rec["control"]
                 rand = "%+.3f" % (ctrl["sum_r"] / ctrl["n"]) if ctrl["n"] else "-"

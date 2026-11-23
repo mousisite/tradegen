@@ -52,13 +52,14 @@ import dataclasses
 import logging
 import math
 import time
+from datetime import date
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from . import bias as bias_mod
 from . import clock, labstore, market, setups, structure
-from .setuplab import Trade, clustered_se, walk, _seed
+from .setuplab import Trade, clustered_se, shuffled, walk, _seed
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +75,12 @@ SMT_BARS = 36
 SMT_PAIR_GAP = 2
 FVG_BARS = 20
 
-_POOL_NOTE = ("The S&P 500 and Nasdaq 100 futures follow the same indexes as their funds "
-              "(SPY and QQQ), so counting both overstates how much evidence there is.")
+_POOL_NOTE = ("The S&P 500 and Nasdaq 100 futures follow the same indexes as their funds, "
+              "so counting both overstates how much evidence there is.")
+_WEEKEND_NOTE = ("Coins trade at the weekend too, but New York does not open then, so their "
+                 "Saturdays and Sundays are left out.")
+_NAMES = {sym: name for sym, name, _ in setups.LAB_SYMBOLS}
+_COINS = frozenset(sym for sym, _, group in setups.LAB_SYMBOLS if group == "coin")
 _ONE_REGIME = ("Five-minute prices go back about 60 days at the data source, so this is "
                "one stretch of the market, not every kind of market.")
 
@@ -123,6 +128,10 @@ class _View:
     @staticmethod
     def usable(d) -> bool:
         return bool(d.complete and not d.roll)
+
+    def weekend(self, d) -> bool:
+        """A coin's Saturday or Sunday: a trading day with no New York open."""
+        return self.instrument == "coin" and d.weekday >= 5
 
     def rows(self, d, start: int, end: int) -> np.ndarray:
         """The day's bars starting at or after New York minute `start` and
@@ -261,6 +270,9 @@ def london_takes_asia(bars_list) -> Optional[Dict]:
     for v in views:
         cell = by.setdefault(v.symbol, _cell())
         for d in v.days:
+            if v.weekend(d):
+                _skip(skipped, "weekend")
+                continue
             if d.roll:
                 _skip(skipped, "roll")
                 continue
@@ -280,7 +292,7 @@ def london_takes_asia(bars_list) -> Optional[Dict]:
             cell["base_trials"] += trial
             cell["base_hits"] += hit
     notes = [_ONE_REGIME, "Days where one London bar went past both sides of the Asia range "
-             "are left out."]
+             "are left out.", _WEEKEND_NOTE]
     return _record("london_takes_asia", "5m", by, notes, skipped)
 
 
@@ -295,6 +307,9 @@ def ny_takes_london(bars_list) -> Optional[Dict]:
     for v in views:
         cell = by.setdefault(v.symbol, _cell())
         for d in v.days:
+            if v.weekend(d):
+                _skip(skipped, "weekend")
+                continue
             if d.roll:
                 _skip(skipped, "roll")
                 continue
@@ -315,7 +330,7 @@ def ny_takes_london(bars_list) -> Optional[Dict]:
             trial, hit, _ = _range_test(v, rows, hi, lo, rows)
             cell["base_trials"] += trial
             cell["base_hits"] += hit
-    notes = [_ONE_REGIME]
+    notes = [_ONE_REGIME, _WEEKEND_NOTE]
     return _record("ny_takes_london", "5m", by, notes, skipped)
 
 
@@ -429,6 +444,9 @@ def open_manipulation(bars_list) -> Optional[Dict]:
     for v in views:
         cell = by.setdefault(v.symbol, _cell())
         for b, d in enumerate(v.days):
+            if v.weekend(d):
+                _skip(skipped, "weekend")
+                continue
             if d.roll:
                 _skip(skipped, "roll")
                 continue
@@ -446,7 +464,7 @@ def open_manipulation(bars_list) -> Optional[Dict]:
     notes = [_ONE_REGIME, "Levels: yesterday's high and low, and today's Asia, London and "
              "before-the-open ranges, if price had not already gone past them that day.",
              "The hour from 9:30 is usually the day's busiest, so the range an hour later is "
-             "wider and harder to go past than the one before the open."]
+             "wider and harder to go past than the one before the open.", _WEEKEND_NOTE]
     return _record("open_manipulation", "5m", by, notes, skipped)
 
 
@@ -467,6 +485,9 @@ def after_1030_slower(bars_list) -> Optional[Dict]:
         cell = by.setdefault(v.symbol, _cell())
         step_min = max(1, v.step // 60)
         for d in v.days:
+            if v.weekend(d):
+                _skip(skipped, "weekend")
+                continue
             if d.roll:
                 _skip(skipped, "roll")
                 continue
@@ -502,9 +523,11 @@ def after_1030_slower(bars_list) -> Optional[Dict]:
         pooled["diff"] = round(float(np.mean(xs)), 6)
         dse = clustered_se(xs, dates)
         pooled["diff_se"] = None if dse is None else round(dse, 6)
-    v_ = labstore.verdict(pooled.get("diff"), pooled.get("diff_se"), len(xs))
+        pooled["days"] = pooled["base_days"] = len(set(dates))
+    v_ = labstore.verdict(pooled.get("diff"), pooled.get("diff_se"), len(xs),
+                          days=len(set(dates)))
     notes = [_ONE_REGIME, "Bar sizes are compared within each day, so a busy day and a quiet "
-             "day count the same. Days on the same date are counted together."]
+             "day count the same. Days on the same date are counted together.", _WEEKEND_NOTE]
     notes += _index_note(by)
     return _record("after_1030_slower", "5m", by, notes, skipped, measure="mean",
                    pooled=pooled, verdict=v_)
@@ -526,7 +549,7 @@ def fvg_gets_retested(bars_list) -> Optional[Dict]:
     """video 2:51:15: price comes back into a fresh gap. A gap counts when a bar
     within 20 bars trades back into it without closing through it. Control: a
     zone of the same size and distance below (above) the price, at a random
-    bar, the same on every run."""
+    bar, which stays the same from night to night while the prices hold it."""
     views = _intraday(bars_list, "5m") + _intraday(bars_list, "15m")
     if not views:
         return None
@@ -536,7 +559,12 @@ def fvg_gets_retested(bars_list) -> Optional[Dict]:
         cell = by.setdefault(v.symbol, _cell())
         s = v.s
         atr = s["st_atr"]
-        rng = np.random.RandomState(_seed("fvg", v.symbol, v.interval))
+        # Each bar's random number, in order: a gap takes the first bar past its
+        # own, so its random bar does not move when a night slides the window.
+        spots = np.arange(20, max(20, v.n - FVG_BARS - 1))
+        marks = shuffled(v.ts[spots], _seed("fvg", v.symbol, v.interval))
+        ring = np.argsort(marks, kind="stable")
+        marks, spots = marks[ring], spots[ring]
         news = np.flatnonzero(s["st_fvg_new"] != 0)
         for c_ in news.tolist():
             if c_ + FVG_BARS >= v.n:
@@ -553,10 +581,9 @@ def fvg_gets_retested(bars_list) -> Optional[Dict]:
                 continue
             dist = (v.c[c_] - top) if up else (bottom - v.c[c_])
             size = top - bottom
-            for _ in range(3):
-                r = int(rng.randint(20, v.n - FVG_BARS - 1)) if v.n > FVG_BARS + 22 else -1
-                if r < 0:
-                    break
+            for nth in range(3 if spots.size else 0):
+                at = shuffled(v.ts[c_:c_ + 1], _seed("fvg gap", v.symbol, v.interval, nth))
+                r = int(spots[int(np.searchsorted(marks, at[0])) % spots.size])
                 a_r = atr[r]
                 if not (a_r == a_r and a_r > 0) or v.rolls_in(r, r + FVG_BARS):
                     continue
@@ -763,12 +790,12 @@ def _dates(rows: List[Tuple[str, Trade]]) -> int:
     return len(set(t.day for _, t in rows))
 
 
-def _said(mean: Optional[float], se: Optional[float]) -> str:
+def _said(mean: Optional[float], se: Optional[float], days: int) -> str:
     """A figure in R with its margin of error, for a note."""
     if mean is None:
         return "not measured"
     text = "%+.2fR" % (round(mean, 2) + 0.0)
-    return text if se is None else "%s (±%.2f)" % (text, 2 * se)
+    return text if se is None else "%s (±%.2f)" % (text, labstore.reach(days) * se)
 
 
 def _round(x):
@@ -825,10 +852,14 @@ def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
     """video 4:33:23, 4:37:38: entries from 9:50 to 10:10 do best. The lab's
     sweep, break and retest trades (twice-the-risk target, 5-minute prices) by
     the time they were entered, against the same instrument's trades at other
-    times."""
-    rows = _lab(trades, "liquidity_model")
+    times. Coins' Saturdays and Sundays, with no New York open, are left out of
+    both."""
+    found = _lab(trades, "liquidity_model")
+    rows = [(sym, t) for sym, t in found
+            if not (sym in _COINS and date.fromordinal(t.day).weekday() >= 5)]
     if not rows:
         return None
+    skipped = {"weekend": len(found) - len(rows)} if len(rows) < len(found) else {}
     by: Dict[str, Dict] = {}
     for sym, t in rows:
         cell = by.setdefault(sym, _cell())
@@ -844,13 +875,14 @@ def macro_window(trades: Dict[str, Dict]) -> Optional[Dict]:
     diff, dse, dn = _within(macro, other)
     pooled = _pool(by)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
-                   "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse)})
-    v = labstore.verdict(diff, dse, dn) if bn >= labstore.MIN_TRADES else None
+                   "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse),
+                   "days": _dates(macro), "base_days": _dates(other)})
+    v = labstore.verdict(diff, dse, dn, days=_dates(macro)) if bn >= labstore.MIN_TRADES else None
     notes = [_ONE_REGIME, "Kept money per trade after costs, in units of risk, for trades "
              "entered from 9:50 to 10:10 New York time against the same instrument's "
-             "trades at all other times.", _WITHIN_NOTE]
+             "trades at all other times.", _WITHIN_NOTE, _WEEKEND_NOTE]
     notes += _index_note(by)
-    return _record("macro_window", "5m", by, notes, {}, measure="mean", pooled=pooled,
+    return _record("macro_window", "5m", by, notes, skipped, measure="mean", pooled=pooled,
                    verdict=v)
 
 
@@ -880,7 +912,8 @@ def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
     dm, dse, dn = _mean_se(paired, _against_random)
     pooled = _pool(by)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
-                   "base_se": _round(bse), "diff": _round(dm), "diff_se": _round(dse)})
+                   "base_se": _round(bse), "diff": _round(dm), "diff_se": _round(dse),
+                   "days": _dates(rows), "base_days": _dates(paired)})
     kept = labstore.verdict(m, se, n, days=_dates(rows))
     beat = labstore.verdict(dm, dse, dn, days=_dates(paired))
     if kept is None or beat is None:
@@ -891,7 +924,7 @@ def crowd_breakout_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
              "money after costs. The claim holds when the trades lost money and did worse "
              "than their own random entries, each by more than its margin of error: costs "
              "alone make random trades lose too.",
-             "Against their random entries: %s a trade." % _said(dm, dse),
+             "Against their random entries: %s a trade." % _said(dm, dse, _dates(paired)),
              "Coins cost far more to trade on five-minute bars than futures or stocks, which "
              "weighs on the pooled figure; each instrument's own figure is kept beside it."]
     notes += _index_note(by)
@@ -942,13 +975,15 @@ def sweep_alone_loses(trades: Dict[str, Dict]) -> Optional[Dict]:
         v = 0
     pooled = _pool(by)
     pooled.update({"mean": _round(m), "se": _round(se), "base_mean": _round(bm),
-                   "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse)})
+                   "base_se": _round(bse), "diff": _round(diff), "diff_se": _round(dse),
+                   "days": _dates(sweeps), "base_days": _dates(own)})
     notes = [_ONE_REGIME, "The sweep-and-reclaim trades are the result shown. Against their "
-             "own random entries: %s a trade." % _said(om, ose)]
+             "own random entries: %s a trade." % _said(om, ose, _dates(own))]
     if chain:
         notes.append("The four-step model: %s a trade after costs, and %s against its own "
                      "random entries. Set against their random entries, the model minus the "
-                     "sweeps: %s." % (_said(cm, cse), _said(co, cose), _said(diff, dse)))
+                     "sweeps: %s." % (_said(cm, cse, _dates(chain)), _said(co, cose, _dates(chain_own)),
+                        _said(diff, dse, _dates(chain_own))))
     notes += ["The claim holds only when every part is clear: the sweeps lost money, did "
               "worse than random entries, and the model did better than they did. Random "
               "entries carry the same costs, which weigh more on a closer stop.", _WITHIN_NOTE]
@@ -989,7 +1024,7 @@ def not_every_day_green(trades: Dict[str, Dict]) -> Optional[Dict]:
              "together, after costs."]
     if longest:
         notes.append("The longest run of losing days in a row was %d, on %s (counting only "
-                     "days with trades)." % (longest, where))
+                     "days with trades)." % (longest, _NAMES.get(where, where)))
     return _record("not_every_day_green", "5m", by, notes, {}, measure="descriptive",
                    pooled=pooled, verdict=None)
 
@@ -1230,9 +1265,9 @@ def bias_works(study: Dict[str, Dict], skipped: Dict[str, int]) -> Optional[Dict
              "its side of the price at that time."]
     if pooled["trials"] >= labstore.MIN_TRADES:
         lo, hi = labstore.wilson(pooled["hits"], pooled["trials"])
-        notes.append("Against a coin flip: right on %d of %d days it leaned, a range of %d%% "
+        notes.append("Against a coin flip: right on %s of %s days it leaned, a range of %d%% "
                      "to %d%%, %s one in two."
-                     % (pooled["hits"], pooled["trials"], round(lo * 100), round(hi * 100),
+                     % ("{:,}".format(pooled["hits"]), "{:,}".format(pooled["trials"]), round(lo * 100), round(hi * 100),
                         "above" if lo > 0.5 else "below" if hi < 0.5 else "which includes"))
     notes += _index_note(by)
     return _record("bias_works", "1h", by, notes, skipped)

@@ -307,6 +307,27 @@ check("filled on Monday, and by Friday, as scripted",
       p["hit_monday"] == weeks.count(0) and p["hits"] == weeks.count(0) + weeks.count(1), p)
 
 # ---------------------------------------------------------------------------
+head("A COIN'S WEEKENDS ARE NO PART OF THE CLAIMS ABOUT THE NEW YORK OPEN")
+# ---------------------------------------------------------------------------
+coin = sc.walk(sc.coin_times(40 * 288), seed=3, kind="coin", price=90000.0, vol=0.0008,
+               symbol="BTC-USD")
+ends = [d for d in clock.day_table(coin) if d.weekday >= 5]
+for fn in (claims.london_takes_asia, claims.ny_takes_london, claims.open_manipulation,
+           claims.after_1030_slower):
+    rec = fn([coin])
+    check("%s leaves out its Saturdays and Sundays, and counts them" % rec["claim"],
+          len(ends) >= 10 and rec["skipped"].get("weekend") == len(ends)
+          and 0 < rec["pooled"]["trials"] <= 40 - len(ends)
+          and any("Saturdays and Sundays" in n for n in rec["notes"]),
+          (rec["skipped"], rec["pooled"], len(ends)))
+check("a future has no weekend to leave out",
+      "weekend" not in claims.after_1030_slower([futures_days([NY] * DAYS)])["skipped"])
+
+rec_a = claims.fvg_gets_retested([clock.head(coin, 38 * 288)])
+check("gaps are still set beside random zones", rec_a["pooled"]["base_trials"] > 100
+      and rec_a["pooled"]["base_trials"] >= 0.9 * rec_a["pooled"]["trials"], rec_a["pooled"])
+
+# ---------------------------------------------------------------------------
 head("THE LAB'S OWN TRADES: BY TIME OF DAY, AND BY SETUP")
 # ---------------------------------------------------------------------------
 
@@ -343,6 +364,18 @@ check("the window is compared inside each instrument, so a dear coin trading at 
       and abs(p["diff"]) < 1e-9 and rec["verdict"] == 0, p)
 check("each instrument's own averages are kept", rec["by_symbol"]["ES=F"]["mean"] == 0.0
       and rec["by_symbol"]["BTC-USD"]["base_mean"] < -1.9, rec["by_symbol"])
+# A coin's trades at the weekend, when New York does not open, are on neither side;
+# a future's all count.
+weekdays = sum(1 for k in range(40) if date.fromordinal(700000 + k).weekday() < 5)
+coins = claims.macro_window({"BTC-USD": {"liquidity_model": {"2r": macro + other}}})
+check("a coin's weekend trades are left out of the claim about the New York open, and counted",
+      coins["pooled"]["trials"] == weekdays < 40 and coins["skipped"].get("weekend")
+      == sum(1 for t in macro + other if date.fromordinal(t.day).weekday() >= 5),
+      (coins["pooled"], coins["skipped"]))
+few = [trade("liquidity_model", 1.0 + 0.1 * (k % 3), 700000 + k % 6, "macro") for k in range(40)]
+rec = claims.macro_window({"ES=F": {"liquidity_model": {"2r": few + other}}})
+check("trades on six days are too few days to say, however many they are",
+      rec["verdict"] is None, rec["verdict"])
 crowd = [trade("crowd_breakout", -1.0, 700000 + k // 2, control=-0.1) for k in range(40)]
 sells = [Trade(**dict(t.__dict__, direction=-1, r=5.0)) for t in crowd[:20]]
 rec = claims.crowd_breakout_loses({"ES=F": {"crowd_breakout": {"2r": crowd + sells}}})
@@ -479,7 +512,7 @@ check("9:30 to 9:50 and the hour later take and lose their levels alike",
       p["trials"] > 200 and abs(p["rate"] - p["base_rate"]) < 0.12 and rec["verdict"] == 0,
       (p, rec["verdict"]))
 tally = [0, 0, 0, 0]
-for k in range(6):
+for k in range(7):                     # coins' weekends are not counted
     many = [nothing(100 + 10 * k + j, s_) for j, s_ in enumerate(("ES=F", "NQ=F"))] \
         + [nothing(105 + 10 * k + j, s_, "coin") for j, s_ in enumerate(("BTC-USD", "ETH-USD"))]
     p = claims.ny_takes_london(many)["pooled"]

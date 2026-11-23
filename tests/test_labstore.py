@@ -170,6 +170,9 @@ second = labstore.save_run(conn, 1795086400, None, {"symbols": 8, "failed": ["NV
 run = labstore.last_run(conn)
 check("the newest run is the one returned", run["id"] == second and run["finished"] is None
       and run["summary"]["failed"] == ["NVDA"] and first != second)
+third = labstore.save_run(conn, 1795090000, 1795090010, {"checked": 1, "full": False})
+check("a run over one instrument is the newest, but not the newest full one",
+      labstore.last_run(conn)["id"] == third and labstore.last_run(conn, full=True)["id"] == second)
 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 check("its four tables, none of them anyone's personal data",
       {"lab_results", "lab_claims", "bias_record", "lab_runs"} <= tables
@@ -194,6 +197,14 @@ check("or without a margin", labstore.verdict(0.5, None, 100) is None
 check("or when the trades came on fewer than 10 separate days",
       labstore.verdict(1.0, 0.01, 50, days=9) is None
       and labstore.verdict(1.0, 0.01, 50, days=10) == 1)
+check("the fewer the days, the wider the margin: Student's t for one day fewer",
+      labstore.reach(None) == 2.0 and abs(labstore.reach(10) - 2.262 * (10 / 9.0) ** 0.5) < 0.002
+      and abs(labstore.reach(20) - 2.093 * (20 / 19.0) ** 0.5) < 0.002
+      and abs(labstore.reach(60) - 2.001 * (60 / 59.0) ** 0.5) < 0.002
+      and labstore.reach(1000) == 2.0,
+      [labstore.reach(d) for d in (10, 20, 60, 1000)])
+check("so a result two errors clear of nothing is called on 60 days but not on 10",
+      labstore.verdict(0.22, 0.1, 50, days=60) == 1 and labstore.verdict(0.22, 0.1, 50, days=10) == 0)
 check("its words", labstore.words(1) == "kept money by more than its margin of error"
       and labstore.words(-1) == "lost money by more than its margin of error"
       and labstore.words(0) == "cannot be told apart from luck"
@@ -248,6 +259,17 @@ for res in few:
 check("the same few dates in two instruments are still too few",
       labstore.pooled(few, "liquidity_model", "2r")["days"] == 6
       and labstore.pooled(few, "liquidity_model", "2r")["verdict"] is None)
+# Trades with no random entries are no part of the comparison, or of its count.
+part = labstore.sample_result("ES=F")
+rule_ = part["setups"]["liquidity_model"]["rules"]["2r"]
+rule_["control"]["n"] = 33
+rule_["diff"], rule_["diff_se"] = 0.5, 0.01
+for k, row in enumerate(rule_["by_day"]):
+    if k >= 6:
+        row[3], row[4] = 0, 0.0
+paired = labstore.pooled([part], "liquidity_model", "2r")
+check("the comparison with random entries is judged on the days that have them",
+      paired["days"] == 30 and paired["diff_days"] == 6 and paired["diff_verdict"] is None, paired)
 check("and a group with nothing in it is None",
       labstore.pooled([labstore.sample_result()], "liquidity_model", "2r", group="coin") is None)
 
