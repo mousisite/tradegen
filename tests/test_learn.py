@@ -115,7 +115,7 @@ try:
     head("NOTHING MEASURED YET")
     status, page = get("/learn")
     check("the hub opens to a visitor", status == 200, status)
-    check("and says it is being tested", "Being tested. This fills in after the first "
+    check("and says it is being tested", "Being tested. This fills in after the next "
           "nightly run." in page)
     check("asking search engines to wait", 'name="robots" content="noindex"' in page)
     check("it keeps builder text and jargon out", not leaks(page), leaks(page))
