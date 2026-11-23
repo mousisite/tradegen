@@ -69,7 +69,7 @@ _LEXICON = {
     "halted": -1.3, "layoffs": -1.0, "layoff": -1.0, "cuts": -0.9, "cut": -0.8,
     "weak": -0.9, "weakness": -0.9, "decline": -0.8, "declines": -0.8,
     "loss": -0.9, "losses": -0.9, "bearish": -1.1, "resign": -1.0, "resigns": -1.0,
-    "short seller": -1.3, "overvalued": -0.8, "downside": -0.8, "selloff": -1.2,
+    "overvalued": -0.8, "downside": -0.8, "selloff": -1.2,
     "correction": -0.7, "risk": -0.4, "concerns": -0.7, "disappointing": -1.2,
     "scandal": -1.5, "delay": -0.8, "delayed": -0.8, "denies": -0.6,
     "fell": -0.8, "falling": -0.8, "dropped": -0.8, "slipped": -0.7,
@@ -264,7 +264,7 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
 def gather_social(symbol: str, limit: int = 30) -> List[Item]:
     """Pull recent StockTwits posts, filtering out ticker-spam.
 
-    A post listing five or more tickers is almost always promotional noise
+    A post listing four or more tickers is almost always promotional noise
     rather than an opinion about this instrument, so it is discarded.
     """
     base = symbol.replace("-USD", ".X") if symbol.endswith("-USD") else symbol

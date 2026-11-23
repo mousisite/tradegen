@@ -24,10 +24,23 @@ from . import yahoo
 
 log = logging.getLogger(__name__)
 
+# Only what is read below: every module is downloaded and parsed for each
+# company opened, screened or found.
 _MODULES = ("quoteType,price,assetProfile,financialData,defaultKeyStatistics,summaryDetail,"
-            "incomeStatementHistory,balanceSheetHistory,cashflowStatementHistory,"
-            "earnings,earningsTrend,recommendationTrend,calendarEvents,"
-            "majorHoldersBreakdown")
+            "recommendationTrend")
+
+
+def big_number(value: float, digits: int = 1) -> str:
+    """A large amount the way a person would say it: 1.2T, 3.4B, 28.0M, 5.1K.
+
+    Always on the scale it needs. Cash flows printed in billions whatever
+    their size came out as 0.0B for a small company.
+    """
+    for cut, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        # From where it would round up to this scale: 999.96M is 1.0B.
+        if abs(value) >= cut - 0.5 * 10 ** -digits * cut / 1000:
+            return "%.*f%s" % (digits, value / cut, suffix)
+    return "%.2f" % value
 
 
 @dataclass
@@ -76,11 +89,7 @@ class Fundamentals:
     summary: str = ""
 
     metrics: Dict[str, Metric] = field(default_factory=dict)
-    income: List[Dict] = field(default_factory=list)      # newest first
-    balance: List[Dict] = field(default_factory=list)
-    cashflow: List[Dict] = field(default_factory=list)
     analysts: Dict = field(default_factory=dict)
-    calendar: Dict = field(default_factory=dict)
     sec_facts: Optional[sec_mod.CompanyFacts] = None
     sources: List[Dict] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
@@ -259,10 +268,6 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
         _put(m, "fcf_yield", "Free cash flow yield", fcf / cap, "pct",
              "derived from Yahoo", "free cash flow divided by market cap")
 
-    out.income = _statements(mods, "incomeStatementHistory", "incomeStatementHistory")
-    out.balance = _statements(mods, "balanceSheetHistory", "balanceSheetStatements")
-    out.cashflow = _statements(mods, "cashflowStatementHistory", "cashflowStatements")
-
     trend = mods.get("recommendationTrend") or {}
     rec_rows = trend.get("trend") or []
     out.analysts = {
@@ -274,20 +279,11 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
         "trend": rec_rows[0] if rec_rows else {},
     }
 
-    cal = mods.get("calendarEvents") or {}
-    earnings = cal.get("earnings") or {}
-    dates = earnings.get("earningsDate") or []
-    out.calendar = {
-        "next_earnings": g({"d": dates[0]}, "d") if dates else None,
-        "ex_dividend": g(cal, "exDividendDate"),
-        "dividend_date": g(cal, "dividendDate"),
-    }
-
     if mods:
         out.sources.append({
             "name": "Yahoo Finance fundamentals",
             "url": "https://finance.yahoo.com/quote/%s/key-statistics" % out.symbol,
-            "detail": "ratios, analyst targets, statement history",
+            "detail": "ratios and analyst targets",
         })
 
     if with_sec:
@@ -330,21 +326,6 @@ def _note_missing(out: Fundamentals) -> None:
         note += (" Funds, coins and some foreign listings do not publish company "
                  "figures.")
     out.notes.append(note)
-
-
-def _statements(mods: Dict, module: str, key: str) -> List[Dict]:
-    """Flatten a Yahoo statement history into plain dictionaries, newest first."""
-    rows = (mods.get(module) or {}).get(key) or []
-    out = []
-    for row in rows:
-        flat = {}
-        for name, value in row.items():
-            if name == "maxAge":
-                continue
-            flat[name] = yahoo.fmt(row, name)
-        if flat:
-            out.append(flat)
-    return out
 
 
 def _reconcile(out: Fundamentals, facts: "sec_mod.CompanyFacts") -> None:

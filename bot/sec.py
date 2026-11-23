@@ -1,4 +1,4 @@
-"""SEC EDGAR: filings, filed financials, and full-text search.
+"""SEC EDGAR: filings and filed financials.
 
 Free, keyless, and authoritative. Unlike a data vendor's copy, everything here
 traces to a document a company signed and filed, so every figure can carry a
@@ -53,7 +53,6 @@ def _headers() -> Dict[str, str]:
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK%010d.json"
 _SUBS_URL = "https://data.sec.gov/submissions/CIK%010d.json"
-_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
 _ARCHIVE = "https://www.sec.gov/Archives/edgar/data/%d/%s/%s"
 _FILING_PAGE = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=%010d&type=%s"
 
@@ -320,8 +319,8 @@ def cik_for(symbol: str) -> Optional[int]:
     """CIK for a ticker, or None when it is not a US SEC registrant.
 
     Matches the ticker as written. The only normalisation is the dot-to-dash
-    convention for share classes, where Yahoo writes BRK.B and the SEC writes
-    BRK-B for the same security.
+    convention for share classes: some write BRK.B for what Yahoo and the SEC
+    both write as BRK-B.
     """
     raw = (symbol or "").upper().strip()
     if not raw:
@@ -365,16 +364,12 @@ class CompanyFacts:
     cik: int
     entity: str
     annual: Dict[str, List[Fact]] = field(default_factory=dict)
-    quarterly: Dict[str, List[Fact]] = field(default_factory=dict)
     # Whether it files figures under international rules, which are not read.
     international: bool = False
 
-    def latest(self, concept: str, annual_only: bool = True) -> Optional[Dict]:
-        """Most recent reported value for a concept."""
-        rows = self.annual.get(concept) or ([] if annual_only
-                                            else self.quarterly.get(concept) or [])
-        if not rows and not annual_only:
-            rows = self.quarterly.get(concept) or []
+    def latest(self, concept: str) -> Optional[Dict]:
+        """The value for a concept in the latest annual report that has it."""
+        rows = self.annual.get(concept)
         if not rows:
             return None
         f = rows[-1]
@@ -418,6 +413,13 @@ class CompanyFacts:
         if first is None or last is None or first <= 0 or last <= 0 or span <= 0:
             return None
         return (last / first) ** (1.0 / span) - 1.0
+
+    def cagr_years(self, concept: str, years: int = 5) -> Optional[Tuple[int, int]]:
+        """The first and last fiscal year that growth runs between."""
+        rows = self.series(concept, years + 1)
+        if self.cagr(concept, years) is None or not rows[0]["fy"] or not rows[-1]["fy"]:
+            return None
+        return rows[0]["fy"], rows[-1]["fy"]
 
 
 def _joined(by_tag: List[Dict]) -> List["Fact"]:
@@ -489,7 +491,7 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
     facts.international = bool((data.get("facts") or {}).get("ifrs-full"))
 
     for concept, tags in _CONCEPTS.items():
-        by_year, by_quarter = [], []       # one entry per tag that has data
+        by_year = []                       # one entry per tag that has data
         for tag in tags:
             node = us_gaap.get(tag)
             if not node:
@@ -500,7 +502,7 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
             if not unit_key:
                 continue
 
-            annual, quarterly = {}, {}
+            annual = {}
             for row in units[unit_key]:
                 form = row.get("form", "")
                 end = row.get("end", "")
@@ -521,12 +523,8 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
                 # figure. Instant concepts (assets, equity) have no start date
                 # and are point-in-time, so they are accepted as they come.
                 is_duration = row.get("start") is not None
-                if is_duration and span is not None and not (300 <= span <= 400):
-                    is_annual_period = False
-                    is_quarter_period = 60 <= span <= 120
-                else:
-                    is_annual_period = True
-                    is_quarter_period = False
+                is_annual_period = not (is_duration and span is not None
+                                        and not (300 <= span <= 400))
 
                 entry = Fact(concept=concept, tag=tag, value=float(row.get("val", 0)),
                              unit=unit_key, fy=period_year, fp=row.get("fp", ""),
@@ -539,20 +537,12 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
                     prior = annual.get(period_year)
                     if prior is None or entry.filed >= prior.filed:
                         annual[period_year] = entry
-                elif form in ("10-Q", "6-K") and (is_quarter_period or not is_duration):
-                    prior = quarterly.get(end)
-                    if prior is None or entry.filed >= prior.filed:
-                        quarterly[end] = entry
 
             if annual:
                 by_year.append(annual)
-            if quarterly:
-                by_quarter.append(quarterly)
 
         if by_year:
             facts.annual[concept] = _joined(by_year)
-        if by_quarter:
-            facts.quarterly[concept] = _joined(by_quarter)
 
     with _CACHE_LOCK:
         _FACTS_CACHE[cik] = (time.time(), facts)
@@ -627,52 +617,6 @@ def filings(symbol: str, forms: Optional[tuple] = None, limit: int = 40) -> List
 def recent_material(symbol: str, limit: int = 12) -> List[Filing]:
     """The filings that actually move a thesis, skipping routine insider forms."""
     return filings(symbol, forms=MATERIAL_FORMS, limit=limit)
-
-
-def full_text_search(query: str, forms: Optional[str] = None,
-                     limit: int = 10) -> List[Dict]:
-    """Search the text of filings across all companies.
-
-    Useful for questions no ratio answers, such as which filers discuss a
-    supplier, a technology, or a legal exposure by name.
-    """
-    params = {"q": '"%s"' % query.strip('"'), "from": 0, "size": limit}
-    if forms:
-        params["forms"] = forms
-    data = _get(_SEARCH_URL, params)
-    if not isinstance(data, dict):
-        return []
-
-    hits = ((data.get("hits") or {}).get("hits") or [])
-    out = []
-    for hit in hits[:limit]:
-        src = hit.get("_source") or {}
-        ident = hit.get("_id", "")
-        accession = ident.split(":")[0] if ":" in ident else ident
-        ciks = src.get("ciks") or []
-        cik = int(ciks[0]) if ciks else 0
-        out.append({
-            "company": (src.get("display_names") or [""])[0],
-            "form": src.get("root_form") or src.get("file_type") or "",
-            "filed": src.get("file_date") or "",
-            "cik": cik,
-            "accession": accession,
-            "url": ("https://www.sec.gov/Archives/edgar/data/%d/%s/%s-index.htm"
-                    % (cik, accession.replace("-", ""), accession)) if cik else "",
-        })
-    return out
-
-
-def total_filings_hits(query: str, forms: Optional[str] = None) -> Optional[int]:
-    """How many filings mention a phrase. A crude but real popularity measure."""
-    params = {"q": '"%s"' % query.strip('"'), "from": 0, "size": 1}
-    if forms:
-        params["forms"] = forms
-    data = _get(_SEARCH_URL, params)
-    if not isinstance(data, dict):
-        return None
-    total = ((data.get("hits") or {}).get("total") or {})
-    return total.get("value") if isinstance(total, dict) else total
 
 
 def financial_history(symbol: str, years: int = 6) -> Dict:
@@ -772,6 +716,7 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
     currencies = facts.currencies(money_concepts)
     currency = sorted(currencies)[0] if len(currencies) == 1 else ""
 
+    grown = ("revenue", "net_income", "operating_income", "equity")
     return {
         "available": True,
         "entity": facts.entity,
@@ -782,7 +727,9 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
         "years": years_seen,
         "table": table,
         "derived": derived,
-        "cagr": {c: facts.cagr(c, 5) for c in ("revenue", "net_income",
-                                               "operating_income", "equity")},
+        "cagr": {c: facts.cagr(c, 5) for c in grown},
+        # The fiscal years each of those runs between: five of them, or fewer
+        # for a company that has not filed that many.
+        "cagr_years": {c: facts.cagr_years(c, 5) for c in grown},
         "source_url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=%010d" % facts.cik,
     }
