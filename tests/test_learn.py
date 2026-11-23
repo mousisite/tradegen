@@ -160,7 +160,8 @@ try:
     check("beside random entries", "-0.10R" in text and "Random entries" in text)
     check("the claims carry their counts and the usual rate",
           "54 of 120" in text and "50 of 120" in text
-          and "cannot be told apart from what usually happens" in text.lower())
+          and "cannot be told either way" in text.lower() and "Compared with" in text
+          and "the range mirrored" in text)
     check("unmeasured claims say they are being tested", "Being tested" in text)
     check("how many results got a verdict, and that 1 in 20 can by luck",
           "1 in 20" in text)
@@ -183,16 +184,73 @@ try:
           "-0.08R ±0.28" in text and "-0.10R" in text and "15-minute" in text
           and "next old high or low" in text)
     check("every instrument is there", "S&P 500 futures" in text and "S&P 500 fund" in text)
-    check("the wider-swing check is said", "three bars each side" in text and "30 trades" in text)
+    check("the wider-swing check is said, once for each instrument, with its target",
+          "three bars each side instead of two) and a target twice the risk" in text
+          and text.count("30 trades, -0.03R") == 2 and "31 trades" not in text)
     check("the skipped setups are counted", "6 with a stop too close" in text)
     check("an example is drawn from the stored bars, in New York time",
-          'class="chart trade"' in page and "Entry" in page and "Target" in page
+          page.count('class="chart trade"') == 2 and 'viewBox="0 0 340 260"' in page
+          and "Entry" in page and "Target" in page
           and "Times are New York time" in text)
     check("its claims are there with their verdicts", "54 of 120" in text)
     check("it keeps builder text and jargon out", not leaks(page), leaks(page))
     check("the video's link is there on the web", "youtu.be/yiuFUp0kFz8" in page)
     check("and gone in the app", "youtu" not in get("/learn/sweep-break-retest",
                                                     headers=APP_UA)[1])
+
+    # What a claim is compared with, its unit, and the figures by earlier times.
+    conn = db.connect(DB)
+    gaps = labstore.sample_claim("ndog_fills")
+    gaps["pooled"].update(trials=198, hits=160, base_trials=198, base_hits=158, hit_1h=89,
+                          base_hit_1h=91, hit_4h=120, base_hit_4h=118)
+    labstore.save_claim(conn, gaps)
+    buys = dict(labstore.sample_claim("crowd_breakout_loses"), measure="mean", verdict=None)
+    buys["pooled"].update(mean=0.04, se=0.04, base_mean=-0.21, base_se=0.02)
+    labstore.save_claim(conn, buys)
+    slower = dict(labstore.sample_claim("after_1030_slower"), measure="mean", verdict=1)
+    slower["pooled"].update(mean=0.85, se=0.01, base_mean=1.2, base_se=0.01)
+    labstore.save_claim(conn, slower)
+    conn.close()
+    text = main_text(get("/learn/opening-gaps")[1])
+    check("a gap's figures within 1 and 4 hours are shown, beside the other way's",
+          "Within 1 hour: 89 of 198" in text and "Within 4 hours: 120 of 198" in text
+          and "91 of 198" in text and "the same distance the other way" in text, text[-900:])
+    check("with no word of a comparison that is not there, or of what is usual",
+          "no comparison" not in text and "Usually" not in text and "than usual" not in text)
+    text = main_text(get("/learn/breakouts")[1])
+    check("a lab claim's figures are in R, beside what they are compared with",
+          "+0.04R ±0.08" in text and "-0.21R ±0.04" in text and "random entries" in text
+          and "It has too few cases to say." in text, text[-900:])
+    text = main_text(get("/learn/sessions")[1])
+    check("bar sizes say what they are a share of, and the verdict does not say 'usual'",
+          "0.85 ±0.02 of that day's average bar" in text
+          and "It held, by more than its margin of error." in text, text[-900:])
+
+    # A figure that has missed several nights says so; a run that stored
+    # nothing makes nothing look newer.
+    check("the hub says when its figures were measured, and that none is old",
+          "Last measured" in main_text(get("/learn")[1])
+          and "have not been refreshed since" not in main_text(get("/learn")[1]))
+    now = 1795000000
+    store = {"results": [{"updated": now - 86400}, {"updated": now - 5 * 86400}],
+             "claims": {"x": {"updated": now - 86400}}}
+    fresh = learn.freshness(store, now)
+    check("the newest and the oldest are read from the figures themselves",
+          fresh == {"newest": now - 86400, "oldest": now - 5 * 86400, "stale": True}
+          and learn.freshness({"results": store["results"][:1], "claims": {}}, now)["stale"] is False
+          and learn.freshness({"results": [], "claims": {}}, now) is None, fresh)
+    conn = db.connect(DB)
+    conn.execute("UPDATE lab_results SET updated = updated - 5 * 86400 WHERE symbol = 'SPY'")
+    conn.commit()
+    labstore.save_run(conn, int(web.time.time()), int(web.time.time()), {"checked": 0})
+    conn.close()
+    check("the hub and a topic say when some figures are more than three days old",
+          "have not been refreshed since" in main_text(get("/learn")[1])
+          and "have not been refreshed since" in main_text(get("/learn/sweep-break-retest")[1]))
+    conn = db.connect(DB)
+    conn.execute("UPDATE lab_results SET updated = updated + 5 * 86400 WHERE symbol = 'SPY'")
+    conn.commit()
+    conn.close()
 
     status, page = get("/learn/daily-bias")
     text = main_text(page)
@@ -270,7 +328,9 @@ try:
     conn.close()
     check("the stored examples become charts", len(items) == 2, len(items))
     status, page = get("/learn/practice")
-    check("a chart and three choices", status == 200 and 'class="chart trade"' in page
+    check("a chart, wide and drawn again for a phone, and three choices",
+          status == 200 and page.count('class="chart trade"') == 2
+          and 'viewBox="0 0 340 260"' in page and "Cut 6,000" in page
           and 'value="up"' in page and 'value="unclear"' in page, status)
     check("the instrument is not named before the answer", "S&P 500" not in main_text(page))
     r = c.post("/learn/practice", data={"item": 0, "pick": "up"},

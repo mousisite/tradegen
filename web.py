@@ -5662,8 +5662,7 @@ def learn():
         page = learn_mod.hub(conn, _registered_setups())
     finally:
         conn.close()
-    return render_template("learn.html", page=page, links=_learn_links(),
-                           strategy_slug=public_mod.strategy_slug)
+    return render_template("learn.html", page=page, links=_learn_links())
 
 
 @app.route("/learn/<slug>")
@@ -5676,8 +5675,7 @@ def learn_topic(slug):
         conn.close()
     if page is None:
         abort(404)
-    return render_template("learn_topic.html", page=page, links=_learn_links(),
-                           strategy_slug=public_mod.strategy_slug)
+    return render_template("learn_topic.html", page=page, links=_learn_links())
 
 
 @app.route("/learn/practice", methods=["GET", "POST"])
@@ -5723,7 +5721,7 @@ def learn_practice():
         else:
             k = (request.args.get("n", type=int) or 0) % len(items)
         item = items[k]
-    chart = learn_mod.practice_chart(item, bool(reveal)) if item else ""
+    chart = learn_mod.practice_chart(item, bool(reveal)) if item else {}
     return render_template(
         "learn_practice.html", item=item, k=k, count=len(items), reveal=reveal,
         chart=chart, tally=tally, picks=learn_mod.PRACTICE_PICKS,

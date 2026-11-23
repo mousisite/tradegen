@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_learn.html" import kept, versus, claim_measured, claim_usual with context %}
+{% from "_learn.html" import kept, versus, claim_measured, claim_against with context %}
 {% set active = 'stocks' %}
 {% set page_blurb = "The ideas a popular free day-trading course teaches (liquidity sweeps, breaks of structure, fair value gaps, sessions, the daily lean), each in plain words and tested on real futures, funds, coins and stocks after trading costs, against random trades at the same times of day. Not financial advice." %}
 {% block title %}Price action, tested: do the day-trading course's ideas work? · Orenth{% endblock %}
@@ -49,9 +49,14 @@
     {% set ct = page.claim_tally %}
     {% if page.measured_claims %}
       <p class="prose">Of the course's claims that could be checked and were
-        measured, {{ ct[1] }} happen more often than usual, {{ ct[-1] }} less
-        often, and {{ ct[0] }} cannot be told apart from what usually
-        happens{% if ct[none] %}; {{ ct[none] }} had too few cases to say{% endif %}.</p>
+        measured, {{ ct[1] }} held by more than {{ 'its' if ct[1] == 1 else 'their' }}
+        margin of error, {{ ct[-1] }} went the other way by more than
+        {{ 'its' if ct[-1] == 1 else 'their' }} margin, and {{ ct[0] }} cannot be told
+        either way{% if ct[none] %}; {{ ct[none] }} had too few cases to say{% endif %}.</p>
+    {% endif %}
+    {% if page.fresh and page.fresh.stale %}
+      <p class="prose">Some of these figures have not been refreshed since
+        {{ page.fresh.oldest|day }}. The newest were measured on {{ page.fresh.newest|day }}.</p>
     {% endif %}
     {% if page.cells %}
       <p class="prose">{{ "{:,}".format(page.cells) }} results got a verdict here
@@ -97,12 +102,13 @@
 <section style="margin-top:var(--s4)">
   <div class="sechead"><h2>The claims, checked</h2></div>
   <p class="prose" style="margin-bottom:var(--s2)">What the course says happens,
-    in Orenth's words, beside how often it happened and how often the same thing
-    happens anyway (the comparison each topic describes).</p>
+    in Orenth's words: what was measured, what it is compared with, and how the
+    two came out. Each topic says exactly how. R is the amount risked on a
+    trade.</p>
   <div class="card pad0">
     <div class="tablewrap">
       <table class="stack">
-        <thead><tr><th>The claim</th><th class="r">Measured</th><th class="r">Usually</th>
+        <thead><tr><th>The claim</th><th class="r">Measured</th><th class="r">Compared with</th>
           <th>In words</th></tr></thead>
         <tbody>
         {% for c in page.claims %}
@@ -112,7 +118,7 @@
                  href="{{ url_for('learn_topic', slug=c.learn) }}">{{ c.title }} &rarr;</a>{% endif %}</td>
             {% if c.measured %}
               <td class="r" data-label="Measured">{{ claim_measured(c) }}</td>
-              <td class="r" data-label="Usually">{{ claim_usual(c) }}</td>
+              <td class="r" data-label="Compared with">{{ claim_against(c) }}</td>
               <td class="wide">{{ c.words|capitalize }}</td>
             {% else %}
               <td class="wide soft" colspan="3">Being tested</td>
@@ -159,9 +165,9 @@
   <ul class="list">
     {% for line in page.limits %}<li>{{ line }}</li>{% endfor %}
   </ul>
-  {% if page.run and page.run.finished %}
+  {% if page.fresh %}
     <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">Last
-      run finished {{ page.run.finished|day }}.</p>
+      measured {{ page.fresh.newest|day }}.</p>
   {% endif %}
 </div>
 

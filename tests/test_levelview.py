@@ -273,6 +273,16 @@ measured = " ".join(strip["measured"])
 check("with the lab's trades entered in this window, as a count", "5 sweep, break and retest "
       "trades on ES=F's 5-minute bars were entered from 9:50 to 10:10" in measured
       and "too few to say anything" in measured, measured)
+conn = db.connect(DB)
+many = labstore.sample_result("ES=F", "5m")
+many["setups"]["liquidity_model"]["rules"]["2r"]["by_window"]["macro"] = [40, 17, -3.0]
+labstore.save_result(conn, many)
+often = " ".join(levelview.clock_strip(FUTURE, "future", clock.ny(2026, 11, 18, 9, 55),
+                                       conn)["measured"])
+labstore.save_result(conn, labstore.sample_result("ES=F", "5m"))
+conn.close()
+check("the trades that kept money are called that, not trades that reached their target",
+      "17 kept money after costs" in often and "reached their target" not in often, often)
 check("and the lab's test of the window, in the claim's words",
       labstore.claim_words(0) in measured, measured)
 
