@@ -42,8 +42,15 @@ def normalised_fcf(f: Fundamentals) -> Dict:
     if facts is None:
         return out
 
-    ocf = {r["fy"]: r["value"] for r in facts.series("operating_cashflow", 6)}
-    capex = {r["fy"]: r["value"] for r in facts.series("capex", 6)}
+    ocf_rows = facts.series("operating_cashflow", 6)
+    capex_rows = facts.series("capex", 6)
+    # The filed flows stand beside Yahoo's cash and debt in the model, so they
+    # are used only when they are in the currency Yahoo's figures are in.
+    units = {r.get("unit") or "USD" for r in ocf_rows + capex_rows}
+    if units - {f.accounts_currency or "USD"}:
+        return out
+    ocf = {r["fy"]: r["value"] for r in ocf_rows}
+    capex = {r["fy"]: r["value"] for r in capex_rows}
     years = sorted(set(ocf) & set(capex))
     if len(years) < 3:
         return out
@@ -70,6 +77,25 @@ def normalised_fcf(f: Fundamentals) -> Dict:
                 % (trailing / 1e9, abs(gap) * 100,
                    "above" if gap > 0 else "below", average / 1e9))
     return out
+
+
+def share_count(f: Fundamentals, price: float) -> Dict:
+    """How many shares the whole company is worth at today's price.
+
+    Yahoo's shares outstanding are those of the listed class alone, while the
+    cash flow, the cash, the debt and the market value cover every class.
+    Dividing all of Alphabet by its class A shares made each worth about twice
+    what it is. The market value divided by the price, both Yahoo's and from
+    the same moment, counts every class in shares of the one being priced.
+    """
+    listed = f.get("shares_out")
+    cap = f.get("market_cap")
+    quoted = f.get("price") or price
+    every = cap / quoted if cap and cap > 0 and quoted and quoted > 0 else None
+    if every and (not listed or listed <= 0 or abs(every / listed - 1) > 0.05):
+        return {"value": every,
+                "source": "market value divided by the price, so every share class counts"}
+    return {"value": listed, "source": "Yahoo Finance"}
 
 
 @dataclass
@@ -113,9 +139,14 @@ def discounted_cash_flow(f: Fundamentals, price: float,
     """
     v = Valuation(method="Discounted cash flow")
 
+    v.reason = f.currency_problem()
+    if v.reason:
+        return v
+
     norm = normalised_fcf(f)
     fcf = norm["value"]
-    shares = f.get("shares_out")
+    counted = share_count(f, price)
+    shares = counted["value"]
     cash = f.get("total_cash") or 0.0
     debt = f.get("total_debt") or 0.0
 
@@ -162,7 +193,7 @@ def discounted_cash_flow(f: Fundamentals, price: float,
         Assumption("growth", "Growth for %d years" % years, growth, growth_src),
         Assumption("terminal_growth", "Growth thereafter", terminal_growth, "your input"),
         Assumption("discount", "Discount rate", discount, discount_src),
-        Assumption("shares", "Shares outstanding", shares, "Yahoo Finance", False),
+        Assumption("shares", "Shares outstanding", shares, counted["source"], False),
     ]
 
     total_pv = 0.0
@@ -240,8 +271,12 @@ def reverse_dcf(f: Fundamentals, price: float, years: int = 10,
     """
     v = Valuation(method="Reverse DCF: growth already priced in")
 
+    v.reason = f.currency_problem()
+    if v.reason:
+        return v
+
     fcf = normalised_fcf(f)["value"]
-    shares = f.get("shares_out")
+    shares = share_count(f, price)["value"]
     cash = f.get("total_cash") or 0.0
     debt = f.get("total_debt") or 0.0
 
@@ -316,6 +351,12 @@ def multiples(f: Fundamentals, price: float) -> Valuation:
     """Where the price sits on the usual ratios, and what each one implies."""
     v = Valuation(method="Multiples")
     rows = []
+    # The ratios that cross two currencies were already left out of the
+    # figures; why is said here too, where they are missed.
+    if f.ratios_mixed:
+        v.notes.append("The other ratios are left out: the accounts are in %s "
+                       "and the shares are priced in another currency."
+                       % f.accounts_currency)
 
     checks = [
         ("pe", "Price to earnings", 25.0, "x"),
@@ -373,8 +414,10 @@ def combine(models: List[Valuation], price: float) -> Dict:
     """
     usable = [m for m in models if m.usable and m.fair_value]
     if not usable:
+        refused = next((m.reason for m in models
+                        if m.reason.startswith("Not calculated")), "")
         return {"usable": False,
-                "reason": "No model produced a value from the available data.",
+                "reason": refused or "No model produced a value from the available data.",
                 "models": models}
 
     values = [m.fair_value for m in usable]

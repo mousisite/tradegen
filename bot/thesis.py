@@ -64,6 +64,8 @@ class Thesis:
     falsifiers: List[str] = field(default_factory=list)
     unknowns: List[str] = field(default_factory=list)
     all_sources: List[Dict] = field(default_factory=list)
+    # Worth reading, and on neither side: it never moves the balance.
+    neutral: List[Point] = field(default_factory=list)
 
     @property
     def evidence_count(self) -> int:
@@ -97,6 +99,7 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
     rather than presenting itself as complete.
     """
     bull, bear = Case("bull"), Case("bear")
+    neutral: List[Point] = []
     unknowns: List[str] = []
     sources: List[Dict] = []
     now = int(time.time())
@@ -133,9 +136,12 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
                                    "strong")],
                 weight=1.2))
 
+    mixed = f.currency_problem() if f is not None else ""
+    if mixed:
+        unknowns.append("The cash flow models of what it might be worth. " + mixed)
     if valuation is not None and valuation.get("usable"):
         _valuation_points(valuation, price, bull, bear, stamp)
-    else:
+    elif not mixed:
         unknowns.append("No valuation model could run, usually because free "
                         "cash flow or share count was not reported.")
 
@@ -163,10 +169,10 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
                            _items(sentiment.n_social, "post"), sentiment.method)})
 
     if filings:
-        _filing_points(filings, bull, bear, stamp)
+        _filing_points(filings, bull, bear, stamp, neutral)
 
     if options_stats:
-        _options_points(options_stats, bull, bear, stamp)
+        _options_points(options_stats, bull, bear, stamp, neutral)
 
     bull.strength = sum(p.weight for p in bull.points)
     bear.strength = sum(p.weight for p in bear.points)
@@ -178,7 +184,7 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
 
     thesis = Thesis(symbol=symbol.upper(), price=price, created=now,
                     bull=bull, bear=bear, balance=balance,
-                    unknowns=unknowns, all_sources=sources)
+                    unknowns=unknowns, all_sources=sources, neutral=neutral)
     thesis.verdict = _verdict(balance, bull, bear, thesis.evidence_count)
     thesis.falsifiers = _falsifiers(bull, bear, f, price, balance)
     return thesis
@@ -243,19 +249,22 @@ def _fundamental_points(f, bull: Case, bear: Case, stamp: str) -> None:
 
     fcf = f.get("free_cashflow")
     if fcf is not None:
+        cash = _money(fcf)
+        if f.accounts_currency not in ("", "USD"):
+            cash += " " + f.accounts_currency
         if fcf > 0:
             bull.points.append(Point(
                 "Generates cash",
                 "Free cash flow of %s after paying for its own capital spending."
-                % _money(fcf),
-                [Evidence("Free cash flow", _money(fcf), "Yahoo Finance", url, stamp,
+                % cash,
+                [Evidence("Free cash flow", cash, "Yahoo Finance", url, stamp,
                           "strong")], 1.2))
         else:
             bear.points.append(Point(
                 "Burns cash",
                 "Free cash flow is %s. Continuing requires either existing cash "
-                "or new money from somebody." % _money(fcf),
-                [Evidence("Free cash flow", _money(fcf), "Yahoo Finance", url, stamp,
+                "or new money from somebody." % cash,
+                [Evidence("Free cash flow", cash, "Yahoo Finance", url, stamp,
                           "strong")], 1.5))
 
     short = f.get("short_pct_float")
@@ -509,7 +518,8 @@ def _sentiment_points(s, bull: Case, bear: Case, stamp: str) -> None:
             [Evidence("Fresh catalyst", "within 3 hours", s.method, "", stamp)], 0.7))
 
 
-def _filing_points(filings, bull: Case, bear: Case, stamp: str) -> None:
+def _filing_points(filings, bull: Case, bear: Case, stamp: str,
+                   neutral: List[Point]) -> None:
     recent = list(filings)[:10]
     eights = [f for f in recent if f.form == "8-K"]
     offerings = [f for f in recent if f.form in ("424B5", "S-1")]
@@ -542,28 +552,31 @@ def _filing_points(filings, bull: Case, bear: Case, stamp: str) -> None:
 
     annual = [f for f in recent if f.form in ("10-K", "20-F")]
     if annual:
+        # Every company that files has one, so it argues for neither side.
         f = annual[0]
-        bull.points.append(Point(
+        neutral.append(Point(
             "Recent annual report available",
             "The %s filed %s is the primary source for anything above. Read the "
             "risk factors before acting on any of it." % (f.form, f.filed),
             [Evidence("Annual report", "%s filed %s" % (f.form, f.filed),
-                      "SEC EDGAR", f.index_url, f.filed, "strong")], 0.3))
+                      "SEC EDGAR", f.index_url, f.filed, "strong")], 0.0))
 
 
-def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str) -> None:
+def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str,
+                    neutral: List[Point]) -> None:
     iv = stats.get("atm_iv")
     pc = stats.get("put_call_oi")
     em = stats.get("expected_move")
 
     if em and em.get("percent"):
-        bull.points.append(Point(
+        # A size, not a direction: up and down alike, so on neither side.
+        neutral.append(Point(
             "The options market has a view on the size of the move",
             "Roughly %s either way by %s, priced from the at-the-money straddle. "
             "That is a forward-looking number, unlike everything derived from "
             "past prices." % (_pct(em["percent"]), stats.get("expiry_date", "expiry")),
             [Evidence("Expected move", _pct(em["percent"]),
-                      "at-the-money straddle", "", stamp, "strong")], 0.4))
+                      "at-the-money straddle", "", stamp, "strong")], 0.0))
 
     if iv and iv > 0.7:
         bear.points.append(Point(

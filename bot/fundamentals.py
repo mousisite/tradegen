@@ -39,6 +39,7 @@ class Metric:
     unit: str = ""            # "ratio" | "pct" | "usd" | "x" | ""
     source: str = ""
     note: str = ""
+    currency: str = ""        # shown after an amount of money; empty for dollars
 
     @property
     def known(self) -> bool:
@@ -51,13 +52,14 @@ class Metric:
         if self.unit == "pct":
             return "%.1f%%" % (v * 100)
         if self.unit == "usd":
+            money = (" " + self.currency) if self.currency else ""
             for cut, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
                 if abs(v) >= cut:
-                    return "%.2f%s" % (v / cut, suffix)
-            return "%.2f" % v
+                    return "%.2f%s%s" % (v / cut, suffix, money)
+            return "%.2f%s" % (v, money)
         if self.unit == "x":
             return "%.1fx" % v
-        return "%.2f" % v
+        return "%.2f%s" % (v, (" " + self.currency) if self.currency else "")
 
 
 @dataclass
@@ -80,6 +82,33 @@ class Fundamentals:
     sec_facts: Optional[sec_mod.CompanyFacts] = None
     sources: List[Dict] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # What the shares are priced in and what the accounts are kept in, as
+    # Yahoo codes; empty when it did not say. Taiwan Semiconductor trades in
+    # USD and reports in TWD; a London share trades in GBp, which is pence,
+    # and reports in GBP.
+    price_currency: str = ""
+    accounts_currency: str = ""
+
+    def currency_problem(self) -> str:
+        """Why the accounts cannot be set against the share price, if they cannot.
+
+        The figures carry no exchange rate, so a value per share worked out
+        from them would be wrong by the rate. Saying so is all that can be done.
+        """
+        priced, kept = self.price_currency, self.accounts_currency
+        if not priced or not kept or priced == kept:
+            return ""
+        return ("Not calculated: the accounts are in %s and the shares are priced "
+                "in %s, so a value per share would be wrong by the rate between "
+                "the two." % (kept, _MINOR.get(priced, priced)))
+
+    @property
+    def ratios_mixed(self) -> bool:
+        """Whether a ratio of a company total to its market value crosses
+        currencies. The market value of a share priced in pence is in pounds,
+        so for those only a value per share is affected."""
+        return bool(self.currency_problem()) and (
+            _MAJOR.get(self.price_currency, self.price_currency) != self.accounts_currency)
 
     def get(self, key: str) -> Optional[float]:
         m = self.metrics.get(key)
@@ -88,6 +117,43 @@ class Fundamentals:
     def show(self, key: str) -> str:
         m = self.metrics.get(key)
         return m.display() if m else "—"
+
+
+# Prices quoted in hundredths of a currency: the currency, and how to say it.
+_MAJOR = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ZAC": "ZAR", "ILA": "ILS"}
+_MINOR = {"GBp": "pence (GBp)", "GBX": "pence (GBX)", "ZAc": "South African cents (ZAc)",
+          "ZAC": "South African cents (ZAC)", "ILA": "agorot (ILA)"}
+
+# Money rows by which of the two currencies they are in, and the ratios that
+# divide one by the other. Yahoo works these out itself, across currencies.
+_MARKET_MONEY = ("market_cap", "enterprise_value")
+_ACCOUNTS_MONEY = ("revenue", "ebitda", "free_cashflow", "operating_cashflow",
+                   "total_cash", "total_debt")
+_CROSS_RATIOS = ("enterprise_value", "forward_pe", "peg", "pb", "ps", "ev_ebitda",
+                 "ev_revenue")
+
+
+def _label_currencies(out: Fundamentals) -> None:
+    """Name the currency beside each money row, and drop what mixes two."""
+    m = out.metrics
+    priced, kept = out.price_currency, out.accounts_currency
+    if out.ratios_mixed:
+        for key in _CROSS_RATIOS:
+            if key in m:
+                m[key].value = None
+        out.notes.append(
+            "The accounts are in %s and the shares are priced in %s. Figures that "
+            "would need an exchange rate between the two (forward price to "
+            "earnings, price to book, price to sales, enterprise value and its "
+            "ratios, free cash flow yield and the cash flow models) are left out "
+            "rather than worked out wrongly." % (kept, _MINOR.get(priced, priced)))
+    if any(c not in ("", "USD") for c in (priced, kept)):
+        for key in _MARKET_MONEY:
+            if key in m:
+                m[key].currency = _MAJOR.get(priced, priced)
+        for key in _ACCOUNTS_MONEY:
+            if key in m:
+                m[key].currency = kept
 
 
 def _put(store: Dict[str, Metric], key: str, label: str, value,
@@ -131,6 +197,8 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
     out.country = profile.get("country") or ""
     out.employees = profile.get("fullTimeEmployees")
     out.summary = (profile.get("longBusinessSummary") or "").strip()
+    out.price_currency = (pricing.get("currency") or detail.get("currency") or "").strip()
+    out.accounts_currency = (fin.get("financialCurrency") or "").strip()
 
     g = yahoo.fmt
     m = out.metrics
@@ -182,8 +250,10 @@ def load(symbol: str, with_sec: bool = True) -> Fundamentals:
 
     # Derived: free cash flow yield is one of the more honest valuation reads,
     # because it is harder to flatter with accounting choices than earnings.
+    # Only between two amounts in one currency.
+    _label_currencies(out)
     fcf, cap = out.get("free_cashflow"), out.get("market_cap")
-    if fcf and cap and cap > 0:
+    if fcf and cap and cap > 0 and not out.ratios_mixed:
         _put(m, "fcf_yield", "Free cash flow yield", fcf / cap, "pct",
              "derived from Yahoo", "free cash flow divided by market cap")
 
@@ -268,12 +338,19 @@ def _reconcile(out: Fundamentals, facts: "sec_mod.CompanyFacts") -> None:
     filed_revenue = facts.latest("revenue")
     filed_income = facts.latest("net_income")
 
+    def currency(row) -> str:
+        """What a filed figure is in, for showing beside it; empty for dollars."""
+        unit = (row.get("unit") or "USD").split("/")[0]
+        return "" if unit == "USD" else unit
+
     if filed_revenue:
         _put(out.metrics, "sec_revenue", "Revenue (last annual report)",
              filed_revenue["value"], "usd", "SEC filing",
              "fiscal %s, filed %s" % (filed_revenue.get("fy"), filed_revenue.get("filed")))
+        out.metrics["sec_revenue"].currency = currency(filed_revenue)
         market = out.get("revenue")
-        if market and filed_revenue["value"]:
+        same = (currency(filed_revenue) or "USD") == (out.accounts_currency or "USD")
+        if market and filed_revenue["value"] and same:
             gap = abs(market - filed_revenue["value"]) / filed_revenue["value"]
             if gap > 0.25:
                 out.notes.append(
@@ -285,6 +362,7 @@ def _reconcile(out: Fundamentals, facts: "sec_mod.CompanyFacts") -> None:
         _put(out.metrics, "sec_net_income", "Net income (last annual report)",
              filed_income["value"], "usd", "SEC filing",
              "fiscal %s" % filed_income.get("fy"))
+        out.metrics["sec_net_income"].currency = currency(filed_income)
 
     for concept, key, label in (("assets", "sec_assets", "Total assets"),
                                 ("liabilities", "sec_liabilities", "Total liabilities"),
@@ -295,6 +373,7 @@ def _reconcile(out: Fundamentals, facts: "sec_mod.CompanyFacts") -> None:
             _put(out.metrics, key, label, row["value"],
                  "" if concept == "eps_diluted" else "usd", "SEC filing",
                  "fiscal %s" % row.get("fy"))
+            out.metrics[key].currency = currency(row)
 
 
 def quality_score(f: Fundamentals) -> Dict:

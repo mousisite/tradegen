@@ -234,6 +234,25 @@
       {% endif %}
     </div>
   </div>
+
+  {% if t.neutral %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">Worth knowing, and counted for neither side</span>
+      {% for p in t.neutral %}
+        <div style="padding:var(--s2) 0;border-top:1px solid var(--hairline)">
+          <div style="font-weight:600;font-size:var(--t-sm)">{{ p.headline }}</div>
+          <p class="prose" style="margin-top:4px">{{ p.detail }}</p>
+          {% for e in p.evidence %}
+            <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
+              <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
+              {% else %}{{ e.cite() }}{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -479,8 +498,9 @@
           {% if h.table.get(key) %}
             {% set byyear = {} %}
             {% for row in h.table[key] %}{% set _ = byyear.update({row.fy: row}) %}{% endfor %}
+            {% set unit = (h.table[key][-1].unit or 'USD').split('/')[0] %}
             <tr>
-              <td>{{ label }}</td>
+              <td>{{ label }}{% if unit != 'USD' %} <span class="faint">in {{ unit }}</span>{% endif %}</td>
               {% for y in h.years %}
                 <td class="r fig">
                   {% if byyear.get(y) %}
@@ -510,7 +530,8 @@
             <td></td>
           </tr>
           <tr>
-            <td>Free cash flow</td>
+            {% set unit = ((h.table.get('operating_cashflow') or [{}])[-1].unit or 'USD').split('/')[0] %}
+            <td>Free cash flow{% if unit != 'USD' %} <span class="faint">in {{ unit }}</span>{% endif %}</td>
             {% for y in h.years %}
               {% set fcf = h.derived.get(y, {}).get('free_cashflow') %}
               <td class="r fig">{{ "%.1fB"|format(fcf/1000000000) if fcf else '—' }}</td>
@@ -691,7 +712,7 @@
 <section>
   <div class="sechead">
     <h2>What options are pricing</h2>
-    <span class="tail">expiry {{ o.expiry_date }}, {{ o.days }} days out</span>
+    <span class="tail">expiry {{ o.expiry_date }}, {{ o.days }} day{{ '' if o.days == 1 else 's' }} out</span>
   </div>
   <div class="card">
     <div class="figs">
