@@ -1,6 +1,7 @@
 # Orenth
 
-**Live at [orenth.app](https://orenth.app).** Free, no ads, no tracking scripts.
+**Live at [orenth.app](https://orenth.app).** Free to use, with a paid Pro plan
+for more of the same. No ads.
 
 Give it a screenshot of a chart. It identifies the instrument, pulls live market
 data, runs **34 trading strategies**, measures which of them actually work on
@@ -39,7 +40,7 @@ required.
 | **Research** | The business behind the ticker: filed financials, valuation, a two-sided thesis, options pricing, recent filings, every claim cited |
 | **Screener** | Ready-made and custom screens over a chosen universe, showing the numbers that got each name through |
 | **Portfolio** | What you are exposed to: concentration, sector weights, correlation between holdings, a market-shock table |
-| **Trades** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
+| **Journal** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
 | **Strategies** | Leaderboard of all 34 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
@@ -126,7 +127,7 @@ otherwise. Each links to where the work happens.
 | 12 | Bull and bear thesis | `bot/thesis.py` | Both cases argued from the gathered evidence, each point carrying what would prove it wrong |
 | 13 | Source citations | throughout | Every figure carries where it came from; filings link to sec.gov |
 | 14 | Investment thesis memory | `bot/thesis.py`, `bot/database.py` | A thesis is saved with the price at the time and closed out later as right, wrong, right-by-luck, or undecided. The outcome offered when you close one is the one the price supports, not the one you remember |
-| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
+| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages, price action and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
 | 15d | Export | `bot/export.py` | The journal, theses, measured strategy record and analysis history as CSV or JSON |
@@ -504,8 +505,9 @@ paper.bat <command> [options]
 | `strategy_weights` | Per-strategy base weights, before regime and learned adjustment |
 | `alert_check_minutes` | Minutes between background alert checks, or 0 to switch them off |
 
-Two environment variables move where things are stored, which is how you keep a
-paper journal and a live one side by side without editing anything:
+These environment variables are the ones most often set. The first two move
+where things are stored, which is how you keep a paper journal and a live one
+side by side without editing anything; DEPLOY.md lists the rest:
 
 | Variable | Effect |
 |---|---|
@@ -758,7 +760,7 @@ suite depends on the order it runs in.
 
 | Source | Used for | Notes |
 |---|---|---|
-| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, crypto. |
+| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, futures, crypto. |
 | Yahoo Finance quoteSummary | Ratios, profile, balance sheet, cash flow | Free, but needs a cookie and crumb handshake, which `bot/yahoo.py` performs and refreshes |
 | Yahoo Finance options | Chains, open interest, implied volatility | Same handshake. Greeks are computed here, not taken on trust |
 | SEC EDGAR | Filed financials (XBRL company facts), filing history, full text search | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
@@ -810,7 +812,7 @@ Three details do most of the work:
 
 - **Every figure is monospaced with tabular numerals**, so columns of prices and
   R multiples line up and stay scannable.
-- **Semantic colours are warm.** Gains are olive `#68773b`, losses rust
+- **Semantic colours are warm.** Gains are olive `#616f37`, losses rust
   `#a53e2a`. A neon green on cream would look violently wrong.
 - **Contrast was solved, not copied.** The published warm tokens are tuned for
   large display type and fail AA as small text on cream: muted grey lands at
@@ -818,7 +820,7 @@ Three details do most of the work:
   until it cleared 4.5:1, keeping the hue and gaining legibility.
 
 There is a warm dark theme too, which follows your system setting. The
-decisions are recorded in `design-system/stock-bot/MASTER.md`.
+colours and the reasons for them are at the top of `static/style.css`.
 
 ---
 
@@ -847,7 +849,7 @@ Stock Bot.bat       double-click this: starts the web server
 web.py              the Flask web app
 templates/          web pages, including the settings screen
 static/style.css    warm editorial design system
-design-system/      the recorded design decisions
+design-system/      an early design study, kept for its history only
 menu.py             terminal menu
 analyze.py          analysis CLI
 paper.py            paper trading journal CLI
@@ -860,6 +862,8 @@ backup.py           consistent snapshots via SQLite's backup API, then verified
 preflight.py        checks a live deployment before anyone else sees it
 Dockerfile          the deployed image
 DEPLOY.md           putting it online, step by step
+mobile/             the iPhone app: the site in a native shell
+tools/              redraw the logo and the preview card, and operator's scripts
 tests/              every suite, runnable with tests/run_all.py
 bot/
   engine.py         the analysis pipeline, shared by web and CLI
@@ -878,6 +882,20 @@ bot/
 
   accounts.py       who owns what, sessions, and the shared/personal split
   auth.py           Google sign-in: authorization code flow with PKCE
+  codes.py          sign-in codes by email and text, and their limits
+  apple.py          Sign in with Apple, on the site and in the app
+  billing.py        Free and Pro, through Stripe, and the free allowance
+  appstore.py       checking what Apple says about a purchase is Apple's
+  apple_store.py    Pro bought in the iPhone app
+  invites.py        a friend's link, and the Pro time it gives
+  demo.py           the example account a signed-out visitor is shown
+  public.py         the pages anyone can read, and their pictures to share
+  digest.py         the weekly email
+  push.py           notifications to phones and browsers
+  webapp.py         the installable app and the offline worker's files
+  events.py         counts of what happened, for the operator
+  safejson.py       JSON read without trusting how deep it goes
+  terminal.py       console output setup
   quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
@@ -899,7 +917,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         thirteen alert conditions and the checker
+  alerts.py         the alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 

@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
     STOCKBOT_DB=/data/stockbot.db \
+    STOCKBOT_CONFIG=/data/config.json \
     STOCKBOT_BEHIND_PROXY=1
 
 WORKDIR /app

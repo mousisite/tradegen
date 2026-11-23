@@ -30,7 +30,7 @@ same complaint.
 
 ## Draft
 
-**Title, for Hacker News** (77 characters, and their limit is 80):
+**Title, for Hacker News** (75 characters, and their limit is 80):
 
 ```
 Show HN: Orenth - stock research that back-tests itself and reports no edge
@@ -52,7 +52,7 @@ for a trading tool to publish and it is what the measurements say.
 Re-run that count before you post. It moves with the market, and a figure you
 cannot reproduce on the day is the one thing that will get picked apart.
 
-Three things it does that I had not found elsewhere:
+Four things it does that I had not found elsewhere:
 
 **It separates being right from being lucky.** You can save a thesis, and later
 close it out as right, wrong, right-by-luck, or undecided. The app proposes the

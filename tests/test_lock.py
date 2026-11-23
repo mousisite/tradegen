@@ -45,6 +45,30 @@ differ = sorted("%s %s/%s" % (n, wanted[n], locked[n])
                 for n in wanted if n in locked and wanted[n] != locked[n])
 check("at the same version", not differ, differ)
 
+# A package that is only there because another one needs it goes when that one
+# does, and what used it goes quiet without a test failing.
+import ast  # noqa: E402
+import glob  # noqa: E402
+
+LISTED_AS = {"PIL": "pillow", "dotenv": "python-dotenv"}
+OURS = {os.path.splitext(os.path.basename(p))[0] for p in glob.glob(
+    os.path.join(ROOT, "*.py"))} | {"bot"}
+used = {}
+for path in glob.glob(os.path.join(ROOT, "*.py")) + glob.glob(
+        os.path.join(ROOT, "bot", "*.py")):
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in ast.walk(tree):
+        names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
+                 [node.module] if isinstance(node, ast.ImportFrom) and not node.level
+                 and node.module else [])
+        for name in names:
+            top = name.split(".")[0]
+            if top not in sys.stdlib_module_names and top not in OURS:
+                used.setdefault(norm(LISTED_AS.get(top, top)), os.path.basename(path))
+unlisted = sorted("%s (%s)" % (n, f) for n, f in used.items() if n not in wanted)
+check("every package the app imports is in requirements.txt", not unlisted, unlisted)
+
 with open(os.path.join(ROOT, "requirements.lock"), encoding="utf-8") as fh:
     text = fh.read()
 entries = re.split(r"\n(?=[A-Za-z0-9])", text.split("\n", 1)[1])

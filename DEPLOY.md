@@ -466,6 +466,39 @@ and refuses anything else.
 
 ---
 
+## Paid plans (Stripe)
+
+Free and Pro are off, and everyone has everything, until the first three
+settings are in. Section 7 above needs these too.
+
+1. In Stripe, make one product with a monthly price, and a yearly one if you
+   want it. Copy each price's id (it starts with `price_`).
+2. Developers, then **Webhooks**: add the endpoint
+   `https://<your-address>/billing/webhook` with the events
+   `checkout.session.completed`, `customer.subscription.created`,
+   `customer.subscription.updated` and `customer.subscription.deleted`. Copy
+   its signing secret.
+3. In the host's settings, add `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
+   `STRIPE_WEBHOOK_SECRET`, and `STRIPE_PRICE_ID_YEARLY` if there is one.
+   Save, and the server restarts.
+
+Then three things in Stripe's own settings, which the app cannot check:
+
+- **Switch on the customer portal** (Settings, Billing, Customer portal), let
+  customers cancel there, and switch plans if there are two prices. "Manage
+  subscription" on the account page opens it, and short of deleting the account
+  it is the only way a person can cancel. Until it is on, that button says
+  payments refused the request.
+- **After all retries for a payment fail, cancel the subscription** (Settings,
+  Billing, under failed payments). The app keeps Pro while Stripe is still
+  retrying a card. If Stripe is told to leave the subscription past due
+  instead, someone who never pays keeps Pro.
+- **A refund does not end Pro.** When you refund someone who should not keep
+  it, cancel their subscription in Stripe too, at once rather than at the end
+  of the period.
+
+---
+
 ## The whole environment, in one place
 
 | Variable | Needed | What it does |
@@ -536,9 +569,12 @@ instruments they look at, whether they pick intraday or daily bars. That last
 one answers the positioning question better than any opinion can. Without this
 set, nobody can see that page on a deployment, including you.
 
+`/usage` also says when the last backup was taken, and in red when one is
+overdue.
+
 Backups run automatically every 12 hours once deployed, are verified before
 being kept, and prune to the newest eight. Each is a copy of the database and
-four CSV exports, and pruning deletes them together. A deploy restarts the
+five CSV exports, and pruning deletes them together. A deploy restarts the
 server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
 disk as the database: with the settings under "Copies of the backups somewhere
@@ -687,7 +723,8 @@ Then the few things no script can check:
       your behalf
 - [ ] Confirm the alert loop is running: Settings shows the state and when it
       last looked
-- [ ] Take a backup and verify it: `python backup.py --csv`, then
+- [ ] Take a backup and verify it, in the host's shell:
+      `python backup.py --out /data/backups --csv`, then
       `python backup.py --verify <the file>`. A backup you have never verified
       is a hope, not a backup
 
@@ -718,11 +755,12 @@ to a storage bucket and checked there. Without it, it is a step for you, the
 operator:
 
 - Every week or so, download the newest `stockbot-<date>.db` from
-  `/data/backups` (over the host's SSH access, as in the commands below) and
+  `/data/backups` (with the commands for your host below) and
   keep it off the platform: your own machine plus one cloud drive is enough.
 - Run `python backup.py --verify <the file>` on the copy you downloaded.
-- Each copy is the size of the database, and eight are kept. At 1 GB that is
-  comfortable while the database is under about 100 MB; after that, set
+- Each copy is the size of the database. Eight are kept, and up to three more
+  taken before releases, all on the same disk. At 1 GB that is comfortable
+  while the database is under about 60 MB; after that, set
   `STOCKBOT_BACKUP_KEEP` lower or make the disk larger. A backup that would
   leave less than 50 MB free is not taken, and the log says so.
 - The CSVs are a convenience, not a full copy: the analysis history holds the
@@ -754,13 +792,26 @@ Restore with `--restore`, never by copying the file over `stockbot.db`: the
 `-wal` file beside it would lay the latest writes back over the backup.
 "Copies of the backups somewhere else" above says more.
 
-On the server:
+To bring one home from Render, take it in the service's **Shell** tab, then
+fetch it from your own computer over SSH (the service's **Connect** button,
+under SSH, shows its address, and Render's page on SSH how to add your key):
 
 ```
-fly ssh console -C "cd /app && python backup.py --out /data/backups --csv"
-fly ssh console -C "cat /data/backups/<the file it named>" > local-copy.db
+python backup.py --out /data/backups --csv
+scp -s <the service's SSH address>:/data/backups/<the file it named> local-copy.db
 python backup.py --verify local-copy.db
 ```
+
+From Fly:
+
+```
+fly ssh console -C "python /app/backup.py --out /data/backups --csv"
+fly ssh sftp get /data/backups/<the file it named> local-copy.db
+python backup.py --verify local-copy.db
+```
+
+With the off-site copies set up, the newest is in the bucket as well, and no
+SSH is needed.
 
 The CSVs are worth taking too. A `.db` file is readable only by this program;
 the exports are readable by anything, which is what matters if the worst case

@@ -1,7 +1,7 @@
 @echo off
 REM The text-based menu, for when you would rather not use a browser.
 REM The web interface in Stock Bot.bat is the main way in.
-title Stock Bot - terminal menu
+title Orenth - terminal menu
 cd /d "%~dp0"
 
 if not exist "%~dp0.runtime\python\python.exe" (
