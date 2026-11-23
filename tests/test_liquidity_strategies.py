@@ -346,7 +346,7 @@ check("/backtest/liquidity-model draws, with nothing about a trial",
       and "on trial" not in page and "Measured here, not used" not in page, page[:200])
 page = " ".join(client.get("/backtest/session-sweep").data.decode("utf-8", "replace").split())
 check("the session sweep's page says a call still uses it, and where its test will be",
-      "Not in the daily test" in page and "An analysis on shorter bars still uses it." in page
+      "Not in the daily test" in page and "An analysis on such bars still uses it." in page
       and "5- and 15-minute prices is shown on this page once it has run" in page)
 page = " ".join(client.get("/backtest/opening-range-break").data.decode("utf-8", "replace").split())
 check("the other intraday strategy promises no such test", "Not in the daily test" in page

@@ -216,20 +216,25 @@ def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
     again at once either. EDGAR answers a client that is over its limit with
     403 or 429, and asking on keeps the door shut for everybody here.
     """
-    last = None
+    # Once for the request and its retries: after a wait it is this one that
+    # finds out whether EDGAR is back, and it must not then wait for itself.
+    try:
+        upstream.check(_HOST)
+    except upstream.Throttled as exc:
+        raise SECError(("EDGAR is not answering, and is asked again in %d seconds"
+                        if exc.why == "down" else
+                        "EDGAR has asked for a pause of %d seconds") % exc.seconds)
+    last, answered = None, False
     for attempt in range(tries):
         if attempt:
             time.sleep(0.6)
-        try:
-            upstream.check(_HOST)
-        except upstream.Throttled as exc:
-            raise SECError("EDGAR has asked for a pause of %d seconds" % exc.seconds)
         _throttle()
         try:
             r = requests.get(url, params=params, headers=_headers(), timeout=(5, 10))
         except requests.RequestException as exc:
             last = str(exc)
             continue
+        answered = True
         if r.status_code == 200:
             upstream.note_ok(_HOST)
             try:
@@ -237,11 +242,20 @@ def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
             except ValueError:
                 return r.text
         if r.status_code == 404:
+            upstream.note_ok(_HOST)                 # it answered
             return None
         last = "HTTP %s" % r.status_code
         if r.status_code in (403, 429, 503):
-            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+            # A 403 here is EDGAR's way of saying "too often".
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r),
+                                    503 if r.status_code == 503 else 429)
             break
+    else:
+        # No answer on any try counts towards leaving it be for a while.
+        if answered:
+            upstream.note_unclear(_HOST)
+        else:
+            upstream.note_failed(_HOST)
     raise SECError("EDGAR request failed: %s" % last)
 
 

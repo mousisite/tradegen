@@ -3245,7 +3245,8 @@ def save_thesis():
             # As the page does it, so it is the same case by today's figures;
             # the written reasoning is not part of a thesis.
             analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
-            price, found = analysis.bars.last_price, analysis.bars.symbol
+            price = analysis.bars.last_price
+            found = getattr(analysis.bars, "symbol", "")
             t = engine.research(symbol, price, cfg, analysis=analysis,
                                 with_options=with_options,
                                 with_reasoning=False).thesis

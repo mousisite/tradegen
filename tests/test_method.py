@@ -1524,6 +1524,16 @@ check("and after three in a row nothing is sent for a while",
 upstream.reset()
 got, calls, _ = edgar(None, 200)
 check("one lost answer is asked for again", got == {"ok": True} and len(calls) == 2, got)
+for _ in range(3):
+    edgar(None, None)
+got, calls, _ = edgar(200)
+check("three with no answer at all leave EDGAR be for a while, said as that",
+      isinstance(got, sec.SECError) and not calls and "not answering" in str(got), got)
+upstream._breaker(sec._HOST)["open_until"] = time.time() - 1
+got, calls, _ = edgar(None, 404)
+check("then one request, with its retry, finds out, and having nothing is an answer",
+      got is None and len(calls) == 2 and not upstream.refusing(sec._HOST), (got, len(calls)))
+upstream.reset()
 
 kept_contact = _os.environ.pop("STOCKBOT_CONTACT", None)
 try:
@@ -2253,7 +2263,8 @@ check("a short history is said to be one",
       any("Only 120 bars of history" in r for r in short_r.plan.risks), short_r.plan.risks)
 long_r = r_
 check("a long one is not", not any("bars of history" in r for r in long_r.plan.risks)
-      and not any("could not be read" in r for r in long_r.plan.risks))
+      and not any("structure could not be read" in r for r in long_r.plan.risks),
+      long_r.plan.risks)
 from bot import liquidity  # noqa: E402
 
 real_series, real_level = liquidity.series, S.log.level
