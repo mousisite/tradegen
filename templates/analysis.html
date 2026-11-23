@@ -235,7 +235,8 @@
 
 {# What price is doing: the structure, the key levels, the New York clock and
    the day's lean, from bot/levelview.py. Facts about price and the course's
-   reading of them; none of it changes the call. #}
+   reading of them. The panel itself changes nothing in the call; the
+   price-action strategies that vote in it read the same structure. #}
 {% if extras and extras.structure %}
 {% set x = extras %}
 <section class="pricedoing" id="what-price-is-doing">
@@ -355,7 +356,9 @@
   {% endif %}
 
   <p class="fine" style="margin-top:var(--s2)">These are facts about price and the course's
-    reading of them, not signals, and none of it changes the call above. The ideas come
+    reading of them. The clock, the day's lean and any related market beside it do
+    not change the call above. The strategies counted in the Liquidity row below read these
+    same highs, lows and gaps, and they do have a say in it. The ideas come
     from {{ x.video.creator }}'s free video
     {% if in_app %}&ldquo;{{ x.video.title }}&rdquo;{% else %}<a href="{{ x.video.url }}" rel="noopener">&ldquo;{{ x.video.title }}&rdquo;</a>{% endif %};
     the exact rules are Orenth's.</p>
@@ -452,7 +455,7 @@
       <div class="tablewrap">
         <table>
           <thead><tr><th>Conviction</th><th class="r">Setups</th>
-            <th class="r">Hit rate</th><th style="width:38%"></th></tr></thead>
+            <th class="r">Hit rate</th><th style="width:38%"><span class="sr">The hit rate as a bar</span></th></tr></thead>
           <tbody>
           {% set be = plan.breakeven_rate or calib.breakeven %}
           {% for row in calib.curve %}
@@ -478,7 +481,7 @@
       <div class="cardhead"><span class="eyebrow">Where the signal comes from</span></div>
       <div class="tablewrap">
         <table>
-          <thead><tr><th>Family</th><th style="width:90px"></th>
+          <thead><tr><th>Family</th><th style="width:90px"><span class="sr">The lean as a bar</span></th>
             <th class="r">Lean</th><th class="r">Active</th></tr></thead>
           <tbody>
           {% for f in families %}
@@ -520,7 +523,7 @@
   <div class="card pad0">
     <div class="tablewrap">
       <table>
-        <thead><tr><th>Strategy</th><th>Family</th><th style="width:88px"></th>
+        <thead><tr><th>Strategy</th><th>Family</th><th style="width:88px"><span class="sr">The score as a bar</span></th>
           <th class="r">Score</th><th class="r">Weight</th><th>What it sees</th></tr></thead>
         <tbody>
         {% for s in ranked[:12] %}
@@ -539,7 +542,7 @@
       </table>
     </div>
     <div class="helpfoot" style="padding-top:var(--s2)">{{ help_list(
-      ['score', 'weight', 'on_trial', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
+      ['score', 'weight', 'on_trial' if trial_names else '', 'sees', 'atr', 'rsi', 'ema', 'macd', 'adx', 'vwap', 'bollinger', 'volume'],
       'What the columns and words mean') }}</div>
   </div>
 </section>

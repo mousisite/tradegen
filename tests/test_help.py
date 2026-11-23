@@ -90,6 +90,10 @@ check("and no setting's name or a file in them",
       not any(re.search(r"[A-Z]{3,}_[A-Z_]+|\.env\b|config\.json", h["text"])
               for h in filled.values()))
 
+check("the help on families names every family",
+      not [f for f in strategies.FAMILIES
+           if f.replace("_", " ") not in filled["family"]["text"]], filled["family"]["text"])
+
 head("THE WORDS CARRY THE PERSON'S OWN NUMBERS")
 mine = dict(config.DEFAULTS, stop_atr_multiple=2.0, target_atr_multiple=3.0,
             risk_per_trade_pct=0.5, account_size=25000.0, max_position_pct=20.0,
@@ -303,6 +307,12 @@ try:
     nest.feed(page)
     check("never inside a paragraph or a phrase, where browsers break it",
           not nest.bad, nest.bad[:3])
+    check("every column of its tables has a name, the bars' too",
+          not re.findall(r"<th[^>]*>\s*</th>", page))
+    flat_page = flat(page)
+    check("it says the Liquidity strategies, and not the clock or the lean, count in the call",
+          "they do have a say in it" in flat_page
+          and "none of it changes the call above" not in flat_page)
     check("a news-less analysis says so in words, not 'Scored by skipped'",
           "The news was not read for this analysis." in flat(page)
           and "Scored by skipped" not in page)

@@ -387,7 +387,7 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         out["Measured risk"] = block
 
     if plan is not None:
-        # The strategies that decide the call; those on trial have no say.
+        # The strategies that decide the call: those that vote.
         from .strategies import voting_names
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}

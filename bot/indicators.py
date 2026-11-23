@@ -6,7 +6,7 @@ the lengths aligned means the backtester can index bar `i` across every
 indicator without bookkeeping.
 
 Rolling window operations use `sliding_window_view` rather than Python loops.
-With two dozen strategies each needing their own back-test over tens of
+With dozens of strategies each needing their own back-test over tens of
 thousands of bars, that choice is the difference between a responsive tool and
 one that stalls on every run.
 """

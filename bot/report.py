@@ -192,7 +192,7 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
                             border_style="blue"))
 
     # --- family roll-up ---------------------------------------------------
-    # With three dozen strategies a flat list is unreadable and, worse,
+    # With dozens of strategies a flat list is unreadable and, worse,
     # misleading: it invites counting votes when what matters is which
     # families agree and how strongly.
     active = [s for s in signals if s.weight > 0 and abs(s.score) > 0.05]

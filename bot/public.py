@@ -465,8 +465,8 @@ _CAPS = {"rsi", "macd", "adx", "di", "sar", "tsi", "roc", "cci", "vwap",
          "obv", "mfi"}
 _LABELS = {"zscore_reversion": "Z-score reversion",
            "linreg_channel": "Linear regression channel"}
-# The course's setups on trial are named as bot/setups.py names them, so a
-# page, an alert and the Learn pages all say the same thing.
+# The course's setups are named as bot/setups.py names them, so a page, an
+# alert and the Learn pages all say the same thing.
 _LABELS.update({s.name: s.label for s in _setups.SETUPS})
 
 
@@ -476,6 +476,11 @@ def strategy_label(name: str) -> str:
         return _LABELS[name]
     words = [w.upper() if w in _CAPS else w for w in name.split("_")]
     return " ".join(words)[:1].upper() + " ".join(words)[1:]
+
+
+def strategy_asked(name: str) -> str:
+    """A strategy's name as it reads in "Does ... work?"."""
+    return _setups.ASKED.get(name) or strategy_label(name)
 
 
 def strategy_slug(name: str) -> str:
@@ -539,6 +544,18 @@ def strategy_results(rows: List[Dict], name: str) -> List[Dict]:
                         longs=(int(longs) if longs is not None
                                and 0 <= int(longs) <= fig["n"] else None)))
     return sorted(out, key=lambda r: -r["kept"])
+
+
+def too_rare(rows: List[Dict], name: str) -> Optional[Dict]:
+    """How little a strategy fired where it was tested, when it has been tested
+    and no instrument gave it enough separate trades to show: "days" it took a
+    pretend trade on over every instrument, and the "tested" instruments. None
+    before any test is stored, and when strategy_results() has something."""
+    stored = [v.get("tests") for v in rows if v.get("tests")]
+    if not stored or strategy_results(rows, name):
+        return None
+    return {"tested": len(stored),
+            "days": sum(int(t[name][0]) for t in stored if t.get(name))}
 
 
 def _kept(entry) -> Optional[float]:

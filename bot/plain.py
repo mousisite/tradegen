@@ -440,14 +440,14 @@ HELP: Dict[str, Dict[str, str]] = {
     # Where the signal comes from.
     "family": {"name": "family", "text": (
         "A group of strategies that read the chart the same kind of way: trend, "
-        "mean reversion, breakout, volume, structure or pattern.")},
+        "mean reversion, breakout, volume, structure, pattern or liquidity (old "
+        "highs and lows taken, breaks of the last swing, gaps).")},
     "lean": {"name": "lean", "text": (
         "The family's weighted opinion today, from -1 (down) to +1 (up).")},
     "on_trial": {"name": "on trial", "text": (
-        "A price-action setup from a day-trading course (old highs and lows taken, "
-        "breaks of the last swing, gaps, the halfway line), scored and tested like "
-        "every other strategy but with no say in the call. Whether it ever gets one "
-        "is decided later, on its tested record after costs.")},
+        "A strategy being tried out: scored and tested like every other, but with no "
+        "say in the call. Whether it ever gets one is decided later, on its tested "
+        "record after costs.")},
     "active": {"name": "active", "text": (
         "How many of the family's strategies have an opinion today, out of all "
         "of them.")},

@@ -1486,9 +1486,9 @@ def _trade_chart(result, calm: bool = False) -> Dict:
 def _family_rollup(result: engine.Analysis):
     """Aggregate signals per family so the page shows structure, not a list.
 
-    Only the strategies that vote: those on trial have no say in the call, so
-    they are left out of the family leans, and a family with no voting member
-    is not shown at all rather than as "0 active".
+    Only the strategies that vote: one on trial (votes=False; none is today)
+    has no say in the call, so it is left out of the family leans, and a
+    family with no voting member is not shown at all rather than as "0 active".
     """
     rows = []
     trial = strategies_mod.TRIAL
@@ -2459,8 +2459,8 @@ def strategies():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = db_mod.strategy_leaderboard(conn, symbol=symbol, regime=regime,
-                                           minimum=minimum, limit=40,
-                                           rank_by=rank_by)
+                                           minimum=minimum, rank_by=rank_by,
+                                           limit=len(strategies_mod.REGISTRY))
         seen = [r["symbol"] for r in conn.execute(
             "SELECT DISTINCT symbol FROM strategy_stats ORDER BY symbol")]
     finally:
@@ -4389,7 +4389,8 @@ def _brand():
             "site_logo": base + url_for("static", filename="logo.png"),
             "same_as": SAME_AS,
             # One source for every page that counts the strategies: those
-            # that decide the call, and apart from them those on trial.
+            # that decide the call, and apart from them any on trial (none
+            # today; a page says nothing about a trial while there is none).
             "strategy_count": len(strategies_mod.voting_names()),
             "daily_strategy_count": len(strategies_mod.daily_voting_names()),
             "trial_count": len(strategies_mod.TRIAL),
@@ -5543,6 +5544,11 @@ def backtests():
              for s in strategies_mod.REGISTRY]
     table = [t for t in table if t["n"]]
     tested = len(table)
+    # Those that can fire on daily bars and have a say in the calls, but have
+    # too few separate trades anywhere to be in the table yet.
+    listed = {t["strategy"] for t in table}
+    unlisted = sum(1 for n in strategies_mod.daily_voting_names()
+                   if n not in listed) if table else 0
     # Buying and shorting on every tested day rank among them, so each
     # strategy reads against what the market's own drift paid its side, not
     # against zero.
@@ -5552,7 +5558,7 @@ def backtests():
             table.append(dict(base, strategy="", family="", baseline=side))
     table = sorted(table, key=lambda t: -t["kept"])
     return render_template("backtests.html", table=table, tested=tested,
-                           method=_house_method(),
+                           unlisted=unlisted, method=_house_method(),
                            label_of=public_mod.strategy_label,
                            strategy_slug=public_mod.strategy_slug)
 
@@ -5575,9 +5581,12 @@ def backtest_page(name):
     return render_template(
         "backtest.html", strategy=strategy, info=info,
         label=public_mod.strategy_label(strategy), results=results,
+        asked=public_mod.strategy_asked(strategy), asked_of=public_mod.strategy_asked,
+        rare=public_mod.too_rare(rows, strategy),
+        course=strategy in setups_mod.BY_NAME,
         intraday=strategy in strategies_mod.INTRADAY_ONLY,
         summary=public_mod.strategy_summary(results), kin=kin,
-        method=_house_method(), label_of=public_mod.strategy_label,
+        method=_house_method(),
         strategy_slug=public_mod.strategy_slug, short=public_mod.short,
         slug=public_mod.slug)
 

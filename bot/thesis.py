@@ -423,8 +423,7 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
     if composite is None:
         return
     # Counted from the registry: a typed-in number said 34 on one page and 33
-    # on the next. Only the strategies that vote make the composite; those on
-    # trial are measured but have no say in it.
+    # on the next. Only the strategies that vote make the composite.
     from .strategies import voting_names
     count = len(voting_names())
     # The odds are measured on the side the call takes, which follows the

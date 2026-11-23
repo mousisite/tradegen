@@ -13,10 +13,10 @@
     textbook.</p>
   <p>For one fixed test, run every day on the same popular stocks and coins,
     see <a href="{{ url_for('backtests') }}">Strategy tests</a>.</p>
-  <p>{{ strategy_count }} strategies decide the call; {{ trial_count }} price-action
-    setups are measured on trial. Those marked <span class="chip mute">on trial</span>
-    are scored and tested like the rest, but have no say in the call until their
-    record shows an edge.</p>
+  <p>{{ strategy_count }} strategies decide the call.{% if trial_count %}
+    {{ trial_count }} more {{ 'is' if trial_count == 1 else 'are' }} on trial: marked
+    <span class="chip mute">on trial</span>, scored and tested like the rest, with no
+    say in the call until the record shows an edge.{% endif %}</p>
 </div>
 
 <div class="card">
@@ -47,26 +47,26 @@
 <div class="card pad0" style="margin-top:var(--s3)">
   {% if rows %}
   <div class="tablewrap">
-    <table>
+    <table class="stack">
       <thead><tr>
         <th>Strategy</th><th>Family</th><th class="r">Setups</th>
         <th class="r">Hit rate</th><th class="r">Raw</th><th class="r">Kept</th>
-        <th class="r">Instruments</th><th style="width:18%"></th>
+        <th class="r">Instruments</th><th style="width:18%"><span class="sr">The raw figure as a bar</span></th>
       </tr></thead>
       <tbody>
       {% for row in rows %}
         <tr>
-          <td>{{ row['strategy']|strategy }}{% if row['strategy'] in trial_names %}
+          <td class="lead">{{ row['strategy']|strategy }}{% if row['strategy'] in trial_names %}
             <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}</td>
-          <td class="soft">{{ row['family'].replace('_',' ') if row['family'] }}</td>
-          <td class="r fig soft">{{ "{:,}".format(row['n']) }}</td>
-          <td class="r fig">{{ row['hit_rate']|pct(1) }}</td>
-          <td class="r fig {{ 'gain' if row['gross_exp'] > 0 else 'loss' }}">
+          <td data-label="Family" class="soft">{{ row['family'].replace('_',' ') if row['family'] }}</td>
+          <td data-label="Setups" class="r fig soft">{{ "{:,}".format(row['n']) }}</td>
+          <td data-label="Hit rate" class="r fig">{{ row['hit_rate']|pct(1) }}</td>
+          <td data-label="Raw" class="r fig {{ 'gain' if row['gross_exp'] > 0 else 'loss' }}">
             {{ row['gross_exp']|signed(3) }}R</td>
-          <td class="r fig {{ 'gain' if row['net_exp'] > 0 else 'loss' }}">
+          <td data-label="Kept" class="r fig {{ 'gain' if row['net_exp'] > 0 else 'loss' }}">
             {{ row['net_exp']|signed(3) }}R</td>
-          <td class="r fig soft">{{ row['symbols'] }}</td>
-          <td>
+          <td data-label="Instruments" class="r fig soft">{{ row['symbols'] }}</td>
+          <td data-label="Raw, as a bar">
             {% set g = row['gross_exp'] %}
             {% set w = [((g if g > 0 else -g) * 400), 50]|min %}
             <div class="lean" style="min-width:100px"><span class="zero"></span>

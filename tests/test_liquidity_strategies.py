@@ -1,12 +1,14 @@
-"""The course's price-action setups, on trial in the strategy library.
+"""The course's price-action setups, which vote like every other strategy.
 
-Ten strategies from TJR's video are scored on every analysis and measured by
-every back-test, but they do not vote: the composite, the odds and every call
-must be exactly what they are without them. This suite pins that, then that
-each setup fires on a scene built to show it (with the right sign and a reason
+Ten strategies from TJR's video have had a say in the composite, the odds and
+every call since 19 November 2026. This suite pins that they do, by the rule
+every strategy follows (one voice in full from a family, later ones less, idle
+ones not at all), and that votes=False still keeps one out. Then that each
+setup fires on a scene built to show it (with the right sign and a reason
 naming the price), keeps quiet where there is nothing, never reads a bar after
-the one it scores, is measured by the daily back-test, sits out cleanly when
-the price structure cannot be read, and costs little time.
+the one it scores, is measured by the daily back-test, sits out cleanly (and
+takes nothing else with it) when the price structure cannot be read, and costs
+little time.
 
 No network: every price here is made up (tests/scenarios.py).
 """
@@ -18,6 +20,8 @@ import warnings
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import dataclasses  # noqa: E402
+
 import harness  # noqa: E402
 
 harness.isolate("liquidity_strategies")
@@ -48,16 +52,21 @@ def head(title):
     print("=" * 72)
 
 
-VOTING = [s for s in S.REGISTRY if s.votes]
 NEW = [s for s in S.REGISTRY if s.family == S.LIQUIDITY]
+TEN = {s.name for s in NEW}
+OTHERS = [s for s in S.REGISTRY if s.family != S.LIQUIDITY]
 
 
-class only_voting:
-    """The registry without the strategies on trial, for the length of a block."""
+class registry:
+    """Another registry for the length of a block: without the ten, or with
+    some of them put back on trial."""
+
+    def __init__(self, strategies):
+        self.strategies = list(strategies)
 
     def __enter__(self):
         self.real = S.REGISTRY
-        S.REGISTRY = list(VOTING)
+        S.REGISTRY = self.strategies
 
     def __exit__(self, *exc):
         S.REGISTRY = self.real
@@ -68,80 +77,116 @@ STOCK = sc.stock_series(2500)
 FUTURE = sc.futures_series(4000, roll_day=None)
 
 # ---------------------------------------------------------------------------
-head("THE STRATEGIES ON TRIAL")
+head("THE TEN SETUPS")
 # ---------------------------------------------------------------------------
-check("ten setups on trial, in the liquidity family",
-      len(NEW) == 10 and all(s.family == S.LIQUIDITY for s in NEW)
-      and S.LIQUIDITY in S.FAMILIES, [s.name for s in NEW])
+check("ten setups, in the liquidity family",
+      len(NEW) == 10 and S.LIQUIDITY in S.FAMILIES, [s.name for s in NEW])
 check("each a strategy the setup catalog names",
       len(NEW) == 10
       and all(n in __import__("bot.setups", fromlist=["x"]).REGISTRY_NAMES for n in (s.name for s in NEW)))
 check("all forty-four strategies vote (the owner switched the setups on, 19 Nov 2026)",
-      len(S.voting_names()) == 44 and len(S.voting_names()) + len(S.TRIAL) == len(S.REGISTRY))
+      len(S.voting_names()) == 44 and S.voting_names() == S.strategy_names()
+      and all(s.votes for s in NEW) and S.TRIAL == () and len(OTHERS) == 34)
 check("the session sweep needs intraday bars",
       "session_sweep" in S.INTRADAY_ONLY and "session_sweep" not in S.daily_strategy_names())
 check("each weighs 0.7 at the start",
       all(abs(s.base_weight - 0.7) < 1e-12 for s in NEW))
 
 # ---------------------------------------------------------------------------
-head("THE CALL IS THE SAME WITH OR WITHOUT THEM")
+head("THEY HAVE A SAY IN THE CALL, BY THE RULE EVERY FAMILY FOLLOWS")
 # ---------------------------------------------------------------------------
+
+
+def by_hand(signals, damped=True):
+    """The composite worked out here: in each family the loudest voice counts
+    in full, the next ones 1/1.45, 1/1.9, 1/2.35 and so on; idle ones nothing.
+    damped=False gives every liquidity voice its full say instead."""
+    top = bottom = 0.0
+    for family in S.FAMILIES:
+        voices = sorted((s for s in signals if s.family == family
+                         and s.weight > 0 and abs(s.score) > 0.05),
+                        key=lambda s: -abs(s.score * s.weight))
+        for rank, s in enumerate(voices):
+            share = 1.0 / (1.0 + 0.45 * rank)
+            if family == S.LIQUIDITY and not damped:
+                share = 1.0
+            top += s.score * s.weight * share
+            bottom += s.weight * share
+    return max(-1.0, min(1.0, top / bottom)) if bottom else 0.0
+
+
 rng = random.Random(7)
-worst = 0.0
-fired_trial = 0
+bars_seen = spoke = moved_bars = crowded = 0
+wrong_sum, wrong_move, wrong_others, undamped = [], [], [], 0
 for name, bars in (("daily", DAILY), ("stock", STOCK), ("future", FUTURE)):
     ctx = S.build_context(bars)
     picks = sorted(rng.sample(range(ctx.warmup, len(bars)), 60))
     learned = {s.name: 0.4 + 0.02 * k for k, s in enumerate(S.REGISTRY)}
     for i in picks:
+        bars_seen += 1
         sig_all, comp_all, reg_all = S.evaluate(ctx, i)
         sig_l, comp_l, _ = S.evaluate(ctx, i, learned=learned)
-        fired_trial += sum(1 for s in sig_all if s.name in S.TRIAL and s.score)
-        with only_voting():
+        with registry(OTHERS):
             sig_v, comp_v, reg_v = S.evaluate(ctx, i)
-            _, comp_vl, _ = S.evaluate(ctx, i, learned=learned)
-        worst = max(worst, abs(comp_all - comp_v), abs(comp_l - comp_vl))
-        same = {s.name: (s.score, s.weight) for s in sig_v} == {
-            s.name: (s.score, s.weight) for s in sig_all if s.name not in S.TRIAL}
-        if not same or reg_all.trend != reg_v.trend:
-            worst = max(worst, 1.0)
-print("   (the setups on trial fired %d times at those bars)" % fired_trial)
-check("the composite is identical at 180 bars on three series, learned weights or not",
-      not S.TRIAL or (worst <= 1e-12 and fired_trial > 20), (worst, fired_trial))
+        for sigs, comp in ((sig_all, comp_all), (sig_l, comp_l), (sig_v, comp_v)):
+            if abs(by_hand(sigs) - comp) > 1e-12:
+                wrong_sum.append((name, i, by_hand(sigs), comp))
+        voices = [s for s in sig_all if s.name in TEN and s.weight > 0 and abs(s.score) > 0.05]
+        spoke += bool(voices)
+        crowded += len(voices) > 1
+        moved_bars += abs(comp_all - comp_v) > 1e-12
+        # A family with nothing to say leaves the number alone, and one with a
+        # voice moves it (unless that voice says exactly what the rest say).
+        if bool(voices) != (abs(comp_all - comp_v) > 1e-12):
+            wrong_move.append((name, i, len(voices), comp_all, comp_v))
+        if {s.name: (s.score, s.weight) for s in sig_v} != {
+                s.name: (s.score, s.weight) for s in sig_all if s.name not in TEN} \
+                or reg_all.trend != reg_v.trend:
+            wrong_others.append((name, i))
+        if len(voices) > 1:
+            # With a full say for each of its voices, the number would differ.
+            undamped += abs(by_hand(sig_all, damped=False) - comp_all) > 1e-9
+print("   (one or more spoke at %d of %d bars, two or more at %d, and the composite moved at %d)"
+      % (spoke, bars_seen, crowded, moved_bars))
+check("the composite is the family-damped mean of all 44, worked by hand, "
+      "learned weights or not", bars_seen == 180 and not wrong_sum, wrong_sum[:2])
+check("it moves where a setup speaks, and nowhere else",
+      spoke > 20 and not wrong_move, wrong_move[:3])
+check("a crowded liquidity family is damped, as any other is",
+      crowded > 3 and undamped == crowded, (crowded, undamped))
+check("and the other 34 score and weigh the same beside them", not wrong_others, wrong_others[:3])
 
+# Put back on trial, one by one or together, they are scored and left out.
 ctx = S.build_context(DAILY)
+on_trial = [dataclasses.replace(s, votes=s.family != S.LIQUIDITY) for s in S.REGISTRY]
+leaks = []
+for i in range(ctx.warmup, len(DAILY), 41):
+    with registry(OTHERS):
+        comp_v = S.evaluate(ctx, i)[1]
+    with registry(on_trial):
+        sig_t, comp_t, _ = S.evaluate(ctx, i)
+    if comp_t != comp_v or len(sig_t) != 44:
+        leaks.append((i, comp_t, comp_v))
+check("votes=False still keeps a strategy out of the composite", not leaks, leaks[:3])
+
 score = S.evaluate(ctx, len(DAILY) - 1)[1]
 calib_all = cal.calibrate(ctx, score, 1.5, 2.25, 10, stride=3, cost_bps=2.0)
-with only_voting():
+with registry(OTHERS):
     calib_v = cal.calibrate(ctx, score, 1.5, 2.25, 10, stride=3, cost_bps=2.0)
-check("the odds are measured the same way",
-      repr(calib_all.__dict__) == repr(calib_v.__dict__)
-      and calib_all.samples > 0, (calib_all.hit_rate, calib_v.hit_rate))
+check("the odds are measured with them voting too",
+      calib_all.samples > 0 and repr(calib_all.__dict__) != repr(calib_v.__dict__),
+      (calib_all.hit_rate, calib_v.hit_rate))
 
 CFG = config.load()
 engine.resolve = lambda s: {"symbol": s, "name": s}
 engine.fetch_bars = lambda s, iv: DAILY
 catalysts.fetch = lambda s: (_ for _ in ()).throw(RuntimeError("no calendar in tests"))
-
-
-def call():
-    r = engine.analyse("TEST", CFG, interval="1d", with_news=False, record=False)
-    p = r.plan
-    return (p.action, p.direction, p.entry, p.stop, p.target1, p.target2, p.probability,
-            p.prob_low, p.prob_high, p.prob_samples, p.expectancy_r, round(r.composite, 15),
-            r.calibration.hit_rate, r.calibration.samples), r
-
-
-full, analysis = call()
-with only_voting():
-    bare, _ = call()
-check("and a whole analysis gives the same call, entry, stop, target and odds",
-      repr(full) == repr(bare), (full, bare))
-check("while the analysis still shows the setups on trial",
-      len(analysis.signals) == len(S.REGISTRY)
-      and {s.name for s in analysis.signals} >= set(S.TRIAL))
-_setups = [s.name for s in S.REGISTRY if s.family == S.LIQUIDITY]
-measured = [n for n in _setups if n in analysis.strategy_report.overall]
+analysis = engine.analyse("TEST", CFG, interval="1d", with_news=False, record=False)
+check("a whole analysis takes its composite from all 44",
+      len(analysis.signals) == 44 and TEN <= {s.name for s in analysis.signals}
+      and abs(by_hand(analysis.signals) - analysis.composite) < 1e-9,
+      (by_hand(analysis.signals), analysis.composite))
+measured = sorted(n for n in TEN if n in analysis.strategy_report.overall)
 check("and measures them on its history", len(measured) >= 5, measured)
 
 # ---------------------------------------------------------------------------
@@ -279,12 +324,12 @@ report = learning.measure_strategies(ctx, 1.5, 2.25, 10, 3, cost_bps=2.0)
 counts = {n: (report.overall[n].n if n in report.overall else 0) for n in [s.name for s in NEW]}
 print("   trades taken: %s" % counts)
 daily_new = [n for n in [s.name for s in NEW] if n not in S.INTRADAY_ONLY]
-check("every daily setup on trial takes trades on five years of daily bars",
+check("every daily setup takes trades on five years of daily bars",
       all(counts[n] > 0 for n in daily_new), counts)
 check("and the session sweep takes none there", counts["session_sweep"] == 0, counts)
 
 # ---------------------------------------------------------------------------
-head("THE PAGES SAY THEY ARE ON TRIAL")
+head("THE PAGES COUNT THEM WITH THE REST")
 # ---------------------------------------------------------------------------
 for key in ("ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "GOOGLE_CLIENT_ID",
             "GOOGLE_CLIENT_SECRET", "STOCKBOT_PUBLIC_URL", "STOCKBOT_BEHIND_PROXY"):
@@ -296,16 +341,19 @@ from bot import public  # noqa: E402
 client, DB = harness.isolated_web("liquidity_pages")
 web.app.config["AUTH_MODE"] = None
 page = " ".join(client.get("/backtest/liquidity-model").data.decode("utf-8", "replace").split())
-check("/backtest/liquidity-model draws, with the on-trial note", not S.TRIAL or (
-      "Does Sweep, break and retest work?" in page
-      and "Measured here, not used in Orenth's calls until its record shows an edge" in page
-      and "34 other strategies decide the calls" in page, page[:200]))
-page = client.get("/backtest/session-sweep").data.decode("utf-8", "replace")
-check("the session sweep's page says its intraday test shows there once run", not S.TRIAL or (
-      "Not in the daily test" in page and "5- and 15-minute prices is shown on this page "
-      "once it has run" in " ".join(page.split())))
-page = client.get("/backtest/rsi-reversion").data.decode("utf-8", "replace")
-check("a voting strategy's page has no such note", "Measured here, not used" not in page)
+check("/backtest/liquidity-model draws, with nothing about a trial",
+      "Does the sweep, break and retest model work?" in page
+      and "on trial" not in page and "Measured here, not used" not in page, page[:200])
+page = " ".join(client.get("/backtest/session-sweep").data.decode("utf-8", "replace").split())
+check("the session sweep's page says a call still uses it, and where its test will be",
+      "Not in the daily test" in page and "An analysis on shorter bars still uses it." in page
+      and "5- and 15-minute prices is shown on this page once it has run" in page)
+page = " ".join(client.get("/backtest/opening-range-break").data.decode("utf-8", "replace").split())
+check("the other intraday strategy promises no such test", "Not in the daily test" in page
+      and "5- and 15-minute prices" not in page)
+rollup = {r["name"]: r for r in web._family_rollup(analysis)}
+check("the analysis page's families have a liquidity row of ten",
+      rollup.get("liquidity", {}).get("total") == 10, rollup.get("liquidity"))
 
 
 def listed(trades):
@@ -327,10 +375,10 @@ check("the strategy tests leave it off with fewer than 40 separate trades",
       "Sweep, break and retest" not in page and "RSI reversion" in page)
 page = listed(40)
 row_at = page.find(">Sweep, break and retest</a>")
-check("and list it, marked on trial, once it has 40", not S.TRIAL or (
-      row_at > 0 and ">on trial</span>" in page[row_at:row_at + 200]))
-check("saying how many decide the call and how many are on trial", not S.TRIAL or (
-      "34 strategies decide Orenth's calls; 10" in " ".join(page.split())))
+check("and list it once it has 40, with no mark on it",
+      row_at > 0 and "chip" not in page[row_at:row_at + 200])
+check("saying all 44 decide the call",
+      "44 strategies decide Orenth's calls." in " ".join(page.split()) and "on trial" not in page)
 
 # ---------------------------------------------------------------------------
 head("WHEN THE STRUCTURE CANNOT BE READ")
@@ -349,19 +397,24 @@ try:
 finally:
     liquidity.series = real_series
 kept = S.build_context(STOCK)
-diff, not_idle = [], []
+diff, not_idle, changed = [], [], 0
 for i in range(kept.warmup, len(STOCK), 97):
-    a = {s.name: (s.score, s.weight, s.reason) for s in S.evaluate(kept, i)[0]}
+    a_sig, a_comp, _ = S.evaluate(kept, i)
+    a = {s.name: (s.score, s.weight, s.reason) for s in a_sig}
     b_sig, b_comp, _ = S.evaluate(lost, i)
     b = {s.name: (s.score, s.weight, s.reason) for s in b_sig}
-    diff += [(n, i) for n in S.voting_names() if a[n] != b[n]]
-    if abs(S.evaluate(kept, i)[1] - b_comp) > 1e-12:
-        diff.append(("composite", i))
-    not_idle += [(n, i) for n in [s.name for s in NEW]
+    diff += [(s.name, i) for s in OTHERS if a[s.name] != b[s.name]]
+    with registry(OTHERS):
+        others_only = S.evaluate(kept, i)[1]
+    if b_comp != others_only:
+        diff.append(("composite", i, b_comp, others_only))
+    changed += abs(a_comp - b_comp) > 1e-12
+    not_idle += [(n, i) for n in TEN
                  if b[n][0] != 0 or b[n][1] != 0
                  or b[n][2] != "price structure could not be read"]
-check("the 34 voting strategies and the composite are untouched", not S.TRIAL or (not diff), diff[:3])
-check("and the setups on trial sit out, saying why", not not_idle, not_idle[:3])
+check("the other 34 are untouched, and the call is the one they make alone",
+      not diff and changed > 0, (changed, diff[:3]))
+check("and the ten sit out, saying why", not not_idle, not_idle[:3])
 
 # ---------------------------------------------------------------------------
 head("THEY COST LITTLE TIME")
@@ -372,22 +425,22 @@ big = S.build_context(BIG)
 print("   context on %d five-minute bars: %.2fs" % (len(BIG), time.time() - t0))
 
 
-def timed(rounds=2):
-    best = None
-    for _ in range(rounds):
-        t = time.time()
-        learning.measure_strategies(big, 1.5, 2.25, 24, 3, cost_bps=1.0)
-        best = min(best or 1e9, time.time() - t)
-    return best
+def timed():
+    t = time.time()
+    learning.measure_strategies(big, 1.5, 2.25, 24, 3, cost_bps=1.0)
+    return time.time() - t
 
 
-with_trial = timed()
-with only_voting():
-    without = timed()
-print("   measuring every strategy: %.2fs with the setups on trial, %.2fs without "
-      "(%.2fx)" % (with_trial, without, with_trial / without))
+# Turn about, and the best of three: a busy machine slows both alike.
+with_ten = without = 1e9
+for _ in range(3):
+    with_ten = min(with_ten, timed())
+    with registry(OTHERS):
+        without = min(without, timed())
+print("   measuring every strategy: %.2fs with the ten, %.2fs without "
+      "(%.2fx)" % (with_ten, without, with_ten / without))
 check("measuring with them takes at most 1.35 times as long",
-      with_trial <= 1.35 * without, (with_trial, without))
+      with_ten <= 1.35 * without, (with_ten, without))
 
 print()
 print("%d failed" % len(fails) if fails else "ALL PASSED")
