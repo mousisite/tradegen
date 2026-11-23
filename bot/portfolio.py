@@ -759,7 +759,7 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         against = ", in the opposite direction" if view.portfolio_beta <= -0.005 else ""
         view.observations.append(
             "Weighted beta is %.2f, so the portfolio tends to move %.0f%% as "
-            "much as the market%s." % (view.portfolio_beta,
+            "much as the market%s." % (round(view.portfolio_beta, 2) + 0.0,
                                        abs(view.portfolio_beta) * 100, against))
         assumed = sorted({p.symbol for p in sized if p.beta is None})
         if assumed:
