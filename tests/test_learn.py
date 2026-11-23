@@ -25,7 +25,7 @@ _os.environ["GOOGLE_CLIENT_SECRET"] = "x"
 
 import web  # noqa: E402
 from bot import database as db  # noqa: E402
-from bot import labstore, learn, setups  # noqa: E402
+from bot import labstore, learn, setups, strategies  # noqa: E402
 
 c, DB = harness.isolated_web("learn")
 web.app.config["AUTH_MODE"] = None
