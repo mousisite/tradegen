@@ -574,7 +574,7 @@ overdue.
 
 Backups run automatically every 12 hours once deployed, are verified before
 being kept, and prune to the newest eight. Each is a copy of the database and
-five CSV exports, and pruning deletes them together. A deploy restarts the
+eight CSV exports, and pruning deletes them together. A deploy restarts the
 server, so when the newest backup is older than the interval, the next one runs
 a few minutes after start rather than twelve hours later. They live on the same
 disk as the database: with the settings under "Copies of the backups somewhere
@@ -763,9 +763,10 @@ operator:
   while the database is under about 60 MB; after that, set
   `STOCKBOT_BACKUP_KEEP` lower or make the disk larger. A backup that would
   leave less than 50 MB free is not taken, and the log says so.
-- The CSVs are a convenience, not a full copy: the analysis history holds the
-  latest 5,000 runs and the theses the latest 1,000, across all users. The
-  `.db` file is the backup.
+- The CSVs are a convenience, not a full copy: they leave out the accounts, the
+  settings, the track record and what the Setup lab measured. The `.db` file is
+  the backup. One that cannot be written is left out and the log says so; the
+  backup itself is kept either way.
 - Backups hold every account's data. A deleted account is gone from them once
   the last copy taken before the deletion is pruned, about four days at the
   defaults and a week for the copies taken before a release, and from any copy
@@ -816,7 +817,8 @@ SSH is needed.
 The CSVs are worth taking too. A `.db` file is readable only by this program;
 the exports are readable by anything, which is what matters if the worst case
 is that this app is gone. Their first column, `user_id`, is the number of the
-account each row belongs to in the database's `users` table.
+account each row belongs to in the database's `users` table; the measured
+strategy record has none, because it is nobody's.
 
 **Yahoo Finance is an unlicensed source.** It works, it is free, and it has no
 agreement with you. It may rate-limit or break without notice, and it is not a

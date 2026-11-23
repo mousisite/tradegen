@@ -11,8 +11,8 @@ services:
     # checking. Check current pricing on Render's site before deploying.
     plan: starter
     healthCheckPath: /healthz
-    # A push that changes only these is not deployed: none of them is in the
-    # image, and every deploy takes the site away for a moment.
+    # A push that changes only these is not deployed: the running site reads
+    # none of them, and every deploy takes it away for a moment.
     buildFilter:
       ignoredPaths:
         - mobile/**
