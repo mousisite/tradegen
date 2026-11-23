@@ -293,7 +293,7 @@
             </td>
             <td class="r">
               <form method="post" action="{{ url_for('delete_trade') }}"
-                    onsubmit="return confirm('Delete the {{ t['symbol'] }} trade? This cannot be undone.');">
+                    onsubmit='return confirm({{ ("Delete the " ~ t["symbol"] ~ " trade? This cannot be undone.")|tojson }});'>
                 <input type="hidden" name="trade_id" value="{{ t['id'] }}">
                 <button class="btn quiet sm" type="submit"
                         title="Delete this trade" aria-label="Delete the {{ t['symbol'] }} trade">
@@ -408,7 +408,7 @@
             <td class="r faint" data-label="Closed">{{ t['ts_closed']|ago }}</td>
             <td class="r">
               <form method="post" action="{{ url_for('delete_trade') }}"
-                    onsubmit="return confirm('Delete this closed {{ t['symbol'] }} trade? Your statistics will change.');">
+                    onsubmit='return confirm({{ ("Delete this closed " ~ t["symbol"] ~ " trade? Your statistics will change.")|tojson }});'>
                 <input type="hidden" name="trade_id" value="{{ t['id'] }}">
                 <button class="btn quiet sm" type="submit"
                         aria-label="Delete the {{ t['symbol'] }} trade">Delete</button>

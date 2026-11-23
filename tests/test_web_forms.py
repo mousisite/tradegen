@@ -197,6 +197,27 @@ check("non-numeric price rejected", r.status_code == 400)
 r = c.post("/trades/open", data={"symbol": "TSLA"})
 check("missing entry and stop rejected", r.status_code == 400)
 
+# A target on the losing side, or no price at all, read as "At target" the
+# moment the trade was logged.
+for side, entry, stop, target, words in (
+        ("long", "100", "95", "90", "the target must sit above the entry"),
+        ("long", "100", "95", "100", "the target must sit above the entry"),
+        ("long", "100", "95", "-5", "must be a positive price"),
+        ("long", "100", "95", "0", "must be a positive price"),
+        ("short", "100", "105", "110", "the target must sit below the entry")):
+    r = c.post("/trades/open", data={"symbol": "TSLA", "direction": side, "entry": entry,
+                                     "stop": stop, "target": target})
+    check("a %s from %s with a target of %s is refused in words" % (side, entry, target),
+          r.status_code == 400 and words in r.data.decode("utf-8", "replace"),
+          "status %d" % r.status_code)
+for extra, words in (({"direction": "sideways"}, "long or short"),
+                     ({"interval": "zzz"}, "Pick an interval"),
+                     ({"symbol": "A" * 300}, "too long for a ticker")):
+    r = c.post("/trades/open", data=dict({"symbol": "TSLA", "direction": "long",
+                                          "entry": "100", "stop": "95"}, **extra))
+    check("a made-up %s is refused in words" % list(extra)[0], r.status_code == 400
+          and words in r.data.decode("utf-8", "replace"), "status %d" % r.status_code)
+
 conn = db.connect(DB)
 try:
     rows = db.list_trades(conn, status="open")
@@ -231,6 +252,23 @@ if tid:
 
 r = c.post("/trades/delete", data={"trade_id": 99999})
 check("deleting a missing trade is rejected", r.status_code == 400)
+
+# A quote in what was typed as the ticker ended the text of the Delete button's
+# question, and what followed it ran as script.
+r = c.post("/trades/open", data={"symbol": "X'+Y+'", "direction": "long",
+                                 "entry": "100", "stop": "95"})
+body = c.get("/trades").data.decode("utf-8", "replace")
+asked = re.findall(r"onsubmit='return confirm\((.*?)\);'", body)
+check("a quote in a ticker stays inside the Delete question",
+      r.status_code == 302 and len(asked) == 1 and "X'" not in asked[0]
+      and __import__("json").loads(asked[0])
+      == "Delete the X'+Y+' trade? This cannot be undone.", str(asked))
+conn = db.connect(DB)
+try:
+    for row in db.list_trades(conn):
+        db.delete_trade(conn, row["id"])
+finally:
+    conn.close()
 
 # Every typed field is a ticker, a number or a short note. Half a megabyte a
 # field let a few hundred posts fill the data disk.

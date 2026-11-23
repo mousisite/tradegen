@@ -574,20 +574,11 @@ def load_strategy_stats(conn: sqlite3.Connection, symbol: str,
 # The trade journal
 # ---------------------------------------------------------------------------
 
-@dataclass
-class TradeRecord:
-    """A trade as stored. Mirrors the trades table."""
-    id: int
-    symbol: str
-    direction: int
-    status: str
-    entry: float
-    stop: float
-    target1: Optional[float]
-    quantity: Optional[float]
-    ts_opened: int
-    r_multiple: Optional[float] = None
-    pnl: Optional[float] = None
+# The most positions one account's journal may hold open at once. The background
+# check reads the price of every open position's instrument each round, so there
+# has to be a ceiling somewhere. The web layer asks for it; the command line,
+# which is one person on their own machine, does not.
+MAX_OPEN_TRADES = 200
 
 
 def check_trail(pct: Optional[float], distance: Optional[float],
@@ -616,7 +607,8 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                trail_pct: Optional[float] = None, trail_dist: Optional[float] = None,
                trail_atr: Optional[float] = None, setup: Optional[str] = None,
                emotion: Optional[str] = None, checklist=None,
-               broke_rule: Optional[str] = None, opened_ts: Optional[int] = None) -> int:
+               broke_rule: Optional[str] = None, opened_ts: Optional[int] = None,
+               cap: Optional[int] = None) -> int:
     """Record a newly opened position, with a trailing stop if one is given.
 
     trail_pct is a share of the best price (0.05 for 5%); trail_dist is a
@@ -628,6 +620,8 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
     daily rules it was logged against. opened_ts is when the person entered,
     when that was earlier than now: at most 30 days back and never in the
     future. Each raises ValueError in words when it is not right.
+
+    cap is the most positions this account may hold open, None for no limit.
     """
     import math
     from .journal import check_opened, check_tags
@@ -649,6 +643,16 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
         raise ValueError("for a long, the stop must sit below the entry")
     if direction < 0 and stop <= entry:
         raise ValueError("for a short, the stop must sit above the entry")
+    # A target on the losing side reads as reached the moment it is logged.
+    for label, value in (("target", target1), ("second target", target2)):
+        if value is None:
+            continue
+        if float(value) <= 0:
+            raise ValueError("the %s must be a positive price, or left empty" % label)
+        if (float(value) - entry) * direction <= 0:
+            raise ValueError("for a %s, the %s must sit %s the entry" % (
+                ("long", label, "above") if direction > 0 else ("short", label, "below")))
+    sym = _symbol(symbol)
     check_trail(trail_pct, trail_dist, trail_atr)
     trails = trail_pct is not None or trail_dist is not None
     ticked = None if checklist is None else sorted(set(checklist))
@@ -659,6 +663,12 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
     now = int(time.time())
     opened = check_opened(opened_ts, now)
     opened = now if opened is None else opened
+    if cap is not None:
+        held = conn.execute("SELECT COUNT(*) FROM trades WHERE status='open' AND user_id=?",
+                            (int(user),)).fetchone()[0]
+        if held >= cap:
+            raise ValueError("A journal can hold %d open positions at once, and yours has "
+                             "%d. Close or delete one first." % (cap, held))
     cur = conn.execute(
         """INSERT INTO trades (run_id, account, symbol, interval, direction,
                status, ts_opened, entry, stop, target1, target2, quantity,
@@ -666,7 +676,7 @@ def open_trade(conn: sqlite3.Connection, symbol: str, interval: str,
                trail_atr, trail_ts, trail_best, trail_best_ts, setup, emotion,
                checklist, broke_rule)
            VALUES (?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (run_id, account, symbol.upper(), interval, direction, opened,
+        (run_id, account, sym, interval, direction, opened,
          float(entry), float(stop), target1, target2, quantity, risk_amount,
          strategy_note, notes, int(user), trail_pct, trail_dist,
          trail_atr if trail_dist is not None else None,

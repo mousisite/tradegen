@@ -1985,14 +1985,16 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
     qty = round(qty_raw, 6) if crypto else float(int(qty_raw))
     if qty <= 0:
         raise _NoTrade("Account too small for one unit at this stop distance.")
-    target = float(row["target1"]) / split if row["target1"] else None
+    # A short on something that moves more than its price can have a target
+    # at or below zero, which no price reaches: logged with none set.
+    target = float(row["target1"]) / split if (row["target1"] or 0) > 0 else None
     try:
         second = row["target2"]
     except (KeyError, IndexError):
         second = None
     return {"direction": direction, "entry": entry, "stop": stop,
             "target": target, "per_unit": per_unit, "quantity": qty,
-            "target2": float(second) / split if second else None,
+            "target2": float(second) / split if (second or 0) > 0 else None,
             "split_words": market_mod.split_words(split) if split != 1.0 else "",
             "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
                               else "{:,.0f}".format(qty)),
@@ -2001,6 +2003,18 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
             "account": account, "capped": capped,
             "reward_risk": (abs(target - entry) / per_unit
                             if target and per_unit > 0 else None)}
+
+
+# Trades logged by hand in an hour, and positions open at once: far more than
+# anyone keeps a journal of, and few enough that one account cannot fill the
+# disk or the background price checks with made-up tickers.
+TRADES_PER_HOUR = 120
+
+
+def _trade_cap() -> Optional[int]:
+    """The most positions this account may hold open; your own machine has no limit."""
+    user = getattr(g, "user", None)
+    return None if user is not None and user.is_local else db_mod.MAX_OPEN_TRADES
 
 
 def _own_run(conn, run_id: int):
@@ -2076,6 +2090,15 @@ def take_trade():
         stop_page, broke = _rules_stop(conn, _cfg(), None)
         if stop_page is not None:
             return stop_page
+        trail = _trail_asked(row["symbol"], row["interval"] or "1d")
+        # Looked at again in the transaction that writes it, now that the
+        # prices a trail may need are in hand: two presses at once both got
+        # past the first look, and the plan was logged twice.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if _logged_from(conn, run_id) is not None:
+            return redirect(url_for("trades", logged=1))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
                           direction=size["direction"], entry=size["entry"],
                           stop=size["stop"], target1=size["target"],
@@ -2084,9 +2107,10 @@ def take_trade():
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid(), setup=tags["setup"], emotion=tags["emotion"],
                           checklist=tags["checklist"], broke_rule=broke,
-                          **_trail_asked(row["symbol"], row["interval"] or "1d"))
+                          cap=_trade_cap(), **trail)
         events_mod.bump(conn, "paper_trade")
     except (ValueError, KeyError) as exc:
+        conn.rollback()              # nothing else waits while the page is drawn
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
@@ -2102,9 +2126,14 @@ def open_trade_manual():
     Without this the journal can only ever hold the bot's own suggestions,
     which makes it useless for recording what you actually did.
     """
+    if _rate_limited("trade", TRADES_PER_HOUR):
+        return _too_often("logged trades")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        direction = 1 if request.form.get("direction", "long") == "long" else -1
+        side = request.form.get("direction", "long")
+        if side not in ("long", "short"):
+            raise ValueError("Say whether the trade is long or short.")
+        direction = 1 if side == "long" else -1
         entry = float(request.form["entry"])
         stop = float(request.form["stop"])
         target = request.form.get("target") or None
@@ -2117,8 +2146,11 @@ def open_trade_manual():
         symbol, exact = _symbol_from(request.form)
         if not symbol:
             raise KeyError("symbol")
-        symbol = market_mod.normalise_symbol(symbol, exact=exact)
+        # Too long for a ticker is refused before any price is asked for.
+        symbol = db_mod._symbol(market_mod.normalise_symbol(symbol, exact=exact))
         interval = request.form.get("interval") or "1d"
+        if interval not in dict(INTERVALS):
+            raise ValueError("Pick an interval from the list.")
         tags = _tags_asked()
         stop_page, broke = _rules_stop(conn, _cfg(), tags["opened_ts"])
         if stop_page is not None:
@@ -2133,7 +2165,7 @@ def open_trade_manual():
             account="paper", strategy_note="entered by hand",
             notes=request.form.get("notes", ""), user=uid(),
             setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
-            broke_rule=broke, opened_ts=tags["opened_ts"],
+            broke_rule=broke, opened_ts=tags["opened_ts"], cap=_trade_cap(),
             **_trail_asked(symbol, interval))
         events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError, DataError) as exc:
