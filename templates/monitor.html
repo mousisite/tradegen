@@ -337,11 +337,13 @@
   </div>
 </section>
 
-<section>
+<section id="theses">
   <div class="sechead">
     <h2>Saved theses</h2>
-    <span class="count">{{ theses|length }}</span>
-    <span class="tail">written down so they can be judged later</span>
+    <span class="count">{{ theses_total }}</span>
+    <span class="tail">{% if theses_total > theses|length and theses %}{{ theses_from + 1 }} to
+      {{ theses_from + theses|length }} of {{ theses_total }}, newest first{% else %}written down so
+      they can be judged later{% endif %}</span>
   </div>
 
   {% if board.closed or board.open %}
@@ -451,6 +453,13 @@
       </table>
     </div>
     <div style="padding:var(--s2) var(--s3) var(--s3)">
+      {% if theses_from or theses_from + theses|length < theses_total %}
+      <p class="prose">
+        {% if theses_from %}<a href="{{ url_for('monitor', theses=[theses_from - theses_page, 0]|max) }}#theses">Newer theses</a>{% endif %}
+        {% if theses_from and theses_from + theses|length < theses_total %}·{% endif %}
+        {% if theses_from + theses|length < theses_total %}<a href="{{ url_for('monitor', theses=theses_from + theses_page) }}#theses">Older theses</a>{% endif %}
+      </p>
+      {% endif %}
       <p class="prose">
         The outcome offered when you close one is the outcome the price supports,
         not the one you remember. You can pick a different one, but you have to

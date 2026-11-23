@@ -4815,6 +4815,10 @@ def portfolio():
                            summary=summary, shocks=shocks)
 
 
+# Saved theses on one page of Monitor.
+THESES_SHOWN = 20
+
+
 @app.route("/monitor")
 def monitor():
     """Alerts, watchlist, saved theses and the automated routines."""
@@ -4822,7 +4826,14 @@ def monitor():
     try:
         alert_rows = db_mod.alert_list(conn, user=uid())
         watch_rows = db_mod.watchlist(conn, user=uid())
-        thesis_rows = db_mod.thesis_list(conn, limit=20, user=uid())
+        # The record is of every thesis. The list shows a page of them, since
+        # each open one needs a price.
+        outcomes = [dict(r) for r in conn.execute(
+            "SELECT outcome FROM theses WHERE user_id=?", (uid(),))]
+        start = min(max(0, request.args.get("theses", 0, type=int)),
+                    max(0, len(outcomes) - 1))
+        thesis_rows = db_mod.thesis_list(conn, limit=start + THESES_SHOWN,
+                                         user=uid())[start:]
         events = db_mod.event_list(conn, uid(), limit=15)
     finally:
         conn.close()
@@ -4836,6 +4847,15 @@ def monitor():
     bars_of = {}
     for row in thesis_rows:
         sym = row["symbol"]
+        stored = {"price": row["price"], "balance": row["balance"],
+                  "created": row["created_ts"]}
+        if row["outcome"] and row["closed_price"]:
+            # Judged at the price it was closed at, the one shown as Now.
+            # What the price did afterwards is no part of it.
+            judged.append({"row": row, "now": float(row["closed_price"]),
+                           "review": thesis_mod.review(stored, float(row["closed_price"])),
+                           "proposed": None, "quoted": None, "split_words": ""})
+            continue
         if sym not in bars_of:
             try:
                 bars_of[sym] = market_mod.fetch_bars(sym, "1d")
@@ -4843,8 +4863,6 @@ def monitor():
                 # One unpriceable symbol must not take the whole page down.
                 bars_of[sym] = None
         price, split = _thesis_price(row, bars_of[sym])
-        stored = {"price": row["price"], "balance": row["balance"],
-                  "created": row["created_ts"]}
         look = (thesis_mod.review(stored, price) if price else
                 {"usable": False, "reason": "Could not price %s today." % sym})
         proposed = (thesis_mod.suggested_outcome(stored, price)
@@ -4855,10 +4873,12 @@ def monitor():
                        "split_words": (market_mod.split_words(split)
                                        if split != 1.0 else "")})
 
-    board = thesis_mod.scoreboard([dict(r) for r in thesis_rows])
+    board = thesis_mod.scoreboard(outcomes)
 
     return render_template("monitor.html", alerts=described, watchlist=watch_rows,
                            theses=judged, board=board,
+                           theses_total=len(outcomes), theses_from=start,
+                           theses_page=THESES_SHOWN,
                            outcomes=thesis_mod.OUTCOMES, kinds=alerts_mod.KINDS,
                            workflows=workflows_mod.WORKFLOWS,
                            # This person's own last routine. A report holds
