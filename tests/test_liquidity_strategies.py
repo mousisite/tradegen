@@ -342,7 +342,7 @@ def broken(bars, k=2):
     raise ValueError("made to fail")
 
 
-S._STRUCTURE_FAILED_LOGGED = True        # keep the log quiet for this test
+S._STRUCTURE_FAILED[STOCK.symbol] = time.time()        # keep the log quiet for this test
 liquidity.series = broken
 try:
     lost = S.build_context(STOCK)

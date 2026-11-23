@@ -291,6 +291,15 @@ def level_name(s: Dict[str, np.ndarray], i: int) -> str:
     return "an earlier swing %s" % side
 
 
+def chain_turn(s: Dict[str, np.ndarray], i: int, d: int) -> str:
+    """How the four steps that end at bar i turned: a close past the last swing,
+    or only a close back through a gap the other move left, which also confirms."""
+    j = int(s["lq_chain_conf_at"][i])
+    if j >= 0 and int(s["st_flip"][j]) != d and int(s["st_ext"][j]) != d:
+        return "closed back through a gap the %s left" % ("fall" if d == 1 else "rise")
+    return "broke its last swing %s" % ("high" if d == 1 else "low")
+
+
 def _when(bars, s: Dict[str, np.ndarray], i: int, daily: bool) -> str:
     if daily:
         day = date.fromordinal(int(s["ck_day"][i]))
@@ -346,9 +355,9 @@ def events(bars, s: Dict[str, np.ndarray], since: Optional[int] = None,
             via = VIA[int(s["lq_chain_via"][i])]
             where = "a gap the new move left" if via == "gap" else "the halfway line of the new move"
             add("chain", d, s["lq_chain_stop"][i], name,
-                "Took %s, broke its last swing %s, came back to %s and closed %s at %s %s. "
+                "Took %s, %s, came back to %s and closed %s at %s %s. "
                 "The course would put the stop past %s."
-                % (name, "high" if d == 1 else "low", where, "up" if d == 1 else "down",
+                % (name, chain_turn(s, i, d), where, "up" if d == 1 else "down",
                    fp(close), when, fp(s["lq_chain_stop"][i])))
         if "lq_asf" in s and s["lq_asf"][i]:
             when = when or _when(bars, s, i, daily)

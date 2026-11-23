@@ -34,8 +34,10 @@
       say in the call.</p>
     {% else %}
     <p class="prose">This strategy reads the inside of a trading day, so it
-      only fires on hourly or shorter bars. These tests run on daily prices,
-      so it has no result here. An analysis on shorter bars still uses it.</p>
+      only fires on {% if strategy == 'opening_range_break' %}bars of 30 minutes or
+      shorter{% else %}bars shorter than a day, on futures and coins{% endif %}. These
+      tests run on daily prices, so it has no result here. An analysis on such bars
+      still uses it.</p>
     {% endif %}
   </div>
 {% elif not summary.tested %}

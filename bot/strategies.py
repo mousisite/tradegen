@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -278,18 +279,21 @@ def build_context(bars: Bars) -> Context:
     try:
         s.update(liquidity.series(bars))
     except Exception:
-        global _STRUCTURE_FAILED_LOGGED
-        if not _STRUCTURE_FAILED_LOGGED:
-            _STRUCTURE_FAILED_LOGGED = True
-            log.exception("Price structure could not be read for %s; the setups on "
-                          "trial sit out", getattr(bars, "symbol", "?"))
+        symbol, now = getattr(bars, "symbol", "?"), time.time()
+        if now - _STRUCTURE_FAILED.get(symbol, 0.0) >= 3600:
+            if len(_STRUCTURE_FAILED) > 500:
+                _STRUCTURE_FAILED.clear()
+            _STRUCTURE_FAILED[symbol] = now
+            log.exception("Price structure could not be read for %s; the price-action "
+                          "setups take no part in its calls", symbol)
 
     return Context(bars, s, warmup=210, vwap_is_session=vwap_is_session)
 
 
-# Logged once per process, so a history that breaks the structure reader
-# does not fill the log on every analysis.
-_STRUCTURE_FAILED_LOGGED = False
+# When each instrument's failure was last logged. Once an hour each, so a
+# history that breaks the structure reader does not fill the log on every
+# analysis, and a second instrument's failure is still seen.
+_STRUCTURE_FAILED: Dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -690,17 +694,20 @@ def opening_range_break(ctx: Context, i: int) -> Signal:
     """Break of the first 30 minutes of the session.
 
     The reference every breakout day-trader watches. Only meaningful once the
-    opening range is complete and while the session is still young.
+    opening range is complete and while the session is still young, and only
+    on bars of 30 minutes or shorter: a longer one hides where the range ends.
     """
     bars = ctx.bars
     sess = bars.session_id[i]
     idx = np.flatnonzero(bars.session_id[:i + 1] == sess)
-    if len(idx) < 8:
-        return _idle("opening_range_break", BREAKOUT, "session too young")
+    if clock.bar_seconds(bars) > 30 * 60:
+        return _idle("opening_range_break", BREAKOUT, "needs bars of 30 minutes or shorter")
 
+    # The bars that start inside the first half hour: one of 30 minutes, two
+    # of 15, six of 5. It is complete once a bar after them has closed.
     start_ts = int(bars.timestamp[idx[0]])
     window = idx[bars.timestamp[idx] < start_ts + 30 * 60]
-    if len(window) < 3 or len(window) >= len(idx):
+    if len(window) >= len(idx):
         return _idle("opening_range_break", BREAKOUT, "opening range not yet complete")
 
     orb_hi = float(np.max(bars.high[window]))
@@ -1279,10 +1286,11 @@ def liquidity_model(ctx: Context, i: int) -> Signal:
         via = liquidity.VIA[min(max(_lq_int(ctx, "lq_chain_via", i), 0), 2)]
         where = ("a gap the new move left" if via == "gap"
                  else "the halfway line of the new move")
+        turn = liquidity.chain_turn(ctx.s, i, d)
         stop = ctx.at("lq_chain_stop", i)
         return Signal(name, 0.85 * d, 1.0,
-                      "took %s, broke its last swing %s, came back to %s and closed %s"
-                      "%s" % (what, "high" if d > 0 else "low", where,
+                      "took %s, %s, came back to %s and closed %s"
+                      "%s" % (what, turn, where,
                               "up" if d > 0 else "down",
                               _at_price(stop, "; the course's stop sits past %s")),
                       LIQUIDITY)
