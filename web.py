@@ -476,17 +476,36 @@ def _just_signed_in(conn) -> bool:
     return age is not None and age < SIGNED_IN_JUST_NOW
 
 
-def _look_item(symbol: str, interval: str, exact: bool = False) -> str:
-    """What a free look is counted against: an instrument at a bar size.
+def _look_item(symbol: str, exact: bool = False) -> str:
+    """What a free look is counted against: an instrument, at any bar size.
 
     LINK exactly (Interlink Electronics) is not the bare LINK (the Chainlink
     coin), so each is its own look. The routines count the same way
     (workflows._Looks).
     """
-    return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+    return billing_mod.look_item(symbol, exact)
 
 
-def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
+# What was typed, and the instrument it turned out to be ("TESLA" is TSLA),
+# from analyses shown since the server started. Read only when today's looks
+# are used up, so typing the name of one already opened still opens it.
+_TURNED_OUT: Dict[str, str] = {}
+_TURNED_OUT_LOCK = threading.Lock()
+TURNED_OUT_KEPT = 2000
+
+
+def _opened_under(conn, item: str) -> str:
+    """The item by which this account already opened the instrument today: the
+    one asked for, or what its words turned out to mean. "" for neither."""
+    with _TURNED_OUT_LOCK:
+        meant = _TURNED_OUT.get(item, item)
+    for known in (item, meant):
+        if billing_mod.opened_today(conn, g.user.id, known):
+            return known
+    return ""
+
+
+def _allowance_left(symbol: str, exact: bool = False) -> bool:
     """Whether a free account may open this instrument now, taking the look if so.
 
     The look is taken before the analysis runs, in one transaction with the
@@ -496,14 +515,16 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     """
     if g.demo or _pro():
         return True
-    item = _look_item(symbol, interval, exact)
+    item = _look_item(symbol, exact)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _from_another_site() and not _just_signed_in(conn) \
-                and not billing_mod.opened_today(conn, g.user.id, item):
+                and not _opened_under(conn, item):
             g.allowance_refused = "elsewhere"
             return False
         taken = billing_mod.reserve_view(conn, g.user.id, item)
+        if not taken and _opened_under(conn, item):
+            taken = "seen"
     finally:
         conn.close()
     if taken == "new":
@@ -511,18 +532,28 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     return bool(taken)
 
 
-def _spend_view(symbol: str, interval: str, exact: bool = False) -> None:
-    """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
+def _spend_view(symbol: str, exact: bool = False, result=None) -> None:
+    """Counted once the analysis is on screen, so a mistyped ticker costs nothing.
+
+    result is that analysis: the look is counted against the instrument it
+    is of, whatever was typed to find it.
+    """
     if g.demo or _pro():
         return
-    item = _look_item(symbol, interval, exact)
-    pending = g.get("views_pending") or set()
-    if item in pending:
-        pending.discard(item)       # shown, so the look taken for it stands
-        return
+    item = _look_item(symbol, exact)
+    found = getattr(getattr(result, "bars", None), "symbol", "") or ""
+    # The analysis names the instrument as Yahoo does, which is never read as
+    # anything else.
+    shown = _look_item(found, exact=True) if found else item
+    if shown != item and not exact:
+        with _TURNED_OUT_LOCK:
+            if len(_TURNED_OUT) >= TURNED_OUT_KEPT:
+                _TURNED_OUT.clear()
+            _TURNED_OUT[item] = shown
+    (g.get("views_pending") or set()).discard(item)   # shown, so it stands
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        billing_mod.count_view(conn, g.user.id, item)
+        billing_mod.show_view(conn, g.user.id, item, shown)
     finally:
         conn.close()
 
@@ -1361,7 +1392,7 @@ def analyse():
         cfg["allow_shorts"] = True
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     if g.demo:
@@ -1382,7 +1413,7 @@ def analyse():
         detail = _plainly(exc, said)
         return render_template("error.html", symbol="", message=(
             said if detail == said else "%s (%s)" % (said, detail))), 500
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     families = _family_rollup(result)
     # What price is doing (levels, the clock, the day's lean): a part that
@@ -2671,7 +2702,7 @@ def research():
                            "can look at any timeframe.")
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     cfg = _cfg()
@@ -2683,7 +2714,7 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, analysis)
 
     # Keyed like the analysis it is built from: the thesis and the reasoning
     # quote that person's own plan, so one person's stops and targets were
@@ -2782,7 +2813,7 @@ def save_thesis():
                                        "the thesis from there."), 400
     # Saving analyses the instrument, so it costs a free look as opening it
     # does. Without this a free account could research anything from here.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     if _rate_limited("thesis", THESES_PER_HOUR):
         return _too_often("saved theses")
@@ -2817,7 +2848,7 @@ def save_thesis():
                                        "Try again in a minute."), 500
     finally:
         conn.close()
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, analysis)
     return redirect(url_for("research", symbol=symbol, interval=interval,
                             exact=1 if exact else None))
 
@@ -5448,7 +5479,7 @@ def api_analyse():
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
     # The same allowance as the pages, or the API is a way round it.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
@@ -5462,7 +5493,7 @@ def api_analyse():
             answer.headers["Retry-After"] = str(wait)
             return answer
         return jsonify({"error": str(exc)}), 404
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     from bot import report as report_mod
     import json as _json
@@ -5775,13 +5806,13 @@ def share():
     interval = request.form.get("interval") or "1d"
     if not symbol or interval not in dict(INTERVALS):
         abort(400)
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     try:
         result = cached_analysis(symbol, interval, _cfg(), record=False, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
     snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))
     conn = db_mod.connect(app.config.get("DB_PATH"))

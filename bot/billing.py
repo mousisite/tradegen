@@ -260,12 +260,46 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
 
 
+def look_item(symbol: str, exact: bool = False) -> str:
+    """What a free look is counted against: the instrument, as Yahoo names it.
+
+    Whatever its bar size, and however it was typed, as far as the text alone
+    can say: $tsla and NASDAQ:TSLA are TSLA, and BTC is the coin. LINK exactly
+    (Interlink Electronics) is not the bare LINK (the Chainlink coin), so each
+    is a look of its own. A company's name is only known to be its ticker once
+    the analysis has found it: show_view moves the look there.
+    """
+    from . import market
+    try:
+        item = market.normalise_symbol(symbol, exact=exact)
+    except market.DataError:
+        item = symbol.strip().upper()
+    return item.replace("|", " ")
+
+
+def _instrument(item: str) -> str:
+    """The instrument a counted row stands for. Rows written before looks were
+    counted per instrument also hold the bar size, as AAPL|1d or LINK|1d|exact."""
+    symbol, bar, rest = item.partition("|")
+    return look_item(symbol, rest.endswith("|exact")) if bar else item
+
+
+def _opened(conn: sqlite3.Connection, user_id: int, day: str) -> Dict[str, List[str]]:
+    """The instruments opened on a day, each with the rows that say so."""
+    out: Dict[str, List[str]] = {}
+    for row in conn.execute("SELECT item FROM usage_views WHERE user_id=? AND day=?",
+                            (user_id, day)):
+        out.setdefault(_instrument(row[0]), []).append(row[0])
+    return out
+
+
 def may_view(conn: sqlite3.Connection, user_id: int, item: str) -> bool:
     """Whether a free account can open this instrument today.
 
     Counted per different instrument, not per page load: opening the same one
-    again, refreshing, or moving between its analysis and research pages costs
-    nothing more, so the allowance is about breadth, not about clicking.
+    again, refreshing, changing its bar size, or moving between its analysis
+    and research pages costs nothing more, so the allowance is about breadth,
+    not about clicking.
     """
     ensure_schema(conn)
     if opened_today(conn, user_id, item):
@@ -276,8 +310,7 @@ def may_view(conn: sqlite3.Connection, user_id: int, item: str) -> bool:
 def opened_today(conn: sqlite3.Connection, user_id: int, item: str) -> bool:
     """Whether this instrument already counts as one of today's looks."""
     ensure_schema(conn)
-    return conn.execute("SELECT 1 FROM usage_views WHERE user_id=? AND day=? "
-                        "AND item=?", (user_id, _today(), item)).fetchone() is not None
+    return _instrument(item) in _opened(conn, user_id, _today())
 
 
 def reserve_view(conn: sqlite3.Connection, user_id: int, item: str) -> str:
@@ -292,15 +325,13 @@ def reserve_view(conn: sqlite3.Connection, user_id: int, item: str) -> str:
     ensure_schema(conn)
     if conn.in_transaction:
         conn.commit()
-    day = _today()
+    day, item = _today(), _instrument(item)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        if conn.execute("SELECT 1 FROM usage_views WHERE user_id=? AND day=? "
-                        "AND item=?", (user_id, day, item)).fetchone():
+        opened = _opened(conn, user_id, day)
+        if item in opened:
             taken = "seen"
-        elif conn.execute("SELECT COUNT(*) FROM usage_views WHERE user_id=? AND "
-                          "day=?", (user_id, day)).fetchone()[0] \
-                >= free_limits()["analyses_per_day"]:
+        elif len(opened) >= free_limits()["analyses_per_day"]:
             taken = ""
         else:
             conn.execute("INSERT INTO usage_views (user_id, day, item) "
@@ -317,22 +348,46 @@ def release_view(conn: sqlite3.Connection, user_id: int, item: str) -> None:
     """Give back a look taken by reserve_view when nothing was shown for it."""
     ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=? AND day=? AND item=?",
-                 (user_id, _today(), item))
+                 (user_id, _today(), _instrument(item)))
     conn.commit()
 
 
 def count_view(conn: sqlite3.Connection, user_id: int, item: str) -> None:
     """Record an instrument as opened today, once it has actually been shown."""
+    show_view(conn, user_id, item, item)
+
+
+def show_view(conn: sqlite3.Connection, user_id: int, asked: str, shown: str) -> None:
+    """Count what was shown, and nothing for the words it was asked for by.
+
+    "tesla" takes its look as TESLA, which is all the text says. The analysis
+    then turns out to be TSLA, so the look moves there: what every link on
+    the page opens is already counted, and one opened before by its ticker is
+    not counted twice. Moving can only ever lower the count.
+    """
     ensure_schema(conn)
-    conn.execute("INSERT OR IGNORE INTO usage_views (user_id, day, item) "
-                 "VALUES (?, ?, ?)", (user_id, _today(), item))
-    conn.commit()
+    if conn.in_transaction:
+        conn.commit()
+    day, asked, shown = _today(), _instrument(asked), _instrument(shown)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        opened = _opened(conn, user_id, day)
+        if shown not in opened:
+            conn.execute("INSERT OR IGNORE INTO usage_views (user_id, day, item) "
+                         "VALUES (?, ?, ?)", (user_id, day, shown))
+        for row in opened.get(asked, []) if asked != shown else []:
+            conn.execute("DELETE FROM usage_views WHERE user_id=? AND day=? AND item=?",
+                         (user_id, day, row))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def views_today(conn: sqlite3.Connection, user_id: int) -> int:
+    """How many different instruments this account has opened today."""
     ensure_schema(conn)
-    return conn.execute("SELECT COUNT(*) FROM usage_views WHERE user_id=? AND "
-                        "day=?", (user_id, _today())).fetchone()[0]
+    return len(_opened(conn, user_id, _today()))
 
 
 # --- plan state ------------------------------------------------------------------

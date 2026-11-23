@@ -305,8 +305,8 @@ try:
         conn = db.connect(DB)
         web.g.user, web.g.demo = A.get_user(conn, free.id), False
         conn.close()
-        web._spend_view("aapl", "1d")
-        web._spend_view("AAPL", "1d")
+        web._spend_view("aapl")
+        web._spend_view("AAPL")
     conn = db.connect(DB)
     check("one that is shown does, once however often it is opened",
           billing.views_today(conn, free.id) == 1)
@@ -373,9 +373,9 @@ try:
             web.g.user, web.g.demo = A.get_user(conn, racer.id), False
             conn.close()
             gate.wait()
-            if web._allowance_left("RACE%d" % n, "1d"):
+            if web._allowance_left("RACE%d" % n):
                 got.append(n)
-                web._spend_view("RACE%d" % n, "1d")
+                web._spend_view("RACE%d" % n)
 
     threads = [threading.Thread(target=look, args=(n,)) for n in range(8)]
     for t in threads:
@@ -388,6 +388,98 @@ try:
     check("and exactly that many are counted",
           billing.views_today(conn, racer.id) == limit)
     conn.close()
+
+    print()
+    print("   A look is one instrument, whatever was typed and whatever the bars:")
+    from types import SimpleNamespace
+    from bot import report as report_mod
+    from bot import workflows
+
+    from bot import market
+
+    MEANT = {"TESLA": "TSLA", "TESLAINC": "TSLA", "BITCOIN": "BTC-USD"}
+
+    def found_by_name(symbol, interval, *a, **k):
+        if symbol.upper() == "NOTHING":
+            raise DataError("No data for NOTHING.")
+        own = market.normalise_symbol(symbol, exact=k.get("exact", False))
+        return SimpleNamespace(bars=SimpleNamespace(symbol=MEANT.get(own, own)),
+                               plan=None, signals=[],
+                               composite=0, regime=None, calibration=None, sentiment=None)
+
+    def account(email):
+        conn = db.connect(DB)
+        try:
+            return A.upsert_email_user(conn, email)
+        finally:
+            conn.close()
+
+    def used(who):
+        conn = db.connect(DB)
+        try:
+            return billing.views_today(conn, who.id)
+        finally:
+            conn.close()
+
+    def opens(symbol, interval="1d", exact=""):
+        return c.get("/api/analyse", query_string={"symbol": symbol, "interval": interval,
+                                                   "exact": exact}).status_code
+
+    real_json = report_mod.to_json
+    report_mod.to_json = lambda *a: "{}"
+    web.cached_analysis = found_by_name
+    try:
+        namer = account("namer@example.com")
+        sign_in(namer)
+        got = [opens(s) for s in ("tesla", "TSLA", "$tsla", "NASDAQ:TSLA", "Tesla Inc")]
+        check("one stock asked for by its name and by its ticker is one look",
+              got == [200] * 5 and used(namer) == 1, (got, used(namer)))
+        got = [opens("TSLA", bar) for bar in ("1h", "15m", "1wk")]
+        check("and so it is on every bar size", got == [200] * 3 and used(namer) == 1,
+              (got, used(namer)))
+        got = [opens(s) for s in ("bitcoin", "BTC", "BTC-USD", "btcusdt", "BTC/USD")]
+        check("as is a coin, however it is written", got == [200] * 5 and used(namer) == 2,
+              (got, used(namer)))
+        check("a name that finds nothing costs nothing",
+              opens("nothing") == 404 and used(namer) == 2, used(namer))
+        check("a listing a coin's ticker hides is a look of its own",
+              opens("LINK", exact="1") == 200 and used(namer) == 3, used(namer))
+        check("the fourth instrument is refused", opens("MSFT") == 402 and opens("link") == 402)
+        check("while those already opened stay open, by name too",
+              [opens("tesla"), opens("TSLA", "1h"), opens("bitcoin"),
+               opens("LINK", exact="1")] == [200] * 4 and used(namer) == 3, used(namer))
+
+        # Rows from the hours before this release hold the bar size, and the
+        # words typed. Nobody loses a look over them on the day it changes.
+        older = account("older@example.com")
+        sign_in(older)
+        conn = db.connect(DB)
+        for item in ("AAPL|1d", "AAPL|1h", "TESLA|1d", "LINK|1d|exact"):
+            conn.execute("INSERT INTO usage_views (user_id, day, item) VALUES (?, ?, ?)",
+                         (older.id, billing._today(), item))
+        conn.commit()
+        conn.close()
+        check("looks counted the old way are counted by instrument too", used(older) == 3,
+              used(older))
+        check("what they opened opens again at no cost",
+              [opens("AAPL", "15m"), opens("LINK", exact="1"), opens("tesla")] == [200] * 3
+              and used(older) == 3, used(older))
+        check("and a name becomes the instrument it stands for",
+              opens("TSLA") == 200 and used(older) == 3 and opens("MSFT") == 402, used(older))
+
+        # The routines keep the same count as the pages.
+        routine = account("routine@example.com")
+        conn = db.connect(DB)
+        looks = workflows._Looks(conn, routine.id)
+        taken = looks.take("tesla")
+        looks.shown("tesla", "TSLA")
+        check("a routine's look is the instrument's as well",
+              taken == "new" and looks.take("TSLA") == "seen" and used(routine) == 1,
+              (taken, used(routine)))
+        conn.close()
+    finally:
+        web.cached_analysis = real_analysis
+        report_mod.to_json = real_json
 
     # A link on someone else's site arrives with the session cookie, so it
     # could spend a free account's looks.
