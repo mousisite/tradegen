@@ -62,23 +62,25 @@ class RunReport:
 WORKFLOWS: Dict[str, Dict] = {
     "morning": {
         "label": "Morning review",
-        "why": "Checks alerts, marks open positions, and re-runs the watchlist. "
-               "The things worth knowing before the day starts.",
+        "why": "Checks your alerts, your open positions and the price of "
+               "everything on your watchlist. The things worth knowing before "
+               "the day starts.",
     },
     "watchlist": {
         "label": "Re-analyse the watchlist",
-        "why": "Runs a full analysis on every instrument you are watching and "
-               "reports only the ones where the call changed.",
+        "why": "Runs a full analysis on the instruments you are watching and "
+               "points out the ones where the call changed.",
     },
     "positions": {
         "label": "Position check",
-        "why": "Marks every open trade to market and flags anything at its stop "
-               "or target, or that has grown too large.",
+        "why": "Checks the price of every open trade and points out anything at "
+               "its stop or target, or that has grown too large.",
     },
     "hunt": {
         "label": "Find candidates",
-        "why": "Runs the quality screen and analyses the best few results, so "
-               "you start from evidence rather than a ticker someone mentioned.",
+        "why": "Runs the \"Profitable and not expensive\" screen and analyses the "
+               "largest few companies that pass, so you start from evidence "
+               "rather than a ticker someone mentioned.",
     },
 }
 
@@ -243,7 +245,7 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 
 
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
-    step("Marking positions to market")
+    step("Checking open positions")
     # What is held: a position closed in part counts only what is left.
     rows = db.open_positions(conn, limit=None, user=user)
     if not rows:
@@ -304,8 +306,8 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
     rows = db.watchlist(conn, user=user)
     if not rows:
         report.steps.append(Step(
-            "Watchlist", "Nothing on the watchlist. Add instruments to have them "
-            "re-analysed automatically.", "ok"))
+            "Watchlist", "Nothing on the watchlist. Add instruments on the Monitor "
+            "page, and this routine analyses them each time you run it.", "ok"))
         return
 
     # Longest since its last analysis first, so a list too long for one run is
@@ -509,7 +511,8 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
                            "analysed." % passed)
     elif not done:
         report.headline = "%s, but none could be analysed just now." % passed
-    elif count == 1:
-        report.headline = "%s and was analysed." % passed
+    elif done == count:
+        report.headline = "%s and %s analysed." % (passed, "was" if count == 1 else "were")
     else:
-        report.headline = "%s; the best few were analysed." % passed
+        report.headline = "%s; %d of the largest %s analysed." % (
+            passed, done, "was" if done == 1 else "were")

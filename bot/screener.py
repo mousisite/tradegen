@@ -250,7 +250,8 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
     if not pool:
         return ScreenResult(universe_name, 0, [], 0,
                             _describe(filters), deep,
-                            ["That universe returned nothing."], at=started)
+                            ["That list came back empty just now. Try again "
+                             "in a minute."], at=started)
 
     try:
         rows = yahoo.quotes(pool)
@@ -343,8 +344,8 @@ def run(symbols: Optional[List[str]] = None, universe: str = "most_actives",
     if not survivors and filters:
         if not unread:
             notes.append("Nothing passed. Either the filters are too tight, or the "
-                         "data needed to judge them was not reported for this "
-                         "universe.")
+                         "data needed to judge them was not reported for these "
+                         "companies.")
         elif rejected:
             notes.append("Nothing passed among the ones that could be read.")
     return ScreenResult(universe_name, scanned, survivors, rejected,
@@ -462,8 +463,8 @@ PRESETS = {
     },
     "dividend": {
         "label": "Income that looks affordable",
-        "why": "A yield above 3% from a company with positive cash flow and "
-               "moderate debt, so the dividend is paid from earnings.",
+        "why": "A yield above 3% from a company that takes in more cash than it "
+               "spends and whose debt is at most twice its equity.",
         "universe": "portfolio_anchors",
         "filters": {"dividend_min": 0.03, "market_cap_min": 5e9,
                     "debt_max": 200, "fcf_positive": 0},
@@ -478,7 +479,8 @@ PRESETS = {
     },
     "momentum": {
         "label": "Moving with real volume",
-        "why": "Rising today on genuine liquidity, not a thin-volume spike.",
+        "why": "Up at least 3% today with more than a million shares traded, "
+               "not a jump on a handful of trades.",
         "universe": "day_gainers",
         "filters": {"change_min": 0.03, "volume_min": 1_000_000,
                     "market_cap_min": 5e8},
