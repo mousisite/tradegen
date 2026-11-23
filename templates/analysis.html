@@ -77,7 +77,8 @@
     </div>
   </div>
   <div class="factline">
-    <span><b>{{ r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
+    {# The source's "exchange" for a coin is a code of its own, CCC. #}
+    <span><b>{{ 'Crypto' if r.bars.asset_class == 'crypto' else r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
     <span>{{ r.bars.interval|bar_words }} bars</span>
     {# A daily bar is its day; a shorter one's time is the exchange's own. #}
     <span>last bar <b>{{ r.bars.last_bar_time[:10] if r.bars.interval == '1d' else r.bars.last_bar_time }}</b>{% if r.bars.interval != '1d' %}

@@ -264,7 +264,8 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     if high <= low:
         high, low = high * 1.01 + 0.01, low * 0.99 - 0.01
 
-    pad_left, pad_right, pad_top = 60, 86, 14
+    # The right edge is for the levels' names: with none, the candles have it.
+    pad_left, pad_right, pad_top = 60, 86 if levels or extra else 14, 14
     vol_h = 44 if any(r[5] > 0 for r in rows) else 0
     gap = 10 if vol_h else 0
     pad_bottom = 24

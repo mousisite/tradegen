@@ -56,6 +56,7 @@
   </div>
   <div class="card">
     <span class="eyebrow">Your notes on it</span>
+    {% if t['notes'] %}<p class="prose">{{ t['notes'] }}</p>{% endif %}
     <dl class="pairs">
       <dt>Tags</dt><dd>{{ tags|join(', ') if tags else 'none' }}</dd>
       {% if broke %}<dt>Rules</dt><dd>Logged after {{ broke|join(' and ') }} said stop</dd>{% endif %}
