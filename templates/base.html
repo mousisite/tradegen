@@ -11,7 +11,8 @@
 {# Without these, pasting the link anywhere shows a bare URL and nothing else.
    A card with a picture and a sentence is the difference between a link people
    click and a link people scroll past. #}
-{% set _blurb = page_blurb or "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Company figures on the research page cite the SEC filing they came from." %}
+{% set _about = "Free stock and crypto research. It back-tests its own advice, charges real trading costs, and tells you when it has no edge. Filed accounts on the research page cite the SEC filings they came from." %}
+{% set _blurb = page_blurb or _about %}
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
@@ -34,7 +35,8 @@
    them is clearly this. sameAs is the part that does the disambiguating, so
    it carries only addresses that resolve and that use this name.
    Nothing here is a claim that cannot be checked on the page itself: no
-   ratings, no counts, no awards. #}
+   ratings, no counts, no awards. It says what Orenth is, the same on every
+   page: a page's own blurb, one stock's call, is not that. #}
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -45,7 +47,7 @@
       "name": "{{ site_name }}",
       "url": "{{ site_base }}/",
       "logo": "{{ site_logo }}",
-      "description": {{ _blurb|tojson }}{% if same_as %},
+      "description": {{ _about|tojson }}{% if same_as %},
       "sameAs": [{% for link in same_as %}"{{ link }}"{{ ", " if not loop.last }}{% endfor %}]{% endif %}
     },
     {
@@ -57,8 +59,8 @@
       "operatingSystem": "Any web browser",
       "browserRequirements": "Requires JavaScript only for optional extras",
       "publisher": { "@id": "{{ site_base }}/#org" },
-      "image": "{{ preview_image }}",
-      "description": {{ _blurb|tojson }},
+      "image": "{{ site_base }}{{ url_for('static', filename='preview.png') }}",
+      "description": {{ _about|tojson }},
       "offers": {
         "@type": "Offer",
         "price": "0",
@@ -101,9 +103,12 @@
    address, query string and all, and /email/stop carries a token there. This
    sends their same counter request with the path only, so no third-party
    script runs and no cookie is set. Signed-in pages are never counted, and
-   nothing is counted inside the iPhone app, which declares no tracking. #}
-{% if (not current_user or demo) and not in_app %}
-<script>new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
+   nothing is counted inside the iPhone app, which declares no tracking.
+   Counted only at the site's own address, as the browser sees it: a copy on
+   somebody's machine is not a visit. #}
+{% if (not current_user or demo) and not in_app and visit_host %}
+<script>if (location.hostname.replace(/^www\./, "") === {{ visit_host|tojson }})
+  new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
   + encodeURIComponent(location.origin + location.pathname) + "&bw=" + innerWidth + "&bh=" + innerHeight
   + (document.referrer ? "&ref=" + encodeURIComponent(document.referrer.split("?")[0]) : "");</script>
 {% endif %}
@@ -148,12 +153,19 @@
     <div class="tools">
       {# Sign in, because the front page and the example's own banner already
          ask newcomers to create an account; this is the way back in for
-         someone who has one. The page it opens does both. #}
+         someone who has one. The page it opens does both, and signing in
+         comes back to the page they were on, with what was asked of it only
+         where the page is nothing without that: an address can carry any
+         words, and they are not repeated. #}
       {% if auth_on and (demo or not current_user) and active != 'signin' %}
-        <a class="btn sm" href="{{ url_for('signin') }}">Sign in</a>
+        {% set here = none if request.method != 'GET'
+           or request.endpoint in (none, 'index', 'email_stop')
+           else request.full_path.rstrip('?') if request.endpoint in
+           ('analyse', 'research', 'ideas', 'screener') else request.path %}
+        <a class="btn sm" href="{{ url_for('signin', next=here) }}" rel="nofollow">Sign in</a>
       {% endif %}
       {% if go_pro and active != 'pricing' %}
-        <a class="btn sm" href="{{ url_for('pricing') }}">Go Pro</a>
+        <a class="btn sm" href="{{ url_for('pricing') }}" data-go-pro>Go Pro</a>
       {% endif %}
       {% if current_user and not demo %}
         <a class="me" href="{{ url_for('account') }}" title="{{ current_user.contact }}"
@@ -207,7 +219,7 @@
 <div class="firebar" id="firebar" role="status" aria-live="polite" hidden>
   <div class="inner">
     <span class="what" id="firetext"></span>
-    <a href="{{ url_for('monitor') }}">Open Monitor</a>
+    <a id="fireopen" href="{{ url_for('monitor') }}#told">Open Monitor</a>
     <button type="button" id="firedismiss" aria-label="Dismiss">Dismiss</button>
   </div>
 </div>
@@ -235,10 +247,10 @@
 <footer>
 <p class="legal">
   <b>Analysis software, not financial advice.</b>
-  Every figure here is measured from historical price data and can stop
-  describing the future at any moment. Day trading loses money for the large
-  majority of retail participants, and this tool's own measurements agree with
-  that. Never risk money you cannot afford to lose.
+  The odds and test results here are measured from historical price data and
+  can stop describing the future at any moment. Day trading loses money for the
+  large majority of retail participants. Never risk money you cannot afford to
+  lose.
   <br>
   {# Inside the iPhone app the bar along the bottom is the way round, and a
      website's row of links under every page is not an app's: only Terms and
@@ -316,7 +328,7 @@
   </details>
 </nav>
 
-{# An analysis back-tests 34 strategies over tens of thousands of bars. Without
+{# An analysis back-tests every strategy over tens of thousands of bars. Without
    feedback the page reads as frozen and people submit a second time. #}
 <div class="overlay" id="working">
   <div class="spin" aria-hidden="true"></div>
@@ -559,6 +571,7 @@
   (function () {
     var bar = document.getElementById('firebar');
     var text = document.getElementById('firetext');
+    var link = document.getElementById('fireopen');
     var dismiss = document.getElementById('firedismiss');
     if (!bar || !window.fetch) { return; }
 
@@ -586,8 +599,13 @@
            + (first.message || first.symbol));
       line += ' (' + age(Math.max(0, now - first.at))
         + (first.as_of ? '; price as of ' + first.as_of : '') + ')';
-      text.textContent = line;
+      // To what fired. With its id, so it is a new address: a Monitor page
+      // already there would only be scrolled, and not show the new one.
+      link.href = '{{ url_for("monitor") }}?told=' + first.id + '#told';
+      // Shown first, filled a moment later: a screen reader speaks a region
+      // whose text changes while it is on the page, not one that appears.
       bar.hidden = false;
+      window.setTimeout(function () { text.textContent = line; }, 50);
       // A notice on the screen as well, for a browser that allowed them
       // before notifications came from the server. Where they are on for
       // this account (static/notify.js), the server's own notification has
@@ -595,12 +613,14 @@
       if (window.Notification && Notification.permission === 'granted'
           && !(window.OrenthNotify && window.OrenthNotify.mine())) {
         try {
-          new Notification('Orenth', { body: line });
+          // One tag for the same fire, so several open tabs show it once.
+          new Notification('Orenth', { body: line, tag: 'orenth-fire-' + first.id });
         } catch (e) {}
       }
     }
 
     var failures = 0;
+    var waits = 0;                             // turns to sit out
     function poll() {
       fetch('/api/alerts/status?after=' + encodeURIComponent(after), {
         headers: { 'Accept': 'application/json' }, credentials: 'same-origin'
@@ -614,15 +634,20 @@
         }
       }).catch(function () {
         // The server going away is the normal end of a session, not an error
-        // worth showing. Back off rather than retrying every few seconds.
+        // worth showing. After a few, ask every five minutes or so instead,
+        // so a phone that was offline for a while still hears.
         failures += 1;
+        if (failures >= 5) { waits = 6; }
       });
     }
 
     // Poll rarely. The check itself happens on the server; this only collects
     // the result, so a slow poll costs nothing but a little delay.
     window.setTimeout(poll, 4000);
-    window.setInterval(function () { if (failures < 5) { poll(); } }, 45000);
+    window.setInterval(function () {
+      if (waits > 0) { waits -= 1; } else { poll(); }
+    }, 45000);
+    window.addEventListener('online', function () { failures = 0; waits = 0; poll(); });
   })();
 
   // The service worker: keeps the public files and the offline page, and
@@ -650,9 +675,12 @@
 {% endif %}
 {% endif %}
 {# Notifications on this device: the switch on the Monitor and Settings pages,
-   and, inside the iPhone app, what a tapped notification opens. #}
+   and, inside the iPhone app, what a tapped notification opens, signed in or
+   not. A visitor's browser has no use for it. #}
+{% if in_app or (current_user and not demo) %}
 <script src="{{ url_for('static', filename='notify.js', v=asset_version) }}" defer
         data-user="{{ current_user.id if current_user and not demo else '' }}"
         data-mark="{{ push_mark }}"></script>
+{% endif %}
 </body>
 </html>

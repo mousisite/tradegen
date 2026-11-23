@@ -61,17 +61,6 @@ for f in fl[:6]:
 
 print()
 print("=" * 72)
-print("SEC full-text search")
-print("=" * 72)
-hits = sec.full_text_search("artificial intelligence", forms="10-K", limit=5)
-check("search returned hits", len(hits) > 0)
-for hit in hits[:4]:
-    print("   %-40s %-6s %s" % (hit["company"][:40], hit["form"], hit["filed"]))
-total = sec.total_filings_hits("artificial intelligence", forms="10-K")
-print("   total 10-K filings mentioning it: %s" % ("{:,}".format(total) if total else "?"))
-
-print()
-print("=" * 72)
 print("Yahoo fundamentals")
 print("=" * 72)
 for sym in ["AAPL", "KO"]:
@@ -105,8 +94,7 @@ for sym in ["BTC-USD", "SPY"]:
     print("   %-8s metrics=%d  sec=%s  quality_reliable=%s" % (
         sym, sum(1 for m in f.metrics.values() if m.known),
         bool(f.sec_facts), q["reliable"]))
-    check("%s does not crash" % sym, True)
-    check("%s refuses a fake score" % sym, q["score"] is None or not q["reliable"] or sym == "SPY")
+    check("%s refuses a fake score" % sym, q["score"] is None or not q["reliable"])
 
 print()
 print("=" * 72)

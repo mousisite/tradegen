@@ -7,6 +7,7 @@ before anything else.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from typing import Dict, List
 
@@ -43,7 +44,6 @@ BLOCK = "█" if _FANCY else "#"
 DOT = "·" if _FANCY else "."
 PIPE = "│" if _FANCY else "|"
 TICK = "▇" if _FANCY else "="
-SEP = "   ·   " if _FANCY else "   |   "
 
 
 def _fmt(value, digits=4):
@@ -128,8 +128,8 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
             t.add_row("Position", "[yellow]%s[/]" % pos["error"])
         else:
             # Cash amounts get two decimals, not the instrument's tick size.
-            t.add_row("Position", "%s units   ·   %s %s notional   ·   risking %s %s (%.2f%%)" % (
-                _fmt(pos["quantity"], 8), bars.currency,
+            t.add_row("Position", "%s %s   ·   %s %s notional   ·   risking %s %s (%.2f%%)" % (
+                _fmt(pos["quantity"], 8), pos.get("unit_text", "units"), bars.currency,
                 "{:,.2f}".format(pos["notional"]), bars.currency,
                 "{:,.2f}".format(pos["risk_amount"]),
                 pos["risk_pct_of_account"]))
@@ -192,7 +192,7 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
                             border_style="blue"))
 
     # --- family roll-up ---------------------------------------------------
-    # With three dozen strategies a flat list is unreadable and, worse,
+    # With dozens of strategies a flat list is unreadable and, worse,
     # misleading: it invites counting votes when what matters is which
     # families agree and how strongly.
     active = [s for s in signals if s.weight > 0 and abs(s.score) > 0.05]
@@ -317,10 +317,23 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
     console.print()
 
 
+def _plain_json(value):
+    """A NaN or an infinity, a reading that could not be measured, as None.
+    json.dumps writes it as the bare word NaN, which is not JSON, and a
+    browser or any strict reader then refuses the whole answer."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _plain_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(v) for v in value]
+    return value
+
+
 def to_json(bars: Bars, plan: Plan, signals: List[Signal], composite: float,
             regime: Regime, calib: Calibration, sentiment: Sentiment) -> str:
     """Machine-readable form of the same analysis, for logging or automation."""
-    return json.dumps({
+    return json.dumps(_plain_json({
         "instrument": {
             "symbol": bars.symbol, "name": bars.name,
             "asset_class": bars.asset_class, "currency": bars.currency,
@@ -364,4 +377,4 @@ def to_json(bars: Bars, plan: Plan, signals: List[Signal], composite: float,
                       for i in sentiment.items],
         },
         "risks": plan.risks, "confirmations": plan.confirmations,
-    }, indent=2)
+    }), indent=2, allow_nan=False)

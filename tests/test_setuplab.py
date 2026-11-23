@@ -217,7 +217,26 @@ check("and are the same on every run",
 check("no trade is entered on a bar that ends at 16:00 (no time left)",
       all(not (clock.fmt_ny(int(es.timestamp[t.i]) + 300) == "16:00")
           for rules in trades.values() for t in rules["2r"]))
+# A night later the 60 days have slid on by one: the oldest day gone, a new one
+# come. A trade in both keeps its random entries, but for the odd one whose day
+# left or that a bar of the new day takes the place of.
+per_day = 276
+nights = []
+for shift in (0, 1):
+    cut_ = slice(shift * per_day, shift * per_day + 19 * per_day)
+    b_n = sc.make(es.open[cut_], es.high[cut_], es.low[cut_], es.close[cut_], es.timestamp[cut_],
+                  kind="future", symbol="ES=F")
+    s_n = liquidity.series(b_n)
+    p_n = setuplab.prepare(b_n, s_n, 1.0, "ES=F", "5m")
+    nights.append({int(p_n.ts[t.i]): set(int(p_n.ts[j]) for j in t.controls)
+                   for t in setuplab.trades_for(b_n, s_n, "sweep_reclaim", "2r", prep=p_n)})
+both = sorted(set(nights[0]) & set(nights[1]))
+kept = sum(len(nights[0][t_] & nights[1][t_]) for t_ in both)
+drawn = sum(len(nights[0][t_]) for t_ in both)
+check("a trade keeps most of its random entries from one night to the next (%d of %d)"
+      % (kept, drawn), len(both) > 100 and kept > 0.8 * drawn, (len(both), kept, drawn))
 late = []
+open_bars = 0
 for i in range(0, len(es.close) - 1, 7):
     end = int(es.timestamp[i]) + 300
     day_, minute, _ = clock.ny_clock(end)
@@ -225,11 +244,37 @@ for i in range(0, len(es.close) - 1, 7):
         day_ = date.fromordinal(day_.toordinal() + 1)
     x = clock.ny(day_.year, day_.month, day_.day, 16, 0)
     j = int(p.exit_i[i])
-    if not (int(es.timestamp[j]) + 300 <= x
+    if x > int(es.timestamp[-1]) + 300:
+        if j != -1:
+            late.append(i)
+        open_bars += 1
+    elif not (int(es.timestamp[j]) + 300 <= x
             and (j + 1 >= len(es.close) or int(es.timestamp[j + 1]) + 300 > x)):
         late.append(i)
 check("each bar's last bar is the last one ending by the next 16:00 New York time",
       not late, late[:5])
+# ES's last whole bar ends at 17:00 here, an hour past the 16:00 before it, so
+# the bars of that last hour have their 16:00 still to come.
+check("and the bars whose 16:00 is not in the prices yet have none", open_bars >= 1, open_bars)
+counted = {}
+for name in setuplab.SETUP_NAMES:
+    for key, n_ in res["setups"][name]["skipped"].items():
+        counted[key] = counted.get(key, 0) + n_
+missing = [i for name in setuplab.SETUP_NAMES for i in setuplab.events(name, full, es)[0]
+           if p.good[i] and p.exit_i[i] == -1]
+check("a trade whose exit time is not in the prices yet is counted as still open, not scored",
+      missing and counted["still_open"] == len(missing)
+      and not any(t.i in missing for rules in trades.values() for t in rules["2r"]),
+      (counted, len(missing)))
+short = clock.head(es, len(es.close) - 20)
+s_short = liquidity.series(short)
+ended = [(t.i, t.exit_i) for t in setuplab.trades_for(
+    short, s_short, "sweep_reclaim", "2r", prep=setuplab.prepare(short, s_short, 1.0, "ES=F", "5m"),
+    with_controls=False)]
+whole_ = {t.i: t.exit_i for t in trades["sweep_reclaim"]["2r"]}
+check("so a result once counted does not change when more prices come",
+      ended and all(whole_.get(i) == at for i, at in ended),
+      [(i, at, whole_.get(i)) for i, at in ended if whole_.get(i) != at][:4])
 check("and every trade ends by then",
       all(t.exit_i <= p.exit_i[t.i] for rules in trades.values() for t in rules["2r"]))
 
@@ -272,6 +317,18 @@ print("   (%d cells; %d kept money beyond their margin; %d beat random entries b
 check("fewer than one cell in ten keeps money by more than its margin", plus < 0.1 * total,
       plus)
 check("at most one beats its random entries by more than its margin", beat <= 1, beat)
+
+# Results with nothing in them, 30 trades on 10 days (the fewest that get a
+# verdict): about 1 in 20 clears its margin, as the pages say, not 1 in 11.
+rng = np.random.RandomState(4)
+days_of = np.repeat(np.arange(10), 3)
+cleared = 0
+for _ in range(4000):
+    x = rng.normal(0.0, 1.0, 30) + rng.normal(0.0, 0.7, 10)[days_of]
+    cleared += labstore.verdict(float(x.mean()), setuplab.clustered_se(x, days_of), 30,
+                                days=10) != 0
+check("at the fewest days that get a verdict, about 1 in 20 clears its margin by luck (%.1f%%)"
+      % (cleared / 40.0), 0.035 * 4000 < cleared < 0.065 * 4000, cleared)
 
 # ---------------------------------------------------------------------------
 head("(c) A PLANTED EDGE IS FOUND")
@@ -352,11 +409,18 @@ check("in the lab's order", [r["symbol"] for r in stored[::2]]
 check("every claim measured on a full run is stored",
       set(labstore.claims(conn)) == set(c_.id for c_ in setups.CLAIMS if c_.must),
       sorted(set(c_.id for c_ in setups.CLAIMS if c_.must) - set(labstore.claims(conn))))
+five_min = [r for r in stored if r["interval"] == "5m"]
+table_se = labstore.pooled(five_min, "sweep_reclaim", "2r")
+claim_se = labstore.claim(conn, "sweep_alone_loses")["pooled"]
+check("the claims and the setups' table give the same trades the same margin",
+      abs(table_se["mean"] - claim_se["mean"]) < 1e-5 and abs(table_se["se"] - claim_se["se"]) < 1e-4
+      and claim_se["trials"] == table_se["n"], (table_se["se"], claim_se["se"]))
 check("and the bias study, per instrument and pooled",
       labstore.bias(conn, labstore.POOL_ALL) is not None
       and all(labstore.bias(conn, s_[0]) for s_ in setups.LAB_SYMBOLS))
 last = labstore.last_run(conn)
-check("the run is recorded", last and last["summary"]["checked"] == 16
+check("the run is recorded, as a full one", last and last["summary"]["checked"] == 16
+      and last["summary"]["full"] is True
       and "results" not in last["summary"])
 text = setuplab.table(stored)
 check("the printed table has no blanks, None or nan",
@@ -412,6 +476,13 @@ labstore.save_run(conn, noon - 3 * 3600, noon - 3 * 3600 + 5, {"checked": 0})
 check("a run that stored nothing is tried again after two hours", setuplab.due(conn, noon))
 labstore.save_run(conn, noon - 3600, noon - 3600 + 5, {"checked": 0})
 check("but not sooner", not setuplab.due(conn, noon))
+conn = memory()
+evening = clock.ny(2026, 7, 15, 17, 6)
+labstore.save_run(conn, evening - 21 * 3600, evening - 21 * 3600 + 60, {"checked": 16, "full": True})
+setuplab.run(conn, fetch=fake_fetch(), symbols=["SPY"], intervals=["15m"], pause=0,
+             now=evening - 2 * 3600)
+check("one instrument measured by hand in the afternoon does not stop the evening's run",
+      labstore.last_run(conn)["summary"]["full"] is False and setuplab.due(conn, evening))
 
 # ---------------------------------------------------------------------------
 head("THE SERVER'S NIGHTLY JOB MEASURES ONLY WHEN DUE")

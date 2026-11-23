@@ -11,6 +11,14 @@ services:
     # checking. Check current pricing on Render's site before deploying.
     plan: starter
     healthCheckPath: /healthz
+    # A push that changes only these is not deployed: the running site reads
+    # none of them, and every deploy takes it away for a moment.
+    buildFilter:
+      ignoredPaths:
+        - mobile/**
+        - tests/**
+        - docs/**
+        - "**/*.md"
     disk:
       name: stockbot-data
       mountPath: /data
@@ -26,6 +34,8 @@ services:
       - key: STOCKBOT_PUBLIC_URL
         sync: false
       - key: STOCKBOT_SECRET_KEY
+        sync: false
+      - key: STOCKBOT_CONTACT
         sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false

@@ -10,17 +10,20 @@
 <div class="pagehead">
   <h1>Which trading strategies actually work?</h1>
   <p>{{ shown }} strategies, back-tested every day on popular stocks and coins,
-    after trading costs. Best first. Tap one to see every stock.
-    {% if strategy_count > daily_strategy_count %}The other {{ strategy_count - daily_strategy_count }}
-    of Orenth's {{ strategy_count }} read the inside of a trading day, so they only
-    fire on hourly or shorter bars and are not in this daily test.{% endif %}</p>
-  <p>{{ strategy_count }} strategies decide Orenth's calls; {{ trial_count }}
-    price-action setups are measured on trial. On trial means measured here, not
-    used in Orenth's calls until its record shows an edge. Each is marked
-    <span class="chip mute">on trial</span> and appears once it has at least
-    {{ method.min }} separate trades on a stock or coin.{% if trial_count > daily_trial_count %}
-    {{ trial_count - daily_trial_count }} of them reads the sessions inside a
-    trading day, so it is not in this daily test either.{% endif %}</p>
+    after trading costs. Best first. Tap one to see every stock.</p>
+  {% set inside = strategy_count - daily_strategy_count %}
+  <p>{{ strategy_count }} strategies decide Orenth's calls.
+    {% if unlisted %}{{ unlisted }} of them {{ 'has' if unlisted == 1 else 'have' }}
+    fewer than {{ method.min }} separate trades on every stock and coin tested so
+    far, too few to list here.{% endif %}
+    {% if inside %}{{ inside }} of them {{ 'reads' if inside == 1 else 'read' }} the inside
+    of a trading day, so {{ 'it only fires' if inside == 1 else 'they only fire' }} on
+    shorter bars and {{ 'is' if inside == 1 else 'are' }} not in this daily test.{% endif %}</p>
+  {% if trial_count %}
+  <p>{{ trial_count }} more {{ 'strategy is' if trial_count == 1 else 'strategies are' }} on trial: marked
+    <span class="chip mute">on trial</span>, measured here the same way, and not used
+    in Orenth's calls until the record shows an edge.</p>
+  {% endif %}
   <p>These are today's popular names, picked after the years they were tested
     on. Where a name rose over those years, buying it on any day kept money
     too, so a strategy that mostly bought can look skilled without being so,
@@ -28,7 +31,7 @@
     are exactly that: a buy, and a short, on every tested day. Set each
     strategy beside the one on its side.</p>
   <p>How the same strategies did across the analyses people run on this site,
-    under their own settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
+    with its standard settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
   <p>Each result has a margin of error after it. It is green only when the
     whole margin is above zero, and red only when it is all below. With
     {{ shown }} strategies tested, one or two can look this good by luck alone.</p>
@@ -37,7 +40,7 @@
 <div class="card pad0">
   {% if table %}
   <div class="tablewrap">
-    <table>
+    <table class="stack">
       <thead><tr>
         <th>Strategy</th><th class="r">Kept a trade</th>
         <th class="r">Kept money on</th><th class="r">Hit rate</th>
@@ -46,15 +49,15 @@
       <tbody>
       {% for t in table %}
         <tr{% if t.baseline %} style="background:var(--sunken)"{% endif %}>
-          <td>{% if t.baseline %}<b>{{ 'Shorting' if t.baseline == 'short' else 'Buying' }} on every tested day</b>{% else %}<a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>{% if t.strategy in trial_names %}
+          <td class="lead">{% if t.baseline %}<b>{{ 'Shorting' if t.baseline == 'short' else 'Buying' }} on every tested day</b>{% else %}<a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>{% if t.strategy in trial_names %}
             <span class="chip mute" style="white-space:nowrap">on trial</span>{% endif %}{% if t.side == 'short' %}
             <span class="soft" style="font-size:var(--t-xs);white-space:nowrap">mostly shorts</span>{% endif %}{% endif %}</td>
-          <td class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if t.verdict == 1 else 'loss' if t.verdict == -1 }}">{{ t.kept|signed(2) }}R</span>{% if t.se is not none %}
+          <td data-label="Kept a trade" class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if t.verdict == 1 else 'loss' if t.verdict == -1 }}">{{ t.kept|signed(2) }}R</span>{% if t.se is not none %}
             <span class="soft">±{{ '%.2f'|format(2 * t.se) }}</span>{% endif %}</td>
-          <td class="r fig">{{ t.paid }} of {{ t.tested }}</td>
-          <td class="r fig">{{ (t.wins / t.n)|pct(0) }}</td>
-          <td class="r fig soft">{{ "{:,}".format(t.n) }}</td>
-          <td class="soft">{% if t.baseline %}no strategy{% else %}{{ t.family.replace('_', ' ') }}{% endif %}</td>
+          <td data-label="Kept money on" class="r fig">{{ t.paid }} of {{ t.tested }}</td>
+          <td data-label="Hit rate" class="r fig">{{ (t.wins / t.n)|pct(0) }}</td>
+          <td data-label="Days tested" class="r fig soft">{{ "{:,}".format(t.n) }}</td>
+          <td data-label="Family" class="soft">{% if t.baseline %}no strategy{% else %}{{ t.family.replace('_', ' ') }}{% endif %}</td>
         </tr>
       {% endfor %}
       </tbody>
@@ -69,9 +72,8 @@
 
 <section class="card closing" style="margin-top:var(--s4)">
   <p class="lead">Analyse any stock or coin, free.</p>
-  <p class="prose">Orenth runs all {{ strategy_count }} that decide its calls on whatever you
-    are looking at, scores the {{ trial_count }} on trial beside them, and says so when
-    none of them has an edge.</p>
+  <p class="prose">Orenth runs all {{ strategy_count }} on whatever you are looking at,
+    and says so when none of them has an edge.</p>
   <div class="cta">
     {% if not current_user or demo %}
       <a class="btn" href="{{ url_for('signin') }}">Create free account</a>

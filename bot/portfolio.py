@@ -14,13 +14,26 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
+from .clock import ny_clock
 from .market import DataError, fetch_bars, split_factor_since, split_words
+
+
+# The most holdings compared with each other. Every one is read in turn and
+# is a row and a column of the table, so a very long list is a slow page and
+# a table nobody can read.
+COMPARE_MOST = 40
+
+# Seconds the page keeps asking for prices and betas. A journal holds up to two
+# hundred positions, and a source that answers slowly held one of the server's
+# few threads for as long as it took to ask about every one of them.
+READ_FOR = 25.0
 
 
 @dataclass
@@ -319,6 +332,7 @@ class Position:
     breached: bool = False
     touched: Optional[float] = None       # the price that crossed the stop since opening
     touched_at: Optional[int] = None
+    touched_day: Optional[date] = None    # the day to say it was crossed on (crossed_day)
     touched_stop: Optional[float] = None  # the stop in force when it was crossed
     beta_assumed: bool = False
     status: str = "open"
@@ -433,7 +447,8 @@ def build(rows, account: float, with_correlation: bool = True,
     (database.open_positions), so a position closed in part counts only the
     part still open. cost_bps maps an asset class ("equity", "crypto", other)
     to its round-trip cost in basis points; half of it is charged to get out
-    of each position.
+    of each position. "futures", where given, is a futures contract's, which
+    the data source files under other.
     """
     view = PortfolioView(account=account)
     if not rows:
@@ -451,6 +466,7 @@ def build(rows, account: float, with_correlation: bool = True,
         for r in rows
     ]
 
+    started = time.monotonic()
     _enrich(positions, view)
     for p in positions:
         if p.split != 1.0:
@@ -463,7 +479,10 @@ def build(rows, account: float, with_correlation: bool = True,
     for p in positions:
         if p.price is None:
             continue
-        mark(p, costs.get(p.asset_class, costs.get("other", 0.0)))
+        kind = p.asset_class
+        if "futures" in costs and p.symbol.upper().endswith("=F"):
+            kind = "futures"
+        mark(p, costs.get(kind, costs.get("other", 0.0)))
 
     # Positions with no price are left out of every sum, and so are positions
     # logged without a size, whose cash figures cannot be known.
@@ -480,10 +499,14 @@ def build(rows, account: float, with_correlation: bool = True,
     view.exit_costs = sum(p.exit_cost for p in sized)
     view.gross_exposure = sum(abs(p.notional) for p in sized)
     view.net_exposure = sum(p.notional * p.direction for p in sized)
-    # An unpriced holding still holds money: its entry cost stays out of cash.
-    unpriced_cost = sum(p.entry * p.quantity for p in positions
-                        if p.price is None and p.sized)
-    view.cash = max(0.0, account - view.invested - unpriced_cost)
+    # What is left of the account is what was not paid out: a holding that has
+    # risen since was still bought at its entry, and one without a price still
+    # holds its money. Counted at today's value, cash fell when a holding rose.
+    # A futures contract is held on a deposit, not bought at its full value:
+    # one micro contract, worth more than a small account, left no cash at all.
+    paid = sum(p.entry * p.quantity for p in positions
+               if p.sized and not p.symbol.upper().endswith("=F"))
+    view.cash = max(0.0, account - paid)
 
     for p in sized:
         key = p.sector or ("Crypto" if p.asset_class == "crypto" else "Unclassified")
@@ -497,15 +520,30 @@ def build(rows, account: float, with_correlation: bool = True,
         # perfectly even.
         view.concentration = sum(w * w for w in _name_weights(sized, view.gross_exposure).values())
 
-        # Signed: a short adds negative market exposure, not more of it.
-        betas = [(p.beta, p.notional * p.direction) for p in sized if p.beta is not None]
-        if betas:
-            view.portfolio_beta = sum(b * w for b, w in betas) / view.gross_exposure
+        # Signed: a short adds negative market exposure, not more of it. One
+        # with no measured beta is taken to move with the market, as what_if
+        # takes it, so this figure and the shock table agree; _assess names it.
+        if any(p.beta is not None for p in sized):
+            view.portfolio_beta = sum(
+                (p.beta if p.beta is not None else 1.0) * p.notional * p.direction
+                for p in sized) / view.gross_exposure
 
-    if with_correlation and len({p.symbol for p in priced}) >= 2:
+    if (with_correlation and len({p.symbol for p in priced}) >= 2
+            and time.monotonic() - started >= READ_FOR):
+        view.observations.append(
+            "Prices came in too slowly to compare how the holdings move together. "
+            "Open this page again in a minute.")
+    elif with_correlation and len({p.symbol for p in priced}) >= 2:
+        worth: Dict[str, float] = {}
+        for p in priced:
+            worth[p.symbol] = worth.get(p.symbol, 0.0) + abs(p.notional)
+        names = sorted(worth, key=lambda s: (-worth[s], s))[:COMPARE_MOST]
         try:
-            view.correlation = risk_mod.correlation_matrix(
-                sorted({p.symbol for p in priced}), "1d")
+            view.correlation = risk_mod.correlation_matrix(sorted(names), "1d")
+            if len(names) < len(worth):
+                view.correlation.setdefault("notes", []).append(
+                    "Compared between your %d largest holdings, of %d."
+                    % (len(names), len(worth)))
         except Exception:
             view.correlation = {}
 
@@ -535,8 +573,17 @@ def keep_reads(conn, view: PortfolioView, now: Optional[float] = None) -> None:
 
 
 def _enrich(positions: List[Position], view: PortfolioView) -> None:
-    """Attach live price, sector and risk stats to each holding, concurrently."""
-    def grab(p: Position):
+    """Attach live price, sector and risk stats to each holding, concurrently.
+
+    Every price first, since every figure on the page needs those. Whatever
+    has not been asked for after READ_FOR seconds is left unknown.
+    """
+    give_up = time.monotonic() + READ_FOR
+
+    def price(p: Position):
+        if time.monotonic() >= give_up:
+            view.failed.append(p.symbol)
+            return
         try:
             # The trade's own bars, which the journal, paper.py and the stop
             # notice read it on: on daily bars a whole day is held to the stop
@@ -557,9 +604,13 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             p.price, p.stop = read.price, read.stop
             p.touched_at, p.touched = read.touched_at, read.touched
             p.touched_stop = read.touched_stop
+            p.touched_day = crossed_day(p.interval or "1d", bars, read.touched_at)
             p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
+
+    def rest(p: Position):
+        if p.price is None or time.monotonic() >= give_up:
             return
         try:
             if p.asset_class == "equity":
@@ -579,7 +630,8 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             pass
 
     with ThreadPoolExecutor(max_workers=min(6, len(positions))) as pool:
-        list(pool.map(grab, positions))
+        list(pool.map(price, positions))
+        list(pool.map(rest, positions))
 
 
 def _name_weights(positions: List[Position], gross: float) -> Dict[str, float]:
@@ -602,9 +654,12 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     exposure_pct = view.gross_exposure / account * 100
     count = len({p.symbol for p in priced})
     view.observations.append(
-        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash."
+        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash.%s"
         % (exposure_pct, count, "" if count == 1 else "s",
-           "{:,.0f}".format(view.cash)))
+           "{:,.0f}".format(view.cash),
+           " A futures contract is held on a deposit, so its full value is counted as "
+           "deployed but is not taken out of cash."
+           if any(p.symbol.upper().endswith("=F") for p in sized) else ""))
 
     # Said first and loudest: a breached stop is the one thing on this page
     # that needs doing today, and "nothing at risk" would hide it.
@@ -613,7 +668,7 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         if (p.price - p.stop) * p.direction > 0 and p.touched is not None:
             crossed = p.touched_stop if p.touched_stop is not None else p.stop
             where = ("traded through its %s of %s on %s (at %s) and is back at %s"
-                     % (kind, _px(crossed), _day(p.touched_at), _px(p.touched),
+                     % (kind, _px(crossed), day_words(p.touched_day), _px(p.touched),
                         _px(p.price)))
         else:
             where = "is at %s against a %s of %s" % (_px(p.price), kind, _px(p.stop))
@@ -626,7 +681,8 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         view.warnings.append(
             "Stop breached on %s: it %s (%s, %s). The stop in the journal is a "
             "plan, not an order, so unless you placed a stop order with your "
-            "broker this position is still open. Close it or set a new stop."
+            "broker this position is still open. Close it in the journal once "
+            "you are out."
             % (p.symbol, where, result,
                "%.2fR" % p.open_r if p.open_r is not None else "R unknown"))
         if p.open_r is not None and p.open_r < -1.05:
@@ -642,12 +698,15 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     unbreached = [p for p in priced if not p.breached and p.sized]
     risk_pct = view.total_risk / account * 100
     if unbreached:
+        # A small position's costs round to nothing, and "about 0 in trading
+        # costs" says nothing; a short's stop is above it, not below.
+        costs = "{:,.0f}".format(sum(p.exit_cost for p in unbreached))
         view.observations.append(
-            "If every stop still ahead were hit from here, the positions above "
-            "their stops would lose a further %s, or %.1f%% of the account, "
-            "including about %s in trading costs to get out."
+            "If every stop still ahead were hit from here, the positions not yet "
+            "at their stops would lose a further %s, or %.1f%% of the account%s."
             % ("{:,.0f}".format(view.total_risk), risk_pct,
-               "{:,.0f}".format(sum(p.exit_cost for p in unbreached))))
+               "" if costs == "0" else
+               ", including about %s in trading costs to get out" % costs))
     if view.planned_risk:
         view.observations.append(
             "The plans put %s at risk on what is still open, entry to the stop "
@@ -696,10 +755,18 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
                 "exposures." % avg)
 
     if view.portfolio_beta is not None:
+        # A book that is short on balance gains when the market falls.
+        against = ", in the opposite direction" if view.portfolio_beta <= -0.005 else ""
         view.observations.append(
             "Weighted beta is %.2f, so the portfolio tends to move %.0f%% as "
-            "much as the market." % (view.portfolio_beta,
-                                     abs(view.portfolio_beta) * 100))
+            "much as the market%s." % (round(view.portfolio_beta, 2) + 0.0,
+                                       abs(view.portfolio_beta) * 100, against))
+        assumed = sorted({p.symbol for p in sized if p.beta is None})
+        if assumed:
+            view.observations.append(
+                "No beta could be measured for %s, so %s counted as moving exactly "
+                "with the market." % (", ".join(assumed),
+                                      "it is" if len(assumed) == 1 else "they are"))
 
     if view.net_exposure < 0 and view.gross_exposure > 0:
         view.observations.append("Net exposure is short.")
@@ -724,9 +791,25 @@ def _px(value: float) -> str:
     return format_price(value)
 
 
-def _day(ts: Optional[int]) -> str:
-    import time
-    return time.strftime("%d %b", time.gmtime(int(ts))).lstrip("0") if ts else "a recent day"
+def crossed_day(interval: str, bars, when: Optional[int]):
+    """The date a stop was traded through, the same wherever it is said, or None.
+
+    The New York date, as the journal counts its days. A daily bar is named
+    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
+    session opens, while it is still the evening before in New York.
+    """
+    if when is None:
+        return None
+    times = getattr(bars, "timestamp", None)
+    if (interval == "1d" and times is not None
+            and int(when) in {int(t) for t in times}):
+        return datetime.fromtimestamp(int(when), timezone.utc).date()
+    return ny_clock(when)[0]
+
+
+def day_words(day) -> str:
+    """'5 Nov' for a date."""
+    return day.strftime("%d %b").lstrip("0") if day else "a recent day"
 
 
 def what_if(view: PortfolioView, shock_pct: float) -> Dict:
@@ -770,12 +853,8 @@ def overlap(rows, symbol: str, interval: str = "1d",
     still change the decision.
 
     Bars have to be fetched per instrument, so the comparison is capped at the
-    largest few holdings and runs concurrently.
+    largest few holdings.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
-    from . import risk as risk_mod
-
     want = symbol.upper()
     out = {"usable": False, "warnings": [], "held": False, "pairs": [],
            "average": None, "compared": []}
@@ -821,8 +900,7 @@ def overlap(rows, symbol: str, interval: str = "1d",
             break
 
     out["compared"] = compare
-    with ThreadPoolExecutor(max_workers=4):
-        matrix = risk_mod.correlation_matrix([want] + compare, interval)
+    matrix = risk_mod.correlation_matrix([want] + compare, interval)
     if not matrix.get("usable"):
         out["note"] = matrix.get("reason", "Not enough shared history.")
         return out

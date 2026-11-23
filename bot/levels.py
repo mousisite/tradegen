@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from . import clock
 from .market import Bars
 
 
@@ -94,8 +95,13 @@ def opening_range(bars: Bars, minutes: int = 30):
 
     The opening range is the reference every breakout day-trader watches. For
     crypto there is no opening bell, so the session boundary is the UTC day
-    rollover, which is still where a lot of algorithmic activity resets.
+    rollover, which is still where a lot of algorithmic activity resets. A
+    future trades round the clock and its calendar day starts at midnight, the
+    middle of its session, so it has none; nor has a session whose first bar
+    is still forming, when the bars here are all from the session before.
     """
+    if clock.kind_of(bars) == "future" or clock.live_day(bars):
+        return None
     mask = session_slice(bars, 0)
     if mask is None or not mask.any():
         return None
@@ -113,8 +119,22 @@ def opening_range(bars: Bars, minutes: int = 30):
 
 
 def prior_session(bars: Bars):
-    """High, low and close of the previous completed session."""
-    mask = session_slice(bars, 1)
+    """High, low and close of the previous completed session.
+
+    The session before the live price's. While a market trades, the last
+    finished daily bar (and the last intraday one until the first bar of the
+    day is over) is that session itself, not the one before it. For futures
+    and coins on intraday bars it is the last whole trading day, 18:00 to
+    18:00 New York time, the day the key levels call yesterday.
+    """
+    ahead = clock.live_day(bars) is not None
+    if clock.kind_of(bars) in ("future", "coin"):
+        days = clock.day_table(bars)
+        whole = [d for d in (days if ahead else days[:-1]) if d.complete]
+        if not whole:
+            return None
+        return {"high": whole[-1].high, "low": whole[-1].low, "close": whole[-1].close}
+    mask = session_slice(bars, 0 if ahead else 1)
     if mask is None or not mask.any():
         return None
     return {
@@ -173,7 +193,8 @@ def build_levels(bars: Bars, atr_value: float, lookback: int = 800,
                 levels.append(Level(val, k, 1, name, 0.75))
 
     orb = opening_range(bars, 30)
-    if orb:
+    # Not a range until its minutes are over.
+    if orb and orb["complete"]:
         if orb["high"] > price:
             levels.append(Level(orb["high"], "resistance", 1, "opening range high", 0.7))
         if orb["low"] < price:

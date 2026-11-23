@@ -1,9 +1,10 @@
 # Orenth
 
-**Live at [orenth.app](https://orenth.app).** Free, no ads, no tracking scripts.
+**Live at [orenth.app](https://orenth.app).** Free to use, with a paid Pro plan
+for more of the same. No ads.
 
 Give it a screenshot of a chart. It identifies the instrument, pulls live market
-data, runs **34 trading strategies**, measures which of them actually work on
+data, runs **44 trading strategies**, measures which of them actually work on
 that instrument, reads the news and social chatter, and tells you to buy, wait,
 or stand aside. Everything it says and every trade you take is recorded in a
 database so the record accumulates.
@@ -39,9 +40,9 @@ required.
 | **Research** | The business behind the ticker: filed financials, valuation, a two-sided thesis, options pricing, recent filings, every claim cited |
 | **Screener** | Ready-made and custom screens over a chosen universe, showing the numbers that got each name through |
 | **Portfolio** | What you are exposed to: concentration, sector weights, correlation between holdings, a market-shock table |
-| **Trades** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
+| **Journal** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
-| **Strategies** | Leaderboard of all 34 strategies, filterable by instrument and market conditions |
+| **Strategies** | Leaderboard of all 44 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
 | **Price action, tested** | `/learn`: the ideas a popular day-trading course teaches, each in plain words beside what the Setup lab measured, and a practice page for calling the next move |
 
@@ -113,10 +114,10 @@ otherwise. Each links to where the work happens.
 | | Capability | Where | What it actually does |
 |---|---|---|---|
 | 1 | Real-time market data | `bot/market.py` | OHLCV for equities, ETFs and crypto across seven intervals, with stub bars trimmed and the forming bar separated so signals do not flicker |
-| 2 | Technical analysis | `bot/indicators.py`, `bot/strategies.py` | 30+ indicators and 34 strategies, each scored, weighted by regime, and discounted when it duplicates a sibling in the same family |
+| 2 | Technical analysis | `bot/indicators.py`, `bot/strategies.py` | 30+ indicators and 44 strategies, each scored, weighted by regime, and discounted when it duplicates a sibling in the same family |
 | 3 | Backtesting | `bot/calibrate.py` | Walk-forward replay with Wilson confidence intervals, striding to decorrelate samples, and a pessimistic tie-break when a bar touches both stop and target |
 | 4 | Real-time news and sentiment | `bot/sentiment.py` | Google News and StockTwits, scored by a finance lexicon that handles negation, or by an LLM when a key is present |
-| 5 | SEC filings analysis | `bot/sec.py` | Filing history, XBRL company facts, and full-text search, each result linked back to the document |
+| 5 | SEC filings analysis | `bot/sec.py` | Filing history and XBRL company facts, each linked back to the document |
 | 6 | Fundamental analysis | `bot/fundamentals.py` | Forty-odd ratios, each carrying its source, with Yahoo reconciled against what was actually filed, and a quality score that refuses to answer on too little data |
 | 7 | Financial modeling | `bot/valuation.py` | Discounted cash flow on a three-year average of filed free cash flow, growth fading toward terminal, a 5x5 sensitivity grid, plus a reverse DCF that solves for the growth the price implies |
 | 8 | Advanced stock screener | `bot/screener.py` | Two stages: bulk quotes first, full fundamentals only for names that already passed, so a wide screen stays fast |
@@ -126,10 +127,10 @@ otherwise. Each links to where the work happens.
 | 12 | Bull and bear thesis | `bot/thesis.py` | Both cases argued from the gathered evidence, each point carrying what would prove it wrong |
 | 13 | Source citations | throughout | Every figure carries where it came from; filings link to sec.gov |
 | 14 | Investment thesis memory | `bot/thesis.py`, `bot/database.py` | A thesis is saved with the price at the time and closed out later as right, wrong, right-by-luck, or undecided. The outcome offered when you close one is the one the price supports, not the one you remember |
-| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
+| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages, price action and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
-| 15d | Export | `bot/export.py` | The journal, theses, measured strategy record and analysis history as CSV or JSON |
+| 15d | Export | `bot/export.py` | The journal, theses, watchlist, alerts, measured strategy record and analysis history as CSV or JSON |
 | 16 | Paper trading | `paper.py`, `bot/database.py` | Positions sized against your account, marked to market, closed with the R-multiple computed |
 | 17 | Automated workflows | `bot/workflows.py` | Four routines: check open positions, a morning sweep, hunt for setups, re-analyse the watchlist |
 | 18 | AI financial reasoning | `bot/reasoning.py` | Reasons over the facts already gathered, never over its own recollection. Needs a key |
@@ -179,9 +180,8 @@ gap between those two columns is the whole story of retail day trading.
 | AAPL | 0.07R | 0.04R | 0.02R | 0.01R |
 
 At 20bp round-trip on a 5-minute crypto bar, fees exceed the entire stop
-distance. Break-even for 5-minute BTC is about 98%. Scalping crypto at retail
-fee levels is arithmetically unprofitable before strategy quality even enters
-the picture.
+distance. Scalping crypto at retail fee levels is arithmetically unprofitable
+before strategy quality even enters the picture.
 
 Net expectancy per trade:
 
@@ -244,9 +244,9 @@ same costs. A setup that keeps money but no more than random trades at that
 time of day has shown nothing about itself.
 
 **Margin.** Two standard errors, with trades on the same trading day counted
-together. A setup needs 30 trades on 10 separate days before it gets a
-verdict: kept money by more than its margin, lost money by more than it, or
-cannot be told apart from luck. About 1 cell in 20 crosses its margin by
+together, and more when the days are few (2.4 on 10 days). A setup needs 30
+trades on 10 separate days before it gets a verdict: kept money by more than
+its margin, lost money by more than it, or cannot be told apart from luck. About 1 cell in 20 crosses its margin by
 luck alone, and many cells are tested, so a single green cell proves little.
 ES and SPY (and NQ and QQQ) follow the same indexes: pooled together, they
 overstate the evidence.
@@ -260,10 +260,12 @@ trades that would carry through a roll. Each is counted.
 
 **Claims.** Each checkable claim is measured against a control of the same
 size: London taking one side of the Asia range and reaching the other is set
-beside a band as wide as Asia's centred on the 03:00 price; the 9:30-9:50
-window beside 10:30-10:55; a close past a swing beside a wick past it; gaps
+beside that range mirrored around the 03:00 price; the 9:30-9:50 window beside
+the same test an hour later; a close past a swing beside a wick past it; gaps
 beside random zones of the same size; the daily lean beside always saying up.
-Gap fills are set against one in two.
+An opening gap is set beside the level the same distance the other way. Coins'
+Saturdays and Sundays are left out of the claims about the sessions and the
+New York open.
 
 **When.** Nightly on the server after 17:05 New York time, or by hand:
 
@@ -273,14 +275,14 @@ python -m bot.setuplab              # print what is stored
 ```
 
 A partial run leaves the claims alone; add `--claims` to measure them anyway.
+It does not stand for the night's run, which still goes.
 
 ---
 
 ## The strategy library
 
 44 strategies in seven families. Each returns a directional score from -1 to
-+1 with a plain-language reading. 34 of them, in the first six families,
-decide the call; the 10 in the liquidity family are measured on trial.
++1 with a plain-language reading, and all of them have a say in the call.
 
 **Trend (10)** — `trend_stack`, `macd_momentum`, `supertrend_follow`,
 `adx_di_cross`, `ichimoku_cloud`, `parabolic_sar_flip`, `linreg_channel`,
@@ -301,7 +303,7 @@ decide the call; the 10 in the liquidity family are measured on trial.
 
 **Pattern (3)** — `engulfing_pattern`, `pin_bar`, `momentum_thrust`
 
-**Liquidity (10), on trial** — `sweep_reclaim`, `prior_day_sweep`,
+**Liquidity (10)** — `sweep_reclaim`, `prior_day_sweep`,
 `equal_levels_sweep`, `session_sweep`, `structure_flip`, `sweep_then_flip`,
 `fvg_retest`, `ifvg_flip`, `premium_discount`, `liquidity_model`
 
@@ -314,13 +316,14 @@ video timestamps live in `bot/setups.py`; the price structure they read is
 `bot/structure.py`, `bot/clock.py` and `bot/liquidity.py`. `session_sweep`
 needs intraday bars, like `opening_range_break`.
 
-**On trial** means measured, not used. Every analysis scores them and every
-back-test (the per-instrument one and the daily test on the popular names)
-measures them with the house stop, target and costs, but `Strategy.votes` is
-False: `evaluate()` leaves them out of the composite, so the composite, the
-odds and every BUY / WAIT / AVOID are exactly what they would be without
-them (`tests/test_liquidity_strategies.py` proves it). Pages tag them "on
-trial". Promoting one to a vote is a later, separate decision, on its record.
+These ten have voted in the composite since 19 November 2026, at the owner's
+choice: each starts at a weight of 0.7, weighted by regime and by its measured
+record and discounted inside its family like any other strategy. Before that
+they were on trial, scored and measured with no say in the call, and calls
+came from the other 34. The switch is `Strategy.votes`: set to False, it puts
+a strategy on trial, and the pages then tag it "on trial". If the price
+structure cannot be read on some history, the ten sit out and the call is the
+one the other 34 make (`tests/test_liquidity_strategies.py` checks both).
 
 The alerts follow the same levels (`bot/alerts.py`, the "Price action"
 group): yesterday's high or low traded through, or taken and closed back
@@ -365,8 +368,11 @@ Design choices that keep it honest:
 - **Wilson confidence intervals**, which stay sensible at small sample sizes.
 - **A holdout check** on the most recent third. If the edge exists only in older
   data, the report says so.
-- **Break-even includes cost.** With cost `c` and reward:risk `R`, break-even is
-  `(1+c)/(1+R)`, not `1/(1+R)`.
+- **Break-even is measured, not assumed.** It is worked out from what winning
+  and losing trades were worth after costs: with an average win `W` and an
+  average loss `L` (a negative number), it is `-L/(W-L)`. The textbook
+  `(1+c)/(1+R)`, with cost `c` and reward:risk `R`, stands in only when there
+  are no wins or no losses to measure.
 
 ---
 
@@ -377,13 +383,11 @@ SQLite at `data/stockbot.db`, created on first run.
 | Table | Holds |
 |---|---|
 | `runs` | Every analysis: price, regime, composite, action, levels, odds |
-| `run_signals` | All 34 strategy scores for every run |
 | `strategy_stats` | Measured performance per symbol, strategy and regime |
 | `trades` | The journal: entry, stop, exit, realised R, P&L, and any trailing stop |
 | `trade_exits` | Parts of a position closed while the rest stayed open |
-| `run_news` | Headlines and posts seen at each run |
 
-Strategy statistics are **replaced** per key, not accumulated. Two runs over
+Strategy statistics are **replaced** per instrument, not accumulated. Two runs over
 overlapping history describe the same bars, and summing them would manufacture
 confidence that was never earned.
 
@@ -435,7 +439,8 @@ to show what risking 0.5% to 10% a trade does over 100 trades. The tags,
 review and rule columns are on the trades table and in the journal export.
 
 `take` deliberately refuses plans the bot did not propose, plans marked WAIT
-where price never reached the entry, and plans older than two hours. It records
+where price never reached the entry, plans older than two hours, and a plan
+already open in the journal. It reads the newest analysis only. It records
 the trade the bot actually recommended rather than a remembered version. Use
 `paper.bat open` with explicit numbers to log anything else.
 
@@ -468,7 +473,7 @@ run.bat [image] [options]
   --no-llm              never call Claude for sentiment
   --no-learn            fixed weights, skip per-strategy measurement
   --no-db               do not record this run
-  --all-signals         print all 34 strategies, not just top contributors
+  --all-signals         print all 44 strategies, not just top contributors
   --json PATH           write the full analysis as JSON
   --config PATH         use a different config.json
 ```
@@ -478,7 +483,9 @@ paper.bat <command> [options]
 
   take SYMBOL           open from the bot's last plan for that symbol
   open SYMBOL           open with explicit --entry --stop --target --qty
-  close ID --price P    close a position
+  close ID --price P    close a position, or part of it with --qty
+  trail ID --pct P      trail its stop behind the best price (or --atr N)
+  delete ID             remove a trade entirely
   check                 mark open positions to market
   list [--all]          show trades
   stats                 realised performance
@@ -502,14 +509,15 @@ paper.bat <command> [options]
 | `strategy_weights` | Per-strategy base weights, before regime and learned adjustment |
 | `alert_check_minutes` | Minutes between background alert checks, or 0 to switch them off |
 
-Two environment variables move where things are stored, which is how you keep a
-paper journal and a live one side by side without editing anything:
+These environment variables are the ones most often set. The first two move
+where things are stored, which is how you keep a paper journal and a live one
+side by side without editing anything; DEPLOY.md lists the rest:
 
 | Variable | Effect |
 |---|---|
 | `STOCKBOT_DB` | Use this database file instead of `data/stockbot.db` |
 | `STOCKBOT_CONFIG` | Use this settings file instead of `config.json` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. Unset means no login at all |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. With no way to sign in set up, your own machine needs no login; a public server shows the example account and says signing in is off |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
 
@@ -561,9 +569,10 @@ a perfectly plausible Altman score that is wrong by the exchange rate, and the
 filing contains no rate to correct it with. Every model refuses on those, and
 names the currencies it found.
 
-**Models applied outside their domain.** No Altman Z for a bank: the
-coefficients were fitted on manufacturers, and a balance sheet that is mostly
-other people's money by design reads as distressed however healthy it is.
+**Models applied outside their domain.** No scores for a bank or an insurer:
+Altman's coefficients were fitted on manufacturers, and a balance sheet that is
+mostly other people's money by design reads as distressed however healthy it is.
+The cash flow and margin tests of the other three do not fit one either.
 
 **Partial evidence.** A Piotroski score computed from seven available tests
 says "6 of 7" and names the two it could not measure, rather than grading out
@@ -598,10 +607,11 @@ decades of filings, and can be looked up.
 
 Three things they deliberately will not do:
 
-**Score a bank on Altman.** The coefficients were fitted on manufacturers, and
+**Score a bank.** Altman's coefficients were fitted on manufacturers, and
 a balance sheet that is mostly other people's money by design reads as
-distressed however healthy it is. A number there would mislead, so none is
-given.
+distressed however healthy it is. The other three models' cash flow, debt and
+margin tests do not fit a lender either. A number there would mislead, so none
+is given.
 
 **Rescale a partial score.** If only seven of the nine Piotroski tests can be
 measured, it says "6 of 7" and names what was missing, rather than quietly
@@ -653,10 +663,10 @@ are checked every time, and so is an alert that is new, edited, re-armed or
 whose last check failed. "Check them all now" and the routines check
 everything. The usage page counts the checks skipped.
 
-**Nothing runs when the window is closed.** The interface says so in those
-words rather than letting you believe a level is being watched overnight.
-Making that true means hosting the app somewhere that stays up, which this
-deliberately does not pretend to be.
+**It runs for as long as the server does.** Hosted somewhere that stays up, it
+watches day and night, whether or not anyone has a page open. On your own
+computer nothing is checked while the app is closed, and the pages there say
+so rather than letting you believe a level is being watched overnight.
 
 ---
 
@@ -746,9 +756,10 @@ against published values, Black-Scholes against textbook figures, put-call
 parity, the lexicon's handling of negation, database invariants, every template
 compiling, every link resolving, and a full analysis end to end.
 
-Every suite gets a private database and settings file through `tests/harness.py`.
-Nothing in the suite can read or write your real journal, and no suite depends
-on the order it runs in.
+Every suite that opens the database, the settings or the website gets private
+ones through `tests/harness.py`, which also keeps the keys in `.env` out of a
+test run. Nothing in the suite can read or write your real journal, and no
+suite depends on the order it runs in.
 
 ---
 
@@ -756,10 +767,10 @@ on the order it runs in.
 
 | Source | Used for | Notes |
 |---|---|---|
-| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, crypto. |
+| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, futures, crypto. |
 | Yahoo Finance quoteSummary | Ratios, profile, balance sheet, cash flow | Free, but needs a cookie and crumb handshake, which `bot/yahoo.py` performs and refreshes |
 | Yahoo Finance options | Chains, open interest, implied volatility | Same handshake. Greeks are computed here, not taken on trust |
-| SEC EDGAR | Filed financials (XBRL company facts), filing history, full text search | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
+| SEC EDGAR | Filed financials (XBRL company facts), filing history | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
 | Google News RSS | Headlines | Free, no key |
 | StockTwits | Retail trader posts | Free public endpoint |
 
@@ -777,12 +788,13 @@ source in `gather_social` in `bot/sentiment.py`.
 
 ## Limitations
 
-- **The backtest assumes stops and targets fill at the exact level.** Real fills
-  gap through stops, especially on news and at the open. The trade plan now
-  states this in cash: alongside what the stop budgets, it shows what a move the
-  size of that instrument's worst measured day would actually cost. For Bitcoin
+- **A stop is an order, not a price.** The back-test fills a stop the bar opened
+  through at that bar's open. Inside a bar it still assumes the stop's own
+  price, and real fills can be worse, especially on news. The trade plan states
+  this in cash: alongside what the stop budgets, it shows what a move the size
+  of that instrument's worst measured day would actually cost. For Bitcoin
   that is routinely three times the budgeted risk; for an index fund closer to
-  1.2 times. The backtest itself still assumes the clean fill.
+  1.2 times.
 - **Cost is modelled as a flat spread.** No size-dependent slippage, no partial
   fills.
 - **Sixty days of 5-minute history is one market regime.** An edge measured
@@ -807,7 +819,7 @@ Three details do most of the work:
 
 - **Every figure is monospaced with tabular numerals**, so columns of prices and
   R multiples line up and stay scannable.
-- **Semantic colours are warm.** Gains are olive `#68773b`, losses rust
+- **Semantic colours are warm.** Gains are olive `#616f37`, losses rust
   `#a53e2a`. A neon green on cream would look violently wrong.
 - **Contrast was solved, not copied.** The published warm tokens are tuned for
   large display type and fail AA as small text on cream: muted grey lands at
@@ -815,36 +827,25 @@ Three details do most of the work:
   until it cleared 4.5:1, keeping the hue and gaining legibility.
 
 There is a warm dark theme too, which follows your system setting. The
-decisions are recorded in `design-system/stock-bot/MASTER.md`.
+colours and the reasons for them are at the top of `static/style.css`.
 
 ---
 
 ## Putting it on the internet
 
-The web app runs on your machine. `http://127.0.0.1:8000` only works there,
-which is deliberate: your API key, your trades and your positions stay local.
+Started from `Stock Bot.bat`, the web app runs on your machine.
+`http://127.0.0.1:8000` only works there, which is deliberate: your API key,
+your trades and your positions stay local.
 
-To give other people a public URL, three things have to change.
+orenth.app is the same code on a server: one Render instance behind
+Cloudflare, run by waitress (`serve.py`), with an account for each person and
+one SQLite file on a disk that outlives each release. [DEPLOY.md](DEPLOY.md)
+has the steps. It must stay one instance, because two cannot share that file,
+and one analysis keeps a CPU core busy for a few seconds.
 
-**Hosting.** The Flask development server that ships here is single-process and
-explicitly not meant for public traffic. A real deployment needs a production
-server such as gunicorn or waitress behind a reverse proxy, on a host like
-Fly.io, Render or a small VPS. Expect a few dollars a month for one instance.
-
-**Concurrency.** One analysis pins a CPU core for two to five seconds, and the
-cache is per-process and in-memory. With more than a handful of simultaneous
-users you need a job queue and a shared cache rather than doing the work inside
-the request.
-
-**Multi-user data.** Everything currently assumes one person: one SQLite file,
-one config, one journal, no accounts. Serving several people means user
-accounts, per-user trade isolation, and a database that tolerates concurrent
-writes better than SQLite does.
-
-None of that is exotic, but it is a different project from the one that exists
-now, and it should follow rather than precede a forward-tested edge. There is
-also licensing to check: publishing trading signals for money is regulated in
-many countries, and the rules differ by where you and your users are.
+There is also licensing to check before running your own: publishing trading
+signals for money is regulated in many countries, and the rules differ by where
+you and your users are.
 
 ---
 
@@ -855,7 +856,7 @@ Stock Bot.bat       double-click this: starts the web server
 web.py              the Flask web app
 templates/          web pages, including the settings screen
 static/style.css    warm editorial design system
-design-system/      the recorded design decisions
+design-system/      an early design study, kept for its history only
 menu.py             terminal menu
 analyze.py          analysis CLI
 paper.py            paper trading journal CLI
@@ -868,13 +869,15 @@ backup.py           consistent snapshots via SQLite's backup API, then verified
 preflight.py        checks a live deployment before anyone else sees it
 Dockerfile          the deployed image
 DEPLOY.md           putting it online, step by step
+mobile/             the iPhone app: the site in a native shell
+tools/              redraw the logo and the preview card, and operator's scripts
 tests/              every suite, runnable with tests/run_all.py
 bot/
   engine.py         the analysis pipeline, shared by web and CLI
   market.py         data fetching, symbol resolution, cleaning
   indicators.py     30+ indicators in pure NumPy
   levels.py         swing pivots, support/resistance, session ranges
-  strategies.py     34 strategies, families, regime classification
+  strategies.py     44 strategies, families, regime classification
   learning.py       per-strategy measurement and weight learning
   calibrate.py      walk-forward backtest and probability calibration
   database.py       SQLite persistence
@@ -886,6 +889,20 @@ bot/
 
   accounts.py       who owns what, sessions, and the shared/personal split
   auth.py           Google sign-in: authorization code flow with PKCE
+  codes.py          sign-in codes by email and text, and their limits
+  apple.py          Sign in with Apple, on the site and in the app
+  billing.py        Free and Pro, through Stripe, and the free allowance
+  appstore.py       checking what Apple says about a purchase is Apple's
+  apple_store.py    Pro bought in the iPhone app
+  invites.py        a friend's link, and the Pro time it gives
+  demo.py           the example account a signed-out visitor is shown
+  public.py         the pages anyone can read, and their pictures to share
+  digest.py         the weekly email
+  push.py           notifications to phones and browsers
+  webapp.py         the installable app and the offline worker's files
+  events.py         counts of what happened, for the operator
+  safejson.py       JSON read without trusting how deep it goes
+  terminal.py       console output setup
   quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
@@ -899,7 +916,7 @@ bot/
   scheduler.py      the background loop that actually checks alerts
   sessions.py       market hours, so the loop leaves a closed market alone
   export.py         your journal and measurements as CSV or JSON
-  sec.py            EDGAR filings, XBRL company facts, full text search
+  sec.py            EDGAR filings and XBRL company facts
   fundamentals.py   ratios from Yahoo, reconciled against what was filed
   valuation.py      discounted cash flow, reverse DCF, multiples
   options.py        Black-Scholes, Greeks, implied volatility, chain quality
@@ -907,7 +924,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         thirteen alert conditions and the checker
+  alerts.py         the alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 

@@ -11,6 +11,7 @@ import json
 import os as _os
 import re
 import sys as _sys
+import threading
 import time
 from types import SimpleNamespace as NS
 
@@ -217,7 +218,7 @@ try:
           '</span> <span class="faint">daily check 2h ago at 182.4</span>' in flat(top))
     check("one she analysed herself shows her own call and its age",
           '<b class="fig">ZZOWN</b></a> <span class="chip hold">WAIT</span> <span '
-          'class="faint">your 1h analysis 2d ago at 12.5, market closed</span>' in flat(top))
+          'class="faint">your hourly analysis 2d ago at 12.5, market closed</span>' in flat(top))
     check("one never analysed says so, whatever anyone else ran",
           '<b class="fig">ZZNEW</b></a> <span class="faint">not analysed yet</span>'
           in flat(top))
@@ -302,6 +303,51 @@ try:
           and "ZZQ rose above" in body)
     time.sleep(1.6)                    # let the abandoned fetches finish
 
+    # Reloaded while the prices are still being read, the page waits for that
+    # reading rather than starting another beside it.
+    real_mark, reads = web._mark_to_market, []
+
+    def slow_mark(trades):
+        reads.append(len(trades))
+        time.sleep(0.6)
+        return real_mark(trades)
+
+    web._mark_to_market = slow_mark
+    web.DASHBOARD_WAIT = 0.05
+    try:
+        for _ in range(4):
+            c.get("/")
+        web.DASHBOARD_WAIT = 3.0
+        body = text(c.get("/"))
+    finally:
+        web._mark_to_market = real_mark
+        web.DASHBOARD_WAIT = real_wait
+    check("the page reloaded while prices are read starts no second reading",
+          len(reads) == 1, reads)
+    check("and shows what that one found", "did not come back in time" not in flat(body)
+          and not web._MARKING)
+
+    # And a reading itself stops asking after so long, for the journal, which
+    # waits for it.
+    real_one, real_for, marked = web._mark_one, web.MARK_FOR, []
+
+    def slow_one(trade):
+        marked.append(trade["id"])
+        time.sleep(0.2)
+        return {"price": 1.0, "r": 0.0, "status": "open"}
+
+    web._mark_one, web.MARK_FOR = slow_one, 0.5
+    try:
+        t0 = time.time()
+        marks = web._mark_to_market([{"id": n} for n in range(200)])
+        took = time.time() - t0
+    finally:
+        web._mark_one, web.MARK_FOR = real_one, real_for
+    check("a long journal and a slow source do not hold a page for minutes",
+          took < 3 and len(marked) < 80 and len(marks) == 200
+          and sum(m["status"] == "no data" for m in marks.values()) == 200 - len(marked),
+          (took, len(marked), len(marks)))
+
     print()
     print("=" * 72)
     print("THE REVIEW BEFORE A PAPER TRADE")
@@ -360,6 +406,37 @@ try:
     check("pressing Confirm twice logs it once",
           len(db.list_trades(conn, symbol="ZZBUY", user=alice.id)) == 1)
     conn.close()
+    # Two presses at once: both get past the first look while prices are read.
+    both = add_run(alice, "ZZBOTH", "BUY", 100.0, 95.0, 110.0)
+    gate = threading.Barrier(2)
+    real_trail = web._trail_asked
+
+    def slow_trail(symbol, interval):
+        gate.wait(10)
+        return real_trail(symbol, interval)
+
+    answers = []
+
+    def press():
+        own = web.app.test_client()
+        sign_in(own, alice)
+        answers.append(own.post("/trades/take", data={"run_id": both}).status_code)
+
+    web._trail_asked = slow_trail
+    try:
+        presses = [threading.Thread(target=press) for _ in range(2)]
+        for p in presses:
+            p.start()
+        for p in presses:
+            p.join()
+    finally:
+        web._trail_asked = real_trail
+    conn = db.connect(DB)
+    check("pressing it twice at once logs it once too", answers == [302, 302]
+          and len(db.list_trades(conn, symbol="ZZBOTH", user=alice.id)) == 1, answers)
+    for x in db.list_trades(conn, symbol="ZZBOTH", user=alice.id):
+        db.delete_trade(conn, x["id"])
+    conn.close()
     body = text(c.get("/trades/simulate?run_id=%d" % buy))
     check("and the review then says it is already in the journal",
           "already in your journal" in body and 'action="/trades/take"' not in body)
@@ -368,6 +445,19 @@ try:
     body = text(c.get("/trades/simulate?run_id=%d" % short))
     check("a SHORT is shown as a short", '<span class="word">Short</span>' in body
           and "it gains if the price falls" in body)
+    # A short whose second target is below zero, a price nothing reaches, can
+    # still be confirmed: that target is left out.
+    deep = add_run(alice, "ZZDEEP", "SHORT", 1.0, 1.5, 0.2)
+    conn = db.connect(DB)
+    conn.execute("UPDATE runs SET target2=-0.4 WHERE id=?", (deep,))
+    conn.commit()
+    r = c.post("/trades/take", data={"run_id": deep})
+    got = db.list_trades(conn, symbol="ZZDEEP", user=alice.id)
+    check("a plan with a target below zero is logged without that target",
+          r.status_code == 302 and len(got) == 1 and got[0]["target2"] is None
+          and got[0]["target1"] == 0.2, (r.status_code, [dict(x) for x in got]))
+    db.delete_trade(conn, got[0]["id"]) if got else None
+    conn.close()
     wait = add_run(alice, "ZZWAIT", "WAIT", 95.0, 90.0, 105.0)
     r = c.get("/trades/simulate?run_id=%d" % wait)
     check("a WAIT has nothing to review", r.status_code == 400
@@ -474,6 +564,199 @@ try:
         web._RESEARCH_CACHE.clear()
     check("a saved thesis that cannot be priced just now leaves the research page standing",
           r.status_code == 200 and "Could not price ZZRES today" in page, r.status_code)
+
+    # A thesis that was closed keeps the outcome recorded for it: the price
+    # recovering afterwards made a "wrong" one read "right so far".
+    def thesis_of(balance, case):
+        return NS(balance=balance, verdict="lean", evidence_count=1, unknowns=[], neutral=[],
+                  bull=NS(summary="", points=case), bear=NS(summary="", points=[]),
+                  falsifiers=["A price below 80"], all_sources=[])
+
+    asked = []
+
+    def research_stub(symbol, price, cfg, **k):
+        asked.append(k)
+        points = [NS(headline="Coverage is positive", detail="d", evidence=[])]
+        return web.engine.Research(symbol=symbol, price=price, thesis=thesis_of(0.19, points))
+
+    web.cached_analysis = lambda *a, **k: NS(bars=stand_in)
+    web.engine.research = research_stub
+    market_mod.split_history = lambda symbol: []
+    web._RESEARCH_CACHE.clear()
+    conn = db.connect(DB)
+    conn.execute("DELETE FROM theses WHERE symbol='ZZRES'")
+    conn.execute("INSERT INTO theses (symbol, created_ts, price, balance, verdict, user_id, "
+                 "outcome, closed_price, closed_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("ZZRES", NOW - 90 * 86400, 100.0, 0.4, "lean bull", alice.id, "wrong", 60.0,
+                  NOW - 30 * 86400))
+    conn.commit()
+    conn.close()
+    daily = NS(symbol="ZZRES", interval="1d", close=[50.0 + k / 10 for k in range(400)],
+               timestamp=[NOW - (399 - k) * 86400 for k in range(400)], gmt_offset=0)
+    market_mod.fetch_bars = lambda symbol, interval="1d", lookback=None: daily
+    try:
+        sign_in(c, alice)
+        page = flat(text(c.get("/research?symbol=ZZRES&interval=15m")))
+        saved_part = page[page.index("Theses you saved"):]
+        check("a closed thesis keeps the outcome recorded for it",
+              ">wrong</span>" in saved_part and "so far" not in saved_part
+              and "closed 30d ago" in saved_part, saved_part[:1200])
+        check("at the price it was closed at", "-40.0%" in saved_part
+              and 'data-label="Now">60 ' in saved_part and "101" not in saved_part,
+              saved_part[:1200])
+
+        # The chart named for a year is a year of daily prices, whatever bars
+        # the analysis was opened on.
+        check("opened from 15-minute bars, the year's chart is of daily prices",
+              "<h2>The last year</h2>" in page and "daily closing prices" in page
+              and "about a year ago" not in page and "15m bars" not in page)
+        start = time.gmtime(NOW - 366 * 86400)
+        check("and its left end is dated",
+              "%d %s" % (start.tm_mday, time.strftime("%b %Y", start)) in page)
+        young = NS(symbol="ZZRES", interval="1d", close=daily.close[-40:],
+                   timestamp=daily.timestamp[-40:], gmt_offset=0)
+        check("forty days of prices are not called a year",
+              web._year_chart(young)["title"] == "The last 39 days",
+              web._year_chart(young)["title"])
+        market_mod.fetch_bars = must_not_run("a request for prices")
+        check("daily bars already in hand are used as they are",
+              web._year_chart(daily)["title"] == "The last year")
+        check("and with none to be had the chart is left out",
+              web._year_chart(stand_in) == {})
+        started.clear()
+
+        # What is saved is the case that was on the page.
+        asked.clear()
+        r = c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        conn = db.connect(DB)
+        row = db.thesis_list(conn, "ZZRES", user=alice.id)[0]
+        conn.close()
+        check("saving a thesis saves the one on the page, worked out once",
+              r.status_code == 302 and not asked and row["balance"] == 0.19
+              and row["price"] == 101.0 and "Coverage is positive" in row["bull_json"],
+              (r.status_code, asked, dict(row)))
+        web._RESEARCH_CACHE.clear()
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        check("and one whose page is no longer kept is worked out as the page is",
+              len(asked) == 1 and asked[0]["with_options"] is True
+              and asked[0]["with_reasoning"] is False, asked)
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m", "options": "0"})
+        check("a page without options saves without them", asked[-1]["with_options"] is False)
+
+        # A case that said it was too thin for a view is kept as none, and one
+        # saved before that was so is not judged or shown as a call either.
+        thin = ("Too little evidence was available to form a view. Do not read the "
+                "balance below as meaningful.")
+        too_thin = thesis_of(1.0, [])
+        too_thin.verdict = thin
+        web.engine.research = lambda symbol, price, cfg, **k: web.engine.Research(
+            symbol=symbol, price=price, thesis=too_thin)
+        web._RESEARCH_CACHE.clear()
+        conn = db.connect(DB)
+        conn.execute("DELETE FROM theses WHERE symbol='ZZRES'")
+        conn.commit()
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        row = db.thesis_list(conn, "ZZRES", user=alice.id)[0]
+        check("a case too thin for a view is saved as taking no side",
+              row["balance"] == 0.0 and row["verdict"] == thin, dict(row))
+        conn.execute("UPDATE theses SET balance=1.0, price=200.0 WHERE id=?", (row["id"],))
+        conn.commit()
+        page = flat(text(c.get("/research?symbol=ZZRES&interval=15m")))
+        saved_part = page[page.index("Theses you saved"):]
+        check("one saved earlier with a side is not judged wrong for a fall",
+              "wrong so far" not in saved_part and "no call" in saved_part
+              and 'data-label="Called">No view</td>' in saved_part, saved_part[:1500])
+        market_mod.fetch_bars = fake_bars
+        body = flat(text(c.get("/monitor")))
+        check("nor called bullish on Monitor",
+              '<span class="chip mute"> No view </span>' in body,
+              body[body.index("<h2>Saved theses</h2>"):][:2500])
+        conn.execute("UPDATE theses SET outcome='undecided', closed_price=150.0, "
+                     "closed_ts=? WHERE id=?", (NOW, row["id"]))
+        conn.commit()
+        body = flat(text(c.get("/monitor")))
+        check("nor once it is closed", '<span class="chip mute"> No view </span>' in body
+              and '<span class="chip long"> Bullish </span>' not in body,
+              body[body.index("<h2>Saved theses</h2>"):][:2500])
+        market_mod.fetch_bars = must_not_run("a request for prices")
+        conn.execute("DELETE FROM theses WHERE id=?", (row["id"],))
+        conn.commit()
+        conn.close()
+
+        # A stale button or a hand-made form gets a sentence, not the error's.
+        for route in ("delete", "close", "reopen"):
+            for sent in ({"thesis_id": "abc"}, {}, {"thesis_id": "999999"},
+                         {"thesis_id": "9" * 30}, {"thesis_id": "-1"}):
+                r = c.post("/thesis/" + route, data=dict(sent, outcome="right"))
+                said = text(r)
+                check("thesis %s with %s says it could not be found" % (route, sent),
+                      r.status_code == 400 and "That thesis could not be found" in said
+                      and "invalid literal" not in said and "Bad Request" not in said,
+                      r.status_code)
+
+        # Two people opening one page, or one person twice, share the work.
+        import threading
+        together, done = threading.Barrier(2), []
+
+        def slow_research(symbol, price, cfg, **k):
+            asked.append(k)
+            time.sleep(0.4)
+            return web.engine.Research(symbol=symbol, price=price)
+
+        web.engine.research = slow_research
+        web._RESEARCH_CACHE.clear()
+        asked.clear()
+
+        def open_page():
+            client = web.app.test_client()
+            sign_in(client, alice)
+            together.wait(5)
+            done.append(client.get("/research?symbol=ZZRES&interval=1d").status_code)
+
+        market_mod.fetch_bars = fake_bars
+        threads = [threading.Thread(target=open_page) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        check("two requests at once build the research once",
+              done == [200, 200] and len(asked) == 1 and not web._RESEARCH_RUNNING,
+              (done, asked))
+
+        # The example is open to anyone, so its address cannot make the server
+        # build it again, nor send a paid request.
+        visitor = web.app.test_client()
+        asked.clear()
+        stand_in.interval, stand_in.symbol = "1d", "NVDA"
+        real_clock, web.time = web.time, NS(**{k: getattr(time, k) for k in (
+            "time", "gmtime", "strftime", "localtime", "mktime", "sleep", "monotonic")
+            if hasattr(time, k)})
+        try:
+            statuses = []
+            for later in (0, 600):
+                web.time.time = lambda later=later: time.time() + later
+                for extra in ("", "&news=0", "&options=0", "&news=0&options=0"):
+                    statuses.append(visitor.get("/research?symbol=NVDA&interval=1d" + extra)
+                                    .status_code)
+        finally:
+            web.time = real_clock
+            stand_in.interval, stand_in.symbol = "15m", "ZZRES"
+        check("the example's research is built once, whatever the address asks for",
+              set(statuses) == {200} and len(asked) == 1, (statuses, asked))
+        check("and without the paid written reasoning",
+              asked and asked[0]["with_reasoning"] is False, asked)
+        sign_in(c, alice)
+        stand_in.interval, stand_in.symbol = "1d", "NVDA"
+        c.get("/research?symbol=NVDA&interval=1d")
+        stand_in.interval, stand_in.symbol = "15m", "ZZRES"
+        check("an account's own page is never the example's copy",
+              len(asked) == 2 and asked[1]["with_reasoning"] is True, asked)
+    finally:
+        web.cached_analysis = must_not_run("an analysis")
+        web.engine.research = real_research
+        market_mod.split_history = lambda symbol: []
+        market_mod.fetch_bars = fake_bars
+        web._RESEARCH_CACHE.clear()
 
     print()
     print("=" * 72)
@@ -866,6 +1149,204 @@ finally:
     workflows.engine.analyse = real_routine[0]
 check("and with billing off nobody is",
       len(analysed) == 4 and looks_used(pat) == 0, (analysed, looks_used(pat)))
+
+print()
+print("=" * 72)
+print("ONE PERSON'S SCREEN DOES NOT SPEND EVERYBODY'S DATA")
+print("=" * 72)
+from bot import yahoo as yahoo_mod  # noqa: E402
+
+conn = db.connect(DB)
+quin = A.upsert_email_user(conn, "quin@example.com")
+conn.close()
+sign_in(c, quin)
+quoted, listed = [], []
+real_quotes = (yahoo_mod.quotes, yahoo_mod.predefined_screen)
+yahoo_mod.quotes = lambda symbols, *_a, **_k: quoted.append(list(symbols)) or [
+    {"symbol": s, "shortName": s, "regularMarketPrice": 10.0, "marketCap": 1e9}
+    for s in symbols]
+yahoo_mod.predefined_screen = lambda name, count=25: listed.append(name) or [{"symbol": "ZZU"}]
+web._RATE.clear()
+try:
+    long_list = " ".join("ZZ%03d" % n for n in range(300))
+    body = flat(text(c.get("/screener", query_string={"go": "1", "symbols": long_list})))
+    check("a typed list is cut to what one screen takes",
+          [len(q) for q in quoted] == [screener_mod.MAX_LISTED], [len(q) for q in quoted])
+    check("and the page says how many were not looked at",
+          "240 of the 300 instruments on your list were not looked at" in body)
+    del quoted[:]
+    c.get("/screener", query_string={"go": "1", "symbols": "zzq ZZQ,zzq"})
+    check("a name typed three times is asked for once", quoted == [["ZZQ"]], quoted)
+    body = text(c.get("/screener", query_string={
+        "go": "1", "universe": "anything, a link says so"}))
+    check("a list that is not on the form is never asked for, nor said back",
+          listed == ["most_actives"] and "a link says so" not in body, listed)
+    check("a debt filter is said back as the percent it is",
+          "Debt to equity at most 150%" in " ".join(re.sub(
+              r"<[^>]+>", " ", text(c.get("/screener", query_string={
+                  "go": "1", "symbols": "ZZNONE", "price_min": "999", "debt_max": "150"}))).split()))
+    done = sum(len(v) for k, v in web._RATE.items() if k == ("screen", "user:%d" % quin.id))
+    check("each screen is counted", done == 4, done)
+    for _n in range(web.SCREENS_PER_HOUR - done):
+        c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    before = len(quoted)
+    r = c.get("/screener", query_string={"go": "1", "symbols": "ZZQ"})
+    check("past the hour's screens, one more is refused in words and asks for nothing",
+          r.status_code == 429 and "run screens a lot" in text(r) and len(quoted) == before,
+          (r.status_code, len(quoted) - before))
+    check("while the empty form still opens", c.get("/screener").status_code == 200)
+finally:
+    yahoo_mod.quotes, yahoo_mod.predefined_screen = real_quotes
+    web._RATE.clear()
+
+from bot import fundamentals as fundamentals_mod  # noqa: E402
+
+check("a company's debt to equity is shown as the percent it is",
+      fundamentals_mod.Metric("debt_to_equity", "Debt to equity", 154.49, "percent").display()
+      == "154%")
+
+print()
+print("=" * 72)
+print("A ROUTINE FITS IN ONE REQUEST")
+print("=" * 72)
+conn = db.connect(DB)
+rae = A.upsert_email_user(conn, "rae@example.com")
+for n in range(40):
+    db.watch_add(conn, "ZZL%02d" % n, "1d", user=rae.id)
+conn.close()
+workflows.engine.analyse = routine_analyse
+try:
+    report = run_routine("watchlist", rae)
+    first = list(analysed)
+    check("a long watchlist is analysed up to a limit",
+          first == ["ZZL%02d" % n for n in range(workflows.WATCH_MOST)], len(first))
+    held_back = [s for s in report.steps if s.label == "Left for next time"]
+    check("and says how many were left, and which",
+          "15 more were left for the next run" in report.headline
+          and held_back and "ZZL25" in held_back[0].detail
+          and "and 7 more" in held_back[0].detail, (report.headline, held_back))
+    check("and counts only what was analysed",
+          report.headline.startswith("None of the 25 watched instruments changed."))
+    run_routine("watchlist", rae)
+    check("run again, it starts with the ones that were left",
+          analysed[:15] == ["ZZL%02d" % n for n in range(25, 40)], analysed[:15])
+
+    def slow_analyse(symbol, *a, **k):
+        time.sleep(0.1)
+        return routine_analyse(symbol, *a, **k)
+
+    workflows.WATCH_SECONDS, seconds = 0.05, workflows.WATCH_SECONDS
+    workflows.engine.analyse = slow_analyse
+    report = run_routine("watchlist", rae)
+    workflows.WATCH_SECONDS, workflows.engine.analyse = seconds, routine_analyse
+    check("out of time, it starts no more and says so",
+          len(analysed) == 1 and "39 more were left" in report.headline, report.headline)
+
+    # One of anything is said as one, and a failure is not an answer.
+    conn = db.connect(DB)
+    sol = A.upsert_email_user(conn, "sol@example.com")
+    db.watch_add(conn, "ZZO1", "1d", user=sol.id)
+    db.open_trade(conn, "ZZO1", "1d", 1, 100.0, 95.0, 110.0, quantity=10, user=sol.id)
+    db.watch_add(conn, "LINK", "1d", user=sol.id, exact=True)
+    db.watch_add(conn, "BTC", "1d", user=sol.id)
+    # Saved as typed, before tickers were tidied on the way in.
+    conn.execute("UPDATE watchlist SET symbol='BTC', exact=0 WHERE user_id=? AND "
+                 "symbol LIKE 'BTC%'", (sol.id,))
+    conn.commit()
+    conn.close()
+    priced, real_bars = [], workflows.fetch_bars
+    real_check = workflows._check_positions
+    workflows.fetch_bars = lambda symbol, interval="1d", *a, **k: priced.append(symbol) or NS(
+        last_price=110.0, prev_close=100.0)
+    workflows._check_positions = lambda *a, **k: None
+    try:
+        report = run_routine("morning", sol)
+    finally:
+        workflows.fetch_bars, workflows._check_positions = real_bars, real_check
+    check("the morning review prices an entry as the instrument it opens",
+          sorted(priced) == ["BTC-USD", "LINK", "ZZO1"], priced)
+    check("and one trade is said as one",
+          "0 analyses recorded, 1 trade logged, 0 alerts set, 3 instruments watched."
+          in [s.detail for s in report.steps], [s.detail for s in report.steps])
+    conn = db.connect(DB)
+    for sym in ("LINK", "BTC"):
+        conn.execute("DELETE FROM watchlist WHERE user_id=? AND symbol=?", (sol.id, sym))
+    conn.commit()
+    conn.close()
+    report = run_routine("watchlist", sol)
+    check("one watched instrument is said as one",
+          report.headline == "The one watched instrument analysed did not change.",
+          report.headline)
+    conn = db.connect(DB)
+    for sym in ("ZZO2", "ZZO3"):
+        db.watch_add(conn, sym, "1d", user=sol.id)
+    conn.close()
+    refuse.add("ZZO2")
+    report = run_routine("watchlist", sol)
+    check("an analysis that failed is not counted as looked at",
+          report.headline == "None of the 2 watched instruments changed. "
+                             "1 more could not be analysed.", report.headline)
+    refuse.update(("ZZO1", "ZZO3"))
+    report = run_routine("watchlist", sol)
+    check("and when all of them fail it says so",
+          report.headline == "Nothing on the watchlist could be analysed this time.",
+          report.headline)
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO9")], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("one candidate is said as one",
+          report.headline == "1 candidate passed the screen and was analysed.", report.headline)
+    # The screen lists the largest first, and a routine analyses four of them.
+    # "The best few were analysed" was said of any number of them.
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO%d" % k) for k in (9, 8, 7, 6, 5)], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("several candidates are the largest, not the best",
+          report.headline == "5 candidates passed the screen; 4 of the largest were "
+                             "analysed.", report.headline)
+    refuse.update(("ZZO9", "ZZO8", "ZZO7"))
+    report = run_routine("hunt", sol)
+    check("and only the ones analysed are counted as analysed",
+          report.headline == "5 candidates passed the screen; 1 of the largest was "
+                             "analysed.", report.headline)
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO9")], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("and one not as analysed when it was not",
+          report.headline == "1 candidate passed the screen, but none could be analysed "
+                             "just now.", report.headline)
+    refuse.clear()
+
+    # The button on the page.
+    sign_in(c, rae)
+    web._RATE.clear()
+    web._CACHE[("kept",)] = (time.time(), None, {})
+    real_run, runs = workflows.run, []
+    workflows.run = lambda name, *a, **k: runs.append(name) or workflows.RunReport(
+        name, 0, 0, headline="Done.")
+    try:
+        check("the routine runs from its button",
+              c.post("/workflow/positions").status_code == 302 and runs == ["positions"])
+        check("and leaves everyone's kept analyses alone", ("kept",) in web._CACHE)
+        web._ROUTINES.add(rae.id)
+        r = c.post("/workflow/watchlist")
+        check("while one is running, another is not started beside it",
+              r.status_code == 409 and runs == ["positions"]
+              and "still running" in text(r), r.status_code)
+        web._ROUTINES.discard(rae.id)
+        for _n in range(web.ROUTINES_PER_HOUR):
+            r = c.post("/workflow/positions")
+        check("past the hour's routines, one more is refused in words",
+              r.status_code == 429 and "run routines a lot" in text(r)
+              and len(runs) == web.ROUTINES_PER_HOUR - 1, (r.status_code, len(runs)))
+        check("and nothing is left marked as running", rae.id not in web._ROUTINES)
+    finally:
+        workflows.run = real_run
+        web._ROUTINES.clear()
+        web._CACHE.pop(("kept",), None)
+        web._RATE.clear()
+finally:
+    workflows.engine.analyse, workflows.screener_mod.run = real_routine
 
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)

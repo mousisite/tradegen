@@ -162,9 +162,21 @@ try:
     print("=" * 72)
     gone = db.alert_add(conn, "ZZZ", "price_above", threshold=5, user=bob.id)
     alerts.check(conn, call_of=call_of)
-    row = conn.execute("SELECT last_error, last_checked FROM alerts WHERE id=?", (gone,)).fetchone()
+    row = conn.execute("SELECT last_error, last_error_ts, last_checked FROM alerts WHERE id=?",
+                       (gone,)).fetchone()
     check("a symbol with no price leaves its reason on the alert",
-          row["last_error"] and "No price" in row["last_error"] and row["last_checked"], row["last_error"])
+          row["last_error"] and "No price" in row["last_error"] and row["last_error_ts"],
+          row["last_error"])
+    check("and does not say it was looked at, which it was not", row["last_checked"] is None,
+          row["last_checked"])
+    LIMITED = ("The market data source limits how often this site may ask for prices, and "
+               "turned this request away. Try again in about 5 minutes. Nothing you did "
+               "caused this, and your alerts are safe in the meantime, every one of them.")
+    check("a long reason is kept to a whole sentence",
+          alerts._whole(LIMITED) == LIMITED[:LIMITED.index(" Nothing")], alerts._whole(LIMITED))
+    check("and one long sentence to a whole word",
+          alerts._whole("alpha " * 60).endswith("alpha...")
+          and len(alerts._whole("alpha " * 60)) <= 190, alerts._whole("alpha " * 60))
     PRICE["ZZZ"] = 4.0
     alerts.check(conn, call_of=call_of)
     check("and a check that works clears it",
@@ -192,6 +204,34 @@ try:
     check("and it is in the owner's history",
           any(e["kind"] == "stop_breach" and e["trade_id"] == long_id
               for e in db.event_list(conn, alice.id)))
+    # A made-up ticker in a journal was asked for, and refused, every round.
+    made_up = db.open_trade(conn, "NOSUCH", "1d", 1, entry=22.0, stop=21.0, user=alice.id)
+
+    def nothing_there(interval):
+        raise web.market_mod.SymbolNotFound("nothing under that symbol")
+
+    SERIES["NOSUCH"] = nothing_there
+    began = time.time()
+
+    def asked_at(when, **how):
+        del ASKED[:]
+        alerts.check_stops(conn, now=began + when, **how)
+        return ("NOSUCH", "1d") in ASKED
+
+    check("a ticker the source has nothing under is asked for twice running, then left",
+          [asked_at(when, skip_closed=True) for when in (0, 300, 600, 3500)]
+          == [True, True, False, False])
+    check("but not by a check someone asked for", asked_at(700, user=alice.id))
+    check("and it is asked for again an hour later", asked_at(700 + 3601, skip_closed=True))
+    del SERIES["NOSUCH"]
+    PRICE["NOSUCH"] = 20.0
+    asked_at(8000 + 700, skip_closed=True)
+    check("a ticker that comes back is watched as before", asked_at(9000, skip_closed=True)
+          or conn.execute("SELECT breach_noticed FROM trades WHERE id=?",
+                          (made_up,)).fetchone()[0] is not None)
+    db.delete_trade(conn, made_up)
+    alerts._STOPS_MISSING.clear()
+    del PRICE["NOSUCH"]
     conn.close()
 
     print()
@@ -349,6 +389,26 @@ try:
     check("a stop that traded and came back is told, as the journal counts it",
           len(said) == 1 and "traded at 94" in said[0], said)
 
+    # A coin's hourly bar at 02:00 UTC on the 11th is the evening of the 10th
+    # in New York, which is the day the journal names.
+    evening = 1762826400
+
+    def dipped_late(interval="1h"):
+        b = daily([100.0] * 30, lows=[100.0] * 29 + [94.0], live=99.0, interval="1h")
+        b.timestamp = np.array([evening - (29 - k) * 3600 for k in range(30)], dtype=np.int64)
+        return b
+
+    SERIES["EVE"] = dipped_late
+    eve = db.open_trade(conn, "EVE", "1h", 1, entry=100.0, stop=95.0, target1=110.0,
+                        quantity=1, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (evening - 10 * 3600, eve))
+    conn.commit()
+    said = [f.message for f in alerts.check_stops(conn)["fired"] if f.trade_id == eve]
+    journal = web._touched_day({"interval": "1h"}, dipped_late(), evening)
+    check("on the day the journal says it was, an evening crossing included",
+          len(said) == 1 and "traded at 94 on 10 Nov, past" in said[0]
+          and journal == "10 Nov 2025", (said, journal))
+
     # Two checks at once both read the trade before either marks it.
     SERIES["OVL"] = lambda interval="1d": daily([100.0] * 30, live=90.0, interval=interval)
     ovl = db.open_trade(conn, "OVL", "1d", 1, entry=100.0, stop=95.0, target1=110.0,
@@ -440,8 +500,82 @@ try:
     out = alerts.deliver(conn, [again], broken, web._alert_address(conn))
     row = conn.execute("SELECT emailed, email_error FROM alert_events WHERE id=?",
                        (again.event_id,)).fetchone()
-    check("a failed send is on record too, with why", out["failed"] == 1
-          and row["emailed"] is None and "smtp down" in row["email_error"])
+    check("a failed send is on record too, in words of its own", out["failed"] == 1
+          and row["emailed"] is None and row["email_error"] == alerts.NOT_SENT
+          and "Google" not in alerts.NOT_SENT, row["email_error"])
+    long = alerts.Fired(1, "BTC-USD", "sweeps_prior_high", None, 96900.0,
+                        "BTC-USD took yesterday's high of 97,250 and closed back below it, at "
+                        "96,900, in the bar that opened at 10:00 New York time on 19 Nov.", "",
+                        alice.id, "")
+    del sent[:]
+    alerts.deliver(conn, [long], send, web._alert_address(conn), site="https://example.com/")
+    check("a long subject ends on a whole word",
+          sent[0][1] == "Orenth: BTC-USD took yesterday's high of 97,250 and closed back...", sent[0][1])
+    check("and the body says where the Monitor page is",
+          "https://example.com/monitor\n" in sent[0][2], sent[0][2])
+    slow = alerts.Fired(1, "AAA", "price_above", 90.0, 100.0, "AAA is above 90 once more.", "",
+                        alice.id, "")
+    slow.event_id = db.event_add(conn, alice.id, slow.kind, slow.symbol, slow.message)
+    real_mail = (web.codes_mod.email_ready, web.codes_mod.send_mail)
+    web.codes_mod.email_ready = lambda: True
+    web.codes_mod.send_mail = lambda *a, **k: (time.sleep(1.5), send(*a, **k))
+    del sent[:]
+    try:
+        started = time.time()
+        web._tell([slow])
+        waited = time.time() - started
+    finally:
+        web.codes_mod.email_ready, web.codes_mod.send_mail = real_mail
+    check("a slow mail server holds up neither a check nor a page", waited < 1.0, waited)
+    check("which is still sent, and on record", alerts.mail_idle(10)
+          and [s[0] for s in sent] == ["alice@example.com"]
+          and conn.execute("SELECT emailed FROM alert_events WHERE id=?",
+                           (slow.event_id,)).fetchone()[0], sent)
+    conn.close()
+
+    print()
+    print("=" * 72)
+    print("A ROUND THAT BREAKS OFF STILL TELLS WHAT FIRED")
+    print("=" * 72)
+    conn = db.connect(DB)
+    lost = person("lost@example.com")
+    level = db.alert_add(conn, "AAA", "price_above", threshold=90, user=lost.id)
+    told, real = [], (alerts.check_stops, web._tell)
+
+    def busy(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    alerts.check_stops, web._tell = busy, lambda fired: told.extend(fired)
+    try:
+        try:
+            web._check_and_tell(conn, user=lost.id)
+            raised = False
+        except RuntimeError:
+            raised = True
+    finally:
+        alerts.check_stops = real[0]
+    check("what fired before the stops failed is told", [f.alert_id for f in told] == [level], told)
+    check("and the failure still reaches the caller", raised)
+    del told[:]
+    second = db.alert_add(conn, "BBB", "price_above", threshold=40, user=lost.id)
+    real_add = db.event_add
+
+    def no_event(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    db.event_add = no_event
+    try:
+        web._check_and_tell(conn, user=lost.id)
+    except RuntimeError:
+        pass
+    finally:
+        db.event_add = real_add
+    check("so is one whose place in the history could not be written",
+          [f.alert_id for f in told] == [second], told)
+    del told[:]
+    web._check_and_tell(conn, user=lost.id)
+    web._tell = real[1]
+    check("and the next round tells neither again", told == [], told)
     conn.close()
 
     print()
@@ -483,6 +617,10 @@ try:
         seen = got["cursor"]
         check("a page that has seen them is told nothing more",
               c.get("/api/alerts/status?after=%d" % seen).get_json()["new_fires"] == [])
+        odd = {q: c.get("/api/alerts/status?" + q).status_code for q in (
+            "since=nan", "since=inf", "since=-inf", "since=1e300", "since=abc",
+            "after=" + "9" * 30, "after=-" + "9" * 30, "after=" + "9" * 6000)}
+        check("a marker that cannot be one is read as none", set(odd.values()) == {200}, odd)
         sign_in(bob)
         got = c.get("/api/alerts/status?since=0").get_json()
         check("Bob sees Bob's", got["new_fires"][0]["message"] == "Bob's private level"
@@ -506,6 +644,15 @@ try:
     r = c.post("/monitor/alert/edit", data={"alert_id": level, "threshold": "1", "note": "x"})
     check("or edit it", r.status_code == 400)
     sign_in(alice)
+    strange = [c.post("/monitor/alert/%s" % what, data={"alert_id": asked})
+               for what in ("pause", "resume", "reset", "delete", "edit")
+               for asked in ("", "x", "1e309", "9" * 30)]
+    strange.append(c.post("/settings/notifications/remove", data={"device_id": "9" * 30}))
+    said = [r.data.decode("utf-8", "replace") for r in strange]
+    check("a number no alert or device can have is refused in words, not with an error",
+          all(r.status_code in (400, 302) for r in strange)
+          and not any("invalid literal" in s for s in said),
+          [r.status_code for r in strange])
     c.post("/monitor/alert/pause", data={"alert_id": level})
     conn = db.connect(DB)
     check("Alice can pause it",
@@ -523,7 +670,8 @@ try:
     page = c.get("/monitor").data.decode("utf-8", "replace")
     check("the Monitor page lists what it has told you",
           "What it has told you" in page and "from WAIT to BUY" in page and "Stop crossed" in page)
-    check("including whether the email went", "sent" in page and "failed: smtp down" in page)
+    check("including whether the email went",
+          "sent" in page and "failed: it could not be sent just now" in page)
     check("the change-of-call alerts can be chosen", "Call turns BUY" in page)
 
     print()
@@ -588,12 +736,174 @@ try:
     db.alert_edit(conn, keep, 48.0, "", user=carol.id)
     check("a new level is a new question: already met, it fires",
           fired_ids(alerts.check(conn, user=carol.id)) == [keep])
+    db.alert_edit(conn, keep, 48.0, "a note alone", user=carol.id)
+    row = conn.execute("SELECT note, state FROM alerts WHERE id=?", (keep,)).fetchone()
+    check("a note alone is not: it is kept, and nothing is told again",
+          row["note"] == "a note alone" and row["state"] == "met"
+          and fired_ids(alerts.check(conn, user=carol.id)) == [], tuple(row))
+    sign_in(carol)
+    for typed, shown in (("7", "7"), ("29", "29"), ("2.5", "2.5")):
+        c.post("/monitor/alert/add", data={"symbol": "EEE", "kind": "near_52w_high",
+                                           "threshold": typed, "repeat": "1"})
+        pid = conn.execute("SELECT MAX(id) FROM alerts").fetchone()[0]
+        page = c.get("/monitor").data.decode("utf-8", "replace")
+        box = re.search(r'id="e-th-%d"[^>]*?value="([^"]*)"' % pid, page, re.S).group(1)
+        conn.execute("UPDATE alerts SET state='met' WHERE id=?", (pid,))
+        conn.commit()
+        c.post("/monitor/alert/edit", data={"alert_id": pid, "threshold": box, "note": "n"})
+        row = conn.execute("SELECT threshold, state FROM alerts WHERE id=?", (pid,)).fetchone()
+        check("%s%% is edited as %s, and saving its note alone keeps what it has told"
+              % (typed, shown), box == shown and row["state"] == "met"
+              and abs(row["threshold"] - float(typed) / 100) < 1e-12, (box, tuple(row)))
+        db.alert_delete(conn, pid, user=carol.id)
     conn.close()
     sign_in(carol)
     page = c.get("/monitor").data.decode("utf-8", "replace")
     check("the page shows a repeating alert as watching, with no Re-arm",
           "tells you every time it happens" in page and page.count(">Re-arm<") == 1,
           page.count(">Re-arm<"))
+
+    print()
+    print("=" * 72)
+    print("WHAT HAPPENED BETWEEN TWO CHECKS")
+    print("=" * 72)
+    # Five-minute bars ending on T0, 14:30 UTC. The check's own clock is given,
+    # so bars are before or after it as they would be live.
+    erin = person("erin@example.com")
+    conn = db.connect(DB)
+    T0 = LAST
+
+    def five(closes, end=T0, live=None, highs=None, lows=None, volumes=None):
+        b = daily(closes, highs, lows, volumes, live=live, interval="5m")
+        n = len(closes)
+        b.timestamp = np.array([end - (n - 1 - i) * 300 for i in range(n)], dtype=np.int64)
+        b.meta = {"regularMarketTime": end + 300}
+        return b
+
+    def feed(symbol, bars, now):
+        SERIES[symbol] = lambda interval="5m": bars
+        return alerts.check(conn, user=erin.id, now=now)
+
+    def said(out, aid):
+        return next((f.message for f in out["fired"] if f.alert_id == aid), None)
+
+    def state(aid):
+        return conn.execute("SELECT state FROM alerts WHERE id=?", (aid,)).fetchone()[0]
+
+    up = db.alert_add(conn, "SPK", "price_above", threshold=200.0, interval="5m", repeat=True,
+                      user=erin.id)
+    flat = [199.0] * 60
+    # The last bar before the first look traded at 202, before anyone was watching.
+    out = feed("SPK", five(flat, highs=[199.0] * 59 + [202.0]), T0 + 400)
+    check("a bar from before the alert was watched is not news", said(out, up) is None
+          and state(up) == "clear:%d" % (T0 + 400), (said(out, up), state(up)))
+    ran = five(flat + [199.2, 199.4, 199.4], end=T0 + 900, live=199.5,
+               highs=[199.0] * 60 + [199.2, 201.0, 199.4])
+    out = feed("SPK", ran, T0 + 1300)
+    check("a level traded and left between two checks is told, with the price and the bar",
+          said(out, up) == "SPK traded at 201 in the 14:40 UTC bar on 11 Nov, above the 200 you "
+                           "set, and was last at 199.5.", said(out, up))
+    out = feed("SPK", ran, T0 + 1310)
+    check("once", said(out, up) is None)
+    out = feed("SPK", five(flat + [201.0], end=T0 + 1500, live=201.5,
+                           highs=[199.0] * 60 + [201.5]), T0 + 1900)
+    check("the price itself past the level is told as it always was",
+          said(out, up) == "SPK is 201.5, above the 200 you set.", said(out, up))
+    out = feed("SPK", five(flat + [201.0, 199.5], end=T0 + 1800, live=199.5,
+                           highs=[199.0] * 60 + [201.5, 201.2]), T0 + 2200)
+    check("and the bars it was told in are not told again when it comes back",
+          said(out, up) is None and state(up) == "clear:%d" % (T0 + 2200), (said(out, up), state(up)))
+    db.alert_set_active(conn, up, False, user=erin.id)
+    db.alert_set_active(conn, up, True, user=erin.id)
+    out = feed("SPK", five(flat + [199.0], end=T0 + 2700, live=199.0,
+                           highs=[199.0] * 60 + [203.0]), T0 + 3100)
+    check("nor what it did while the alert was paused", said(out, up) is None, said(out, up))
+    conn.execute("UPDATE alerts SET state='clear' WHERE id=?", (up,))
+    conn.commit()
+    out = feed("SPK", ran, T0 + 3200)
+    check("an alert from before this release tells nothing at its first check after it",
+          said(out, up) is None and state(up) == "clear:%d" % (T0 + 3200), (said(out, up), state(up)))
+    conn.execute("UPDATE alerts SET state=? WHERE id=?", ("clear:%d" % (T0 - 60 * DAY), up))
+    conn.commit()
+    out = feed("SPK", ran, T0 + 20 * DAY)
+    check("one left unchecked for weeks does not tell what it missed long ago",
+          said(out, up) is None, said(out, up))
+    down = db.alert_add(conn, "SPD", "price_below", threshold=90.0, user=erin.id)
+    feed("SPD", daily([100.0] * 40), LAST - DAY + 7 * 3600)
+    out = feed("SPD", daily([100.0] * 40, lows=[100.0] * 39 + [88.0]), LAST + 7 * 3600)
+    check("on daily bars it is told once the day is over, a one-off switching off",
+          said(out, down) == "SPD traded at 88 on 11 Nov, below the 90 you set, and was last at 100."
+          and conn.execute("SELECT active FROM alerts WHERE id=?", (down,)).fetchone()[0] == 0,
+          said(out, down))
+
+    cross = db.alert_add(conn, "MAV", "crosses_ma", interval="5m", repeat=True, user=erin.id)
+    under = [100.0] * 70 + [99.0, 99.0, 99.0]
+    out = feed("MAV", five(under, end=T0), T0 + 400)
+    check("below its average, quiet", said(out, cross) is None and state(cross) == "bar:%d" % T0,
+          state(cross))
+    over = five(under + [101.0, 101.2], end=T0 + 600)
+    out = feed("MAV", over, T0 + 1000)
+    check("a cross on a bar that finished between two checks is told",
+          (said(out, cross) or "").startswith("MAV closed at 101 in the 14:35 UTC bar on 11 Nov, "
+                                              "back above its 50-bar average"), said(out, cross))
+    out = feed("MAV", over, T0 + 1010)
+    check("once", said(out, cross) is None)
+    db.alert_reset(conn, cross, user=erin.id)
+    out = feed("MAV", over, T0 + 1020)
+    check("and re-arming does not tell it again", said(out, cross) is None, said(out, cross))
+    for kept, want in (("met", False), ("clear", True)):
+        newest = five(under + [101.0], end=T0 + 300)
+        conn.execute("UPDATE alerts SET state=? WHERE id=?", (kept, cross))
+        conn.commit()
+        out = feed("MAV", newest, T0 + 700)
+        check("kept as %r by the release before, the newest bar's cross is %s"
+              % (kept, "told" if want else "not told again"),
+              bool(said(out, cross)) == want and state(cross) == "bar:%d" % (T0 + 300),
+              (said(out, cross), state(cross)))
+    vol = db.alert_add(conn, "VOL", "volume_spike", threshold=3.0, interval="5m", repeat=True,
+                       user=erin.id)
+    out = feed("VOL", five([10.0] * 40, end=T0), T0 + 400)
+    busy = five([10.0] * 43, end=T0 + 900, volumes=[100.0] * 40 + [500.0, 600.0, 100.0])
+    out = feed("VOL", busy, T0 + 1300)
+    check("volume spikes between two checks too, the latest of them",
+          (said(out, vol) or "").startswith("VOL traded 5.0 times its normal volume in the 14:40 UTC")
+          and said(out, vol).endswith("It was the latest of 2 since the last look."), said(out, vol))
+
+    # A level that moves every session: Monday's move says nothing of Tuesday's.
+    def day_of(base, live, day):
+        b = daily([100.0] * 58 + [base], live=live)
+        b.prev_close = base
+        b.meta = {"regularMarketTime": LAST + day * DAY + 3600}
+        return b
+
+    rise = db.alert_add(conn, "GAP", "pct_up", threshold=0.05, repeat=True, user=erin.id)
+    check("up 6% is told", said(feed("GAP", day_of(100.0, 106.0, 0), T0), rise) is not None)
+    check("and not again that day, its base corrected or not",
+          said(feed("GAP", day_of(100.0, 106.5, 0), T0), rise) is None
+          and said(feed("GAP", day_of(99.9, 106.5, 0), T0), rise) is None)
+    check("nor on another date measured from the same close, as a Sunday's futures are",
+          said(feed("GAP", day_of(100.0, 106.5, 1), T0), rise) is None)
+    tuesday = said(feed("GAP", day_of(106.0, 112.5, 1), T0), rise)
+    check("up 6% again the next session, from the new close, is told again",
+          tuesday is not None and "6.13%" in tuesday, tuesday)
+    check("once", said(feed("GAP", day_of(106.0, 113.0, 1), T0), rise) is None)
+    check("and old data from the day before tells nothing",
+          said(feed("GAP", day_of(100.0, 106.0, 0), T0), rise) is None)
+    conn.execute("UPDATE alerts SET state='met' WHERE id=?", (rise,))
+    conn.commit()
+    check("one already met before this release is not told at its first check after it",
+          said(feed("GAP", day_of(106.0, 113.0, 1), T0), rise) is None
+          and state(rise).startswith("met:"), state(rise))
+    check("but is the next session",
+          said(feed("GAP", day_of(113.0, 120.0, 2), T0), rise) is not None)
+
+    # A check that has read an alert must not undo what happened to it since.
+    db.alert_checked(conn, rise, state="clear", was="met:1:1.0")
+    check("a check keeps its state only over the one it read",
+          state(rise).startswith("met:"), state(rise))
+    conn.execute("DELETE FROM alerts WHERE user_id=?", (erin.id,))
+    conn.commit()
+    conn.close()
 
     print()
     print("=" * 72)
@@ -677,6 +987,17 @@ try:
           alerts.describe("pct_down", row["threshold"], "EEE"))
     add(kind="pct_down", threshold="5")
     check("5 typed is five percent", abs(newest(carol)["threshold"] - 0.05) < 1e-12)
+    plan = SimpleNamespace(action="WAIT", direction=1, entry=89.7, stop=85.0)
+    check("a wait suggests an alert at its entry, and at its stop",
+          [(s["kind"], s["threshold"]) for s in alerts.suggest_for("EEE", plan, None)]
+          == [("price_below", 89.7), ("price_below", 85.0)])
+    for action in ("BUY", "SHORT", "AVOID"):
+        plan = SimpleNamespace(action=action, direction=1, entry=89.7, stop=85.0)
+        check("a %s waits for no entry, so only its stop is suggested" % action,
+              [s["threshold"] for s in alerts.suggest_for("EEE", plan, None)] == [85.0])
+    check("the call words keep their capitals",
+          alerts.describe("call_buy", None, "NVDA") == "NVDA call turns BUY"
+          and "WAIT to BUY" in alerts.describe("call_changes", None, "NVDA"))
     suggested = {s["kind"]: s for s in alerts.suggest_for("EEE", None, object())}
     check("a suggestion on an analysis posts its percent as the whole number",
           suggested["pct_down"]["form_value"] == 5.0
@@ -744,6 +1065,156 @@ try:
     finally:
         db.MAX_ALERTS = ceiling
         conn.close()
+
+    before = newest(carol)["id"]
+    r = add(interval="banana")
+    check("a bar size that is not one is refused, in words",
+          r.status_code == 400 and "bar sizes" in r.data.decode("utf-8", "replace")
+          and newest(carol)["id"] == before, r.status_code)
+    r = c.post("/watch/add", data={"symbol": "AMD", "interval": "x" * 19000})
+    conn = db.connect(DB)
+    held = [w["symbol"] for w in db.watchlist(conn, user=carol.id)]
+    check("for the watchlist too", r.status_code == 400 and "AMD" not in held, r.status_code)
+    ceiling, db.MAX_WATCHED = db.MAX_WATCHED, len(held)
+    try:
+        r = c.post("/watch/add", data={"symbol": "AMD", "interval": "1d"})
+        check("a full watchlist takes no more, and says so", r.status_code == 400
+              and "Remove one first" in r.data.decode("utf-8", "replace"), r.status_code)
+        check("but what is on it can still be changed",
+              c.post("/watch/add", data={"symbol": "nvda", "interval": "1h"}).status_code == 302)
+    finally:
+        db.MAX_WATCHED = ceiling
+    conn.close()
+
+    print()
+    print("=" * 72)
+    print("SAVED THESES: JUDGED AT THE CLOSE, AND ALL OF THEM COUNTED")
+    print("=" * 72)
+    frank = person("frank@example.com")
+    conn = db.connect(DB)
+    PRICE["THE"] = 90.0
+    for k in range(25):
+        tid = db.thesis_save(conn, "THE", 100.0, 0.6, "x", [], [], [], [], user=frank.id)
+        conn.execute("UPDATE theses SET created_ts=? WHERE id=?",
+                     (int(time.time()) - (40 - k) * DAY, tid))
+        if k < 6:
+            db.thesis_close(conn, tid, 120.0, "right", user=frank.id)
+        if k == 24:
+            db.thesis_close(conn, tid, 120.0, "right", user=frank.id)
+    conn.commit()
+    conn.close()
+    sign_in(frank)
+    real_fetch = web.market_mod.fetch_bars
+    web.market_mod.fetch_bars = bars_for
+    try:
+        page = re.sub(r"\s+", " ", c.get("/monitor").data.decode("utf-8", "replace"))
+        older = re.sub(r"\s+", " ", c.get("/monitor?theses=20").data.decode("utf-8", "replace"))
+        odd = [c.get("/monitor?theses=%s" % v).status_code for v in ("-3", "x", "99999")]
+    finally:
+        web.market_mod.fetch_bars = real_fetch
+    figures = re.findall(r'<div class="k">([^<]+)</div> <div class="v fig[^"]*">([^<]+)</div>', page)
+    check("the record counts every thesis, not the newest 20",
+          dict(figures).get("Closed out") == "7" and dict(figures).get("Still open") == "18", figures)
+    check("and so does the heading", "1 to 20 of 25, newest first" in page
+          and 'href="/monitor?theses=20#theses"' in page)
+    check("the older ones are a page away, where they can be closed",
+          "21 to 25 of 25" in older and "Newer theses" in older and "Reopen" in older)
+    check("an odd page number is a page, not an error", odd == [200, 200, 200], odd)
+    closed = page[page.index("<b>THE</b>"):]
+    closed = closed[:closed.index("Reopen")]
+    check("a closed thesis moves from the price then to the price it was closed at",
+          ">120" in closed.replace("> 120", ">120") and "20.0%" in closed and "-10.0%" not in closed,
+          re.findall(r"-?[0-9.]+%", closed))
+    gone = person("gone@example.com")
+    conn = db.connect(DB)
+    for sym in ("ZZG1", "ZZG2", "ZZG3"):
+        db.thesis_save(conn, sym, 100.0, -0.6, "x", [], [], [], [], user=gone.id)
+    conn.close()
+    sign_in(gone)
+    at_once, most = [0], [0]
+    gate = threading.Lock()
+
+    def slow_gone(symbol, interval="1d", lookback=None):
+        with gate:
+            at_once[0] += 1
+            most[0] = max(most[0], at_once[0])
+        time.sleep(0.2)
+        with gate:
+            at_once[0] -= 1
+        raise alerts.DataError("no such symbol")
+
+    web.market_mod.fetch_bars = slow_gone
+    try:
+        page = c.get("/monitor").data.decode("utf-8", "replace")
+    finally:
+        web.market_mod.fetch_bars = real_fetch
+    check("several instruments are priced at once", most[0] == 3, most[0])
+    picked = re.findall(r'<option value="(\w+)"\s+selected>', page[page.index('name="outcome"'):])
+    check("with no price, the outcome offered is undecided", "Could not price ZZG1" in page
+          and picked == ["undecided"] * 3, picked)
+    sign_in(carol)
+
+    print()
+    print("=" * 72)
+    print("THE COUNTS THE PAGE GIVES")
+    print("=" * 72)
+    gail = person("gail@example.com")
+    sign_in(gail)
+    conn = db.connect(DB)
+    for k in range(17):
+        db.event_add(conn, gail.id, "price_above", "AAA", "Told %d." % k, 100.0, "")
+    for k in range(2):
+        db.open_trade(conn, "AAA", "1d", 1, entry=100.0, stop=90.0, target1=120.0,
+                      quantity=1, user=gail.id)
+    conn.close()
+    r = c.post("/monitor/alerts/check", follow_redirects=True)
+    page = re.sub(r"\s+", " ", r.data.decode("utf-8", "replace"))
+    check("open positions are not counted as alerts",
+          "Checked 0 alerts and the stops of 2 open positions. 0 triggered." in page,
+          re.findall(r"Checked [^<]*", page))
+    check("the history's count is every time it told, not the rows shown",
+          re.search(r'What it has told you</h3> <span class="count">17</span> '
+                    r'<span class="tail">the latest 15 are shown', page) is not None)
+    one = re.sub(r"\s+", " ", c.get("/monitor?checked=1&stops=1").data.decode("utf-8", "replace"))
+    check("and one of each is one",
+          "Checked 1 alert and the stop of 1 open position. 0 triggered." in one)
+    real_loop, web.ALERTS = web.ALERTS, scheduler.Scheduler(lambda: {}, interval_seconds=60,
+                                                            name="test-minute")
+    web.ALERTS.start()
+    try:
+        page = re.sub(r"\s+", " ", c.get("/monitor").data.decode("utf-8", "replace"))
+    finally:
+        web.ALERTS.stop()
+        web.ALERTS = real_loop
+    check("checks a minute apart are every minute", "checks your alerts every minute, and" in page)
+    for sent in ({}, {"alert_id": "abc"}, {"alert_id": "9" * 30}):
+        r = c.post("/monitor/alert/pause", data=sent)
+        said = r.data.decode("utf-8", "replace")
+        check("an alert number of %s is answered with a sentence" % (
+                  str(sent.get("alert_id"))[:5]),
+              r.status_code == 400 and "invalid literal" not in said
+              and "&#39;alert_id&#39;" not in said, (r.status_code, said[-600:]))
+    check("a call alert says whose settings it is worked out with",
+          "Orenth's standard settings" in page.replace("&#39;", "'"))
+
+    print()
+    print("=" * 72)
+    print("A NOTE ON WHAT IS WATCHED")
+    print("=" * 72)
+    check("the watch form takes one", re.search(r'id="w-note" name="note"', page) is not None)
+    c.post("/watch/add", data={"symbol": "NVDA", "interval": "1d", "note": "after earnings"})
+    c.post("/watch/add", data={"symbol": "NVDA", "interval": "1h", "note": ""})
+    conn = db.connect(DB)
+    row = conn.execute("SELECT interval, note FROM watchlist WHERE user_id=?", (gail.id,)).fetchone()
+    check("added again without one, it keeps the note it has",
+          tuple(row) == ("1h", "after earnings"), tuple(row))
+    c.post("/watch/add", data={"symbol": "NVDA", "interval": "1h", "note": "new note"})
+    c.post("/watch/add", data={"symbol": "AMD", "interval": "1d"})
+    held = {w["symbol"]: w["note"] for w in db.watchlist(conn, user=gail.id)}
+    check("a new note replaces it, and one never given is empty",
+          held == {"NVDA": "new note", "AMD": ""}, held)
+    conn.close()
+    sign_in(carol)
 
     print()
     print("=" * 72)
@@ -921,6 +1392,40 @@ try:
     idle.start()
     check("start brings it back", idle.running)
     idle.stop()
+    going, rounds = threading.Event(), []
+
+    def long_round():
+        rounds.append(1)
+        going.wait(5)
+        return {}
+
+    mid = scheduler.Scheduler(long_round, interval_seconds=3600, name="test-mid")
+    mid.start()
+    mid.check_now()
+    while not rounds:
+        time.sleep(0.01)
+    mid.stop(timeout=0.1)
+    check("started again while still finishing a round, it carries on", mid.start() is True)
+    going.set()
+    time.sleep(0.3)
+    check("and is still running once the round is over, waiting as before",
+          mid.running and len(rounds) == 1, (mid.running, rounds))
+    check("where starting again is refused", mid.start() is False)
+    mid.check_now()
+    time.sleep(0.3)
+    check("and it checks", len(rounds) == 2, rounds)
+    mid.stop()
+    check("and stops", not mid.running)
+    began = []
+    steady = scheduler.Scheduler(lambda: (began.append(time.monotonic()), time.sleep(0.3), {})[2],
+                                 interval_seconds=30, name="test-steady")
+    steady._interval = 0.6
+    steady.start()
+    time.sleep(3.4)
+    steady.stop()
+    gaps = [b - a for a, b in zip(began, began[1:])]
+    check("rounds start an interval apart, whatever a round takes",
+          len(gaps) >= 3 and sum(gaps) / len(gaps) < 0.75, gaps)
     _os.environ["STOCKBOT_ADMIN_EMAIL"] = "alice@example.com"
     real_loop, web.ALERTS = web.ALERTS, None
     try:

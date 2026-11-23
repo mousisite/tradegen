@@ -5,11 +5,10 @@ alert. This runs a loop inside the web server process that checks the active
 alerts on a timer, records what fired, and keeps enough history for the page to
 say when it last actually looked.
 
-What it deliberately does not do is pretend to be a service. Nothing here runs
-when the server is stopped, and the interface says so in those words rather
-than letting someone believe a level is being watched overnight. Making that
-true needs the app hosted somewhere that stays up, which is a different problem
-from this file.
+It runs for as long as the server does. On a hosted site that is day and night,
+whether or not anyone has a page open; on someone's own computer nothing runs
+while the app is closed, and the pages there say so rather than letting someone
+believe a level is being watched overnight.
 """
 from __future__ import annotations
 
@@ -53,6 +52,7 @@ class Scheduler:
 
         self.started_at: Optional[float] = None
         self.last_run: Optional[float] = None
+        self._last_started: Optional[float] = None
         self.last_error: str = ""
         self.runs = 0
         self.failures = 0
@@ -66,7 +66,12 @@ class Scheduler:
         """Begin checking. Returns False if it was already running."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
-                return False
+                if not self._stop.is_set():
+                    return False
+                # Told to stop, but still finishing a round: it carries on.
+                self._stop.clear()
+                self._wake.clear()
+                return True
             self._stop.clear()
             # stop() and set_interval() leave this set. Cleared, so a loop
             # started again waits an interval like a new one does.
@@ -86,7 +91,21 @@ class Scheduler:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def _leave(self) -> bool:
+        """Whether the loop is to end, decided where start() can see it.
+
+        start() either finds the stop still set and clears it, so this says
+        no, or finds no thread and makes a new one. Never a thread that has
+        already decided to end.
+        """
+        with self._lock:
+            if not self._stop.is_set():
+                return False
+            self._thread = None
+            return True
 
     def check_now(self) -> None:
         """Run the job without waiting for the next tick."""
@@ -99,15 +118,24 @@ class Scheduler:
     # -- the loop ----------------------------------------------------------
 
     def _loop(self) -> None:
-        # Wait one interval before the first run. Checking the instant the
-        # server starts would fire alerts against a market the user has not
-        # looked at yet, and the page checks on load anyway.
-        while not self._stop.is_set():
-            woken = self._wake.wait(timeout=self._interval)
+        # Wait one interval before the first run, so a server that has just
+        # started, and is busy warming up, answers pages first. No page checks
+        # alerts as it loads: until then only the button on the Monitor page
+        # and the routines do.
+        spent = 0.0
+        while not self._leave():
+            # The time a round took comes off the wait, so rounds start an
+            # interval apart. Waited in full after each, they drifted later
+            # every time, and a five-minute check let a five-minute bar pass
+            # now and then. A round as long as the interval still gets a pause.
+            woken = self._wake.wait(timeout=max(self._interval - spent,
+                                                min(30.0, self._interval / 2.0)))
             self._wake.clear()
-            if self._stop.is_set():
+            if self._leave():
                 return
+            began = time.monotonic()
             self._run_once(triggered="manual" if woken else "timer")
+            spent = time.monotonic() - began
 
     @staticmethod
     def _as_dict(item) -> Dict:
@@ -131,6 +159,7 @@ class Scheduler:
         recorded says it succeeded.
         """
         started = time.time()
+        self._last_started = started
         try:
             result = self._job() or {}
             fired = [self._as_dict(x) for x in (result.get("fired") or [])]
@@ -208,7 +237,7 @@ class Scheduler:
             "interval": self._interval,
             "started_at": self.started_at,
             "last_run": self.last_run,
-            "next_run": (self.last_run + self._interval) if self.last_run
+            "next_run": (self._last_started + self._interval) if self.last_run
                         else ((self.started_at + self._interval)
                               if self.started_at else None),
             "runs": self.runs,

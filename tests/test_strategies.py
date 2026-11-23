@@ -2,6 +2,8 @@
 import sys, time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness  # noqa: F401  (the default settings, whatever config.json says)
 import numpy as np
 from bot.market import fetch_bars
 from bot import strategies as S
@@ -200,24 +202,26 @@ print("   %d of %d series with a real edge called BUY"
 check("the app is able to say buy at all", len(_edge_buys) >= 2,
       "a real edge was not called BUY: %s" % [r.plan.action for r in _edge_calls])
 
-_unearned = [s for s, p, c in _entries if not c.demonstrated]
+# On a day when none of the forty real names is a market entry, the checks
+# below would have nothing to check, so the series that do call BUY go too.
+_rows = _entries + [("edge series", r.plan, r.calibration) for r in _edge_buys]
+_unearned = [s for s, p, c in _rows if not c.demonstrated]
 check("every market entry rests on a record that shows an edge",
       not _unearned, _unearned)
 
-_mislabelled = [s for s, p, c in _entries
+_mislabelled = [s for s, p, c in _rows
                 if (p.action == "BUY") != (p.direction > 0)]
 check("the label always matches the direction of the trade",
       not _mislabelled, _mislabelled)
 
-_no_levels = [s for s, p, c in _entries if not p.entry or not p.stop]
+_no_levels = [s for s, p, c in _rows if not p.entry or not p.stop]
 check("every market entry carries an entry and a stop",
       not _no_levels, _no_levels)
 
 # A market entry means buy at today's price. If the entry sits far from it, the
 # label and the plan disagree and somebody acts on the wrong one.
-_prices = {s: r for s, r in
-           [(s, None) for s, _, _ in _entries]}
-_far = []
+_far = [("edge series", r.plan.entry, r.bars.last_price) for r in _edge_buys
+        if abs(r.plan.entry - r.bars.last_price) / r.bars.last_price > 0.02]
 for _s, _p, _c in _entries:
     _live = _eng.analyse(_s, _cfg_short, interval="1d", with_news=False,
                          with_learning=True, record=False).bars.last_price
@@ -295,5 +299,6 @@ check("and the plain words say what a win and a loss were worth",
 
 # --- exit code so a runner can tell pass from fail -------------------------
 import sys as _exit_sys
-_bad = bool(globals().get("fails")) or bool(globals().get("fail"))     or (globals().get("ok") is False)
+_bad = (bool(globals().get("fails")) or bool(globals().get("fail"))
+        or (globals().get("ok") is False))
 _exit_sys.exit(1 if _bad else 0)

@@ -15,28 +15,51 @@ Rules held to deliberately:
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional
+
+from .quality import strength_band
 
 
 def _money(value: Optional[float], currency: str = "") -> str:
     if value is None:
         return "?"
-    symbol = "$" if currency in ("", "USD") else ""
+    # Any other currency is named, as format_price names it: a bare number
+    # beside dollar prices reads as dollars.
+    symbol = "$" if not currency or currency == "USD" else currency + " "
     if abs(value) >= 1000:
         return "%s%s" % (symbol, format(value, ",.0f"))
     if abs(value) >= 1:
         return "%s%.2f" % (symbol, value)
+    if 0 < abs(value) < 0.01:
+        # Four figures, however small: "$0.0000" is no price to watch for.
+        digits = 3 - math.floor(math.log10(abs(value)))
+        return symbol + ("%.*f" % (digits, value)).rstrip("0")
     return "%s%.4f" % (symbol, value)
 
 
-def _big(value: Optional[float]) -> str:
-    """A large amount as a person would say it out loud."""
+# The currencies companies file in here, said the way people say them. One
+# not listed is named by its code.
+_CURRENCIES = {"AUD": "Australian dollars", "BRL": "Brazilian reais",
+               "CAD": "Canadian dollars", "CHF": "Swiss francs", "CNY": "Chinese yuan",
+               "DKK": "Danish kroner", "EUR": "euros", "GBP": "British pounds",
+               "HKD": "Hong Kong dollars", "ILS": "Israeli shekels",
+               "INR": "Indian rupees", "JPY": "Japanese yen", "KRW": "South Korean won",
+               "MXN": "Mexican pesos", "NOK": "Norwegian kroner", "RMB": "Chinese yuan",
+               "SEK": "Swedish kronor", "SGD": "Singapore dollars",
+               "TWD": "Taiwan dollars", "ZAR": "South African rand"}
+
+
+def _big(value: Optional[float], currency: str = "USD") -> str:
+    """A large amount as a person would say it out loud, in its own currency."""
     if value is None:
         return "?"
+    sign, after = ("$", "") if currency == "USD" else (
+        "", " " + _CURRENCIES.get(currency, currency))
     for limit, word in ((1e12, "trillion"), (1e9, "billion"), (1e6, "million")):
         if abs(value) >= limit:
-            return "$%.1f %s" % (value / limit, word)
-    return _money(value)
+            return "%s%.1f %s%s" % (sign, value / limit, word, after)
+    return (_money(value) if currency == "USD" else format(value, ",.0f")) + after
 
 
 # --- the call ---------------------------------------------------------------
@@ -55,17 +78,32 @@ _SHORT_WAIT = "Do not short yet. The app expects a fall, but not from today's pr
 _FALLING_AVOID = "Leave this one alone. The signals point to a fall."
 
 
-def counted(samples: int, worked: int) -> str:
+# Said after the counts when they are of bets on a fall and the call is not a
+# short. The public pages say it inside their counts and drop this
+# (public.snapshot).
+FALL_COUNTS = (" Here, worked means a bet on the price falling paid off, because "
+               "that is the way the signals lean.")
+
+
+def counted(samples: int, worked: int, fall: bool = False) -> str:
     """The past examples behind a call, said the same way everywhere.
 
     They are pretend trades in a test on past prices, not trades anyone made,
     and "worked" is what the test measured: the trade reached its target
     before its stop. The public pages lead with this sentence and drop it
-    from the explanation below (public.snapshot), so it must not vary.
+    from the explanation below (public.snapshot), so it must not vary. fall is
+    for a page that gives the counts alone, when they are of bets on a fall.
     """
+    bet = "a bet on the price falling " if fall else ""
+    if samples == 1:
+        return ("In tests on past prices, this same setup came up once and %s."
+                % (bet + "worked that time, reaching its target before its stop"
+                   if worked else
+                   bet + "did not work that time: it did not reach its target "
+                         "before its stop"))
     return ("In tests on past prices, this same setup came up %d times and "
-            "worked %d of them, reaching its target before its stop."
-            % (samples, worked))
+            "%sworked %d of them, reaching its target before its stop."
+            % (samples, bet, worked))
 
 
 def explain_plan(plan, bars, hold_text: str = "") -> Dict:
@@ -77,7 +115,8 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     action = (plan.action or "").upper()
     currency = getattr(bars, "currency", "USD")
     points: List[str] = []
-    short_side = (getattr(plan, "direction", 0) or 0) < 0 and action in ("WAIT", "SHORT")
+    down = (getattr(plan, "direction", 0) or 0) < 0
+    short_side = down and action in ("WAIT", "SHORT")
     why_avoid = getattr(plan, "avoid_reason", "") or ""
     # The odds are measured on the side the signals lean. When that is down and
     # the plan is not a short, every count below is a record of betting on a
@@ -108,9 +147,10 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             "because losses have no limit. Most beginners should skip it.")
     elif action == "AVOID" and why_avoid == "bearish_no_shorts":
         points.append(
-            "The signals point down. The record below is how often a bet on "
-            "the price falling worked here. Buying is the opposite bet, and "
-            "shorting is switched off, so the answer is: do not buy.")
+            "The signals point down. %sBuying is the opposite bet, and "
+            "shorting is switched off, so the answer is: do not buy."
+            % ("The record below is how often a bet on the price falling worked "
+               "here. " if plan.probability is not None and plan.prob_samples else ""))
     elif action == "AVOID" and why_avoid == "negative_record":
         points.append(
             "Setups like this one have lost money here once trading fees are "
@@ -120,7 +160,8 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             "There is no setup here worth the trading fees right now. That is "
             "a normal answer, not a broken one.")
 
-    if plan.stop and plan.entry and short_side:
+    # A short refused on its record keeps its levels: its stop is above.
+    if plan.stop and plan.entry and down:
         points.append(
             "If the price kept rising to %s instead, the plan says get out. "
             "That is the point where the idea was wrong."
@@ -141,8 +182,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         worked = int(round(plan.probability * plan.prob_samples))
         sure = counted(plan.prob_samples, worked)
         if fall_odds:
-            sure += (" Here, worked means a bet on the price falling paid off, "
-                     "because that is the way the signals lean.")
+            sure += FALL_COUNTS
 
         # Saying only how often it worked invites the wrong conclusion, because
         # a loss here is usually not the whole stop: most trades that miss the
@@ -155,9 +195,21 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             win_x = avg_win
             lose_x = abs(avg_loss)
             sure += (" When it worked it made about %.1f times what you put at "
-                     "risk. When it did not, it usually lost about %.0f%% of "
-                     "what you put at risk, not all of it, because the trade "
-                     "is closed rather than left to run." % (win_x, lose_x * 100))
+                     "risk." % win_x)
+            # Trading costs can make the usual miss cost the whole stop or
+            # more, and misses closed part-way can come out ahead.
+            if avg_loss <= -0.995:
+                sure += (" When it did not, it usually lost about %.0f%% of what "
+                         "you put at risk: trading costs, and prices that jump "
+                         "past the stop, come on top of it." % (lose_x * 100))
+            elif avg_loss < 0:
+                sure += (" When it did not, it usually lost about %.0f%% of "
+                         "what you put at risk, not all of it, because the trade "
+                         "is closed rather than left to run." % (lose_x * 100))
+            else:
+                sure += (" When it did not reach its target, it was usually "
+                         "closed part-way and still made about %.0f%% of what "
+                         "you put at risk." % (lose_x * 100))
             # Those wins were made with the tested target. A plan whose target
             # was pulled in to a level in the way, or whose stop sits further
             # off, aims for something else, and a win of "1.5 times" would be
@@ -171,7 +223,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
                          % ("nearer" if mine < tested else "further",
                             mine, "smaller" if mine < tested else "bigger"))
 
-        if plan.breakeven_rate:
+        if plan.breakeven_rate and plan.prob_samples > 1:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
             if fall_odds:
                 sure += (" A bet on a fall needed to work %d of those %d times "
@@ -199,14 +251,20 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     # What a bad day costs, which is the number beginners never see.
     position = plan.position or {}
     risk = ""
-    if position.get("risk_amount"):
-        risk = ("Buying %s of these would put %s at risk."
-                % (_trim(position.get("quantity")),
+    if position.get("risk_amount") and not position.get("error"):
+        contracts = position.get("multiplier")         # futures come in contracts
+        # A short is a sale, and the jump that hurts it is upward
+        # (decision._gap_risk measures that side for it).
+        risk = ("%s %s %s would put %s at risk."
+                % ("Shorting" if down else "Buying",
+                   position.get("quantity_text") or _trim(position.get("quantity")),
+                   position["unit_text"] if contracts else "of these",
                    _money(position["risk_amount"], currency)))
-        if position.get("gap_loss") and position.get("gap_multiple", 0) > 1.4:
-            risk += (" But if the price jumped down overnight, which happens, "
+        if position.get("gap_loss") and (position.get("gap_multiple") or 0) > 1.4:
+            risk += (" But if the price jumped %s overnight, which happens, "
                      "you could lose about %s instead."
-                     % _money(position["gap_loss"], currency))
+                     % ("up" if down else "down",
+                        _money(position["gap_loss"], currency)))
 
     hold = ""
     if hold_text:
@@ -229,7 +287,7 @@ def _trim(value) -> str:
 # One or two sentences on each figure of the analysis page that a first-time
 # investor may not know, said the way this code works the figure out rather
 # than the way a textbook would. The page shows each behind a "?" beside its
-# figure (templates/_help.html). name finishes "What ... means"; text is the
+# figure (templates/_help.html). name finishes "About ..."; text is the
 # answer. A word in braces is a setting, filled in by help_for, so the words
 # match the numbers on the page.
 HELP: Dict[str, Dict[str, str]] = {
@@ -266,9 +324,10 @@ HELP: Dict[str, Dict[str, str]] = {
         "through yet. Equal highs or lows are two or more within a tenth of a typical "
         "bar's range of each other.")},
     "prior_day": {"name": "yesterday's high and low", "text": (
-        "The high, low and close of the last whole trading day before today; for futures "
-        "and coins a trading day runs from 18:00 to 17:00 New York time. Taken means price "
-        "has traded past it today (this week, for last week's).")},
+        "The high, low and close of the last whole trading day before today; on "
+        "bars shorter than a day, a trading day runs from 18:00 to 17:00 New York time for "
+        "futures, and from 18:00 to 18:00 for coins. Taken means price has traded past it "
+        "today (this week, for last week's).")},
     "typical_bar": {"name": "the distance in typical bars", "text": (
         "How far the level is from the last close, counted in the average range of one "
         "bar over the last 14 bars. 2 means about two ordinary bars' moves away.")},
@@ -339,7 +398,8 @@ HELP: Dict[str, Dict[str, str]] = {
         "How many shares or coins the plan would buy: enough that reaching the "
         "stop loses {risk}% of the {account} account set in Settings, rounded "
         "down to whole shares for a stock, and never more than {cap}% of the "
-        "account in one position.")},
+        "account in one position. Futures are whole contracts, sized by what a "
+        "point in one is worth, without that second limit.")},
     "risk": {"name": "the amount at risk", "text": (
         "What reaching the stop would lose: the size times the distance from "
         "entry to stop, before trading costs, and that as a share of the "
@@ -440,14 +500,14 @@ HELP: Dict[str, Dict[str, str]] = {
     # Where the signal comes from.
     "family": {"name": "family", "text": (
         "A group of strategies that read the chart the same kind of way: trend, "
-        "mean reversion, breakout, volume, structure or pattern.")},
+        "mean reversion, breakout, volume, structure, pattern or liquidity (old "
+        "highs and lows taken, breaks of the last swing, gaps).")},
     "lean": {"name": "lean", "text": (
         "The family's weighted opinion today, from -1 (down) to +1 (up).")},
     "on_trial": {"name": "on trial", "text": (
-        "A price-action setup from a day-trading course (old highs and lows taken, "
-        "breaks of the last swing, gaps, the halfway line), scored and tested like "
-        "every other strategy but with no say in the call. Whether it ever gets one "
-        "is decided later, on its tested record after costs.")},
+        "A strategy being tried out: scored and tested like every other, but with no "
+        "say in the call. Whether it ever gets one is decided later, on its tested "
+        "record after costs.")},
     "active": {"name": "active", "text": (
         "How many of the family's strategies have an opinion today, out of all "
         "of them.")},
@@ -524,8 +584,10 @@ HELP: Dict[str, Dict[str, str]] = {
 }
 
 
-def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
-    """HELP with the settings' own numbers in it, for one bar interval."""
+def help_for(cfg: Dict, interval: str = "1d", asset_class: str = "",
+             symbol: str = "") -> Dict[str, Dict[str, str]]:
+    """HELP with the settings' own numbers in it, for one bar interval of one
+    instrument (a coin's day is not a stock's)."""
     from .config import DEFAULTS, describe_horizon, horizon_for
 
     def setting(key):
@@ -541,7 +603,7 @@ def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
         "cap": "%g" % float(setting("max_position_pct")),
         "account": "{:,.0f}".format(float(setting("account_size"))),
         "bars": bars,
-        "window": describe_horizon(interval, bars),
+        "window": describe_horizon(interval, bars, asset_class, symbol),
         "minimum": int(setting("min_bucket_samples")),
         "equity": "%g" % (float(setting("cost_bps_equity")) / 100.0),
         "crypto": "%g" % (float(setting("cost_bps_crypto")) / 100.0),
@@ -571,6 +633,11 @@ def explain_company(research) -> Dict:
                 "why": ("Its filed accounts could not be read just now, so there "
                         "are no company numbers to put into plain words here. "
                         "The price side of the app still works.")}
+    if not history.get("available") and history.get("entity"):
+        # It does file; why its figures could not be read is already known.
+        return {"available": False,
+                "why": "%s The price side of the app still works."
+                       % history.get("reason", "Its filed figures could not be read.")}
     if not history.get("available"):
         return {"available": False,
                 "why": ("This is not a company that files accounts with the US "
@@ -581,30 +648,43 @@ def explain_company(research) -> Dict:
     table = history.get("table") or {}
     currency = history.get("currency") or "USD"
 
-    def latest(concept):
-        rows = table.get(concept) or []
-        return rows[-1]["value"] if rows else None
+    def by_year(concept):
+        """Each financial year's figure and the currency it was filed in."""
+        return {r["fy"]: (r["value"], (r.get("unit") or currency).split("/")[0])
+                for r in table.get(concept) or []
+                if r.get("fy") is not None and r.get("value") is not None}
 
-    revenue, profit = latest("revenue"), latest("net_income")
-    if revenue:
-        points.append("Last year it sold %s worth of things." % _big(revenue))
-    if revenue and profit is not None:
-        kept = profit / revenue
-        if profit < 0:
-            points.append("It lost money doing it.")
-        else:
-            points.append(
-                "It kept about %.0f cents of every dollar as profit." % (kept * 100))
+    # Sales and profit of one and the same year, and the year is named: the
+    # two series can end in different years, and the newest filed year is not
+    # always last year.
+    sold, earned = by_year("revenue"), by_year("net_income")
+    shared = set(sold) & set(earned) if sold and earned else set(sold)
+    year = max(shared) if shared else None
+    if year is not None and sold[year][0] > 0:
+        revenue, unit = sold[year]
+        points.append("In its %d financial year it sold %s worth of things."
+                      % (year, _big(revenue, unit)))
+        if year in earned:
+            profit, profit_unit = earned[year]
+            if profit < 0:
+                points.append("It lost money doing it.")
+            elif profit_unit != unit:
+                pass        # no exchange rate in the filing, so no share either
+            elif unit == "USD":
+                points.append("It kept about %.0f cents of every dollar as profit."
+                              % (profit / revenue * 100))
+            else:
+                points.append("It kept about %.0f%% of what it sold as profit."
+                              % (profit / revenue * 100))
 
     # Turn each score into one sentence a person can act on.
     f = scores.get("scores", {}).get("piotroski") if scores.get("available") else None
-    if f is not None and f.usable:
-        if f.value >= 7:
-            points.append("Its finances got better in most ways last year.")
-        elif f.value <= 3:
-            points.append("Its finances got worse in most ways last year.")
-        else:
-            points.append("Some parts got better last year, some got worse.")
+    band = strength_band(f)
+    if band:
+        when = "in its %d financial year" % f.year if f.year else "last year"
+        points.append({"strong": "Its finances got better in most ways %s.",
+                       "weak": "Its finances got worse in most ways %s.",
+                       "mixed": "Some parts got better %s, some got worse."}[band] % when)
 
     z = scores.get("scores", {}).get("altman") if scores.get("available") else None
     if z is not None and z.usable:
@@ -617,9 +697,12 @@ def explain_company(research) -> Dict:
 
     a = scores.get("scores", {}).get("accruals") if scores.get("available") else None
     if a is not None and a.usable and a.value > 0.10:
-        points.append(
-            "Its profit on paper is much bigger than the cash it actually "
-            "collected. That gap often shrinks later.")
+        if a.inputs.get("net income", 1.0) > 0:
+            points.append(
+                "Its profit on paper is much bigger than the cash it actually "
+                "collected. That gap often shrinks later.")
+        else:
+            points.append("Much more cash went out than its accounts show it losing.")
 
     value = getattr(research, "valuation", None) or {}
     if value.get("usable") and value.get("upside") is not None:

@@ -6,7 +6,7 @@ the lengths aligned means the backtester can index bar `i` across every
 indicator without bookkeeping.
 
 Rolling window operations use `sliding_window_view` rather than Python loops.
-With two dozen strategies each needing their own back-test over tens of
+With dozens of strategies each needing their own back-test over tens of
 thousands of bars, that choice is the difference between a responsive tool and
 one that stalls on every run.
 """
@@ -33,13 +33,25 @@ def _win(x: np.ndarray, n: int):
 # ---------------------------------------------------------------------------
 
 def sma(x: np.ndarray, n: int) -> np.ndarray:
+    """Simple moving average. A window with a missing value in it has no average."""
     x = np.asarray(x, dtype=float)
     out = _nan(len(x))
     if len(x) < n or n <= 0:
         return out
+    missing = np.isnan(x)
     c = np.cumsum(np.insert(np.nan_to_num(x, nan=0.0), 0, 0.0))
     out[n - 1:] = (c[n:] - c[:-n]) / n
+    if missing.any():
+        m = np.cumsum(np.insert(missing.astype(int), 0, 0))
+        out[n - 1:][(m[n:] - m[:-n]) > 0] = np.nan
     return out
+
+
+# A spread under a thousand-millionth of the price is rounding left over from
+# the sums, not a movement: the smallest real tick of a real price is larger.
+# Divided by, it turned a price that had not moved in 20 bars into one "60
+# standard deviations" from its mean.
+_STILL = 1e-9
 
 
 def ema(x: np.ndarray, n: int) -> np.ndarray:
@@ -141,6 +153,7 @@ def rsi(close: np.ndarray, n: int = 14) -> np.ndarray:
         out = 100.0 - (100.0 / (1.0 + rs))
     out[np.isnan(ag)] = np.nan
     out[np.isinf(rs) & ~np.isnan(ag)] = 100.0
+    out[(ag == 0) & (al == 0)] = 50.0           # no move either way is neither
     return out
 
 
@@ -188,7 +201,8 @@ def cci(high, low, close, n: int = 20) -> np.ndarray:
     # Mean absolute deviation, which is what CCI uses rather than std.
     mad = np.abs(w - w.mean(axis=1, keepdims=True)).mean(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
-        out[n - 1:] = np.where(mad > 0, (tp[n - 1:] - ma[n - 1:]) / (0.015 * mad), 0.0)
+        out[n - 1:] = np.where(mad > _STILL * np.abs(ma[n - 1:]),
+                               (tp[n - 1:] - ma[n - 1:]) / (0.015 * mad), 0.0)
     return out
 
 
@@ -237,7 +251,9 @@ def zscore(close: np.ndarray, n: int = 20) -> np.ndarray:
     ma = sma(close, n)
     sd = rolling_std(close, n)
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(sd > 0, (close - ma) / sd, 0.0)
+        z = np.where(sd > _STILL * np.abs(ma), (close - ma) / sd, 0.0)
+    z[np.isnan(ma)] = np.nan
+    return z
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +279,7 @@ def bollinger(close: np.ndarray, n: int = 20, k: float = 2.0):
     close = np.asarray(close, dtype=float)
     mid = sma(close, n)
     sd = rolling_std(close, n)
+    sd = np.where(sd > _STILL * np.abs(mid), sd, np.where(np.isnan(sd), np.nan, 0.0))
     upper = mid + k * sd
     lower = mid - k * sd
     width = upper - lower
@@ -420,7 +437,12 @@ def adx(high, low, close, n: int = 14):
         minus_di = np.where(tr_n > 0, 100.0 * minus_n / tr_n, np.nan)
         denom = plus_di + minus_di
         dx = np.where(denom > 0, 100.0 * np.abs(plus_di - minus_di) / denom, np.nan)
-    return wilder(np.nan_to_num(dx, nan=0.0), n), plus_di, minus_di
+    # Smoothed from the first real reading on. The blanks before it, counted
+    # as zeros, held the figure low for dozens of bars, so a stock listed six
+    # weeks ago read as ranging. A price that never moved has no trend: zero.
+    if not np.isfinite(dx).any():
+        return wilder(np.zeros(len(dx)), n), plus_di, minus_di
+    return wilder(dx, n), plus_di, minus_di
 
 
 def aroon(high, low, n: int = 25):
@@ -619,6 +641,7 @@ def money_flow_index(high, low, close, volume, n: int = 14) -> np.ndarray:
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(sn > 0, sp / sn, np.inf)
         out[n - 1:] = np.where(np.isinf(ratio), 100.0, 100.0 - 100.0 / (1.0 + ratio))
+    out[n - 1:][(sp <= 0) & (sn <= 0)] = 50.0   # no flow either way is neither
     return out
 
 

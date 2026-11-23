@@ -288,7 +288,7 @@ const answer = (status, body) => Promise.resolve({
 const fine = (url) => answer(200, url.indexOf('/config') !== -1
   ? { web: { enabled: false }, apns: { enabled: true } } : { ok: true, known: true, removed: 1 });
 const FAILURES = {
-  'no connection': () => Promise.reject(new TypeError('Load failed')),
+  'no connection': () => Promise.reject(new TypeError('Load failed.')),
   'a 502 during a deploy': () => answer(502, {}),
   'a 429': () => answer(429, { error: 'Wait a while.' }),
 };
@@ -362,6 +362,7 @@ function page() {
                 assign: (to) => { went.push(String(to)); } },
     document: { readyState: 'complete', currentScript: { getAttribute: () => '' },
                 querySelectorAll: () => [], addEventListener() {} },
+    addEventListener: (type, fn) => { heard['window ' + type] = fn; },
   };
   ctx.window = ctx;
   vm.createContext(ctx);
@@ -376,6 +377,11 @@ for (const path of PATHS) {
   p.heard.pushNotificationActionPerformed({ notification: { data: { url: path } } });
   out[path] = p.went;
 }
+// Swiped back to and returned as it was left, once the app has forgotten it.
+const left = page();
+delete left.heard.pushNotificationActionPerformed;
+if (left.heard['window pageshow']) { left.heard['window pageshow']({ persisted: true }); }
+out.back = !!left.heard.pushNotificationActionPerformed;
 console.log(JSON.stringify(out));
 """
 
@@ -749,7 +755,7 @@ try:
           payload)
     check("with a sound and a thread", payload["aps"]["sound"] == "default"
           and payload["aps"]["thread-id"])
-    check("and the page to open, beside aps", payload["url"] == "/monitor")
+    check("and the page to open, beside aps", payload["url"] == "/monitor#told")
     row = device_rows(alice.id)[0]
     check("the device says when it last worked", row["last_ok_ts"] and not row["last_error"])
     _os.environ["APNS_BUNDLE_ID"] = "app.orenth.beta"
@@ -1159,6 +1165,8 @@ try:
     page = c.get("/settings").data.decode("utf-8", "replace")
     check("the Settings page lists the devices", "Chrome on Android" in page
           and 'action="/settings/notifications/remove"' in page)
+    r = c.post("/settings/notifications/remove", data={"device_id": "9" * 30})
+    check("a number no device can have is not an error", r.status_code == 302, r.status_code)
     r = c.post("/settings/notifications/remove", data={"device_id": alice_ids[0]})
     check("and removes one from there", r.status_code == 302 and not device_rows(alice.id))
 
@@ -1231,6 +1239,50 @@ try:
           r.get_json()["known"] is False
           and [d["address"] for d in device_rows(dave.id)] == [FCM + "laptop"])
 
+    section("A SIGN-IN OVER ANOTHER ENDS IT, AND TAKES THEIR DEVICE OFF")
+    ann = person("ann-shared@example.com")
+    ben = person("ben-shared@example.com")
+
+    def signs_in(user):
+        """A real sign-in, in the browser c is."""
+        with c.session_transaction() as sess:
+            held = dict(sess)
+        with web.app.test_request_context("/"):
+            web.session.update(held)
+            web._open_session(user)
+            now = dict(web.session)
+        with c.session_transaction() as sess:
+            sess.clear()
+            sess.update(now)
+        return held.get(web.SESSION_KEY)
+
+    def alive(token):
+        conn = db.connect(DB)
+        try:
+            return A.user_for_session(conn, token) is not None
+        finally:
+            conn.close()
+
+    sign_out()
+    signs_in(ann)
+    c.post("/api/push/subscribe", json={"kind": "web",
+                                        "subscription": subscription(FCM + "shared")})
+    first = signs_in(ann)
+    check("the same person signing in again ends the first sign-in", not alive(first))
+    check("and keeps their own device on", len(device_rows(ann.id)) == 1)
+    # Before any page has told the server of it again.
+    c.post("/signout")
+    check("which signing out of the new sign-in switches off", not device_rows(ann.id))
+    signs_in(ann)
+    c.post("/api/push/subscribe", json={"kind": "web",
+                                        "subscription": subscription(FCM + "shared")})
+    second = signs_in(ben)
+    check("someone else signing in there ends it too", not alive(second))
+    check("and takes the device off the person before", not device_rows(ann.id))
+    check("while they are signed in themselves",
+          "ben-shared@example.com" in c.get("/account").data.decode("utf-8", "replace"))
+    web._RATE.clear()
+
     section("FROM A FIRED ALERT TO A NOTIFICATION")
     web.market_mod.split_history = lambda symbol: []
     web._call_now = lambda symbol, interval="1d": None
@@ -1265,7 +1317,8 @@ try:
     note = json.loads(decrypt(body, ua_key, ua_auth))
     message = result["fired"][0].message
     check("readable only by that browser, saying what fired and when the price was set",
-          note == {"title": "Orenth", "url": "/monitor", "tag": "alert-%d" % level,
+          note == {"title": "Orenth", "tag": "alert-%d" % level,
+                   "url": "/monitor?told=%d#told" % result["fired"][0].event_id,
                    "body": "%s (price as of %s)" % (message, result["fired"][0].as_of)},
           note)
     check("in the alert email's own words", note["body"].startswith(message)
@@ -1306,6 +1359,9 @@ try:
     push._web_post = Recorder(201)
     web._check_and_tell(conn, user=nobody.id)
     push.wait_idle(10)
+    sign_in(grace)
+    check("the page it opens has the list it names",
+          'id="told"' in c.get(note["url"].split("#")[0]).data.decode("utf-8"))
     check("nothing is sent for someone with no device on", not push._web_post.calls)
     db.alert_delete(conn, quiet, user=nobody.id)
 
@@ -1473,12 +1529,19 @@ try:
     check("registers the worker after load, and never inside the iPhone app",
           "'serviceWorker' in navigator && !window.Capacitor" in home
           and "navigator.serviceWorker.register('/sw.js'" in home)
+    sign_in(alice)
+    hers = c.get("/privacy").data.decode("utf-8")
+    sign_out()
     check("every page asks for the style sheet and its scripts marked with the version",
-          'href="/static/style.css%s"' % marked in home
-          and 'src="/static/notify.js%s"' % marked in home)
+          all('href="/static/style.css%s"' % marked in page for page in (home, hers))
+          and 'src="/static/notify.js%s"' % marked in hers)
+    check("a visitor's browser is not sent the notifications script, of no use to it",
+          "/static/notify.js" not in home)
     in_app = c.get("/privacy", headers={"User-Agent": "Mozilla/5.0 (iPhone) OrenthApp/1"})
-    check("and so does an app page for the phone script",
-          'src="/static/native.js%s"' % marked in in_app.data.decode("utf-8"))
+    check("an app page asks for the phone script marked too, and for the one that "
+          "opens a tapped notification, signed in or not",
+          all('src="/static/%s%s"' % (name, marked) in in_app.data.decode("utf-8")
+              for name in ("native.js", "notify.js")))
 
     sign_in(alice)
     account = c.get("/account").data.decode("utf-8")
@@ -1559,6 +1622,9 @@ try:
         check("Turn off with no connection says it did not work, and stays On",
               off["before"] == "On" and off["failed"]["chip"] == "On"
               and off["failed"]["said"].startswith("That did not work"), off)
+        check("and ends that with one full stop, whatever the reason ended with",
+              off["failed"]["said"].endswith(".")
+              and not off["failed"]["said"].endswith(".."), off["failed"]["said"])
         check("and keeps the device, so it can be turned off again",
               off["failed"]["kept"] == phone, off["failed"])
         check("once the server is told, it says Off and forgets the device",
@@ -1595,6 +1661,8 @@ try:
         check("one for %r stays on orenth.app" % ODD_BUT_HERE,
               tapped[ODD_BUT_HERE] == ["https://orenth.app" + ODD_BUT_HERE],
               tapped[ODD_BUT_HERE])
+        check("a page swiped back to that returns as it was left hears a tap again",
+              tapped["back"] is True, tapped.get("back"))
 
     section("RETIRING THE WORKER AFTER A ROLLBACK")
     # A version from before the worker answers /sw.js with "not found", and a

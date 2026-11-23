@@ -10,12 +10,12 @@
 
 <div class="plans">
   <div class="card plan">
-    <span class="eyebrow">Free</span>
+    <h2 class="eyebrow">Free</h2>
     {% if not in_app %}<p class="price">$0</p>{% endif %}
     <ul class="list">
       <li>{{ limits.analyses_per_day }} different stocks or coins analysed a day</li>
       <li>The top {{ limits.find_results }} in every Find list</li>
-      <li>{{ limits.alerts }} alert running at a time</li>
+      <li>{{ limits.alerts }} alert{{ '' if limits.alerts == 1 else 's' }} running at a time</li>
       <li>The full journal, portfolio and strategies</li>
       <li>Download your journal, saved theses and analysis history{{ ' from the website'
           if in_app }}, any time</li>
@@ -26,7 +26,7 @@
   </div>
 
   <div class="card plan pro">
-    <span class="eyebrow">Pro</span>
+    <h2 class="eyebrow">Pro</h2>
     {# Both prices come from Stripe, so they always match the charge. The
        iPhone app shows no web price at all. #}
     {% if not in_app %}
@@ -38,15 +38,22 @@
     {% endif %}
     <ul class="list">
       <li>As many stocks and coins a day as you like</li>
-      <li>Every result in every Find list</li>
+      <li>Every Find result worth a look, and the {{ watch_shown }} strongest
+        worth watching</li>
       <li>As many alerts as you like</li>
+      <li>A daily call on the first {{ watch_calls }} stocks or coins you watch
+        (on Free, only the popular ones get one)</li>
       <li>Everything in Free</li>
     </ul>
     {# The hourly safety limits every account keeps, Pro included, from the
        numbers the server enforces. #}
     <p class="fine">Fair use: up to {% if fair.images %}{{ fair.images }}
       screenshot reads and {% endif %}{{ fair.theses }} saved theses an hour,
-      and Find scans wait their turn when the server is busy.</p>
+      and Find scans wait their turn when the server is busy. Also up to
+      {{ fair.screens }} stock screens and {{ fair.routines }} routines an
+      hour.{% if not in_app %}
+      A program of your own can read up to {{ fair.json }} analyses an
+      hour.{% endif %}</p>
     {% if in_app %}
       {# ===================== app_purchase =====================
          Inside the iPhone app, Pro may only be sold through Apple (App Store
@@ -73,7 +80,12 @@
         {% elif apple.pro %}
           <p class="prose"><b>You have Pro through Apple</b>{% if apple.pro.test %},
             from a test purchase{% endif %}.
-            {% if apple.pro.renews %}It renews on {{ apple.pro.until|day }}.{% else %}It
+            {% if apple.pro.grace %}Apple could not take the last payment. Pro
+            stays on until {{ apple.pro.until|day }} while Apple tries
+            again{% if apple.pro.renews %}; to keep it after that, update the
+            payment method in your iPhone's Settings &gt; Apple
+            Account{% else %}, and then ends{% endif %}.{% elif apple.pro.renews %}It
+            renews on {{ apple.pro.until|day }}.{% else %}It
             ends on {{ apple.pro.until|day }} and will not renew.{% endif %}</p>
           {% if apple.twice %}
             <p class="notice">You are paying for Pro twice: through Apple, and
@@ -96,7 +108,8 @@
               <p class="prose"><b>The Pro on this iPhone's Apple Account belongs
                 to another Orenth account.</b> Move it here, and that account
                 loses it and is told by email. A subscription can move once
-                every 30 days.</p>
+                every 30 days, except back to the account it was moved
+                from.</p>
               <button class="btn quiet" type="button" data-iap-move>Move Pro to this account</button>
             </div>
             <p class="fine">Payment is charged to your Apple Account when you
@@ -121,7 +134,9 @@
       </div>
       {% endblock %}
     {% elif is_pro and current_user and not demo %}
-      <p class="prose"><b>You have Pro.</b></p>
+      <p class="prose"><b>You have Pro.</b>{% if apple.paid_said %} {{ apple.paid_said }}{% elif apple.via == 'invite' and not apple.pro %}
+        It is free until {{ apple.invite_until|day }}, and then
+        your account goes back to Free.{% endif %}</p>
       {% if apple.pro %}
         <p class="prose">{{ apple_pro_said }}</p>
       {% endif %}
@@ -132,7 +147,8 @@
       {% endif %}
       {% if has_customer %}
         <form method="post" action="{{ url_for('billing_portal') }}">
-          <button class="btn quiet" type="submit">Manage subscription</button>
+          <button class="btn quiet" type="submit">{{ 'Manage subscription'
+            if apple.via == 'web' else 'Receipts and billing' }}</button>
         </form>
       {% endif %}
     {% elif current_user and not demo and apple.retrying %}
@@ -145,7 +161,8 @@
          behind a link that is easy to miss. It is left empty on purpose: the
          code is passed on by word of mouth, never printed on the site. #}
       <form method="post" action="{{ url_for('billing_checkout') }}"
-            data-check="{{ url_for('billing_code') }}">
+            data-check="{{ url_for('billing_code') }}"
+            data-signin="{{ url_for('signin', next='/pricing') }}">
         <label class="fine" for="code">Discount code</label>
         {# Apply comes first, so pressing Enter in the box checks the code
            rather than going straight to pay. #}
@@ -155,7 +172,7 @@
                  autocapitalize="characters" autocorrect="off" spellcheck="false">
           <button class="btn quiet" type="submit" name="apply" value="1">Apply</button>
         </div>
-        <div class="codeslot" data-said>{% include "_codesaid.html" %}</div>
+        <div class="codeslot" data-said aria-live="polite">{% include "_codesaid.html" %}</div>
         <button class="btn" type="submit" name="plan" value="monthly">Upgrade to Pro</button>
         {% if offer.yearly %}
           <button class="btn quiet" type="submit" name="plan" value="yearly">Or pay yearly{% if offer.save %}
@@ -165,7 +182,8 @@
     {% else %}
       <a class="btn" href="{{ url_for('signin', next='/pricing') }}">Create account to upgrade</a>
     {% endif %}
-    {% if not in_app %}
+    {# Not to someone whose Pro does not renew here: an invite's, or Apple's. #}
+    {% if not in_app and (apple.via == 'web' or not (is_pro or apple.retrying)) %}
     <p class="fine">Pro renews
       automatically every {{ 'month or year, whichever you pick,' if offer.yearly else 'month' }}
       until you cancel. Cancel any time from your Account page. Payments are
@@ -177,7 +195,9 @@
 {# Said plainly, because it is the thing a paying customer might assume
    otherwise and it is not true. #}
 {# Apply answers in place, so the page neither reloads nor jumps to the
-   top. Anything that goes wrong falls back to the plain form post. #}
+   top. Only the one line /billing/code marks as its own is ever put under
+   the box: any other page answering (the sign-in page, once the sign-in has
+   ended) is gone to, or said to be a failure, never drawn in the card. #}
 <script>
 (function () {
   var form = document.querySelector('form[data-check]');
@@ -190,10 +210,14 @@
     e.submitter.disabled = true;
     fetch(form.getAttribute('data-check'), {
       method: 'POST', body: new FormData(form), credentials: 'same-origin'
-    }).then(function (r) { return r.text(); })
-      .then(function (html) { said.innerHTML = html; })
+    }).then(function (r) {
+      if (r.headers.get('X-Orenth-Part') === 'code') { return r.text(); }
+      if (!r.redirected) { throw new Error('not the answer'); }
+      location.assign(form.getAttribute('data-signin'));
+      return '';
+    }).then(function (html) { said.innerHTML = html; })
       .catch(function () {
-        said.innerHTML = '<p class="codesaid bad" role="alert">Could not check ' +
+        said.innerHTML = '<p class="codesaid bad">Could not check ' +
           'the code just now. Try again in a moment.</p>';
       })
       .then(function () { e.submitter.disabled = false; });

@@ -56,7 +56,7 @@ COUNT_KEYS = ("st_sweep_n",)
 INDEX_KEYS = ("st_hi_at", "st_lo_at", "st_fvg_up_at", "st_fvg_dn_at", "st_trend_at")
 PRICE_KEYS = ("st_hi", "st_lo", "st_above1", "st_above2", "st_above3",
               "st_below1", "st_below2", "st_below3", "st_ref_hi", "st_ref_lo",
-              "st_sweep_lvl", "st_sweep_far", "st_eqh", "st_eql",
+              "st_sweep_lvl", "st_sweep_far", "st_sweep_eq_lvl", "st_eqh", "st_eql",
               "st_fvg_up_top", "st_fvg_up_bot", "st_fvg_up_stack_bot",
               "st_fvg_dn_top", "st_fvg_dn_bot", "st_fvg_dn_stack_top",
               "st_ifvg_lvl", "st_eq", "st_leg_lo", "st_leg_hi", "st_atr")
@@ -183,28 +183,36 @@ class _Levels:
     def take(self, extreme: float):
         """Remove and return every level this bar's high (or low) went past.
 
-        Returns (taken items in price order, whether one was part of equal
-        highs or lows). Past means strictly: a high equal to a level has not
-        traded beyond it.
+        Returns (taken items in price order, the nearest price of the equal
+        highs or lows among them, or NaN). Equal ones count when two or more
+        of one set were taken together. Past means strictly: a high equal to
+        a level has not traded beyond it.
         """
         prices = self.prices
         if not prices:
-            return None, False
+            return None, NAN
         if self.highs:
             if extreme <= prices[0]:
-                return None, False
+                return None, NAN
             j = bisect.bisect_left(prices, extreme)
             taken = self.items[:j]
             del self.items[:j]
             del prices[:j]
         else:
             if extreme >= prices[-1]:
-                return None, False
+                return None, NAN
             j = bisect.bisect_right(prices, extreme)
             taken = self.items[j:]
             del self.items[j:]
             del prices[j:]
-        equal = any(len(self.clusters[it[2]]) >= 2 for it in taken)
+        equal = NAN
+        if len(taken) > 1:
+            count: Dict[int, int] = {}
+            for it in taken:
+                count[it[2]] = count.get(it[2], 0) + 1
+            same = [it[0] for it in taken if count[it[2]] >= 2]
+            if same:
+                equal = same[0] if self.highs else same[-1]
         for it in taken:
             self._forget(it)
         return taken, equal
@@ -245,7 +253,9 @@ def series(bars, k: int = K) -> Dict[str, np.ndarray]:
                                          in the trend's own direction
       st_ref_hi, st_ref_lo               the level whose close would flip it
       st_sweep (+1 lows taken, -1 highs), st_sweep_both, st_sweep_lvl (nearest
-      level taken), st_sweep_far, st_sweep_n, st_sweep_back, st_sweep_eq
+      level taken), st_sweep_far, st_sweep_n, st_sweep_back, st_sweep_eq (equal
+      highs or lows among them, two or more taken together), st_sweep_eq_lvl
+      (the nearest of those)
       st_eqh, st_eql                     nearest equal highs above, lows below
       st_fvg_up_top/bot/stack_bot/at, st_fvg_dn_top/bot/stack_top/at
                                          the most recent live gap each way
@@ -297,6 +307,7 @@ def series(bars, k: int = K) -> Dict[str, np.ndarray]:
     o_sw, o_swb, o_swl, o_swf, o_swn, o_swback, o_sweq = (
         cols["st_sweep"], cols["st_sweep_both"], cols["st_sweep_lvl"], cols["st_sweep_far"],
         cols["st_sweep_n"], cols["st_sweep_back"], cols["st_sweep_eq"])
+    o_sweql = cols["st_sweep_eq_lvl"]
     o_eqh, o_eql = cols["st_eqh"], cols["st_eql"]
     o_ut, o_ub, o_us, o_ua = (cols["st_fvg_up_top"], cols["st_fvg_up_bot"],
                               cols["st_fvg_up_stack_bot"], cols["st_fvg_up_at"])
@@ -386,13 +397,13 @@ def series(bars, k: int = K) -> Dict[str, np.ndarray]:
             near = took_lo[-1][0]
             o_swl[i], o_swf[i], o_swn[i] = near, took_lo[0][0], len(took_lo)
             o_swback[i] = 1 if cl_i > near else 0
-            o_sweq[i] = 1 if eq_lo else 0
+            o_sweq[i], o_sweql[i] = (1 if eq_lo == eq_lo else 0), eq_lo
         elif took_hi:
             o_sw[i] = -1
             near = took_hi[0][0]
             o_swl[i], o_swf[i], o_swn[i] = near, took_hi[-1][0], len(took_hi)
             o_swback[i] = 1 if cl_i < near else 0
-            o_sweq[i] = 1 if eq_hi else 0
+            o_sweq[i], o_sweql[i] = (1 if eq_hi == eq_hi else 0), eq_hi
 
         # --- the legs for the 50% line, moved by this bar ---------------------
         if up_leg[0] == up_leg[0]:

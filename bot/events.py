@@ -184,12 +184,21 @@ _UPGRADED_LOCK = threading.Lock()
 UPGRADE_MEMORY = 3600.0
 
 
-def _pro_ids(conn: sqlite3.Connection):
+# Apple's word of a renewal can come a little after the old period's end. Pro
+# through Apple that ended within this long still counts as on Pro beforehand,
+# so a late renewal is not counted as turning Pro again.
+APPLE_LATE = 3 * 86400.0
+
+
+def _pro_ids(conn: sqlite3.Connection, late: float = 0.0):
+    """Everyone on Pro they pay for: through Stripe, or through Apple until a
+    time no more than late seconds ago."""
     from . import billing as billing_mod
     marks = ",".join("?" * len(billing_mod.ACTIVE))
     return {int(r[0]) for r in conn.execute(
-        "SELECT id FROM users WHERE plan='pro' AND plan_status IN (%s)" % marks,
-        tuple(billing_mod.ACTIVE))}
+        "SELECT id FROM users WHERE (plan='pro' AND plan_status IN (%s)) "
+        "OR apple_until > ?" % marks,
+        tuple(billing_mod.ACTIVE) + (time.time() - late,))}
 
 
 @contextlib.contextmanager
@@ -200,7 +209,7 @@ def counting_upgrades(conn: sqlite3.Connection) -> Iterator[None]:
     plan and counts nothing.
     """
     try:
-        before = _pro_ids(conn)
+        before = _pro_ids(conn, late=APPLE_LATE)
     except Exception:
         log.exception("Could not read who is on Pro")
         before = None

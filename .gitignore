@@ -16,6 +16,16 @@ secret.key
 .env.*
 !.env.example
 
+# Keys downloaded from Apple and others, and what editors and the Mac leave.
+*.p8
+*.pem
+.claude/
+.impeccable/
+.DS_Store
+
+# Notes for whoever runs this copy. They are not for a public repository.
+/docs/
+
 # Local settings, so a public repo does not carry your account size around.
 config.json
 

@@ -5,13 +5,19 @@
    Shrunk to a phone, the wide drawing's labels were 4 pixels tall, so a
    phone gets the narrow one, drawn for its width. #}
 {% block head_extra %}{% if price_svg and price_svg_narrow %}<style>
+  .yearchart .chart { max-height: none; }
   .yearchart .narrow { display: none; }
   @media (max-width: 600px) {
     .yearchart .wide { display: none; }
     .yearchart .narrow { display: block; }
-    .yearchart .chart { max-height: none; }
   }
 </style>{% endif %}{% endblock %}
+
+{# The source and its day. The day stays in one piece: on a phone it broke
+   across two lines at a hyphen, "2026-11-" and "23". #}
+{% macro cited(e) -%}
+{{ e.source }}{% if e.as_of %} · <span style="white-space:nowrap">{{ e.as_of }}</span>{% endif %}
+{%- endmacro %}
 
 {% macro lean(v) %}
   <div class="lean"><span class="zero"></span>
@@ -42,7 +48,7 @@
     {% if f and f.country %}<span>{{ f.country }}</span>{% endif %}
     <span>researched in {{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
-  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap">
+  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap;align-items:flex-start">
     {% set exact = exact_arg(r.symbol) %}
     <a class="btn quiet sm" data-working
        href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval, exact=exact) }}">
@@ -62,11 +68,19 @@
         <button class="btn quiet sm" type="submit">Add to watchlist</button>
       </form>
     {% endif %}
-    <form method="post" action="{{ url_for('save_thesis') }}">
+    <form method="post" action="{{ url_for('save_thesis') }}" data-working
+          data-working-title="Saving this thesis"
+          data-working-note="Keeping the case as it stands today, so it can be judged later."
+          style="display:flex;gap:var(--s1);flex-wrap:wrap">
       <input type="hidden" name="symbol" value="{{ r.symbol }}">
       {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
       <input type="hidden" name="interval" value="{{ a.bars.interval }}">
+      {% if with_news is defined and not with_news %}<input type="hidden" name="news" value="0">{% endif %}
+      {% if with_options is defined and not with_options %}<input type="hidden" name="options" value="0">{% endif %}
       <button class="btn sm" type="submit">Save this thesis</button>
+      <label class="sr" for="t-note">Note to keep with the thesis, optional</label>
+      <input class="field sm" id="t-note" name="note" type="text" maxlength="200"
+             placeholder="note (optional)" autocomplete="off" style="flex:0 1 200px;width:200px">
     </form>
   </div>
 </div>
@@ -76,7 +90,7 @@
    for the owner of a copy on their own machine (and the server log). #}
 {% set owner = current_user and current_user.is_local %}
 {% if r.unavailable %}
-  <div class="card" style="border-color:var(--hold)">
+  <div class="card" style="border-color:var(--hold);margin-bottom:var(--s3)">
     <span class="eyebrow">Not available here</span>
     <ul class="list warn">{% for u in r.unavailable %}<li>{{ u }}</li>{% endfor %}</ul>
     <p class="prose" style="margin-top:var(--s2)">Either the source has none for
@@ -90,7 +104,7 @@
 
 {# Thirty phone screens of sections. The bar lists them and sticks under the
    top bar; it is filled in below from the headings that actually rendered. #}
-<nav class="jump" id="jump" aria-label="Sections" hidden></nav>
+<nav class="jump" id="jump" aria-label="On this page" hidden></nav>
 
 {# A step this copy does not have switched on is not shown to anyone who
    could not switch it on: it is not a fault of the page they are reading. #}
@@ -167,7 +181,7 @@
 <section>
   <div class="sechead">
     <h2>The case, both ways</h2>
-    <span class="tail">{{ t.evidence_count }} pieces of evidence</span>
+    <span class="tail">{{ t.evidence_count }} piece{{ '' if t.evidence_count == 1 else 's' }} of evidence</span>
   </div>
 
   <div class="card" style="margin-bottom:var(--s3)">
@@ -189,8 +203,8 @@
           {% for e in p.evidence %}
             <div class="tiny faint" style="margin-top:6px;font-size:var(--t-xs)">
               <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
-              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
-              {% else %}{{ e.cite() }}{% endif %}
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -209,8 +223,8 @@
           {% for e in p.evidence %}
             <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
               <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
-              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.cite() }}</a>
-              {% else %}{{ e.cite() }}{% endif %}
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
             </div>
           {% endfor %}
         </div>
@@ -223,26 +237,75 @@
   <div class="cols b" style="margin-top:var(--s3)">
     <div class="card">
       <span class="eyebrow">What would prove this wrong</span>
-      <ul class="list">{% for x in t.falsifiers %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% if t.falsifiers %}
+        <ul class="list">{% for x in t.falsifiers %}<li>{{ x }}</li>{% endfor %}</ul>
+      {% else %}
+        <p class="prose">The evidence leans neither way, so there is no case here
+          to prove wrong.</p>
+      {% endif %}
     </div>
     <div class="card">
       <span class="eyebrow">What could not be measured</span>
       {% if t.unknowns %}
         <ul class="list warn">{% for x in t.unknowns %}<li>{{ x }}</li>{% endfor %}</ul>
       {% else %}
-        <p class="prose">Every input was available for this instrument.</p>
+        {% set no_accounts = r.sec_history and not r.sec_history.available %}
+        <p class="prose">{% if no_accounts %}Accounts filed with the SEC, because
+          there were none here to read.{% endif %}
+          {% if r.unavailable %}What is listed at the top of this page as not
+          available.{% endif %}
+          {% if not no_accounts and not r.unavailable %}Every input was available
+          for this instrument.{% endif %}</p>
       {% endif %}
     </div>
   </div>
+
+  {% if t.neutral %}
+    <div class="card" style="margin-top:var(--s3)">
+      <span class="eyebrow">Worth knowing, and counted for neither side</span>
+      {% for p in t.neutral %}
+        <div style="padding:var(--s2) 0;border-top:1px solid var(--hairline)">
+          <div style="font-weight:600;font-size:var(--t-sm)">{{ p.headline }}</div>
+          <p class="prose" style="margin-top:4px">{{ p.detail }}</p>
+          {% for e in p.evidence %}
+            <div class="faint" style="margin-top:6px;font-size:var(--t-xs)">
+              <span class="fig">{{ e.value }}</span> · {{ e.claim }} ·
+              {% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ cited(e) }}</a>
+              {% else %}{{ cited(e) }}{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
 </section>
 {% endif %}
 
-{% if f and r.quality %}
+{# A coin or a fund has no business to judge, but may have figures. #}
+{% set figures = [] %}
+{% if f %}
+  {% for key in ['market_cap','pe','forward_pe','pb','ps','ev_ebitda',
+                 'gross_margin','operating_margin','net_margin','roe','roa',
+                 'revenue_growth','earnings_growth','revenue','free_cashflow',
+                 'fcf_yield','total_cash','total_debt','debt_to_equity',
+                 'current_ratio','beta','dividend_yield','short_pct_float',
+                 'sec_revenue','sec_net_income','sec_assets','sec_liabilities',
+                 'sec_equity','sec_eps'] %}
+    {% set m = f.metrics.get(key) %}
+    {% if m and m.known %}{% set _ = figures.append(m) %}{% endif %}
+  {% endfor %}
+{% endif %}
+{% if f and r.quality and (r.quality.known or figures or f.summary or f.notes) %}
 <section>
   <div class="sechead">
-    <h2>The business</h2>
-    <span class="tail">{{ r.quality.known }} of {{ r.quality.total }} checks could be judged</span>
+    {% if r.quality.known %}
+      <h2>The business</h2>
+      <span class="tail">{{ r.quality.known }} of {{ r.quality.total }} checks could be judged</span>
+    {% else %}
+      <h2>What is reported about it</h2>
+    {% endif %}
   </div>
+  {% if r.quality.known %}
   <div class="card">
     <p class="prose" style="margin-bottom:var(--s3);color:var(--ink)">
       {{ r.quality.verdict }}</p>
@@ -265,42 +328,27 @@
       </div>
     </div>
   </div>
+  {% endif %}
 
+  {% if figures %}
   <div class="card pad0" style="margin-top:var(--s3)">
     <div class="cardhead"><span class="eyebrow">Key figures</span></div>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Measure</th><th class="r">Value</th><th>Source</th></tr></thead>
         <tbody>
-        {% for key in ['market_cap','pe','forward_pe','pb','ps','ev_ebitda',
-                       'gross_margin','operating_margin','net_margin','roe','roa',
-                       'revenue_growth','earnings_growth','revenue','free_cashflow',
-                       'fcf_yield','total_cash','total_debt','debt_to_equity',
-                       'current_ratio','beta','dividend_yield','short_pct_float'] %}
-          {% set m = f.metrics.get(key) %}
-          {% if m and m.known %}
-            <tr>
-              <td>{{ m.label }}</td>
-              <td class="r fig">{{ m.display() }}</td>
-              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
-            </tr>
-          {% endif %}
-        {% endfor %}
-        {% for key in ['sec_revenue','sec_net_income','sec_assets','sec_liabilities',
-                       'sec_equity','sec_eps'] %}
-          {% set m = f.metrics.get(key) %}
-          {% if m and m.known %}
-            <tr>
-              <td>{{ m.label }}</td>
-              <td class="r fig">{{ m.display() }}</td>
-              <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
-            </tr>
-          {% endif %}
+        {% for m in figures %}
+          <tr>
+            <td>{{ m.label }}</td>
+            <td class="r fig">{{ m.display() }}</td>
+            <td class="faint">{{ m.source }}{% if m.note %} · {{ m.note }}{% endif %}</td>
+          </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
   </div>
+  {% endif %}
 
   {% if f.summary %}
     <div class="card" style="margin-top:var(--s3)">
@@ -318,7 +366,7 @@
 {% endif %}
 
 {% if plain %}
-<div class="plainbox">
+<div class="plainbox" style="margin-top:var(--s3)">
   <span class="eyebrow">In plain words</span>
   {% if plain.available %}
     <ul class="list">{% for x in plain.points %}<li>{{ x }}</li>{% endfor %}</ul>
@@ -332,8 +380,8 @@
 {% if price_svg %}
 <section class="yearchart">
   <div class="sechead">
-    <h2>The last year</h2>
-    <span class="tail">closing prices, {{ a.bars.interval }} bars</span>
+    <h2>{{ price_title }}</h2>
+    <span class="tail">daily closing prices</span>
   </div>
   <div class="card">
     <div class="wide">{{ price_svg|safe }}</div>
@@ -364,7 +412,8 @@
   <p class="prose" style="margin-top:var(--s3)">
     Bars rather than a line, because each is a separate audited figure from one
     annual report. A line between two of them would imply values in between
-    that were never reported. Hover a bar for the exact number.
+    that were never reported.
+    {% if not in_app %}<span class="hover-only">Point at a bar for the exact number.</span>{% endif %}
   </p>
   {% if r.sec_history and r.sec_history.mixed_currency %}
     <div class="card" style="margin-top:var(--s3);border-color:var(--hold)">
@@ -418,13 +467,19 @@
         {% if s.tests %}
           <div class="tablewrap" style="margin-top:var(--s2)">
             <table>
+              <thead><tr><th style="padding:0;border:0"><span class="sr">Result</span></th>
+                <th style="padding:0;border:0"><span class="sr">Test</span></th>
+                <th style="padding:0;border:0"><span class="sr">Detail</span></th></tr></thead>
               <tbody>
               {% for t in s.tests %}
                 <tr>
                   <td style="width:26px">
-                    {% if t.passed is none %}<span class="faint">?</span>
-                    {% elif t.passed %}<span class="gain">&check;</span>
-                    {% else %}<span class="loss">&times;</span>{% endif %}
+                    {% if t.passed is none %}<span class="faint" aria-hidden="true">?</span>
+                      <span class="sr">not reported</span>
+                    {% elif t.passed %}<span class="gain" aria-hidden="true">&check;</span>
+                      <span class="sr">passed</span>
+                    {% else %}<span class="loss" aria-hidden="true">&times;</span>
+                      <span class="sr">failed</span>{% endif %}
                   </td>
                   <td>{{ t.name }}</td>
                   <td class="soft" style="font-size:var(--t-xs)">{{ t.detail }}</td>
@@ -434,10 +489,15 @@
             </table>
           </div>
         {% elif s.inputs %}
+          {# The earnings score's inputs are amounts of money; the others' are
+             ratios. #}
+          {% set unit = (r.sec_history or {}).get('currency') or 'USD' %}
           <dl class="pairs" style="margin-top:var(--s2)">
             {% for label, value in s.inputs.items() %}
               <dt style="font-size:var(--t-xs)">{{ label }}</dt>
-              <dd class="fig" style="font-size:var(--t-xs)">{{ "%.2f"|format(value) }}</dd>
+              <dd class="fig" style="font-size:var(--t-xs)">{{ "%.2f"|format(value)
+                if key != 'accruals' else value|big if unit == 'USD'
+                else value|big ~ ' ' ~ unit }}</dd>
             {% endfor %}
           </dl>
         {% endif %}
@@ -467,7 +527,7 @@
         <thead><tr>
           <th>Fiscal year</th>
           {% for y in h.years %}<th class="r">{{ y }}</th>{% endfor %}
-          <th class="r">5y growth</th>
+          <th class="r">Growth a year</th>
         </tr></thead>
         <tbody>
         {% for key, label in [('revenue','Revenue'),('gross_profit','Gross profit'),
@@ -479,21 +539,23 @@
           {% if h.table.get(key) %}
             {% set byyear = {} %}
             {% for row in h.table[key] %}{% set _ = byyear.update({row.fy: row}) %}{% endfor %}
+            {% set unit = (h.table[key][-1].unit or 'USD').split('/')[0] %}
             <tr>
-              <td>{{ label }}</td>
+              <td>{{ label }}{% if unit != 'USD' %} <span class="faint">in {{ unit }}</span>{% endif %}</td>
               {% for y in h.years %}
                 <td class="r fig">
                   {% if byyear.get(y) %}
                     {% set v = byyear[y].value %}
                     {% if key == 'eps_diluted' %}{{ "%.2f"|format(v) }}
-                    {% elif v|abs >= 1000000000 %}{{ "%.1fB"|format(v/1000000000) }}
-                    {% elif v|abs >= 1000000 %}{{ "%.0fM"|format(v/1000000) }}
-                    {% else %}{{ "{:,.0f}".format(v) }}{% endif %}
+                    {% else %}{{ v|big }}{% endif %}
                   {% else %}—{% endif %}
                 </td>
               {% endfor %}
               <td class="r fig {{ 'gain' if (h.cagr.get(key) or 0) > 0 else 'loss' if h.cagr.get(key) else '' }}">
                 {{ h.cagr.get(key)|pct(1) if h.cagr.get(key) is not none else '—' }}
+                {% set span = h.get('cagr_years', {}).get(key) %}
+                {% if span %}<div class="faint" style="font-size:var(--t-xs)">{{ span[0] }}
+                  to {{ span[1] }}</div>{% endif %}
               </td>
             </tr>
           {% endif %}
@@ -510,10 +572,11 @@
             <td></td>
           </tr>
           <tr>
-            <td>Free cash flow</td>
+            {% set unit = ((h.table.get('operating_cashflow') or [{}])[-1].unit or 'USD').split('/')[0] %}
+            <td>Free cash flow{% if unit != 'USD' %} <span class="faint">in {{ unit }}</span>{% endif %}</td>
             {% for y in h.years %}
               {% set fcf = h.derived.get(y, {}).get('free_cashflow') %}
-              <td class="r fig">{{ "%.1fB"|format(fcf/1000000000) if fcf else '—' }}</td>
+              <td class="r fig">{{ fcf|big if fcf is not none else '—' }}</td>
             {% endfor %}
             <td></td>
           </tr>
@@ -523,25 +586,40 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       These are the numbers the company filed, not a data vendor's version of
-      them. Growth is compounded annually across the filed years.
+      them. Growth is the steady yearly rate between the two years named
+      under it.
     </p>
   </div>
 </section>
 {% endif %}
 
-{% if r.valuation and r.valuation.usable %}
+{# With no value to show, the cards are still worth reading when one of them
+   ran: the ratios of a fund or a bank, say. #}
+{% if r.valuation and (r.valuation.usable or r.valuation.models|selectattr('usable')|list) %}
 {% set v = r.valuation %}
 <section>
   <div class="sechead">
     <h2>What it might be worth</h2>
-    <span class="tail">{{ v.agreement }} agreement between models</span>
+    <span class="tail">{{ 'no value could be worked out' if not v.usable
+      else v.agreement_words }}</span>
   </div>
+  {% if not v.usable %}
+  <div class="card">
+    <p class="prose">No model could put a value on it. What could be worked out
+      is below, with the reason for what could not.</p>
+  </div>
+  {% else %}
   <div class="card">
     <div class="figs" style="margin-bottom:var(--s3)">
+      {% if v.agreement == 'single' %}
+      <div class="f"><div class="k">Modelled value</div>
+        <div class="v fig">{{ v.midpoint|price }}</div></div>
+      {% else %}
       <div class="f"><div class="k">Modelled range</div>
         <div class="v fig">{{ v.low|price }}–{{ v.high|price }}</div></div>
       <div class="f"><div class="k">Midpoint</div>
         <div class="v fig">{{ v.midpoint|price }}</div></div>
+      {% endif %}
       <div class="f"><div class="k">Price today</div>
         <div class="v fig">{{ r.price|price }}</div></div>
       <div class="f"><div class="k">Gap</div>
@@ -552,12 +630,13 @@
       <p class="prose">{{ line }}</p>
     {% endfor %}
   </div>
+  {% endif %}
 
   {% for m in v.models %}
     <div class="card" style="margin-top:var(--s3)">
       <span class="eyebrow">{{ m.method }}</span>
       {% if m.usable %}
-        {% if m.fair_value %}
+        {% if m.fair_value and not m.only_a_check %}
           <p class="prose" style="color:var(--ink);font-size:var(--t-base)">
             Fair value <span class="fig">{{ m.fair_value|price }}</span>
             {% if m.upside is not none %}
@@ -575,10 +654,11 @@
                 <tr>
                   <td>{{ a_.label }}</td>
                   <td class="r fig">
-                    {% if a_.key in ['growth','terminal_growth','discount','implied_growth'] %}
+                    {% if a_.key in ['growth','terminal_growth','discount','implied_growth',
+                                     'implied_average'] %}
                       {{ a_.value|pct(1) }}
-                    {% elif a_.value|abs >= 1000000 %}{{ "%.2fB"|format(a_.value/1000000000) }}
-                    {% else %}{{ "%.4g"|format(a_.value) }}{% endif %}
+                    {% elif a_.key == 'price' %}{{ a_.value|price }}
+                    {% else %}{{ a_.value|big(2) }}{% endif %}
                   </td>
                   <td class="faint">{{ a_.source }}</td>
                 </tr>
@@ -597,7 +677,8 @@
                   <td>{{ row.label }}</td>
                   <td class="r fig">{{ row.value|pct(1) if row.unit == 'pct'
                       else "%.1fx"|format(row.value) }}</td>
-                  <td class="{{ 'gain' if row.cheap else 'loss' }}">{{ row.comment }}</td>
+                  <td class="{{ 'faint' if not row.comparable else 'gain' if row.cheap
+                    else 'loss' }}">{{ row.comment }}</td>
                 </tr>
               {% endfor %}
               </tbody>
@@ -672,10 +753,11 @@
         <div class="v fig loss">{{ k.var_99|pct(1) }}</div>
         <div class="n">worst 1 in 100</div></div>
       <div class="f"><div class="k">Beta</div>
-        <div class="v fig">{{ "%.2f"|format(k.beta) if k.beta is not none else '—' }}</div>
+        {# Adding nothing turns a rounded -0.00 into 0.00. #}
+        <div class="v fig">{{ "%.2f"|format(k.beta|round(2) + 0) if k.beta is not none else '—' }}</div>
         <div class="n">versus the market</div></div>
       <div class="f"><div class="k">Sharpe</div>
-        <div class="v fig">{{ "%.2f"|format(k.sharpe) if k.sharpe is not none else '—' }}</div>
+        <div class="v fig">{{ "%.2f"|format(k.sharpe|round(2) + 0) if k.sharpe is not none else '—' }}</div>
         <div class="n">return per unit of risk</div></div>
     </div>
     {% if k.notes %}
@@ -691,7 +773,7 @@
 <section>
   <div class="sechead">
     <h2>What options are pricing</h2>
-    <span class="tail">expiry {{ o.expiry_date }}, {{ o.days }} days out</span>
+    <span class="tail">expiry {{ o.expiry_date }}, {{ o.days }} day{{ '' if o.days == 1 else 's' }} out</span>
   </div>
   <div class="card">
     <div class="figs">
@@ -707,7 +789,7 @@
         <div class="v fig">{{ "%.2f"|format(o.put_call_oi) if o.put_call_oi else '—' }}</div>
         <div class="n">open interest</div></div>
       <div class="f"><div class="k">Skew</div>
-        <div class="v fig">{{ "%+.3f"|format(o.skew) if o.skew is not none else '—' }}</div>
+        <div class="v fig">{{ o.skew|signed(3) if o.skew is not none else '—' }}</div>
         <div class="n">put minus call IV</div></div>
       <div class="f"><div class="k">Tradable now</div>
         <div class="v fig">{{ o.tradable_count }}</div>
@@ -797,12 +879,19 @@
             {# Today's price in the shares the thesis was saved in, so it
                sits beside "Price then"; after a split it says so. #}
             <td class="r fig" data-label="Now">{{ rev.now|price if rev.now else '—' }}
+              {% if row['outcome'] %}<div class="faint" style="font-size:var(--t-xs)">when
+                it was closed</div>{% endif %}
               {% if rev.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ rev.quoted|price }} today, after a {{ rev.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}" data-label="Move">
+            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' if (rev.move or 0) < 0 else '' }}" data-label="Move">
               {{ rev.move|pct(1) if rev.usable else '—' }}</td>
-            <td class="fig" data-label="Called">{{ row['balance']|signed }}</td>
-            <td data-label="Outcome">{% if rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
+            <td class="{{ 'soft' if rev.no_view else 'fig' }}" data-label="Called">{{ 'No view' if rev.no_view else row['balance']|signed }}</td>
+            <td data-label="Outcome">{% if row['outcome'] %}<span class="chip {{
+                 'long' if row['outcome'] == 'right' else 'short' if row['outcome'] == 'wrong'
+                 else 'hold' if row['outcome'] == 'luck' else 'mute' }}">{{
+                 'right for the wrong reason' if row['outcome'] == 'luck' else row['outcome'] }}</span>
+                 <div class="faint" style="font-size:var(--t-xs)">closed {{ row['closed_ts']|ago }}</div>
+              {% elif rev.usable %}<span class="chip {{ 'long' if rev.outcome == 'right so far'
                  else 'short' if rev.outcome == 'wrong so far' else 'mute' }}">
               {{ rev.outcome }}</span>{% else %}<span class="faint">{{ rev.reason }}</span>{% endif %}</td>
             <td class="r">

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from . import clock
 from .strategies import Context, evaluate
 
 
@@ -207,13 +208,44 @@ def simulate_trade(ctx: Context, i: int, direction: int, stop_atr: float,
     return False, move / risk - cost_r, last - i, cost_r
 
 
+def bar_numbers(bars) -> np.ndarray:
+    """A number for each bar worked out from its own time and nothing else.
+
+    Bars that follow each other have numbers that do too, so every third
+    number is every third bar, and a bar keeps its number whatever history
+    was downloaded around it.
+
+    A day counts as one, weekends left out where the market has none: counted
+    in plain days, a stride of seven would look at one weekday only. A Sunday
+    session (a stock exchange that opens on Sundays, or whose Monday starts
+    on Sunday in UTC) takes the place of the Friday it has no bars on. Inside
+    a day the number goes up by one a bar and starts one later each day, so a
+    replay is not stuck on the same times of day.
+    """
+    ts = np.asarray(bars.timestamp, dtype=np.int64)
+    step = clock.bar_seconds(bars) or 86400
+    days = ts // 86400
+    weekday = (days + 3) % 7                          # Monday is 0
+    if getattr(bars, "is_crypto", False) or len(np.unique(weekday)) == 7:
+        return ts // step                             # it never closes
+    day = (days + 3) // 7 * 5 + np.minimum(weekday, 4)
+    return day + (ts % 86400) // step
+
+
 def sample_points(ctx: Context, horizon: int, stride: int = 3,
                   max_samples: int = 2500) -> List[int]:
-    """The bars a replay looks at: every `stride`-th, the most recent kept."""
+    """The bars a replay looks at: every `stride`-th, the most recent kept.
+
+    Chosen by each bar's own time. Counted from the first bar downloaded, a
+    different third was looked at each day, as one old bar left the five-year
+    window: with nothing else changed, the same setup's record read 19 of 47
+    one day and 33 of 68 the next, and a call went from WAIT to BUY and back.
+    """
     start, end = ctx.warmup, len(ctx.bars) - horizon - 1
     if end <= start:
         return []
-    indices = list(range(start, end, max(1, stride)))
+    numbers = bar_numbers(ctx.bars)[start:end]
+    indices = [start + int(k) for k in np.flatnonzero(numbers % max(1, stride) == 0)]
     if len(indices) > max_samples:                   # keep the most recent
         indices = indices[-max_samples:]
     return indices
@@ -345,6 +377,20 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
 
     reward_risk = target_atr / stop_atr if stop_atr > 0 else 0.0
 
+    # The learned weights or the news can put the call on the other side from
+    # the score the replay uses. On such a day the replay's own model would
+    # have taken the opposite trade, so it has no past setups like this one:
+    # the buys it made at the same strength came from scores pointing up.
+    if direction * current_score < 0:
+        return Calibration(
+            0, 0, 0, 0, None, None, None,
+            (1.0 / (1.0 + reward_risk)) if reward_risk > 0 else 1.0, None,
+            horizon, reward_risk, None, False,
+            "The call leans %s, but the standard reading the odds are measured "
+            "with leans %s today, so there are no comparable past setups."
+            % (("up", "down") if direction > 0 else ("down", "up")),
+            direction=direction, cost_bps=cost_bps, score=current_score)
+
     every = run_backtest(ctx, stop_atr, target_atr, horizon, stride, weights,
                          cost_bps=cost_bps)
     outcomes = [o for o in every if not direction or o.direction == direction]
@@ -436,7 +482,8 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
     lost_r = [o.r_multiple for o in grp if not o.won]
     avg_win = float(np.mean(won_r)) if won_r else None
     avg_loss = float(np.mean(lost_r)) if lost_r else None
-    if avg_win is not None and avg_loss is not None and avg_win > avg_loss             and avg_loss < 0:
+    if (avg_win is not None and avg_loss is not None and avg_win > avg_loss
+            and avg_loss < 0):
         breakeven = -avg_loss / (avg_win - avg_loss)
 
     # Hold out the most recent third of comparable setups. If the edge exists
@@ -456,10 +503,11 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
     reliable = bn >= min_bucket and len(every) >= 120
 
     if not reliable:
-        note = ("Only %d comparable %ssetups in history. Treat this figure as "
-                "indicative, not measured." % (bn, (side + " ") if direction else ""))
+        note = ("Only %d comparable %ssetup%s in history. Treat this figure as "
+                "indicative, not measured." % (bn, (side + " ") if direction else "",
+                                               "" if bn == 1 else "s"))
     elif ci_lo is not None and ci_lo <= breakeven <= (ci_hi or 1.0):
-        note = ("Confidence interval straddles the %.0f%% break-even line, so "
+        note = ("The 95%% range takes in the %.0f%% break-even line, so "
                 "no edge is demonstrated at this score." % (breakeven * 100))
     elif rate > breakeven:
         note = "Hit rate clears break-even on %d comparable setups." % bn

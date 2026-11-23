@@ -13,13 +13,17 @@ price history kept working while everything else returned 401.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Dict, Optional
+from urllib.parse import quote
 
 import requests
 
 from . import upstream
+
+log = logging.getLogger(__name__)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
@@ -43,8 +47,10 @@ _RETRY_AFTER_FAILURE = 60.0
 # a source that has not answered in this long is not going to.
 _HANDSHAKE_TIMEOUT = 5
 
-_NO_SESSION = ("Could not obtain a Yahoo session token. This usually means no "
-               "internet connection, or Yahoo is blocking this network.")
+# These are read by visitors, in a screen's notes, so they say nothing about
+# the connection of whoever is reading.
+_NO_SESSION = ("Yahoo would not give this site its figures just now. Try again "
+               "in a minute.")
 
 
 class YahooError(RuntimeError):
@@ -78,7 +84,8 @@ def _handshake() -> None:
             # The same refusal the data requests would get, so it counts
             # towards closing the door on them too, and the other address is
             # not tried: asking again is what turns a limit into a block.
-            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r),
+                                    r.status_code)
             break
         text = (r.text or "").strip()
         # A crumb is a short opaque token. An HTML body means we were bounced
@@ -126,7 +133,17 @@ def _ensure(force: bool = False, seen: Optional[str] = None) -> None:
 _HOST = "Yahoo Finance"
 
 
-def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
+# Seconds to connect and to wait for each part of the answer, and how many
+# tries. It answers in well under one second when it answers at all.
+_TIMEOUT = (5, 10)
+_TRIES = 2
+# How long callers asking the same thing wait for one answer rather than each
+# asking again. It outlasts the fetch at its slowest: two tries of fifteen
+# seconds, each behind a handshake of four requests of five.
+_WAIT = 75.0
+
+
+def get(url: str, params: Optional[Dict] = None, tries: int = _TRIES) -> Dict:
     """GET an authenticated Yahoo endpoint, cached and de-duplicated.
 
     A 401 means the crumb went stale, so the handshake is redone once and the
@@ -134,58 +151,76 @@ def get(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
     """
     key = "yahoo|%s|%s" % (url, sorted((params or {}).items()))
     try:
-        # The wait outlasts the fetch at its slowest (three tries of fifteen
-        # seconds and a handshake), so callers asking the same thing wait
-        # for this answer instead of each asking again.
         return upstream.cached(key, lambda: _get_once(url, params, tries),
-                               host=_HOST, wait=60.0)
+                               host=_HOST, wait=_WAIT)
     except upstream.Throttled as exc:
         raise YahooError(str(exc))
 
 
-def _get_once(url: str, params: Optional[Dict] = None, tries: int = 3) -> Dict:
-    last, used = None, None
+def _get_once(url: str, params: Optional[Dict] = None, tries: int = _TRIES) -> Dict:
+    last, used, answered = None, None, False
+    said = "Yahoo did not answer."
     for attempt in range(tries):
+        if attempt:
+            time.sleep(0.5 * attempt)
         _ensure(force=(attempt > 0 and last == 401), seen=used)
         session, used = _SESSION, _CRUMB
         query = dict(params or {})
         query["crumb"] = used
         try:
-            # Five seconds to connect, ten to answer: it answers in well
-            # under one when it answers at all, and 25 a try let three tries
-            # outlast the time other callers wait for this one.
-            r = session.get(url, params=query, timeout=(5, 10))
+            r = session.get(url, params=query, timeout=_TIMEOUT)
         except requests.RequestException as exc:
-            last = str(exc)
-            time.sleep(0.5 * (attempt + 1))
+            # The error's own text holds the address asked, with the session
+            # token in it, and these words are read by visitors.
+            last = type(exc).__name__
+            said = ("Yahoo took too long to answer."
+                    if isinstance(exc, requests.Timeout)
+                    else "Yahoo could not be reached.")
             continue
 
+        answered = True
         if r.status_code == 200:
             try:
                 parsed = r.json()
+                if not isinstance(parsed, dict):
+                    raise ValueError("not an object")
             except ValueError:
-                raise YahooError("Yahoo returned something that was not JSON.")
+                raise YahooError("Yahoo sent something that could not be read.")
             upstream.note_ok(_HOST)
             return parsed
         last = r.status_code
         if r.status_code == 404:
-            raise YahooError("Yahoo has no data at %s" % url.rsplit("/", 1)[-1])
+            upstream.note_ok(_HOST)         # it answered
+            raise YahooError("Yahoo has nothing under that name.")
         if upstream.is_throttle(r.status_code):
             # Retrying into a rate limit makes it worse for everyone sharing
             # this address, so stop here and let the breaker hold the door.
-            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
-            raise YahooError(
-                "Yahoo is rate limiting this server (HTTP %s). Wait a minute "
-                "and try again; the limit is shared by everyone using this "
-                "installation." % r.status_code)
-        time.sleep(0.4 * (attempt + 1))
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r),
+                                    r.status_code)
+            if r.status_code == 429:
+                raise YahooError(
+                    "Yahoo limits how often this site may ask, and turned this "
+                    "request away. Wait a minute and try again; the limit is "
+                    "shared by everyone using the site.")
+            raise YahooError("Yahoo is busy or briefly down, and did not answer. "
+                             "Wait a minute and try again.")
+        said = "Yahoo answered with an error (HTTP %s)." % r.status_code
 
-    raise YahooError("Yahoo request failed after %d tries (last: %s)" % (tries, last))
+    if not answered:
+        upstream.note_failed(_HOST)
+    log.warning("Yahoo request failed after %d tries (last: %s)", tries, last)
+    raise YahooError(said)
+
+
+def _path(symbol: str) -> str:
+    """A symbol as part of an address: what follows a # or ? in one would be
+    read as something else, and another company's page answer for it."""
+    return quote(symbol, safe="^=&")
 
 
 def quote_summary(symbol: str, modules: str) -> Dict:
     """One instrument's fundamental modules, already unwrapped."""
-    data = get("https://query1.finance.yahoo.com/v10/finance/quoteSummary/%s" % symbol,
+    data = get("https://query1.finance.yahoo.com/v10/finance/quoteSummary/%s" % _path(symbol),
                {"modules": modules})
     result = ((data.get("quoteSummary") or {}).get("result") or [])
     if not result:
@@ -211,7 +246,7 @@ def quotes(symbols) -> list:
 def options(symbol: str, expiry: Optional[int] = None) -> Dict:
     """Option chain for one expiry, or the nearest one when none is given."""
     params = {"date": expiry} if expiry else {}
-    data = get("https://query1.finance.yahoo.com/v7/finance/options/%s" % symbol, params)
+    data = get("https://query1.finance.yahoo.com/v7/finance/options/%s" % _path(symbol), params)
     result = ((data.get("optionChain") or {}).get("result") or [])
     if not result:
         raise YahooError("No options listed for %s" % symbol)

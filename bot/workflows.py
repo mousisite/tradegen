@@ -22,7 +22,17 @@ from . import database as db
 from . import engine
 from . import portfolio as portfolio_mod
 from . import screener as screener_mod
-from .market import DataError, fetch_bars, format_price, needs_exact
+from .market import DataError, fetch_bars, format_price, needs_exact, normalise_symbol
+
+
+# A routine answers inside one page request, which Cloudflare drops after 100
+# seconds while the server carries on. So one run of the watchlist routine
+# analyses this many instruments and starts no more after this long, and says
+# which were left; they come first next time. The morning review reads only
+# prices, so it takes more.
+WATCH_MOST = 25
+WATCH_SECONDS = 60.0
+MORNING_MOST = 60
 
 
 @dataclass
@@ -52,23 +62,25 @@ class RunReport:
 WORKFLOWS: Dict[str, Dict] = {
     "morning": {
         "label": "Morning review",
-        "why": "Checks alerts, marks open positions, and re-runs the watchlist. "
-               "The things worth knowing before the day starts.",
+        "why": "Checks your alerts, your open positions and the price of "
+               "everything on your watchlist. The things worth knowing before "
+               "the day starts.",
     },
     "watchlist": {
         "label": "Re-analyse the watchlist",
-        "why": "Runs a full analysis on every instrument you are watching and "
-               "reports only the ones where the call changed.",
+        "why": "Runs a full analysis on the instruments you are watching and "
+               "points out the ones where the call changed.",
     },
     "positions": {
         "label": "Position check",
-        "why": "Marks every open trade to market and flags anything at its stop "
-               "or target, or that has grown too large.",
+        "why": "Checks the price of every open trade and points out anything at "
+               "its stop or target, or that has grown too large.",
     },
     "hunt": {
         "label": "Find candidates",
-        "why": "Runs the quality screen and analyses the best few results, so "
-               "you start from evidence rather than a ticker someone mentioned.",
+        "why": "Runs the \"Profitable and not expensive\" screen and analyses the "
+               "largest few companies that pass, so you start from evidence "
+               "rather than a ticker someone mentioned.",
     },
 }
 
@@ -151,30 +163,37 @@ class _Looks:
         return not billing_mod.is_pro(person, (person.email or "").lower() in admins)
 
     @staticmethod
-    def _item(symbol: str, interval: str, exact: bool = False) -> str:
+    def _item(symbol: str, exact: bool = False) -> str:
         # The same item the site counts (web._look_item), so a look taken
         # here and on a page is one look.
-        return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+        from . import billing as billing_mod
+        return billing_mod.look_item(symbol, exact)
 
-    def take(self, symbol: str, interval: str, exact: bool = False) -> str:
+    def take(self, symbol: str, exact: bool = False) -> str:
         """"new" or "seen" when the analysis may run, "free" when no limit
         applies, and "" when today's looks are used up."""
         if not self.limited:
             return "free"
         from . import billing as billing_mod
         taken = billing_mod.reserve_view(self.conn, self.user,
-                                         self._item(symbol, interval, exact))
+                                         self._item(symbol, exact))
         if not taken:
             self.refused.append(symbol)
         return taken
 
-    def give_back(self, symbol: str, interval: str, taken: str,
-                  exact: bool = False) -> None:
+    def give_back(self, symbol: str, taken: str, exact: bool = False) -> None:
         """Return a look taken for an analysis that failed, as the site does."""
         if taken == "new":
             from . import billing as billing_mod
             billing_mod.release_view(self.conn, self.user,
-                                     self._item(symbol, interval, exact))
+                                     self._item(symbol, exact))
+
+    def shown(self, symbol: str, found: str, exact: bool = False) -> None:
+        """Count the instrument the analysis turned out to be, as the site does."""
+        if self.limited:
+            from . import billing as billing_mod
+            billing_mod.show_view(self.conn, self.user, self._item(symbol, exact),
+                                  billing_mod.look_item(found, exact=True))
 
     def report(self, report: RunReport) -> None:
         """One step naming what was not analysed for want of a look."""
@@ -226,9 +245,9 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 
 
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
-    step("Marking positions to market")
+    step("Checking open positions")
     # What is held: a position closed in part counts only what is left.
-    rows = db.open_positions(conn, user=user)
+    rows = db.open_positions(conn, limit=None, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return
@@ -236,13 +255,14 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     from . import config as config_mod
     view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True,
                                cost_bps={kind: config_mod.cost_bps_for(kind, cfg)
-                                         for kind in ("equity", "crypto", "other")})
+                                         for kind in ("equity", "crypto", "other")}
+                               | {"futures": float(cfg.get("cost_bps_futures", 1.0))})
     # What the prices just read saw is kept, as the journal keeps it.
     portfolio_mod.keep_reads(conn, view)
     for p in view.positions:
         if p.price is None:
             report.steps.append(Step("Position: %s" % p.symbol,
-                                     "No price available.", "failed"))
+                                     "%s: no price available." % p.symbol, "failed"))
             continue
         at_target = (p.target is not None and
                      ((p.price >= p.target) if p.direction > 0
@@ -257,10 +277,10 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
                 crossed = p.touched_stop
             report.steps.append(Step(
                 "Position: %s" % p.symbol,
-                "%s is at %s and has crossed its %sstop of %s. Close it, or set a "
-                "new stop on purpose." % (p.symbol, format_price(p.price),
-                                          "trailing " if p.trail is not None else "",
-                                          format_price(crossed)),
+                "%s is at %s and has crossed its %sstop of %s. Close it in the "
+                "journal once you are out." % (p.symbol, format_price(p.price),
+                                               "trailing " if p.trail is not None else "",
+                                               format_price(crossed)),
                 "attention", {"trade_id": p.trade_id}))
         elif at_target:
             report.steps.append(Step(
@@ -286,18 +306,26 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
     rows = db.watchlist(conn, user=user)
     if not rows:
         report.steps.append(Step(
-            "Watchlist", "Nothing on the watchlist. Add instruments to have them "
-            "re-analysed automatically.", "ok"))
+            "Watchlist", "Nothing on the watchlist. Add instruments on the Monitor "
+            "page, and this routine analyses them each time you run it.", "ok"))
         return
 
-    changed = 0
+    # Longest since its last analysis first, so a list too long for one run is
+    # got through in turn rather than its start being done again each time.
+    rows = sorted(rows, key=lambda r: (r["last_run"] or 0, r["symbol"]))
+    started, done = time.time(), 0
+    left: List[str] = []
+    changed = failed = 0
     looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
+        if done >= WATCH_MOST or time.time() - started > WATCH_SECONDS:
+            left.append(symbol)
+            continue
         # Saved as Yahoo's own symbol (LINK for Interlink Electronics, not the
         # Chainlink coin a bare LINK means), and analysed as saved.
         exact = bool(row["exact"])
-        taken = looks.take(symbol, interval, exact)
+        taken = looks.take(symbol, exact)
         if not taken:
             continue
         step("Analysing %s" % symbol)
@@ -308,11 +336,14 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
                                     db_path=db_path, user=user, source="workflow",
                                     **_exactly(exact))
         except (DataError, Exception) as exc:
-            looks.give_back(symbol, interval, taken, exact)
+            looks.give_back(symbol, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
-                                     str(exc)[:140], "failed"))
+                                     "%s: %s" % (symbol, str(exc)[:140]), "failed"))
+            failed += 1
             continue
+        looks.shown(symbol, result.bars.symbol, exact)
 
+        done += 1
         db.watch_touch(conn, symbol, user=user)
         # What this person was told before this run, for the same instrument
         # and bar size, so only genuine changes get reported. An hourly look
@@ -335,22 +366,41 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         else:
             report.steps.append(Step(
                 "Watchlist: %s" % symbol,
-                "%s, unchanged. %s" % (now, result.plan.headline), "ok",
+                "%s: %s%s. %s" % (symbol, now, ", unchanged" if was else "",
+                                  result.plan.headline), "ok",
                 {"symbol": symbol, "interval": interval, "exact": exact}))
 
     looks.report(report)
-    looked = len(rows) - len(looks.refused)
-    if not looked:
+    if left:
+        shown = ", ".join(left[:8]) + (" and %d more" % (len(left) - 8)
+                                       if len(left) > 8 else "")
+        report.steps.append(Step(
+            "Left for next time",
+            "Not analysed this time: %s. One run takes up to %d instruments, or "
+            "about a minute. Run it again and these come first."
+            % (shown, WATCH_MOST), "attention"))
+    if not done and not failed:
         report.headline = ("Nothing on the watchlist was analysed: today's free "
                            "looks are used up.")
         return
-    report.headline = ("%d of %d watched instruments changed their call."
-                       % (changed, looked) if changed
-                       else "None of the %d watched instruments changed." % looked)
+    if not done:
+        report.headline = "Nothing on the watchlist could be analysed this time."
+    elif done == 1:
+        report.headline = ("The one watched instrument analysed %s."
+                           % ("changed its call" if changed else "did not change"))
+    else:
+        report.headline = ("%d of %d watched instruments changed their call."
+                           % (changed, done) if changed
+                           else "None of the %d watched instruments changed." % done)
+    if failed and done:
+        report.headline += " %d more could not be analysed." % failed
     if looks.refused:
         report.headline += (" %d more %s not analysed, for want of a free look."
                             % (len(looks.refused),
                                "was" if len(looks.refused) == 1 else "were"))
+    if left:
+        report.headline += (" %d more %s left for the next run."
+                            % (len(left), "was" if len(left) == 1 else "were"))
 
 
 def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
@@ -361,11 +411,21 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
     rows = db.watchlist(conn, user=user)
     if rows:
         step("Re-checking the watchlist")
+        if len(rows) > MORNING_MOST:
+            report.steps.append(Step(
+                "Watchlist", "Prices were checked for the first %d of your %d watched "
+                "instruments, in alphabetical order. One review takes no more."
+                % (MORNING_MOST, len(rows)), "attention"))
+            rows = rows[:MORNING_MOST]
         # Prices only here. A full re-analysis of a long watchlist would make a
         # morning check take minutes, so the deeper pass is its own routine.
         def grab(row):
             try:
-                return row, fetch_bars(row["symbol"], row["interval"] or "1d")
+                # What the rest of the app opens the entry as: a bare BTC
+                # saved as typed is the coin, not the fund of that ticker.
+                return row, fetch_bars(normalise_symbol(row["symbol"],
+                                                        exact=bool(row["exact"])),
+                                       row["interval"] or "1d")
             except Exception:
                 return row, None
 
@@ -384,11 +444,15 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
                             "attention", {"symbol": symbol,
                                           "exact": bool(row["exact"])}))
 
-    counts = db.stats(conn, user=user)
+    counts = db.stats(conn, user=user, tables=("runs", "trades", "alerts", "watchlist"))
     report.steps.append(Step(
         "Summary",
-        "%d analyses recorded, %d trades logged, %d alerts set, %d instruments watched."
-        % (counts["runs"], counts["trades"], counts["alerts"], counts["watchlist"]),
+        "%d %s recorded, %d %s logged, %d %s set, %d %s watched."
+        % (counts["runs"], "analysis" if counts["runs"] == 1 else "analyses",
+           counts["trades"], "trade" if counts["trades"] == 1 else "trades",
+           counts["alerts"], "alert" if counts["alerts"] == 1 else "alerts",
+           counts["watchlist"],
+           "instrument" if counts["watchlist"] == 1 else "instruments"),
         "ok"))
 
 
@@ -413,11 +477,12 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
 
     looks = _Looks(conn, user)
     best = found.passed[:4]
+    done = 0
     for candidate in best:
         # The screen lists Yahoo's own symbols, all of them companies: LINK
         # there is Interlink Electronics, never the coin.
         exact = needs_exact(candidate.symbol)
-        taken = looks.take(candidate.symbol, cfg["interval"], exact)
+        taken = looks.take(candidate.symbol, exact)
         if not taken:
             continue
         step("Analysing %s" % candidate.symbol)
@@ -426,21 +491,31 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
                                     with_news=False, record=True, db_path=db_path,
                                     user=user, source="workflow", **_exactly(exact))
         except Exception as exc:
-            looks.give_back(candidate.symbol, cfg["interval"], taken, exact)
+            looks.give_back(candidate.symbol, taken, exact)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
-                                     str(exc)[:140], "failed"))
+                                     "%s: %s" % (candidate.symbol, str(exc)[:140]),
+                                     "failed"))
             continue
+        looks.shown(candidate.symbol, result.bars.symbol, exact)
+        done += 1
         status = "attention" if result.plan.action in ("BUY", "WAIT") else "ok"
         report.steps.append(Step(
             "Candidate: %s" % candidate.symbol,
-            "%s. %s" % (result.plan.action, result.plan.headline), status,
+            "%s: %s. %s" % (candidate.symbol, result.plan.action,
+                            result.plan.headline), status,
             {"symbol": candidate.symbol, "interval": cfg["interval"],
              "exact": exact}))
 
     looks.report(report)
+    count = len(found.passed)
+    passed = "%d candidate%s passed the screen" % (count, "" if count == 1 else "s")
     if len(looks.refused) == len(best):
-        report.headline = ("%d candidates passed the screen, but today's free looks "
-                           "are used up, so none was analysed." % len(found.passed))
-        return
-    report.headline = "%d candidates passed the screen; the best few were analysed." \
-                      % len(found.passed)
+        report.headline = ("%s, but today's free looks are used up, so none was "
+                           "analysed." % passed)
+    elif not done:
+        report.headline = "%s, but none could be analysed just now." % passed
+    elif done == count:
+        report.headline = "%s and %s analysed." % (passed, "was" if count == 1 else "were")
+    else:
+        report.headline = "%s; %d of the largest %s analysed." % (
+            passed, done, "was" if done == 1 else "were")

@@ -9,7 +9,7 @@
    price is fetched and nothing is analysed. Confirm logs exactly this. #}
 {% set long = size.direction > 0 %}
 <div class="pagehead">
-  <span class="eyebrow">A simulated trade</span>
+  <span class="eyebrow">A paper trade</span>
   <h1>Review this paper trade</h1>
   <p>Nothing is bought or sold, and no order goes to any broker. Confirming
     only writes this trade into your journal, so you can see later how the
@@ -18,7 +18,7 @@
 
 <div class="call {{ 'buy' if long else 'sell' }}">
   <span class="word">{{ 'Long' if long else 'Short' }}</span>
-  <span class="line"><b>{{ run['symbol'] }}</b>{% if run['name'] and run['name'] != run['symbol'] %}, {{ run['name'] }}{% endif %}.
+  <span class="line"><b>{{ run['symbol'] }}</b>{% if run['name'] and run['name'] != run['symbol'] %}, {{ run['name'] }}{% endif %}{{ '' if run['name'] and run['name'].endswith('.') and run['name'] != run['symbol'] else '.' }}
     From your {{ run['action'] }} call on {{ words }} bars, analysed {{ run['ts']|ago }}.</span>
 </div>
 
@@ -65,7 +65,7 @@
       <span class="eyebrow">The size</span>
       <dl class="pairs">
         <dt>Size</dt>
-        <dd><span class="fig">{{ size.quantity_text }}</span> units
+        <dd><span class="fig">{{ size.quantity_text }}</span> {{ size.unit_text }}
           <span class="faint">{{ size.notional|money }} at the entry</span></dd>
         <dt>Money at risk</dt>
         <dd><span class="fig">{{ size.risk|money }}</span>
@@ -74,6 +74,14 @@
         <dd><span class="fig">{{ "%.2f"|format(size.risk_pct) }}%</span>
           <span class="faint">of {{ size.account|money }}</span></dd>
       </dl>
+      {% if size.contract_words %}
+      <p class="prose" style="margin-top:var(--s2)">That is {{ size.contract_words }}.
+        The journal counts each contract as {{ '%g'|format(size.multiplier) }} units,
+        because a one-point move in it is worth {{ '%g'|format(size.multiplier) }} dollars.
+        Sized by your settings: at most {{ '%g'|format(cfg.risk_per_trade_pct) }}% of the
+        account lost at the stop.
+        <a href="{{ url_for('settings') }}">Change them</a>.</p>
+      {% else %}
       <p class="prose" style="margin-top:var(--s2)">Sized by your settings: at
         most {{ '%g'|format(cfg.risk_per_trade_pct) }}% of the account lost at
         the stop, and no position worth more than
@@ -81,6 +89,7 @@
         second limit applied here, so less than
         {{ '%g'|format(cfg.risk_per_trade_pct) }}% is at risk.{% endif %}
         <a href="{{ url_for('settings') }}">Change them</a>.</p>
+      {% endif %}
     </div>
   </div>
 </div>

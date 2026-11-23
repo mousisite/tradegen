@@ -7,6 +7,7 @@ variables override that.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Dict
 
@@ -33,7 +34,7 @@ DEFAULTS: Dict[str, Any] = {
 
     # --- decision thresholds ---------------------------------------------
     "min_conviction": 0.20,         # below this, no trade is proposed
-    "strong_conviction": 0.45,      # above this, a market entry is allowed
+    "strong_conviction": 0.45,      # from here a wait's reason calls it strong
     "max_extension_atr": 2.0,       # ATR above VWAP before entries must wait
     "allow_shorts": False,
     "require_positive_expectancy": True,
@@ -80,6 +81,9 @@ _ENV_MAP = {
     "STOCKBOT_INTERVAL": ("interval", str),
 }
 
+# Overrides already said to be unusable: the settings are loaded for every page.
+_SAID = set()
+
 
 def project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -118,18 +122,30 @@ def horizon_for(interval: str, cfg: Dict[str, Any]) -> int:
     return _HORIZON.get((interval or "").lower(), 20)
 
 
-def describe_horizon(interval: str, bars: int) -> str:
-    """Say what a horizon means in wall-clock terms, for the report."""
+def describe_horizon(interval: str, bars: int, asset_class: str = "",
+                     symbol: str = "") -> str:
+    """Say what a horizon means in wall-clock terms, for the report.
+
+    How long a day of trading is depends on the instrument: a coin trades
+    round the clock every day, a future 23 hours and a currency pair 24, and
+    anything else is counted in the 6.5 hours of a stock's session.
+    """
     minutes = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30,
                "60m": 60, "1h": 60}.get((interval or "").lower())
+    ticker = (symbol or "").strip().upper()
+    coin = asset_class == "crypto"
+    day = "day" if coin else "trading day"
     if minutes is None:
-        return "%d trading days" % bars
+        return "%d %s%s" % (bars, day, "" if bars == 1 else "s")
+    hours = (24.0 if coin or ticker.endswith("=X")
+             else 23.0 if ticker.endswith("=F") else 6.5)
     total = bars * minutes
     if total < 60:
-        return "%d minutes" % total
-    if total < 60 * 7:
+        return "%d minute%s" % (total, "" if total == 1 else "s")
+    # Seven hours of a stock is still said in hours.
+    if total < 60 * max(hours, 7.0):
         return "%.1f hours" % (total / 60.0)
-    return "%.1f trading days" % (total / (60 * 6.5))
+    return "%.1f %ss" % (total / (60 * hours), day)
 
 
 def cost_bps_for(asset_class: str, cfg: Dict[str, Any]) -> float:
@@ -161,35 +177,88 @@ def load(path: str | None = None) -> Dict[str, Any]:
         try:
             with open(cfg_path, "r", encoding="utf-8") as fh:
                 user = json.load(fh)
+            if not isinstance(user, dict):
+                raise RuntimeError("could not read %s: it must hold settings by name, "
+                                   "between { and }." % cfg_path)
             weights = user.pop("strategy_weights", None)
             cfg.update(user)
             if isinstance(weights, dict):
                 cfg["strategy_weights"].update(weights)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             raise RuntimeError("could not read %s: %s" % (cfg_path, exc))
 
     for env_key, (cfg_key, cast) in _ENV_MAP.items():
         raw = os.environ.get(env_key)
         if raw:
             try:
-                cfg[cfg_key] = cast(raw)
-            except ValueError:
-                pass
+                value = cast(raw)
+                # On its own, so a fault in the file is not blamed on it. One
+                # that cannot work is left out as text that is no number
+                # always was: a slip in the host's settings must not keep the
+                # site from starting.
+                validate(dict(DEFAULTS, **{cfg_key: value}))
+                cfg[cfg_key] = value
+            except (ValueError, RuntimeError) as exc:
+                if (env_key, raw) not in _SAID:
+                    _SAID.add((env_key, raw))
+                    logging.getLogger(__name__).warning(
+                        "%s is %r, which cannot be used, so it is left out: %s",
+                        env_key, raw, exc)
 
     validate(cfg)
     return cfg
 
 
+# The settings that must be ordinary numbers, and what each is called. One
+# kept as text, or as NaN or infinity, passes a comparison or breaks it.
+_NUMBERS = {
+    "account_size": "Account size", "risk_per_trade_pct": "Risk per trade",
+    "max_position_pct": "Largest position", "stop_atr_multiple": "Stop distance",
+    "target_atr_multiple": "First target", "min_conviction": "Minimum conviction",
+    # Not on the Settings page: only the file sets them.
+    "runner_atr_multiple": "Second target", "strong_conviction": "Strong conviction",
+    "max_extension_atr": "Furthest from VWAP before a wait",
+    "sentiment_weight": "Share of conviction from news",
+    "calibration_stride": "Bars between calibration samples",
+    "min_bucket_samples": "Fewest past setups to measure from",
+}
+
+
+# The largest account, past which a size has more digits than it is worth
+# printing, and the largest cost of a round trip, in basis points. Numbers far
+# beyond them overflowed into pages of digits, or no page.
+ACCOUNT_MOST = 1e12
+COST_MOST = 10000
+
+
 def validate(cfg: Dict[str, Any]) -> None:
-    """Raise if any setting would produce nonsense downstream."""
+    """Raise RuntimeError if any setting would produce nonsense downstream."""
+    for key, label in _NUMBERS.items():
+        if not _is_number(cfg.get(key, DEFAULTS[key])):
+            raise RuntimeError("%s must be an ordinary number." % label)
+    if not isinstance(cfg.get("interval", "1d"), str) \
+            or cfg.get("interval", "1d").lower() not in _HORIZON:
+        raise RuntimeError("The default interval must be one of: %s." % ", ".join(_HORIZON))
+    if cfg.get("max_extension_atr", 2.0) <= 0:
+        raise RuntimeError("%s must be more than zero." % _NUMBERS["max_extension_atr"])
+    if not (0 <= cfg.get("sentiment_weight", 0.25) <= 1):
+        raise RuntimeError("%s must be between 0 and 1." % _NUMBERS["sentiment_weight"])
+    for key in ("calibration_stride", "min_bucket_samples"):
+        if cfg.get(key, 1) < 1:
+            raise RuntimeError("%s must be 1 or more." % _NUMBERS[key])
     if not (0 < cfg["risk_per_trade_pct"] <= 10):
         raise RuntimeError("Risk per trade must be between 0 and 10 percent.")
     if not (0 < cfg["max_position_pct"] <= 100):
         raise RuntimeError("Largest position must be between 0 and 100 percent.")
     if cfg["account_size"] <= 0:
         raise RuntimeError("Account size must be greater than zero.")
+    if cfg["account_size"] > ACCOUNT_MOST:
+        raise RuntimeError("Account size must be at most a trillion.")
     if cfg["stop_atr_multiple"] <= 0 or cfg["target_atr_multiple"] <= 0:
         raise RuntimeError("Stop and target distances must be positive.")
+    if not all(0.01 <= cfg[key] <= 100
+               for key in ("stop_atr_multiple", "target_atr_multiple")):
+        raise RuntimeError("Stop and target distances must be between 0.01 and 100 ATR.")
     if cfg["target_atr_multiple"] <= cfg["stop_atr_multiple"] * 0.2:
         raise RuntimeError("The target is far too close to the stop to be tradable.")
     minutes = cfg.get("alert_check_minutes", 5)
@@ -204,21 +273,23 @@ def validate(cfg: Dict[str, Any]) -> None:
         try:
             if not (3 <= int(horizon) <= 400):
                 raise ValueError
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise RuntimeError("Holding window must be a number between 3 and "
                                "400 bars, or the word auto.")
     for key in ("min_conviction", "strong_conviction"):
         if not (0 <= cfg[key] <= 1):
             raise RuntimeError("Conviction thresholds must be between 0 and 1.")
     if cfg["min_conviction"] > cfg["strong_conviction"]:
-        raise RuntimeError("The market-entry threshold cannot be below the "
-                           "minimum conviction threshold.")
+        raise RuntimeError("Strong conviction cannot be below the minimum conviction.")
     for key in ("cost_bps_equity", "cost_bps_crypto", "cost_bps_other", "cost_bps_futures"):
         value = cfg.get(key, 0)
         if not _is_number(value):
             raise RuntimeError("Trading costs must be numbers.")
         if value < 0:
             raise RuntimeError("Trading costs cannot be negative.")
+        if value > COST_MOST:
+            raise RuntimeError("A trading cost can be at most %d basis points, which "
+                               "is the whole price." % COST_MOST)
 
     limit = cfg.get("daily_loss_limit_r", 0.0)
     if not _is_number(limit) or not (0 <= limit <= 20):
@@ -234,6 +305,51 @@ def validate(cfg: Dict[str, Any]) -> None:
                            "time like 10:30, or left empty to switch it off.")
     if not isinstance(cfg.get("calm_candles", False), bool):
         raise RuntimeError("Calm candle colours must be either on or off.")
+
+
+def lift_strong(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep "strong" at or above the least conviction a call is made at.
+
+    The Settings page no longer asks for it, so it must never be why a
+    minimum typed there is refused.
+    """
+    least, strong = cfg.get("min_conviction"), cfg.get("strong_conviction")
+    if _is_number(least) and _is_number(strong) and least > strong:
+        cfg["strong_conviction"] = least
+    return cfg
+
+
+def with_personal(base: Dict[str, Any], own: Dict[str, Any]) -> Dict[str, Any]:
+    """Settings with one person's saved ones on top, leaving out any that
+    cannot work.
+
+    They are checked when saved, but some were saved before they were, and a
+    negative account or a NaN went straight into position sizes and broke
+    that person's pages.
+    """
+    merged = lift_strong(dict(base, **own))
+    try:
+        validate(merged)
+        return merged
+    except RuntimeError:
+        pass
+    out, waiting = dict(base), dict(own)
+    while waiting:
+        # Again for those left over: a stop and a target can each need the other.
+        kept = []
+        for key, value in waiting.items():
+            trial = lift_strong(dict(out, **{key: value}))
+            try:
+                validate(trial)
+            except RuntimeError:
+                continue
+            out = trial
+            kept.append(key)
+        if not kept:
+            break
+        for key in kept:
+            del waiting[key]
+    return out
 
 
 def _is_number(value: Any) -> bool:
@@ -268,7 +384,9 @@ def save(cfg: Dict[str, Any], path: str | None = None) -> str:
         try:
             with open(cfg_path, "r", encoding="utf-8") as fh:
                 existing = json.load(fh)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            existing = {}
+        if not isinstance(existing, dict):
             existing = {}
 
     existing.update({k: v for k, v in cfg.items() if not k.startswith("_")})

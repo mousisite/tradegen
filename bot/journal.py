@@ -380,6 +380,7 @@ def costs_from(cfg: Dict) -> Dict[str, float]:
     """Round-trip costs as fractions of the price, from a person's settings."""
     return {"equity": float(cfg.get("cost_bps_equity", 2.0)) / 10000.0,
             "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0,
+            "other": float(cfg.get("cost_bps_other", 5.0)) / 10000.0,
             "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
 
 
@@ -388,7 +389,8 @@ def _hhmm(minutes: int) -> str:
 
 
 def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
-                costs: Optional[Dict[str, float]] = None) -> List[Dict]:
+                costs: Optional[Dict[str, float]] = None,
+                present: Optional[int] = None) -> List[Dict]:
     """The daily rules a new trade entered at `now` would break, in words.
 
     "Today" is the New York date of `now` (the entry time of the trade being
@@ -396,11 +398,18 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
     The loss is the R after costs of trades closed that day by then; the
     count is the trades entered that day by then; the time rule compares
     New York's clock with the person's last entry time. A rule set to 0 or
-    left empty is off. Each broken rule is {"rule", "words"}.
+    left empty is off. Each broken rule is {"rule", "words", "past"}.
+
+    present is the time it really is, when that may be later than `now`: a
+    trade from an earlier day is told "that day" (and is "past"), and one
+    from earlier the same day the time it was entered.
     """
     from .config import clock_minutes
     now = int(now if now is not None else time.time())
+    present = now if present is None else int(present)
     day, minute, _ = clock.ny_clock(now)
+    past = clock.ny_clock(present)[0] != day
+    when = "that day" if past else "today"
     out: List[Dict] = []
 
     limit = float(cfg.get("daily_loss_limit_r") or 0.0)
@@ -408,8 +417,9 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
         lost = -sum(i["r"] for i in closed_results(conn, user, costs or costs_from(cfg))
                     if i["closed"] <= now and clock.ny_clock(i["closed"])[0] == day)
         if lost >= limit - 1e-9:
-            out.append({"rule": "loss", "words": "you have lost %.1fR today (limit %gR)"
-                        % (lost, limit)})
+            out.append({"rule": "loss", "past": past,
+                        "words": "you %s lost %.1fR %s (limit %gR)"
+                        % ("had" if past else "have", lost, when, limit)})
 
     most = int(cfg.get("max_trades_per_day") or 0)
     if most > 0:
@@ -419,13 +429,17 @@ def rules_check(conn, user: Optional[int], cfg: Dict, now: Optional[int] = None,
         taken = sum(1 for (ts,) in conn.execute(sql, args)
                     if clock.ny_clock(int(ts))[0] == day)
         if taken >= most:
-            out.append({"rule": "trades", "words": "you have taken %d trade%s today (most %d)"
-                        % (taken, "" if taken == 1 else "s", most)})
+            out.append({"rule": "trades", "past": past,
+                        "words": "you %s taken %d trade%s %s (most %d)"
+                        % ("had" if past else "have", taken, "" if taken == 1 else "s",
+                           when, most)})
 
     last = clock_minutes(str(cfg.get("last_entry_time") or ""))
     if last is not None and minute > last:
-        out.append({"rule": "time", "words": "it is %s New York time, after your last "
-                    "entry time of %s" % (_hhmm(minute), _hhmm(last))})
+        earlier = past or present - now > CLOCK_SLACK
+        out.append({"rule": "time", "past": past, "words": "%s %s New York time, after your "
+                    "last entry time of %s" % ("you entered at" if earlier else "it is",
+                                               _hhmm(minute), _hhmm(last))})
     return out
 
 
@@ -435,6 +449,8 @@ def rules_words(broken: Sequence[Dict]) -> str:
         return ""
     said = [b["words"] for b in broken]
     joined = said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1]
+    if broken[0].get("past"):
+        return "Your rule%s said stop that day: %s." % ("s" if len(said) > 1 else "", joined)
     return "Your rule%s say%s stop for today: %s." % (
         "s" if len(said) > 1 else "", "" if len(said) > 1 else "s", joined)
 
@@ -550,6 +566,14 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
     distance = abs(entry - stop)
     per_unit = distance * multiplier
     budget = account * risk_pct / 100.0
+    # Real numbers that multiply or divide past what a computer holds: a page
+    # anyone can open must say so rather than break.
+    aim = float(target) if target is not None and math.isfinite(float(target)) else 0.0
+    fits_in_a_number = per_unit > 0 and all(map(math.isfinite, (
+        per_unit, budget, budget / per_unit * 1e6, budget / per_unit * entry * multiplier,
+        entry * cost_bps / distance, aim / distance)))
+    if not fits_in_a_number:
+        raise ValueError("Those numbers are too large or too small to size.")
     raw = budget / per_unit
     if kind == "coins":
         qty = math.floor(raw * 1e6 + 1e-6) / 1e6
@@ -559,6 +583,11 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
     cost_r = (entry * cost_bps / 10000.0) / distance
     unit = {"shares": "share", "coins": "coin", "futures": "contract"}[kind]
 
+    def at(multiple):
+        """The price that makes this many R, None for a short when it would be zero or below."""
+        price = entry + direction * multiple * distance
+        return price if price > 0 else None
+
     out = {"kind": kind, "unit": unit, "direction": direction, "quantity": qty,
            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if kind == "coins"
                              else "{:,.0f}".format(qty)),
@@ -566,9 +595,8 @@ def size(account: float, risk_pct: float, entry: float, stop: float,
            "pct": at_risk / account * 100.0, "notional": qty * entry * multiplier,
            "cost_r": cost_r, "cost_bps": cost_bps, "contract": name, "label": label,
            "multiplier": multiplier, "distance": distance,
-           "one_r": {"price": entry + direction * distance, "cash": at_risk * (1 - cost_r)},
-           "two_r": {"price": entry + direction * 2 * distance,
-                     "cash": at_risk * (2 - cost_r)},
+           "one_r": {"price": at(1), "cash": at_risk * (1 - cost_r)},
+           "two_r": {"price": at(2), "cash": at_risk * (2 - cost_r)},
            "fits": qty > 0, "why_none": ""}
     rows = []
     for reward in BREAKEVEN_RS:
@@ -609,6 +637,8 @@ def fixed_contracts(account: float, contract: str = "MES", contracts: int = 3,
         raise ValueError("Give at least one contract.")
     label, per_point, tick = CONTRACTS[contract]
     tick_value = per_point * tick
+    if not math.isfinite(contracts * max(ticks) * tick_value / account * 100.0):
+        raise ValueError("That account is too small to work this out for.")
     rows = [{"ticks": t, "points": t * tick, "cash": contracts * t * tick_value,
              "pct": contracts * t * tick_value / account * 100.0} for t in ticks]
     return {"contract": contract, "label": label, "contracts": contracts,
@@ -649,7 +679,7 @@ def survival(rs: Optional[Sequence[float]] = None, p: Optional[float] = None,
         if p is None or win is None or loss is None:
             raise ValueError("Give a hit rate, an average win and an average loss.")
         if not 0 < p < 1:
-            raise ValueError("The hit rate must be between 0% and 100%.")
+            raise ValueError("The hit rate must be more than 0% and less than 100%.")
         if not win > 0 or not loss > 0:
             raise ValueError("The average win and loss must be more than zero.")
         if win > 50 or loss > 50:

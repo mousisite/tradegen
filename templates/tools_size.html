@@ -12,12 +12,13 @@
     shares, coins or futures contracts. Nothing you type is kept.</p>
 </div>
 
-<form method="get" action="{{ url_for('size_tool') }}" class="card">
+{# The answer is under the form, off the bottom of a phone: open there. #}
+<form method="get" action="{{ url_for('size_tool') }}#result" class="card">
   <div class="setgrid">
     <div class="setfield">
       <label for="account">Account</label>
       <input class="field fig" id="account" name="account" type="number" step="any" min="0"
-             inputmode="decimal" value="{{ asked.account or '%g'|format(account) }}">
+             inputmode="decimal" value="{{ asked.account or ('%.2f'|format(account)).rstrip('0').rstrip('.') }}">
     </div>
     <div class="setfield">
       <label for="risk">Risk per trade, %</label>
@@ -37,7 +38,7 @@
       <label for="contract">Contract <span class="faint">futures only</span></label>
       <select class="field" id="contract" name="contract">
         {% for code, c in contracts.items() %}
-          <option value="{{ code }}" {{ 'selected' if asked.contract == code or (not asked.contract and code == 'MES') }}>{{ code }}: {{ c[0] }}, ${{ '%g'|format(c[1]) }} a point</option>
+          <option value="{{ code }}" {{ 'selected' if asked.contract == code or (not asked.contract and code == 'MES') }}>{{ code }}: {{ c[0] }}, ${{ ('{:,.0f}' if c[1] == c[1]|int else '{:,.2f}').format(c[1]) }} a point</option>
         {% endfor %}
         <option value="own" {{ 'selected' if asked.contract == 'own' }}>Another: give its dollars a point</option>
       </select>
@@ -77,11 +78,11 @@
 </form>
 
 {% if problem %}
-  <div class="notice" style="margin-top:var(--s3)">{{ problem }}</div>
+  <div class="notice" id="result" style="margin-top:var(--s3)">{{ problem }}</div>
 {% endif %}
 
 {% if result %}
-<section>
+<section{% if not problem %} id="result"{% endif %}>
   <div class="sechead"><h2>{{ 'Long' if result.direction > 0 else 'Short' }}: the size</h2></div>
   <div class="card">
     {% if result.fits %}
@@ -99,9 +100,13 @@
         <div class="v fig">{{ result.notional|money }}</div></div>
     </div>
     <p class="prose" style="margin-top:var(--s3)">One R, the amount at risk, is
-      {{ result.at_risk|money }}. At {{ result.one_r.price|price }} the trade makes 1R,
-      {{ result.one_r.cash|money }} after costs; at {{ result.two_r.price|price }} it makes
-      2R, {{ result.two_r.cash|money }}. A price that opens past the stop fills worse
+      {{ result.at_risk|money }}. {% if result.one_r.price is none %}A short
+      from here cannot make 1R: the price would have to fall to zero or below.
+      {% else %}At {{ result.one_r.price|price }} the trade makes 1R,
+      {{ result.one_r.cash|money }} after costs{% if result.two_r.price is none %}. A short
+      from here cannot make 2R: the price would have to fall to zero or below.
+      {% else %}; at {{ result.two_r.price|price }} it makes
+      2R, {{ result.two_r.cash|money }}.{% endif %}{% endif %} A price that opens past the stop fills worse
       than the stop, so a loss can be bigger than 1R.</p>
     {% if result.notional > account %}
       <p class="prose" style="margin-top:var(--s2)">This position is worth more than the
@@ -137,7 +142,7 @@
 {% endif %}
 
 <section id="fixed">
-  <div class="sechead"><h2>Fixed contracts {{ help('fixed_contracts') }}</h2>
+  <div class="sechead"><div><h2 style="display:inline">Fixed contracts</h2>{{ help('fixed_contracts') }}</div>
     <span class="tail">the way many futures traders size</span></div>
   <form method="get" action="{{ url_for('size_tool') }}#fixed" class="card">
     {% for key in ('account', 'risk', 'kind', 'contract', 'point_value', 'entry', 'stop', 'target', 'cost') %}

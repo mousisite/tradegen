@@ -1,23 +1,23 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
+{% set on_how_many = '1 stock or coin' if summary.tested == 1 else summary.tested ~ ' stocks and coins' %}
 {% if summary.tested %}
-  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ summary.tested ~ " popular stocks and coins, after trading costs, with its margin of error and beside simply buying or shorting every day, and holding the index. Not financial advice." %}
+  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ ('1 popular stock or coin' if summary.tested == 1 else summary.tested ~ ' popular stocks and coins') ~ ", after trading costs, with its margin of error and beside simply buying or shorting every day, and holding the index. Not financial advice." %}
 {% endif %}
-{% block title %}Does {{ label }} work?{% if not intraday %} Back-tested on {{ summary.tested or 'popular' }} stocks and coins{% endif %} · Orenth{% endblock %}
-{% block og_title %}Does {{ label }} work? · Orenth{% endblock %}
+{% block title %}Does {{ asked }} work?{% if not intraday %} Back-tested on {{ on_how_many if summary.tested else 'popular stocks and coins' }}{% endif %} · Orenth{% endblock %}
+{% block og_title %}Does {{ asked }} work? · Orenth{% endblock %}
 {% block head_extra %}{% if not summary.tested %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
 
 <div class="pagehead">
   <span class="eyebrow">Strategy test · {{ info.family.replace('_', ' ') }}</span>
-  <h1>Does {{ label }} work?</h1>
+  <h1>Does {{ asked }} work?</h1>
   <p>{{ info.description }}.{% if not intraday %} Tested on every popular stock
     and coin, with real trading costs taken off.{% endif %}</p>
   {% if strategy in trial_names %}
   <p><span class="chip mute">on trial</span> Measured here, not used in Orenth's
-    calls until its record shows an edge. It is one of {{ trial_count }} price-action
-    setups taught in a day-trading course and tested on trial; {{ strategy_count }}
-    other strategies decide the calls.</p>
+    calls until its record shows an edge. {{ strategy_count }} other strategies
+    decide the calls.</p>
   {% endif %}
 </div>
 
@@ -26,17 +26,25 @@
      prices these tests use. #}
   <div class="plainbox">
     <span class="eyebrow">Not in the daily test</span>
-    {% if strategy in trial_names %}
-    <p class="prose">This setup reads the sessions inside a trading day, so it
-      only fires on bars shorter than a day. These tests run on daily prices,
-      so it has no result here. Its test on 5- and 15-minute prices is shown on
-      this page once it has run. An analysis on shorter bars scores it, with no
-      say in the call.</p>
-    {% else %}
     <p class="prose">This strategy reads the inside of a trading day, so it
-      only fires on hourly or shorter bars. These tests run on daily prices,
-      so it has no result here. An analysis on shorter bars still uses it.</p>
-    {% endif %}
+      only fires on {% if strategy == 'opening_range_break' %}bars of 30 minutes or
+      shorter{% else %}bars shorter than a day, on futures and coins{% endif %}. These
+      tests run on daily prices, so it has no result here. An analysis on such bars still
+      {{ 'scores it, with no say in the call' if strategy in trial_names else 'uses it' }}.{% if course %}
+      Its test on 5- and 15-minute prices is shown on this page once it has
+      run.{% endif %}</p>
+  </div>
+{% elif not summary.tested and rare %}
+  <div class="plainbox">
+    <span class="eyebrow">Too rare to rank</span>
+    <p class="prose">On the daily prices of the {{ 'one stock or coin' if rare.tested == 1
+      else rare.tested ~ ' stocks and coins' }} tested so far, {% if rare.days %}it took a pretend trade on
+      {{ "{:,}".format(rare.days) }} day{{ '' if rare.days == 1 else 's' }} in all, fewer than
+      {{ method.min }} separate trades on any one of them{% else %}it has not come
+      up{% endif %}. That is too few to say whether it works.
+      {% if strategy not in trial_names %}It still has a say in a call on the days
+      it comes up.{% endif %}{% if course %} Its test on 5- and 15-minute prices is shown on
+      this page once it has run.{% endif %}</p>
   </div>
 {% elif not summary.tested %}
   <div class="plainbox">
@@ -53,11 +61,13 @@
       it lost money, by more than its margin of error.{% elif summary.verdict == 0 %}After
       costs, its result cannot be told apart from luck.{% else %}After costs, it
       {{ 'kept' if summary.kept > 0 else 'lost' }} money on average.{% endif %}</p>
-    <p class="prose">Across the {{ summary.tested }} stocks and coins we test,
+    {# Only the ones it has enough trades on are counted, as the method below
+       says: not all that are tested. #}
+    <p class="prose">{{ 'On the' if summary.tested == 1 else 'Across the' }} {{ on_how_many }} it has enough trades on,
       a trade averaged
       <span class="fig {{ 'gain' if summary.verdict == 1 else 'loss' if summary.verdict == -1 }}">{{ summary.kept|signed(2) }}R</span>{% if summary.se is not none %},
       give or take {{ '%.2f'|format(2 * summary.se) }}R{% endif %}.
-      It kept money on {{ summary.paid }} of the {{ summary.tested }}.</p>
+      {% if summary.tested > 1 %}It kept money on {{ summary.paid }} of the {{ summary.tested }}.{% endif %}</p>
     <p class="prose">It took a pretend trade on {{ "{:,}".format(summary.n) }}
       days{% if summary.separate < summary.n %}, worth about
       {{ "{:,}".format(summary.separate|round|int) }} separate trades, since
@@ -89,7 +99,7 @@
 
   <div class="card pad0" style="margin-top:var(--s3)">
     <div class="tablewrap">
-      <table>
+      <table class="stack">
         <thead><tr>
           <th>Instrument</th><th class="r">Kept a trade</th>
           <th class="r">Buying every day</th><th class="r">Shorting every day</th>
@@ -98,16 +108,16 @@
         <tbody>
         {% for r in results %}
           <tr>
-            <td><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a>
+            <td class="lead"><a href="{{ url_for('stock_page', sym=slug(r.symbol)) }}"><b>{{ short(r.symbol) }}</b></a>
               <span class="soft">{{ r.name }}</span></td>
-            <td class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if r.verdict == 1 else 'loss' if r.verdict == -1 }}">{{ r.kept|signed(2) }}R</span>{% if r.se is not none %}
+            <td data-label="Kept a trade" class="r fig" style="white-space:nowrap"><span class="{{ 'gain' if r.verdict == 1 else 'loss' if r.verdict == -1 }}">{{ r.kept|signed(2) }}R</span>{% if r.se is not none %}
               <span class="soft">±{{ '%.2f'|format(2 * r.se) }}</span>{% endif %}</td>
             {# The yardstick on the strategy's own side is in full ink. #}
-            <td class="r fig{{ '' if summary.side == 'buy' else ' soft' }}">{% if r.base is not none %}{{ r.base|signed(2) }}R{% else %}—{% endif %}</td>
-            <td class="r fig{{ '' if summary.side == 'short' else ' soft' }}">{% if r.short_base is not none %}{{ r.short_base|signed(2) }}R{% else %}—{% endif %}</td>
-            <td class="r fig">{{ (r.wins / r.n)|pct(0) }}</td>
-            <td class="r fig">{{ "{:,}".format(r.wins) }}</td>
-            <td class="r fig soft">{{ "{:,}".format(r.n) }}</td>
+            <td data-label="Buying every day" class="r fig{{ '' if summary.side == 'buy' else ' soft' }}">{% if r.base is not none %}{{ r.base|signed(2) }}R{% else %}—{% endif %}</td>
+            <td data-label="Shorting every day" class="r fig{{ '' if summary.side == 'short' else ' soft' }}">{% if r.short_base is not none %}{{ r.short_base|signed(2) }}R{% else %}—{% endif %}</td>
+            <td data-label="Hit rate" class="r fig">{{ (r.wins / r.n)|pct(0) }}</td>
+            <td data-label="Worked" class="r fig">{{ "{:,}".format(r.wins) }}</td>
+            <td data-label="Days tested" class="r fig soft">{{ "{:,}".format(r.n) }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -125,7 +135,7 @@
     <a class="tail" href="{{ url_for('backtests') }}">all of them &rarr;</a></div>
   <ul class="list">
     {% for k in kin %}
-      <li><a href="{{ url_for('backtest_page', name=strategy_slug(k)) }}">Does {{ label_of(k) }} work?</a></li>
+      <li><a href="{{ url_for('backtest_page', name=strategy_slug(k)) }}">Does {{ asked_of(k) }} work?</a></li>
     {% endfor %}
   </ul>
 </section>

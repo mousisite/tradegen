@@ -4,6 +4,7 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import numpy as np
 from bot.market import fetch_bars
+from bot import config
 from bot import strategies as S
 from bot import indicators as ind
 
@@ -35,6 +36,23 @@ for name in ("vwap_position", "vwap_band_fade"):
     print("    %-16s score=%+.3f  weight=%.2f  %s"
           % (name, sig.score, sig.weight, sig.reason))
 
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+
+# One bar a session makes session VWAP the bar's own middle, which says nothing.
+check("on daily bars the VWAP is not the session's", ctx.vwap_is_session is False)
+check("nor is it each bar's own typical price",
+      np.mean(np.abs(ctx.s["vwap"] - (b.high + b.low + b.close) / 3.0) < 1e-9) < 0.5)
+check("on 5-minute bars it is the session's",
+      S.build_context(fetch_bars("AAPL", "5m")).vwap_is_session is True)
+
 print()
 print("=" * 70)
 print("2. DOES THE OPENING RANGE STRATEGY MEAN ANYTHING ON DAILY BARS?")
@@ -42,21 +60,27 @@ print("=" * 70)
 sig = S.BY_NAME["opening_range_break"].fn(ctx, i)
 print("  opening_range_break  score=%+.3f weight=%.2f  %s"
       % (sig.score, sig.weight, sig.reason))
+check("the opening range has no say on daily bars",
+      sig.weight == 0 and sig.score == 0, (sig.score, sig.weight))
+sig = S.BY_NAME["session_sweep"].fn(ctx, i)
+check("nor have the day's sessions", sig.weight == 0 and sig.score == 0,
+      (sig.score, sig.weight))
 
 print()
 print("=" * 70)
 print("3. IS THE HOLDING HORIZON SENSIBLE PER INTERVAL?")
 print("=" * 70)
-print("  horizon_bars default is 24. In real time that is:")
+print("  The default holding window (config.horizon_for) in real time:")
 for iv, mins in [("5m", 5), ("15m", 15), ("30m", 30), ("1h", 60), ("1d", 60 * 24)]:
-    total = 24 * mins
-    if total < 60 * 8:
+    held = config.horizon_for(iv, config.DEFAULTS)
+    total = held * mins
+    if iv == "1d":
+        span = "%d trading days" % held
+    elif total < 60 * 8:
         span = "%.1f hours" % (total / 60)
-    elif iv == "1d":
-        span = "24 trading days, about 5 weeks"
     else:
         span = "%.1f trading days" % (total / (60 * 6.5))
-    print("    %-4s -> %s" % (iv, span))
+    print("    %-4s %3d bars -> %s" % (iv, held, span))
 
 print()
 print("=" * 70)
@@ -73,6 +97,11 @@ for iv in ("5m", "1h", "1d"):
           % (iv, comp, len(idle), len(degenerate)))
     if idle:
         print("       idle: %s" % ", ".join(idle))
+    check("%s: every score and the combined one are between -1 and 1" % iv,
+          -1.0 <= comp <= 1.0 and all(-1.0 <= s.score <= 1.0 for s in sigs))
+    check("%s: no weight is negative" % iv, all(s.weight >= 0 for s in sigs))
+    check("%s: most strategies have a say" % iv, len(idle) < len(sigs) / 2,
+          (len(idle), len(sigs)))
 
 print()
 print("=" * 70)

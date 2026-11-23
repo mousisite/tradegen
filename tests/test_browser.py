@@ -245,6 +245,15 @@ def build():
                                            "name": "Free Person",
                                            "email_verified": True})
         _seed(db, conn, free.id, now)
+        # The Setup lab's own fixtures, so the Learn pages show figures and
+        # charts rather than "Being tested".
+        from bot import labstore, setups
+        labstore.save_result(conn, labstore.sample_result("ES=F", "5m"))
+        labstore.save_result(conn, labstore.sample_result("SPY", "15m"))
+        for claim in setups.CLAIMS:
+            if claim.must:
+                labstore.save_claim(conn, labstore.sample_claim(claim.id))
+        labstore.save_bias(conn, labstore.POOL_ALL, labstore.sample_bias())
         # Built now, so every page of the example account is ready.
         from bot import demo
         demo.user(conn)
@@ -455,11 +464,14 @@ MEASURE = r"""
       if (size < 16) { out.fonts.push(name(el) + ' at ' + size); }
     }
     // A ticker box asks the phone for capitals, no corrections and a Go
-    // key; a box for a price or a size asks for the decimal keypad.
+    // key, or a Next key when it only starts a longer form; a box for a
+    // price or a size asks for the decimal keypad.
     const ticker = {autocapitalize: 'characters', autocomplete: 'off',
                     autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go'};
+    const starts = ['m-symbol', 'a-symbol'];
     for (const el of document.querySelectorAll('input[name=symbol], input[name=symbols]')) {
       if (el.type === 'hidden' || hidden(el)) { continue; }
+      ticker.enterkeyhint = starts.includes(el.id) ? 'next' : 'go';
       const off = Object.keys(ticker).filter(k => el.getAttribute(k) !== ticker[k]);
       if (off.length) { out.keys.push(name(el) + ' without ' + off.join(', ')); }
     }
@@ -533,6 +545,74 @@ MEASURE = r"""
 }
 """
 
+# What a computer or a tablet shows wrong. A table whose header row stands
+# apart from its columns, or that stops short of its card; a button or link in
+# a table that is a sideways scroll away; a chart whose words are stretched;
+# and a point of a list that runs on past a hundred letters to the line.
+WIDE_MEASURE = r"""
+() => {
+  const W = document.documentElement.clientWidth;
+  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [],
+               stretched: [], long: []};
+  const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+    (typeof el.className === 'string' && el.className.trim()
+      ? '.' + el.className.trim().split(/\s+/).join('.') : '');
+  for (const t of document.querySelectorAll('table')) {
+    const head = t.querySelector('thead tr'), row = t.querySelector('tbody tr');
+    if (!t.offsetParent || !head || !row) { continue; }
+    if (head.parentElement.getBoundingClientRect().width < 2) { continue; }   // drawn as cards
+    if (head.children.length === row.children.length) {
+      for (let i = 0; i < head.children.length; i++) {
+        const a = head.children[i].getBoundingClientRect().left;
+        const b = row.children[i].getBoundingClientRect().left;
+        if (Math.abs(a - b) > 2) {
+          out.heads.push(name(t) + ' column ' + i + ' named at ' + Math.round(a) +
+                         ', its figures at ' + Math.round(b));
+          break;
+        }
+      }
+    }
+    const inside = t.parentElement.clientWidth;
+    if (t.parentElement.classList.contains('tablewrap') && t.offsetWidth < inside - 2) {
+      out.heads.push(name(t) + ' is ' + t.offsetWidth + ' wide in ' + inside);
+    }
+  }
+  for (const wrap of document.querySelectorAll('.tablewrap')) {
+    if (!wrap.offsetParent) { continue; }
+    const edge = wrap.getBoundingClientRect().right;
+    for (const el of wrap.querySelectorAll('button, a, input, select, summary')) {
+      const r = el.getBoundingClientRect();
+      if (el.type !== 'hidden' && r.width >= 1 && r.right > edge + 1) {
+        out.away.push(name(el) + ' "' + el.textContent.trim().slice(0, 20) + '" in ' +
+                      name(wrap.querySelector('table')));
+      }
+    }
+  }
+  for (const t of document.querySelectorAll('svg.chart text')) {
+    const m = t.getScreenCTM();
+    if (t.getClientRects().length && m && Math.abs(m.a / m.d - 1) > 0.02) {
+      out.stretched.push('"' + t.textContent.trim() + '" ' + (m.a / m.d).toFixed(2) + ' times');
+      break;
+    }
+  }
+  const pen = document.createElement('canvas').getContext('2d');
+  for (const li of document.querySelectorAll('ul.list > li')) {
+    if (!li.offsetParent) { continue; }
+    const s = getComputedStyle(li);
+    pen.font = s.fontSize + ' ' + s.fontFamily;
+    const letter = pen.measureText('the quick brown fox jumps over the lazy dog').width / 43;
+    if (li.getBoundingClientRect().width / letter > 100) {
+      const words = document.createRange();
+      words.selectNodeContents(li);
+      if (words.getBoundingClientRect().width / letter > 100) {
+        out.long.push('"' + li.textContent.trim().slice(0, 40) + '"');
+      }
+    }
+  }
+  return out;
+}
+"""
+
 # Text against what is behind it, as WCAG's contrast ratio: 4.5 to 1 at
 # least, or 3 to 1 for large text. Colours that change with the theme ease
 # in over a fifth of a second, so they are stopped first and read as they
@@ -601,6 +681,27 @@ CONTRAST = r"""
     }
     return low;
   }
+}
+"""
+
+# Every table drawn as one: how many there are, and the first heading of each
+# that does not start where its column does.
+COLUMNS = r"""
+() => {
+  let seen = 0;
+  const off = [];
+  for (const t of document.querySelectorAll('table')) {
+    const row = t.tBodies[0] && t.tBodies[0].rows[0];
+    if (!t.tHead || !row || !t.getBoundingClientRect().width) { continue; }
+    seen += 1;
+    const th = [...t.tHead.rows[0].cells];
+    for (let i = 0; i < Math.min(th.length, row.cells.length); i++) {
+      const d = th[i].getBoundingClientRect().left - row.cells[i].getBoundingClientRect().left;
+      if (Math.abs(d) > 1.5) { off.push(th[i].textContent.trim() + ' by ' + Math.round(d)); break; }
+      if (row.cells[i].colSpan > 1) { break; }
+    }
+  }
+  return [seen, off];
 }
 """
 
@@ -713,6 +814,28 @@ APP_NOTCH = r"""
 }
 """
 
+# Two things to tap that share some of the same screen: a tap there does one
+# or the other, whichever is on top.
+SHARED_TAPS = r"""
+() => {
+  const taps = [...document.querySelectorAll('td a, td button, td select, td input, td summary')]
+    .map(el => [el, el.getBoundingClientRect()])
+    .filter(([el, r]) => r.width > 1 && r.height > 1 && el.type !== 'hidden' &&
+            (el.tagName === 'SUMMARY' || !el.closest('details:not([open])')));
+  const out = [];
+  for (let i = 0; i < taps.length; i++) for (let j = i + 1; j < taps.length; j++) {
+    const a = taps[i][1], b = taps[j][1];
+    const x = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const y = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    if (x > 1 && y > 1) {
+      out.push(taps[i][0].textContent.trim().slice(0, 20) + ' | ' +
+               taps[j][0].textContent.trim().slice(0, 20));
+    }
+  }
+  return out;
+}
+"""
+
 # The longest figure a card might have to hold, in the first figure of the
 # portfolio's: it wraps in its column rather than widen the page.
 LONG_FIGURE = r"""
@@ -756,6 +879,7 @@ PAGES = [
     ("/learn", "all", None),
     ("/learn/sweep-break-retest", "all", None),
     ("/learn/practice", "all", None),
+    ("/learn/opening-gaps", "all", None),
     ("/stocks", "all", None),
     ("/stock/nvda", "all", None),
     ("{share}", "all", None),
@@ -981,11 +1105,16 @@ def run(browser, site, base, check, head):
             page.set_viewport_size({"width": 360, "height": 800})
             page.goto(base + "/portfolio")
             longest = page.evaluate(LONG_FIGURE, 360)
+            page.goto(base + "/ideas")
+            page.select_option("#horizon", "long")
+            chosen_why = page.inner_text("#why-horizon")
         ctx.close()
     check("no page opens scrolled away from its top", not moved, moved[:5])
     check("no page is wider than the screen (%d page views)" % views, not wide, wide[:5])
     check("a figure as long as -2,551,934,343,331.83 wraps in its column instead "
           "of widening the page", longest <= 360, longest)
+    check("on Find, picking another choice explains that choice, before the form is sent",
+          chosen_why.startswith("Hold for months. "), chosen_why)
     check("no card of rows scrolls sideways, even with a note typed without a space",
           not cards, cards[:5])
     check("no button or link in a table is a sideways scroll away", not away, away[:5])
@@ -1000,6 +1129,44 @@ def run(browser, site, base, check, head):
           "light or dark", not faint, faint[:5])
     check("the tab bar is there with its five places, 44 or more each, the right one "
           "current, and no Menu above it", not tabs, tabs[:5])
+
+    # -----------------------------------------------------------------------
+    head("EVERY PAGE ON A COMPUTER AND A TABLET")
+    # -----------------------------------------------------------------------
+    broad, heads, hidden, stretched, long_ = [], [], [], [], []
+    for who in ("visitor", "free account"):
+        member = who != "visitor"
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768},
+                                  service_workers="block")
+        ctx.set_default_timeout(15000)
+        ctx.route("**/*", lambda route: route.continue_()
+                  if route.request.url.startswith(base + "/") else route.abort())
+        if member:
+            ctx.add_cookies([session_cookie(site, base)])
+        page = ctx.new_page()
+        for path, whom, _tab in PAGES:
+            if whom == ("visitor" if member else "member"):
+                continue
+            path = path.format(run=run_id, share=share_path)
+            page.goto(base + path)
+            for width in (820, 1024, 1366, 1920):
+                page.set_viewport_size({"width": width, "height": 768})
+                m = page.evaluate(WIDE_MEASURE)
+                where = "%s %s at %d" % (who, path, width)
+                if m["wide"] > 0:
+                    broad.append("%s is %d too wide" % (where, m["wide"]))
+                heads += ["%s: %s" % (where, x) for x in m["heads"]]
+                hidden += ["%s: %s" % (where, x) for x in m["away"]]
+                stretched += ["%s: %s" % (where, x) for x in m["stretched"]]
+                long_ += ["%s: %s" % (where, x) for x in m["long"]]
+        ctx.close()
+    check("no page is wider than the window, from 820 to 1920 wide", not broad, broad[:5])
+    check("every table fills its card, with each column's name over its figures",
+          not heads, heads[:5])
+    check("no button or link in a table is a sideways scroll away on a tablet or a "
+          "computer", not hidden, hidden[:5])
+    check("no chart's words are stretched", not stretched, stretched[:5])
+    check("no point of a list runs past a hundred letters to the line", not long_, long_[:5])
 
     # -----------------------------------------------------------------------
     head("A NOTCH AND A HOME BAR")
@@ -1099,6 +1266,92 @@ def run(browser, site, base, check, head):
               "passes under the top bar" % pages, not unclear, unclear[:4])
 
     # -----------------------------------------------------------------------
+    head("THE ANALYSE PAGE AND THE TABLES, BY TOUCH")
+    # -----------------------------------------------------------------------
+    conn = site.db.connect(site.DB)
+    try:
+        new = site.A.upsert_google_user(conn, {"email": "new@example.com", "sub": "g-new",
+                                               "name": "New Person", "email_verified": True})
+        token = site.A.start_session(conn, new.id, "browser suite")
+    finally:
+        conn.close()
+    ctx = context(390)
+    ctx.add_cookies([session_cookie(site, base, token)])
+    page = ctx.new_page()
+    _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+    try:
+        page.goto(base + "/")
+        page.wait_for_timeout(500)
+        check("with nothing to read first, the page still opens with its tab bar: the search "
+              "box takes the cursor only where there is a keyboard",
+              page.evaluate("getComputedStyle(document.querySelector('.tabbar')).visibility")
+              == "visible")
+        zone = page.evaluate("""(() => {
+            const z = document.getElementById('drop'), r = z.getBoundingClientRect();
+            const words = [...z.querySelectorAll('span')].map(s => s.getBoundingClientRect())
+              .filter(w => w.width > 0);
+            return {lines: z.getClientRects().length,
+                    held: words.every(w => w.left >= r.left && w.right <= r.right
+                                           && w.top >= r.top && w.bottom <= r.bottom),
+                    above: document.getElementById('shotform').previousElementSibling
+                             .getBoundingClientRect().bottom <= r.top}; })()""")
+        check("the screenshot box is one box, round its own words, under the ones above",
+              zone == {"lines": 1, "held": True, "above": True}, zone)
+    except Exception as exc:
+        check("the Analyse page of a new account", False, exc)
+    finally:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+    ctx.close()
+    ctx = context(390, signed_in=True)
+    page = ctx.new_page()
+    try:
+        shared_taps = []
+        for path in ("/screener?preset=quality_value", "/settings", "/monitor", "/trades"):
+            page.goto(base + path)
+            shared_taps += ["%s %s" % (path, s) for s in page.evaluate(SHARED_TAPS)]
+        check("no two links or buttons in a table share a spot to tap", not shared_taps,
+              shared_taps[:4])
+        page.goto(base + "/portfolio")
+        tall = page.evaluate("""[...document.querySelectorAll('.figs .f .v')]
+            .filter(v => v.getBoundingClientRect().height > 1.5 * parseFloat(
+                getComputedStyle(v).lineHeight)).map(v => v.textContent.trim())""")
+        check("a position worth millions is given on one line", not tall, tall)
+    except Exception as exc:
+        check("tapping in the tables", False, exc)
+    ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("ON A COMPUTER'S SCREEN")
+    # -----------------------------------------------------------------------
+    ctx = context(1366, signed_in=True)
+    page = ctx.new_page()
+    adrift, stretched = [], []
+    for path in ("/", "/trades", "/monitor", "/learn", "/analyse?symbol=NVDA&interval=1d",
+                 "/research?symbol=NVDA&interval=1d"):
+        page.goto(base + path)
+        adrift += ["%s: %s" % (path, a) for a in page.evaluate(r"""() => {
+            const out = [];
+            for (const t of document.querySelectorAll('table.stack')) {
+              const heads = [...t.querySelectorAll(':scope > thead > tr > th')];
+              const row = t.querySelector(':scope > tbody > tr');
+              if (!row || row.children.length !== heads.length) { continue; }
+              heads.forEach((h, k) => {
+                const a = h.getBoundingClientRect(), b = row.children[k].getBoundingClientRect();
+                if (a.width && (Math.abs(a.left - b.left) > 1 || Math.abs(a.right - b.right) > 1)) {
+                  out.push(h.textContent.trim() + ' ' + Math.round(a.left) + ' over ' + Math.round(b.left));
+                }
+              });
+            }
+            return out; }""")]
+        stretched += ["%s: %s" % (path, s) for s in page.evaluate(r"""() =>
+            [...document.querySelectorAll('a.btn')].filter(e => e.getBoundingClientRect().height > 60)
+              .map(e => e.textContent.trim())""")]
+    check("each heading of a table is over its own column", not adrift, adrift[:4])
+    check("no button is stretched to the height of the form beside it", not stretched,
+          stretched[:4])
+    ctx.close()
+
+    # -----------------------------------------------------------------------
     head("A TICKER, TYPED")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)
@@ -1173,6 +1426,59 @@ def run(browser, site, base, check, head):
     ctx.close()
 
     # -----------------------------------------------------------------------
+    head("A FIRED ALERT, ON WHATEVER PAGE YOU ARE ON")
+    # -----------------------------------------------------------------------
+    ctx = context(390, signed_in=True)
+    page = ctx.new_page()
+    asked = []
+
+    def answer(route):
+        asked.append(route.request.url)
+        if len(asked) <= 5:
+            route.abort()
+        else:
+            route.fulfill(json={"new_fires": [{"id": 41, "at": time.time(), "symbol": "AAA",
+                                               "message": "AAA is 100, above the 90 you set.",
+                                               "as_of": "20 Nov"}],
+                                "cursor": 41, "now": time.time()})
+
+    try:
+        page.clock.install()
+        page.route("**/api/alerts/status*", answer)
+        page.goto(base + "/trades")
+        page.clock.run_for(5000)
+        for _ in range(4):
+            page.clock.run_for(45000)
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(200)
+        tried = len(asked)
+        page.clock.run_for(45000)
+        page.wait_for_timeout(200)
+        check("after five failed requests it asks less often",
+              tried == 5 and len(asked) == 5, (tried, len(asked)))
+        for _ in range(7):
+            page.clock.run_for(45000)
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(200)
+        check("but it goes on asking", len(asked) >= 6, len(asked))
+        page.clock.run_for(1000)
+        check("and what fired is shown", page.locator("#firebar").is_visible()
+              and "AAA is 100, above the 90 you set." in page.locator("#firetext").inner_text())
+        link = page.locator("#fireopen")
+        check("with a way to the list of what fired",
+              link.get_attribute("href") == "/monitor?told=41#told", link.get_attribute("href"))
+        link.tap()
+        page.wait_for_url(lambda url: "/monitor?told=41#told" in url)
+        page.wait_for_load_state()
+        top = page.locator("#told h3").bounding_box()["y"]
+        bar = page.locator("header").first.bounding_box()
+        check("which is what opens, under the bar at the top",
+              bar["height"] <= top < 844, (top, bar))
+    except Exception as exc:
+        check("a fired alert in the bar", False, exc)
+    ctx.close()
+
+    # -----------------------------------------------------------------------
     head("A PAPER TRADE: REVIEWED, LOGGED, HALF CLOSED")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)
@@ -1240,6 +1546,25 @@ def run(browser, site, base, check, head):
                 check("Apply answers under the box, without leaving the page",
                       page.url == address and answer.inner_text().strip() != "",
                       (page.url, answer.inner_text()))
+                # A server in trouble answers with a page of its own.
+                ctx.route(base + "/billing/code", lambda route: route.fulfill(
+                    status=500, content_type="text/html",
+                    body="<html><body><h1>Trouble</h1></body></html>"))
+                page.locator("#code").fill("FRIEND11")
+                page.get_by_role("button", name="Apply").tap()
+                answer.wait_for(state="visible")
+                check("a page that is not the answer is never drawn under the box",
+                      "Could not check" in answer.inner_text()
+                      and "Trouble" not in page.locator("main").inner_text(),
+                      answer.inner_text())
+                ctx.unroute(base + "/billing/code")
+                # Signed out since, in another tab.
+                ctx.clear_cookies()
+                page.locator("#code").fill("FRIEND12")
+                with page.expect_navigation(url=lambda url: "/signin" in url):
+                    page.get_by_role("button", name="Apply").tap()
+                check("and Apply after the sign-in has ended goes to sign in, and back here",
+                      "next=" in page.url and "pricing" in page.url, page.url)
         except Exception as exc:
             check("the pricing page %s" % ("signed in" if member else "signed out"),
                   False, exc)
@@ -1311,6 +1636,44 @@ def run(browser, site, base, check, head):
             check("the subscribe screen when this Apple Account's Pro is another account's "
                   "(%s first)" % first, False, exc)
         ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("PRO THAT ARRIVES WHILE A PAGE IS OPEN IN THE APP")
+    # -----------------------------------------------------------------------
+    # A purchase recorded on a later page. The server here says Pro each time
+    # and goes on drawing Free, the one case that could send a page round.
+    arrived = {"transactions": [{"jws": "a.b.c", "transactionId": "8"}], "jws": ["a.b.c"]}
+    ctx = context(390, ua=APP_UA, signed_in=True)
+    ctx.add_init_script(FAKE_STORE.replace("__SETUP__", json.dumps(
+        {"answers": dict(answers, unfinished=arrived, finish={}), "first": ["unfinished"]})))
+    ctx.route(base + "/api/apple/transactions", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body='{"results": [{"outcome": "applied"}], "pro": true, "source": "apple"}'))
+    page = ctx.new_page()
+    drawn = []
+    page.on("request", lambda r: drawn.append(r.url) if r.is_navigation_request() else None)
+    try:
+        page.goto(base + "/settings")
+        before = page.locator("[data-go-pro]").count()
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("!document.querySelector('[data-go-pro]')")
+        page.wait_for_timeout(500)
+        check("any page loses its Go Pro button, and is not drawn again under someone typing",
+              before == 1 and len(drawn) == 1, (before, drawn))
+        del drawn[:]
+        page.goto(base + "/account")
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("performance.getEntriesByType('navigation')[0].type === 'reload'"
+                               " && document.readyState === 'complete'"
+                               " && window.__iapAsked.indexOf('unfinished') !== -1")
+        page.evaluate("window.__iapRelease('unfinished')")
+        page.wait_for_function("!document.querySelector('[data-go-pro]')")
+        page.wait_for_timeout(500)
+        check("the Account page, which says the plan, is drawn again, and only once",
+              len(drawn) == 2, drawn)
+    except Exception as exc:
+        check("Pro arriving while a page is open in the app", False, exc)
+    ctx.close()
 
     # -----------------------------------------------------------------------
     head("SIGNING IN INSIDE THE APP")
@@ -1424,6 +1787,67 @@ def run(browser, site, base, check, head):
     except Exception as exc:
         check("deleting an account on a phone", False, exc)
     ctx.close()
+
+    # -----------------------------------------------------------------------
+    head("ON A WIDE SCREEN, HELD SIDEWAYS, AND ON PAPER")
+    # -----------------------------------------------------------------------
+    # .stack is a column of boxes, and on a table it drew the headings out of
+    # line with the figures under them, by up to 461 pixels.
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800},
+                              service_workers="block")
+    ctx.set_default_timeout(15000)
+    ctx.route("**/*", lambda r: r.continue_() if r.request.url.startswith(base + "/")
+              else r.abort())
+    ctx.add_cookies([session_cookie(site, base)])
+    page = ctx.new_page()
+    crooked, seen = [], 0
+    for path in ("/backtests", "/backtest/trend-stack", "/learn", "/privacy", "/monitor",
+                 "/trades", "/settings"):
+        page.goto(base + path)
+        tables, off = page.evaluate(COLUMNS)
+        seen += tables
+        crooked += ["%s: %s" % (path, o) for o in off]
+    check("every heading of a table stands over its own column (%d tables)" % seen,
+          seen >= 8 and not crooked, crooked[:6])
+    hidden = []
+    for path, target in (("/backtests#how-we-tested", "#how-we-tested"),
+                         ("/privacy#notifications", "#notifications"),
+                         ("/backtests#main", "h1")):
+        page.goto("about:blank")
+        page.goto(base + path)
+        top, bar = page.evaluate("s => [document.querySelector(s).getBoundingClientRect().top,"
+                                 " document.querySelector('.topbar')"
+                                 ".getBoundingClientRect().bottom]", target)
+        if top < bar:
+            hidden.append("%s at %d under a bar down to %d" % (path, top, bar))
+    check("what a link jumps to lands below the top bar, not behind it", not hidden, hidden)
+    page.goto(base + "/backtests")
+    centred = page.evaluate("(() => { const a = document.querySelector('.closing .prose')"
+                            ".getBoundingClientRect(), b = document.querySelector('.closing')"
+                            ".getBoundingClientRect();"
+                            " return Math.abs(a.left + a.right - b.left - b.right) / 2; })()")
+    check("the closing box's words are in its middle", centred <= 1, centred)
+    page.set_viewport_size({"width": 720, "height": 900})
+    page.emulate_media(media="print")
+    page.goto(base + "/stock/nvda")
+    printed = page.evaluate("['.tabbar', '.topbar .tools', '.sharebar'].filter(s =>"
+                            " getComputedStyle(document.querySelector(s)).display !== 'none')")
+    check("the bars and buttons are left off a printed page", printed == [], printed)
+    ctx.close()
+    out = []
+    for w, h, ua, opener in ((667, 375, APP_UA, ".tabbar .more"),
+                             (800, 300, None, ".topbar .menu")):
+        ctx = context(w, ua=ua, signed_in=True)
+        page = ctx.new_page()
+        page.set_viewport_size({"width": w, "height": h})
+        page.goto(base + "/")
+        box = page.evaluate("s => { document.querySelector(s).open = true;"
+                            " const r = document.querySelector(s + ' .menu-panel')"
+                            ".getBoundingClientRect(); return [r.top, r.bottom]; }", opener)
+        if box[0] < 0 or box[1] > h:
+            out.append("%s from %d to %d of %d" % (opener, box[0], box[1], h))
+        ctx.close()
+    check("on a phone held sideways the menus stay on the screen", not out, out)
 
     print()
     print("   (refused %d requests for other sites: %s)"

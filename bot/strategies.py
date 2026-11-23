@@ -6,21 +6,21 @@ which goes stale the day one is added. Each reads the same precomputed
 indicator context and returns a directional score in [-1, +1] plus a
 plain-language reading.
 
-Two design rules run through the whole module:
+Three design rules run through the whole module:
 
 1. **Every strategy is parameterised by bar index `i`**, never "the latest
    value". The backtester replays these exact functions over history, so the
    win rate it measures belongs to the same logic that produces the live call.
 
-2. **Family membership is tracked.** Six correlated trend strategies all firing
-   is one piece of evidence, not six. The composite discounts within-family
+2. **Family membership is tracked.** Ten correlated trend strategies all firing
+   is one piece of evidence, not ten. The composite discounts within-family
    agreement so a crowded family cannot drown out the rest of the evidence.
 
-3. **Some strategies are on trial.** The price-action setups from TJR's video
-   (the "liquidity" family) are scored on every analysis and measured by every
-   back-test like the rest, but they do not vote: the composite, and so every
-   call and its odds, is built from the voting strategies alone. Whether any of
-   them earns a vote is a later decision, made on their measured record.
+3. **A strategy can be on trial.** Strategy.votes=False keeps one out of the
+   composite, and so out of every call and its odds, while it is still scored
+   on every analysis and measured by every back-test. None is on trial today:
+   the ten price-action setups from TJR's video (the "liquidity" family) were,
+   and have voted like the rest since 19 November 2026, at the owner's choice.
 
 Theoretical regime hints on each strategy are only priors. Actual weighting
 comes from measured per-instrument performance in `calibrate.py`.
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -47,7 +48,7 @@ BREAKOUT = "breakout"
 VOLUME = "volume"
 STRUCTURE = "structure"
 PATTERN = "pattern"
-# The course's price-action setups, on trial (see Strategy.votes).
+# The course's price-action setups. They have voted since 19 November 2026.
 LIQUIDITY = "liquidity"
 
 TRENDING = "trending"
@@ -271,25 +272,28 @@ def build_context(bars: Bars) -> Context:
     s["bw_pctile"] = bw_pct
 
     # The course's price structure, New York clock and liquidity chain, read
-    # by the setups on trial. Its keys are prefixed (st_, ck_, lq_), so they
-    # cannot replace an indicator above. Should reading them fail on some
-    # odd history, the setups on trial say so and sit out; the voting
-    # strategies, and so the call, do not depend on any of it.
+    # by the liquidity family. Its keys are prefixed (st_, ck_, lq_), so they
+    # cannot replace an indicator above. Should reading them fail on some odd
+    # history, the family's strategies say so and sit out, and the call is
+    # the one the other strategies make without them.
     try:
         s.update(liquidity.series(bars))
     except Exception:
-        global _STRUCTURE_FAILED_LOGGED
-        if not _STRUCTURE_FAILED_LOGGED:
-            _STRUCTURE_FAILED_LOGGED = True
-            log.exception("Price structure could not be read for %s; the setups on "
-                          "trial sit out", getattr(bars, "symbol", "?"))
+        symbol, now = getattr(bars, "symbol", "?"), time.time()
+        if now - _STRUCTURE_FAILED.get(symbol, 0.0) >= 3600:
+            if len(_STRUCTURE_FAILED) > 500:
+                _STRUCTURE_FAILED.clear()
+            _STRUCTURE_FAILED[symbol] = now
+            log.exception("Price structure could not be read for %s; the price-action "
+                          "setups take no part in its calls", symbol)
 
     return Context(bars, s, warmup=210, vwap_is_session=vwap_is_session)
 
 
-# Logged once per process, so a history that breaks the structure reader
-# does not fill the log on every analysis.
-_STRUCTURE_FAILED_LOGGED = False
+# When each instrument's failure was last logged. Once an hour each, so a
+# history that breaks the structure reader does not fill the log on every
+# analysis, and a second instrument's failure is still seen.
+_STRUCTURE_FAILED: Dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +388,9 @@ def supertrend_follow(ctx: Context, i: int) -> Signal:
     freshness = 1.0 if bars_since <= 3 else max(0.45, 1.0 - (bars_since - 3) / 30.0)
     score = direction * min(0.45 + dist * 0.35, 1.0) * freshness
     return Signal("supertrend_follow", _clamp(score), 1.0,
-                  "supertrend %s for %d bars, %.1f ATR from band" % (
-                      "up" if direction > 0 else "down", bars_since, dist), TREND)
+                  "supertrend %s for %d bar%s, %.1f ATR from band" % (
+                      "up" if direction > 0 else "down", bars_since,
+                      "" if bars_since == 1 else "s", dist), TREND)
 
 
 def adx_di_cross(ctx: Context, i: int) -> Signal:
@@ -448,8 +453,9 @@ def parabolic_sar_flip(ctx: Context, i: int) -> Signal:
     dist = abs(price - sar) / atr_v
     freshness = 1.0 if bars_since <= 2 else max(0.35, 1.0 - (bars_since - 2) / 20.0)
     return Signal("parabolic_sar_flip", _clamp(direction * min(0.5 + dist * 0.3, 1.0) * freshness),
-                  1.0, "SAR %s for %d bars" % (
-                      "below price" if direction > 0 else "above price", bars_since), TREND)
+                  1.0, "SAR %s for %d bar%s" % (
+                      "below price" if direction > 0 else "above price", bars_since,
+                      "" if bars_since == 1 else "s"), TREND)
 
 
 def linreg_channel(ctx: Context, i: int) -> Signal:
@@ -690,17 +696,20 @@ def opening_range_break(ctx: Context, i: int) -> Signal:
     """Break of the first 30 minutes of the session.
 
     The reference every breakout day-trader watches. Only meaningful once the
-    opening range is complete and while the session is still young.
+    opening range is complete and while the session is still young, and only
+    on bars of 30 minutes or shorter: a longer one hides where the range ends.
     """
     bars = ctx.bars
     sess = bars.session_id[i]
     idx = np.flatnonzero(bars.session_id[:i + 1] == sess)
-    if len(idx) < 8:
-        return _idle("opening_range_break", BREAKOUT, "session too young")
+    if clock.bar_seconds(bars) > 30 * 60:
+        return _idle("opening_range_break", BREAKOUT, "needs bars of 30 minutes or shorter")
 
+    # The bars that start inside the first half hour: one of 30 minutes, two
+    # of 15, six of 5. It is complete once a bar after them has closed.
     start_ts = int(bars.timestamp[idx[0]])
     window = idx[bars.timestamp[idx] < start_ts + 30 * 60]
-    if len(window) < 3 or len(window) >= len(idx):
+    if len(window) >= len(idx):
         return _idle("opening_range_break", BREAKOUT, "opening range not yet complete")
 
     orb_hi = float(np.max(bars.high[window]))
@@ -1047,7 +1056,7 @@ def roc_momentum(ctx: Context, i: int) -> Signal:
 
 
 # ---------------------------------------------------------------------------
-# Liquidity family: the course's price-action setups, on trial
+# Liquidity family: the course's price-action setups
 # ---------------------------------------------------------------------------
 # TJR's video ("How To Start Day Trading In 2026") teaches these; bot/setups.py
 # names them and says what the course claims. Each reads the series that
@@ -1055,7 +1064,7 @@ def roc_momentum(ctx: Context, i: int) -> Signal:
 # history (build_context), at bar i only, so each costs the same whatever the
 # history's length and none sees a bar after i: tests/test_structure.py proves
 # that of every series. +1 means the setup expects a rise, so taking the lows
-# is +1. None of them votes (Strategy.votes); the back-tests measure them all.
+# is +1.
 
 # The say of "nothing at this bar", as the other event strategies give it.
 _LQ_QUIET = 0.3
@@ -1091,7 +1100,7 @@ def _lq_int(ctx: Context, key: str, i: int) -> int:
 def _took_swings(ctx: Context, i: int, d: int, equal: bool) -> str:
     """'took the swing low at 412.30 and closed back above it', or the same
     for several levels or an equal pair taken on one bar."""
-    lvl = ctx.at("st_sweep_lvl", i)
+    lvl = ctx.at("st_sweep_eq_lvl" if equal else "st_sweep_lvl", i)
     count = max(1, _lq_int(ctx, "st_sweep_n", i))
     side = "low" if d > 0 else "high"
     if equal:
@@ -1279,10 +1288,11 @@ def liquidity_model(ctx: Context, i: int) -> Signal:
         via = liquidity.VIA[min(max(_lq_int(ctx, "lq_chain_via", i), 0), 2)]
         where = ("a gap the new move left" if via == "gap"
                  else "the halfway line of the new move")
+        turn = liquidity.chain_turn(ctx.s, i, d)
         stop = ctx.at("lq_chain_stop", i)
         return Signal(name, 0.85 * d, 1.0,
-                      "took %s, broke its last swing %s, came back to %s and closed %s"
-                      "%s" % (what, "high" if d > 0 else "low", where,
+                      "took %s, %s, came back to %s and closed %s"
+                      "%s" % (what, turn, where,
                               "up" if d > 0 else "down",
                               _at_price(stop, "; the course's stop sits past %s")),
                       LIQUIDITY)
@@ -1374,8 +1384,9 @@ REGISTRY: List[Strategy] = [
     Strategy("momentum_thrust", PATTERN, momentum_thrust,
              "Three consecutive bodies in one direction", (TRENDING,), 0.60),
 
-    # Liquidity: the course's price-action setups. On trial: measured and
-    # shown, and, at the owner's choice (19 Nov 2026), voting in the composite like the rest.
+    # Liquidity: the course's price-action setups. At the owner's choice they
+    # have voted in the composite like the rest since 19 Nov 2026; before that
+    # they were on trial (votes=False).
     Strategy("sweep_reclaim", LIQUIDITY, sweep_reclaim,
              "An old high or low taken, then a close back past it",
              (RANGING, TRANSITIONAL), 0.70, votes=True),
@@ -1414,6 +1425,7 @@ FAMILIES: Tuple[str, ...] = (TREND, REVERSION, BREAKOUT, VOLUME, STRUCTURE, PATT
 BASE_WEIGHTS: Dict[str, float] = {s.name: s.base_weight for s in REGISTRY}
 
 # The strategies on trial: scored and measured, with no say in the call.
+# None today. Pages speak of a trial only when this is not empty.
 TRIAL: Tuple[str, ...] = tuple(s.name for s in REGISTRY if not s.votes)
 
 
@@ -1512,8 +1524,8 @@ def evaluate(ctx: Context, i: int, weights: Optional[Dict[str, float]] = None,
 
     A strategy on trial (votes=False) is scored and weighted like the rest,
     so the back-tests measure it with the same weights it would have, but its
-    signal is left out of the composite: with or without the strategies on
-    trial, the composite is the same number.
+    signal is left out of the composite: with or without a strategy on trial,
+    the composite is the same number.
     """
     base = dict(BASE_WEIGHTS)
     if weights:

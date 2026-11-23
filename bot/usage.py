@@ -107,11 +107,21 @@ def calls_made(conn: sqlite3.Connection, days: int = 30) -> List[Dict]:
 
 
 def by_day(conn: sqlite3.Connection, days: int = 30) -> List[Dict]:
-    since = int(time.time()) - days * DAY
+    """Analyses each UTC day, a day with none as zero, so a quiet week shows.
+
+    Empty when there were none at all.
+    """
+    now = int(time.time())
+    since = now - days * DAY
     rows = _rows(conn, """
         SELECT ts / 86400 AS bucket, COUNT(*), COUNT(DISTINCT user_id)
         FROM runs WHERE ts >= ? GROUP BY bucket ORDER BY bucket""", (since,))
-    return [{"day": int(r[0]) * DAY, "runs": r[1], "people": r[2]} for r in rows]
+    if not rows:
+        return []
+    found = {int(r[0]): r for r in rows}
+    return [{"day": day * DAY, "runs": found[day][1] if day in found else 0,
+             "people": found[day][2] if day in found else 0}
+            for day in range(since // DAY, now // DAY + 1)]
 
 
 def intervals(conn: sqlite3.Connection, days: int = 30) -> List[Dict]:

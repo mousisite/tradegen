@@ -64,7 +64,9 @@ from bot import risk as risk_mod  # noqa: E402
 from bot import screener as screener_mod  # noqa: E402
 from bot import sec  # noqa: E402
 from bot import sentiment as sentiment_mod  # noqa: E402
+from bot import upstream as upstream_mod  # noqa: E402
 from bot import workflows as workflows_mod  # noqa: E402
+from bot import yahoo as yahoo_mod  # noqa: E402
 from bot.market import Bars  # noqa: E402
 
 # web.py reads .env when it is imported, and a developer's own copy may hold
@@ -193,6 +195,7 @@ def no_network(self, method, url, *a, **k):
     raise requests.ConnectionError("this suite is offline: %s" % url)
 
 
+real_screen = screener_mod.run
 STUBS = [(m, "fetch_bars", bars_for) for m in (market_mod, portfolio_mod, risk_mod,
                                                 options_mod, workflows_mod, alerts_mod)]
 STUBS += [(engine, "fetch_bars", lambda s, iv: bars_for(s, iv)),
@@ -277,10 +280,11 @@ try:
     visitor = web.app.test_client()
     front = flat(text(get(visitor, "visitor", "/")))
     check("the front page says the example's counts are a test on past prices",
-          "In tests on past prices, this same setup came up 59 times and worked "
-          "25 of them, reaching its target before its stop." in front, front[:300])
-    check("and that here a worked bet was one on the price falling",
-          "worked means a bet on the price falling paid off" in front)
+          "In tests on past prices, this same setup came up 59 times and a bet on the "
+          "price falling worked 25 of them, reaching its target before its stop." in front,
+          front[:300])
+    check("and that here a worked bet was one on the price falling, said once",
+          front.count("bet on the price falling") == 1, front.count("bet on the price falling"))
     check("and that it is a test, not a promise", "A test, not a promise." in front)
     check("the strategies card says they worked in tests on past prices",
           "trading strategies worked in tests on past prices." in front)
@@ -299,11 +303,20 @@ try:
     finally:
         conn.close()
     line = public.counts_line(snap, short=True)
-    check("the picture card's line says it was tested on past prices",
-          line.startswith("Tested on past prices: it hit its target before its stop"),
+    check("the picture card's line says it was tested on past prices, betting on a fall",
+          snap["fall"] and line.startswith("In tests on past prices, a bet on a fall worked"),
           line)
+    check("and that a buy reached its target before its stop, where it was one",
+          public.counts_line(dict(snap, fall=False), short=True).startswith(
+              "Tested on past prices: it hit its target before its stop"))
     font = public._font("inter-400.ttf", 30)
     widest = public.counts_line({"samples": 2500, "worked": 2500}, short=True)
+    widest_fall = public.counts_line({"samples": 2500, "worked": 2500, "fall": True},
+                                     short=True)
+    check("as does the one for bets on a fall",
+          "a bet on a fall" in widest_fall
+          and font.getlength(widest_fall) <= public.WIDTH - 2 * public.MARGIN,
+          int(font.getlength(widest_fall)))
     check("and fits the card's one line, even at the largest counts",
           font.getlength(widest) <= public.WIDTH - 2 * public.MARGIN,
           int(font.getlength(widest)))
@@ -315,6 +328,12 @@ try:
     check("Pro's card says its fair-use limits, from the server's own numbers",
           "Fair use: up to %d saved theses an hour, and Find scans wait their turn "
           "when the server is busy." % web.THESES_PER_HOUR in pricing, pricing[-900:])
+    check("the hourly limits on screens and routines among them",
+          "Also up to %d stock screens and %d routines an hour."
+          % (web.SCREENS_PER_HOUR, web.ROUTINES_PER_HOUR) in pricing, pricing[-900:])
+    check("and what a program may read, outside the app",
+          "A program of your own can read up to %d analyses an hour."
+          % web.JSON_READS_PER_HOUR in pricing, pricing[-900:])
     check("with no key set, it puts no limit on screenshots it does not read",
           "screenshot" not in pricing)
     check("and it links to how the results are measured",
@@ -380,6 +399,33 @@ try:
     status, page = SEEN[("visitor", "/screener?preset=quality_value")]
     check("a screen that failed says so plainly", status == 500
           and "The screen could not be finished." in page, status)
+    # A screen that could not reach the source comes back with notes rather
+    # than failing, and the notes once held the library's own error: the host,
+    # the address asked and the session token in it.
+    class Dropped:
+        @staticmethod
+        def get(*_a, **_k):
+            raise requests.ConnectionError(BOOM.replace("/NVDA", "/NVDA?crumb=sEcReT"))
+
+    kept = {k: getattr(yahoo_mod, k) for k in ("_SESSION", "_CRUMB", "_OBTAINED_AT")}
+    stub_run, screener_mod.run = screener_mod.run, real_screen
+    yahoo_mod._SESSION, yahoo_mod._CRUMB = Dropped(), "sEcReT"
+    yahoo_mod._OBTAINED_AT = time.time()
+    upstream_mod.reset()
+    try:
+        page = _html.unescape(text(get(visitor, "visitor", "/screener?preset=dividend")))
+    finally:
+        screener_mod.run = stub_run
+        for k, v in kept.items():
+            setattr(yahoo_mod, k, v)
+        upstream_mod.reset()
+    check("a screen that could not reach the source says so, with no address or token",
+          "Yahoo could not be reached." in page and "crumb" not in page
+          and "sEcReT" not in page and not leaks(page), leaks(page))
+    check("nor any word about an installation or the reader's own connection",
+          "this installation" not in yahoo_mod._NO_SESSION
+          and "internet connection" not in yahoo_mod._NO_SESSION)
+
     status, page = SEEN[("visitor", "/ideas?market=stocks&horizon=medium&risk=balanced")]
     check("a Find scan that cannot start says the server is busy", status == 503
           and "running as many scans as it can" in page, status)
@@ -477,7 +523,7 @@ try:
           and "BOOM" in page and "do not exist" not in page, status)
     status, page = SEEN[("free", "/usage")]
     check("the operator's page refuses them without naming a setting",
-          status == 403 and "runs this installation" in page, status)
+          status == 403 and "runs this site" in page, status)
 
     # -----------------------------------------------------------------------
     head("INSIDE THE IPHONE APP: HEADLINES, NOT STRANGERS' POSTS")
@@ -719,6 +765,11 @@ try:
     check("it says the counts are tests on past prices",
           "how often this setup came up in tests on past prices" in store
           and "did best in tests on past prices" in store)
+    from bot import strategies as strategies_mod
+    check("it gives the number of strategies the site gives",
+          "back-tests %d strategies" % len(strategies_mod.voting_names()) in store)
+    check("it promises of Find only what the pricing page does",
+          "every Find result worth a look" in store and "every Find list" not in store)
     privacy = store[store.index("PRIVACY"):store.index("Orenth is analysis software")]
     said = [s for s in re.split(r"(?<=\.)\s+", privacy) if "download" in s]
     exported = {"journal": "trades", "theses": "theses", "watchlist": "watchlist",

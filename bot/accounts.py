@@ -71,11 +71,6 @@ CREATE TABLE IF NOT EXISTS user_settings (
     updated   INTEGER NOT NULL
 );
 
--- A way into an account besides the one it was made with, so far only Apple.
--- users.provider and provider_id keep naming how the account was made, as
--- older versions of the app read them. The refresh token is only kept so that
--- deleting the account can ask Apple to end it, and it is useless without
--- this site's .p8 key, which is never in the database.
 -- When a person agreed to their chart screenshots being sent to Anthropic
 -- to be read. Asked once, before the first picture leaves, because the App
 -- Store and plain fairness both want an explicit yes before anything a
@@ -85,6 +80,11 @@ CREATE TABLE IF NOT EXISTS ai_consents (
     ts       INTEGER NOT NULL
 );
 
+-- A way into an account besides the one it was made with: Apple, or Google
+-- beside an account Apple made. users.provider and provider_id keep naming how
+-- the account was made, as older versions of the app read them. The refresh
+-- token is only kept so that deleting the account can ask Apple to end it, and
+-- it is useless without this site's .p8 key, which is never in the database.
 CREATE TABLE IF NOT EXISTS identities (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -153,6 +153,7 @@ class User:
     plan: str = "free"
     plan_status: str = ""
     plan_until: int = 0           # when the paid period ends, 0 if not known
+    plan_ends: int = -1           # when a cancelled plan stops, 0 if it renews, -1 not known
     bonus_until: int = 0          # free Pro from invites, until this time
     apple_until: int = 0          # Pro bought through Apple, until this time
     weekly_email: bool = False
@@ -160,16 +161,26 @@ class User:
     created_ts: int = 0
 
     @property
+    def placeholder(self) -> bool:
+        """Whether the address is one made up here, which nobody should see."""
+        return self.email.endswith("@users.invalid")
+
+    @property
     def display(self) -> str:
+        if not self.name and self.placeholder and self.provider == "apple":
+            return "Apple account"
         return self.name or self.email.split("@")[0]
 
     @property
     def contact(self) -> str:
-        return self.name if self.provider == "phone" else self.email
+        if self.provider == "phone":
+            return self.name
+        return "No email address on this account" if self.placeholder else self.email
 
     @property
     def initial(self) -> str:
-        return (self.display or "?")[0].upper()
+        # A phone account's name is its number, which starts with a plus.
+        return next((c for c in self.display if c.isalnum()), "?").upper()
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
@@ -180,6 +191,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
                 plan=row["plan"] if "plan" in keys else "free",
                 plan_status=row["plan_status"] if "plan_status" in keys else "",
                 plan_until=row["plan_until"] if "plan_until" in keys else 0,
+                plan_ends=row["plan_ends"] if "plan_ends" in keys else -1,
                 bonus_until=row["bonus_until"] if "bonus_until" in keys else 0,
                 apple_until=row["apple_until"] if "apple_until" in keys else 0,
                 alert_email=bool(row["alert_email"]) if "alert_email" in keys
@@ -194,9 +206,9 @@ def _row_to_user(row: sqlite3.Row) -> User:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the account tables and give every existing row an owner.
 
-    Run on every connect. The backfill happens once: rows written before there
-    were accounts belong to whoever was using the machine, which is the local
-    account.
+    Run once per process, the first time it opens a file. The backfill happens
+    once: rows written before there were accounts belong to whoever was using
+    the machine, which is the local account.
     """
     conn.executescript(_SCHEMA)
 
@@ -206,9 +218,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
                         ("plan_status", "TEXT NOT NULL DEFAULT ''"),
                         ("stripe_customer", "TEXT NOT NULL DEFAULT ''"),
                         ("plan_until", "INTEGER NOT NULL DEFAULT 0"),
+                        # When a plan paid on the website stops, 0 while it
+                        # renews, -1 until Stripe has said which.
+                        ("plan_ends", "INTEGER NOT NULL DEFAULT -1"),
                         ("invite_code", "TEXT NOT NULL DEFAULT ''"),
                         ("invited_by", "INTEGER NOT NULL DEFAULT 0"),
                         ("bonus_until", "INTEGER NOT NULL DEFAULT 0"),
+                        # Free weeks given for inviting friends, counted as
+                        # they are given (bot/invites.py).
+                        ("invite_rewards", "INTEGER NOT NULL DEFAULT 0"),
                         ("weekly_email", "INTEGER NOT NULL DEFAULT 0"),
                         ("alert_email", "INTEGER NOT NULL DEFAULT 0"),
                         ("digest_week", "TEXT NOT NULL DEFAULT ''"),
@@ -376,10 +394,14 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
         conn.commit()
     else:
         user_id = int(row["id"])
+        # An address another account here already uses stays that account's:
+        # this one was found by its Google id, and keeps the address it has.
         conn.execute(
-            "UPDATE users SET email=?, name=?, picture=?, provider='google', "
+            "UPDATE users SET email=CASE WHEN EXISTS (SELECT 1 FROM users o WHERE "
+            "o.email=? AND o.id<>users.id) THEN email ELSE ? END, "
+            "name=?, picture=?, provider='google', "
             "provider_id=?, last_seen_ts=? WHERE id=?",
-            (email, name or row["name"], picture or row["picture"], sub or
+            (email, email, name or row["name"], picture or row["picture"], sub or
              row["provider_id"], now, user_id))
         conn.commit()
 
@@ -721,12 +743,6 @@ def end_session(conn: sqlite3.Connection, token: str) -> None:
         conn.commit()
 
 
-def end_all_sessions(conn: sqlite3.Connection, user_id: int) -> int:
-    cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (int(user_id),))
-    conn.commit()
-    return cur.rowcount
-
-
 def purge_expired(conn: sqlite3.Connection) -> int:
     cur = conn.execute("DELETE FROM sessions WHERE expires_ts <= ?",
                        (int(time.time()),))
@@ -847,6 +863,9 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
 
     Shared measurements stay, because they are not theirs to take: they
     describe instruments, not people, and were contributed to a common record.
+
+    All of it or none of it: one transaction, so a busy database or a restart
+    part-way cannot leave someone signed in to a half-emptied account.
     """
     user = get_user(conn, user_id)
     if user is None:
@@ -854,15 +873,39 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     if user.is_local:
         raise ValueError("The local account cannot be deleted.")
 
+    # Creating a table commits whatever is pending, so every table is made
+    # sure of before the first row goes.
+    from . import apple_store, billing, codes, public, push
+    from .database import _EVENTS
+    for module in (billing, codes, public, push, apple_store):
+        module.ensure_schema(conn)
+    conn.executescript(_EVENTS)
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        removed = _delete_everything(conn, user)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return removed
+
+
+def _delete_everything(conn: sqlite3.Connection, user: User) -> Dict[str, int]:
+    """delete_user's deletes, inside its transaction. Nothing here may commit."""
+    from . import apple_store
+    user_id = user.id
     removed = {}
-    run_ids = [r["id"] for r in
-               conn.execute("SELECT id FROM runs WHERE user_id=?", (user_id,))]
-    if run_ids:
-        marks = ",".join("?" * len(run_ids))
-        for child in ("run_signals", "run_news"):
-            cur = conn.execute("DELETE FROM %s WHERE run_id IN (%s)"
-                               % (child, marks), run_ids)
-            removed[child] = cur.rowcount
+    theirs = "(SELECT id FROM runs WHERE user_id=?)"
+    for child in ("run_signals", "run_news"):
+        cur = conn.execute("DELETE FROM %s WHERE run_id IN %s" % (child, theirs),
+                           (user_id,))
+        removed[child] = cur.rowcount
+    # A trade of someone else's that names one of these runs, as older versions
+    # could record: it stays theirs, and forgets the run.
+    conn.execute("UPDATE trades SET run_id=NULL WHERE user_id<>? AND run_id IN "
+                 + theirs, (user_id, user_id))
     # Parts of trades closed in parts point at their trade, so they go first.
     cur = conn.execute("DELETE FROM trade_exits WHERE trade_id IN "
                        "(SELECT id FROM trades WHERE user_id=?)", (user_id,))
@@ -872,13 +915,10 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
         removed[table] = cur.rowcount
     conn.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM ai_consents WHERE user_id=?", (user_id,))
-    from . import billing, codes, public
-    billing.ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM plan_events WHERE user_id=?", (user_id,))
     # Sign-in codes are filed under the address or number they went to, with
     # the network address that asked for them, so they go with the account.
-    codes.ensure_schema(conn)
     targets = [user.email]
     if user.provider == "phone":
         number = conn.execute("SELECT provider_id FROM users WHERE id=?",
@@ -888,10 +928,7 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     cur = conn.execute("DELETE FROM login_codes WHERE target IN (%s)"
                        % ",".join("?" * len(targets)), targets)
     removed["login_codes"] = cur.rowcount
-    public.ensure_schema(conn)
     conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
-    from .database import _EVENTS
-    conn.executescript(_EVENTS)
     cur = conn.execute("DELETE FROM alert_events WHERE user_id=?", (user_id,))
     removed["alert_events"] = cur.rowcount
     # Other ways in, with any token kept for them, and codes still waiting
@@ -902,8 +939,6 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     conn.execute("DELETE FROM app_handoffs WHERE user_id=?", (user_id,))
     # The phones and browsers notifications went to. Before the users row,
     # which they point at.
-    from . import push
-    push.ensure_schema(conn)
     cur = conn.execute("DELETE FROM push_devices WHERE user_id=?", (user_id,))
     removed["push_devices"] = cur.rowcount
     # Pro bought through Apple: the account's token goes, and its
@@ -911,11 +946,9 @@ def delete_user(conn: sqlite3.Connection, user_id: int) -> Dict[str, int]:
     # so that a copy of a refunded purchase cannot give Pro again. Apple
     # keeps billing until the person cancels with Apple, which the Account
     # page says before this runs; renewals then arrive unowned.
-    from . import apple_store
     apple_store.forget_user(conn, user_id)
     conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-    conn.commit()
     return removed
 
 

@@ -18,7 +18,9 @@
         <div style="font-weight:600;font-size:var(--t-base);font-family:var(--serif)">
           {{ p.label }}</div>
         <p class="prose" style="margin-top:6px">{{ p.why }}</p>
-        <form method="get" action="{{ url_for('screener') }}" data-working
+        {# To the results, which on a phone are screens below the filters: the
+           page came back at its top and looked as if nothing had happened. #}
+        <form method="get" action="{{ url_for('screener') }}#results" data-working
               style="margin-top:var(--s2)">
           <input type="hidden" name="preset" value="{{ key }}">
           <button class="btn quiet sm" type="submit">Run this screen</button>
@@ -31,7 +33,7 @@
 <section>
   <div class="sechead"><h2>Or build your own</h2></div>
   <div class="card">
-    <form method="get" action="{{ url_for('screener') }}" data-working>
+    <form method="get" action="{{ url_for('screener') }}#results" data-working>
       <input type="hidden" name="go" value="1">
       <div class="setgrid">
         <div class="setfield">
@@ -41,7 +43,7 @@
               <option value="{{ key }}" {{ 'selected' if key == universe }}>{{ label }}</option>
             {% endfor %}
           </select>
-          <div class="hint">Ignored if you list your own instruments below.</div>
+          <div class="hint">Ignored if you list your own instruments.</div>
         </div>
         <div class="setfield">
           <label for="symbols">Or your own list</label>
@@ -60,17 +62,20 @@
               {% if spec.deep %}<span class="faint">slower</span>{% endif %}</label>
             <input class="field fig" id="f-{{ key }}" name="{{ key }}" type="number"
                    step="any" value="{{ typed.get(key, '') }}"
-                   placeholder="{{ 'percent' if spec.unit == 'pct' else
+                   placeholder="{{ 'percent' if spec.unit in ('pct', 'points') else
                                    'dollars' if spec.unit == 'usd' else
-                                   'multiple' if spec.unit == 'x' else 'any' }}">
+                                   'multiple' if spec.unit == 'x' else 'any' }}"
+                   {% if spec.hint %}aria-describedby="h-{{ key }}"{% endif %}>
+            {% if spec.hint %}<div class="hint" id="h-{{ key }}">{{ spec.hint }}</div>{% endif %}
           </div>
         {% endfor %}
       </div>
       <button class="btn" type="submit" style="margin-top:var(--s3)">Run screen</button>
     </form>
     <p class="prose" style="margin-top:var(--s3)">
-      Filters marked slower need full company fundamentals, which is one request
-      per candidate. Those run only on names that already passed everything else.
+      Filters marked slower need full company fundamentals, which are fetched
+      one company at a time. Those run only on names that already passed
+      everything else.
       Type percentages as whole numbers: 15 for 15%, 0.5 for half a percent,
       -3 for down 3%.
     </p>
@@ -78,7 +83,7 @@
 </section>
 
 {% if result %}
-<section>
+<section id="results">
   <div class="sechead">
     <h2>Results</h2>
     <span class="count">{{ result.passed|length }} passed</span>
@@ -116,12 +121,12 @@
         {% for c in result.passed %}
           <tr>
             <td><b>{{ c.symbol }}</b>
-              <div class="faint" style="font-size:var(--t-xs)">{{ c.name[:34] }}</div></td>
-            <td class="r fig" data-label="Price">{{ c.price|price }}</td>
+              <div class="faint" style="font-size:var(--t-xs)">{{ c.name|truncate(34, true, '…', 0) }}</div></td>
+            <td class="r fig" data-label="Price">{{ c.price|price }}{% if c.currency not in ('', 'USD') %}
+              <span class="faint">{{ c.currency }}</span>{% endif %}</td>
             <td class="r fig {{ 'gain' if (c.change_pct or 0) > 0 else 'loss' if (c.change_pct or 0) < 0 else '' }}" data-label="Today">
               {{ c.change_pct|pct(1) if c.change_pct is not none else '—' }}</td>
-            <td class="r fig" data-label="Market cap">{{ "%.1fB"|format(c.market_cap/1000000000)
-                if c.market_cap else '—' }}</td>
+            <td class="r fig" data-label="Market cap">{{ c.size or '—' }}</td>
             <td class="r fig" data-label="P/E">{{ "%.1f"|format(c.pe) if c.pe else '—' }}</td>
             {% if result.deep %}
               <td class="r fig" data-label="ROE">{{ c.roe|pct if c.roe is not none else '—' }}</td>

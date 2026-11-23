@@ -155,6 +155,62 @@ aid = add("ES=F", "sweeps_prior_high", since=TS[SWEEP1 + 10])
 FEED["ES=F"] = clock.head(ES, SWEEP1 + 20)
 check("a sweep from before the alert was set is not news", told(aid) is None)
 
+# The first checks fail; the sweep happens meanwhile; then one works.
+aid = add("ES=F", "sweeps_prior_high", since=TS[SWEEP1 - 3])
+FEED["ES=F"] = None                                   # nothing that can be read
+alerts.check(conn)
+check("a check that failed is said on the alert", row(aid)["last_error"] is not None)
+FEED["ES=F"] = object()                               # nor this, by the program itself
+alerts.check(conn)
+check("in words, not the program's own", row(aid)["last_error"] == alerts.CHECK_BROKE,
+      row(aid)["last_error"])
+FEED["ES=F"] = clock.head(ES, SWEEP1 + 4)
+said = told(aid)
+check("what happened while the first checks failed is told once one works",
+      said is not None and "09:00 New York time" in said, said)
+db.alert_set_active(conn, aid, False)
+db.alert_set_active(conn, aid, True)
+conn.execute("UPDATE alerts SET state=? WHERE id=?", ("since:%d" % int(TS[SWEEP2 + 5]), aid))
+conn.commit()
+FEED["ES=F"] = clock.head(ES, SWEEP2 + 10)
+check("one resumed looks from then: what happened while it was paused is not told",
+      told(aid) is None and row(aid)["state"] == "bar:%d" % int(TS[SWEEP2 + 9]), row(aid)["state"])
+db.alert_set_active(conn, aid, False)
+db.alert_set_active(conn, aid, True)
+check("and resuming is what sets that", row(aid)["state"].startswith("since:"), row(aid)["state"])
+
+# ---------------------------------------------------------------------------
+head("A DAILY BAR IS OVER AT THE CLOSE, NOT A DAY AFTER IT OPENED")
+# ---------------------------------------------------------------------------
+DTS = sc.daily_times(120, start=sc.date(2026, 3, 2))
+dn = len(DTS)
+dO, dC = np.full(dn, 100.0), np.full(dn, 100.0)
+dH, dL = np.full(dn, 100.5), np.full(dn, 99.5)
+dH[-2] = 101.0
+dO[-1], dH[-1], dL[-1], dC[-1] = 100.2, 102.0, 100.0, 100.4
+SWP = sc.make(dO, dH, dL, dC, DTS, kind="stock", interval="1d", symbol="SWP")
+FEED["SWP"] = SWP
+OPENED = int(DTS[-1])
+CLOSED = OPENED + 6 * 3600 + 1800
+aid = add("SWP", "sweeps_prior_high", interval="1d", since=CLOSED + 2 * 3600)
+check("set in the evening, the session that has closed is not news", told(aid) is None)
+aid = add("SWP", "sweeps_prior_high", interval="1d", since=OPENED + 3600)
+check("set while it traded, it is told after the close", told(aid) is not None)
+conn.execute("UPDATE alerts SET active=0 WHERE id=?", (aid,))
+db.alert_reset(conn, aid)
+check("re-arming looks from that moment", row(aid)["state"].startswith("since:"), row(aid)["state"])
+conn.execute("UPDATE alerts SET state=? WHERE id=?", ("since:%d" % (CLOSED + 3600), aid))
+conn.commit()
+check("so re-armed the same evening, the same event is not told again", told(aid) is None)
+check("and the exchange's own closing time is used when the data gives it",
+      int(alerts._bar_ends(dataclasses.replace(SWP, gmt_offset=-14400, meta=dict(
+          SWP.meta, currentTradingPeriod={"regular": {
+              "start": OPENED, "end": OPENED + 3 * 3600 + 1800}})))[-1]) == OPENED + 3 * 3600 + 1800
+      and int(alerts._bar_ends(SWP)[-1]) == CLOSED, alerts._bar_ends(SWP)[-1] - OPENED)
+check("a coin's day lasts a day, and a five-minute bar five minutes",
+      int(alerts._bar_ends(sc.coin_series(60))[-1]) == int(sc.coin_series(60).timestamp[-1]) + 300
+      and int(alerts._bar_ends(ES)[0]) == int(TS[0]) + 300)
+
 # ---------------------------------------------------------------------------
 head("LONDON'S RANGE, IN THE NEW YORK MORNING")
 # ---------------------------------------------------------------------------
@@ -221,11 +277,50 @@ FEED["ES=F"] = live(day1, 101.2, int(TS[FIRST[1]]) + 60)
 said = told(aid)
 check("from the first minute of a new day, yesterday is the day that just ended",
       said is not None and "yesterday's high of 101" in said, said)
+aid = add("ES=F", "takes_prior_high")
+FEED["ES=F"] = live(before, 101.2, moment)
+told(aid)
+day3 = clock.head(ES, FIRST[2] + 1)
+FEED["ES=F"] = live(day3, 101.6, int(TS[FIRST[2] + 1]) + 60)
+said = told(aid)
+check("still above at the next day's first check, it is past a new yesterday's high, and told",
+      said is not None and "yesterday's high of 101.3" in said, said)
+check("once", told(aid) is None)
 aid = add("ES=F", "takes_prior_low")
 FEED["ES=F"] = live(before, 99.8, moment)
 said = told(aid)
 check("and below yesterday's low", said is not None and "below yesterday's low of 99.9" in said,
       said)
+
+# A Tokyo session runs over a New York midnight: 14:00 to 15:30 there is the
+# same New York date as the next morning's first hours. Its days are its own.
+JST = 9 * 3600
+KTS = np.array([t for d in range(17, 21)                  # 17 to 20 November 2026
+                for start in (clock.ny(2026, 11, d - 1, 19, 0),)
+                for t in range(start, start + 6 * 3600 + 1800, 300)], dtype=np.int64)
+kn, day_bars = len(KTS), len(KTS) // 4
+kC = np.repeat([100.0, 102.0, 104.0, 106.0], day_bars)
+TYO = dataclasses.replace(
+    sc.make(kC, kC + 0.1, kC - 0.1, kC, KTS, symbol="7203.T"), gmt_offset=JST,
+    session_id=(KTS + JST) // 86400,
+    meta={"instrumentType": "EQUITY", "exchangeTimezoneName": "Asia/Tokyo"})
+aid = add("7203.T", "takes_prior_high")
+late = 3 * day_bars - 6                                     # 15:00 on the third day
+FEED["7203.T"] = live(clock.head(TYO, late), 104.0, int(KTS[late]) + 60)
+check("a Tokyo stock past yesterday's high in its afternoon is told", told(aid) is not None)
+FEED["7203.T"] = live(clock.head(TYO, 3 * day_bars + 2), 106.0, int(KTS[3 * day_bars + 2]) + 60)
+said = told(aid)
+check("and next morning there, past a new one, though New York's date is the same",
+      said is not None and "yesterday's high of 104.1" in said, (said, row(aid)["state"]))
+check("once, New York's midnight passing included", told(aid) is None)
+FEED["7203.T"] = live(clock.head(TYO, kn - 4), 106.0, int(KTS[kn - 4]) + 60)
+check("to the end of that session", told(aid) is None, row(aid)["state"])
+aid = add("EURUSD=X", "takes_session_range")
+FEED["EURUSD=X"] = dataclasses.replace(STOCK, symbol="EURUSD=X")
+alerts.check(conn)
+note = row(aid)["last_error"] or ""
+check("a currency pair is not said to trade only by day",
+      note == "London's range is read for futures and coins, not for currency pairs.", note)
 
 # ---------------------------------------------------------------------------
 head("BREAKS, GAPS AND FILLS ON A WALK")
@@ -335,14 +430,11 @@ check("with no None anywhere a visitor reads", ">None<" not in page
       and 'value="None"' not in page and "nan" not in re.sub(r"<[^>]+>", " ", page).split(),
       [f for f in forms if f[1] == "None"])
 detail = page[page.find("<h2>Strategy detail</h2>"):page.find("What the columns and words mean")]
-trial_rows = re.findall(r"<tr>\s*<td>([^<]+)\s*(<span class=\"chip mute\"[^>]*>on "
-                        r"trial</span>)?</td>", detail)
-print("   (%d rows in the strategy table, %d on trial)"
-      % (len(trial_rows), sum(1 for _, chip in trial_rows if chip)))
-check("and the strategy table says what on trial means, and marks those on trial",
-      "<dt>On trial</dt>" in page and len(trial_rows) == 12 and all(
-          (label.strip() in [web.public_mod.strategy_label(n) for n in web.strategies_mod.TRIAL])
-          == bool(chip) for label, chip in trial_rows), trial_rows[:3])
+rows = re.findall(r"<tr>\s*<td>([^<]+)</td>", detail)
+check("the strategy table has its twelve rows, and nothing on the page speaks of a trial",
+      len(rows) == 12 and not web.strategies_mod.TRIAL
+      and "on trial" not in page.lower(), rows[:3])
+check("the Liquidity row is among the families", re.search(r"<td>Liquidity</td>", page))
 
 conn.close()
 print()

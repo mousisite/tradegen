@@ -29,12 +29,62 @@ print("WHAT PEOPLE TYPE")
 print("=" * 72)
 
 check("an email is cleaned", codes.clean_email("  Ann@Example.COM ") == "ann@example.com")
-for bad in ("", "ann", "ann@", "@example.com", "ann@example"):
+for bad in ("", "ann", "ann@", "@example.com", "ann@example",
+            # Spellings a mail server delivers to ann@example.com, or to
+            # somebody else, that would each have been filed as a new person.
+            "ann(1)@example.com", "x:ann@example.com", "y<ann@example.com",
+            "\"ann@example.com", "ann\\@example.com", "ann,bob@example.com",
+            "ann;bob@example.com", "[ann@example.com", "ann>@example.com",
+            "=?utf-8?q?ann?=@example.com", "ann\x01@example.com",
+            "ann\u200b@example.com", "ann@\uff45xample.com",
+            # Endings that can never be an inbox, a phone account's included.
+            "phone15551234567@users.invalid", "example@orenth.invalid",
+            "ann@mail.test", "ann@mail.example", "ann@my.localhost"):
     try:
         codes.clean_email(bad)
-        check("%r is refused" % bad, False)
+        check("%a is refused" % bad, False)
     except codes.CodeError:
-        check("%r is refused" % bad, True)
+        check("%a is refused" % bad, True)
+
+for good in ("ann.lee+stocks@example.com", "o'neil@example.co.uk", "a_b-c@x.io",
+             "jos\u00e9@example.com", "ann@xn--e1afmkfd.com"):
+    check("%a is still an address" % good, codes.clean_email(good) == good)
+
+
+class FakeSMTP:
+    sent = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def starttls(self, **k):
+        pass
+
+    def login(self, *a):
+        pass
+
+    def send_message(self, msg, from_addr=None, to_addrs=None):
+        self.sent.append(to_addrs)
+
+
+_real_smtp = codes.smtplib.SMTP
+codes.smtplib.SMTP = FakeSMTP
+_os.environ.update({"SMTP_HOST": "smtp.example.com", "SMTP_USER": "u",
+                    "SMTP_PASSWORD": "p", "MAIL_FROM": "Orenth <hi@example.com>"})
+try:
+    codes.send_mail("x:ann@example.com", "s", "b")
+finally:
+    codes.smtplib.SMTP = _real_smtp
+    for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM"):
+        _os.environ.pop(key, None)
+check("an email goes to exactly the address given, never one read out of it",
+      FakeSMTP.sent == [["x:ann@example.com"]], FakeSMTP.sent)
 
 check("a number is reduced to E.164",
       codes.clean_phone("+1 (555) 123-4567") == "+15551234567")
@@ -44,6 +94,12 @@ try:
     check("a number with no country code is refused", False)
 except codes.CodeError:
     check("a number with no country code is refused", True)
+
+try:
+    codes.clean_phone("+1555\u0661234567")
+    check("the same number in another script's digits is not a second number", False)
+except codes.CodeError:
+    check("the same number in another script's digits is not a second number", True)
 
 _os.environ["PHONE_ALLOWED_PREFIXES"] = "+1"
 try:
@@ -89,6 +145,71 @@ try:
 except codes.CodeError:
     check("a code works only once", True)
 
+# The second of two codes lets the person in, and the first goes with it.
+codes.send_email_code(conn, "two@example.com", "2.2.2.9", SECRET, fake_send)
+older = sent["two@example.com"]
+codes.send_email_code(conn, "two@example.com", "2.2.2.9", SECRET, fake_send)
+codes.check_email_code(conn, "two@example.com", sent["two@example.com"], SECRET)
+check("a right code is not counted as a wrong guess",
+      conn.execute("SELECT SUM(attempts) FROM login_codes WHERE "
+                   "target='two@example.com'").fetchone()[0] == 0)
+try:
+    codes.check_email_code(conn, "two@example.com", older, SECRET)
+    check("an older code stops working once a newer one is used", False)
+except codes.CodeError as exc:
+    check("an older code stops working once a newer one is used",
+          "expired" in str(exc), exc)
+
+# Guesses sent at the same moment: each reads the count before any writes it.
+# The stand-in holds every guess at that point until all of them are there.
+import threading  # noqa: E402
+
+codes.send_email_code(conn, "rush@example.com", "2.2.2.8", SECRET, fake_send)
+TOGETHER = 8
+gate = threading.Barrier(TOGETHER, timeout=20)
+judged, real_hash, judged_lock = [], codes._hash, threading.Lock()
+real_check_guesses = codes._check_guesses
+
+
+def counting_hash(*args):
+    with judged_lock:
+        judged.append(1)
+    return real_hash(*args)
+
+
+arrived = threading.local()
+
+
+def waiting_check(*args):
+    real_check_guesses(*args)
+    if not getattr(arrived, "yes", False):
+        arrived.yes = True
+        gate.wait()
+
+
+def guess():
+    k = db.connect(DB)
+    try:
+        codes.check_email_code(k, "rush@example.com", "000000"
+                               if sent["rush@example.com"] != "000000" else "111111", SECRET)
+    except codes.CodeError:
+        pass
+    finally:
+        k.close()
+
+
+codes._hash, codes._check_guesses = counting_hash, waiting_check
+try:
+    threads = [threading.Thread(target=guess) for _ in range(TOGETHER)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+finally:
+    codes._hash, codes._check_guesses = real_hash, real_check_guesses
+check("eight guesses sent at once still get only five tries",
+      len(judged) == codes.MAX_ATTEMPTS, len(judged))
+
 codes.send_email_code(conn, "bob@example.com", "2.2.2.2", SECRET, fake_send)
 for _ in range(codes.MAX_ATTEMPTS):
     try:
@@ -119,8 +240,10 @@ codes.send_email_code(conn, "dan@example.com", "4.4.4.9", SECRET, fake_send)
 try:
     codes.send_email_code(conn, "dan@example.com", "4.4.4.8", SECRET, fake_send)
     check("one address cannot be sent endless codes", False)
-except codes.CodeError:
+except codes.CodeError as exc:
     check("one address cannot be sent endless codes", True)
+    check("and is not told that codes were sent, which a failed email was not",
+          "were sent" not in str(exc) and "Google" not in str(exc), exc)
 
 for n in range(10):
     try:
@@ -179,6 +302,55 @@ check("while this month's are kept for the limits",
       conn.execute("SELECT COUNT(*) FROM login_codes WHERE target=?", (gus,))
       .fetchone()[0] > 0)
 
+# One inbox has as many addresses as it likes, and each had its own limit.
+let_through = 0
+for n in range(6):
+    try:
+        codes.send_email_code(conn, "hal+%d@gmail.com" % n, "8.8.%d.1" % n, SECRET, fake_send)
+        let_through += 1
+    except codes.CodeError:
+        pass
+check("one inbox's other addresses share its limit", let_through == codes.PER_TARGET[0],
+      let_through)
+
+# Asked for all at once, each was let through by the same count.
+import threading  # noqa: E402
+held = threading.Barrier(6)
+through = []
+
+
+def ask_at_once():
+    own = db.connect(DB)
+    try:
+        held.wait(10)
+        codes.send_email_code(own, "ivy@example.com", "8.9.9.1", SECRET, fake_send)
+        through.append(1)
+    except codes.CodeError:
+        pass
+    finally:
+        own.close()
+
+
+real_check = codes._check_limits
+
+
+def slow_check(*a):
+    real_check(*a)
+    time.sleep(0.2)          # long enough for the rest to be looking as well
+
+
+codes._check_limits = slow_check
+askers = [threading.Thread(target=ask_at_once) for _ in range(6)]
+try:
+    for t in askers:
+        t.start()
+    for t in askers:
+        t.join(30)
+finally:
+    codes._check_limits = real_check
+check("codes asked for at the same moment are counted one by one",
+      len(through) == codes.PER_TARGET[0], len(through))
+
 print()
 print("=" * 72)
 print("PHONE CODES, THROUGH A STAND-IN FOR TWILIO")
@@ -204,6 +376,25 @@ except codes.CodeError:
     check("a wrong texted code is refused", True)
 codes.check_phone_code(conn, "+15551234567", "424242", fake_twilio)
 check("the right texted code is accepted", True)
+
+
+
+def twilio_says_no(path, data):
+    if path == "VerificationCheck":
+        raise codes.CodeError("That number could not be sent a code.")
+    return {"status": "pending"}
+
+
+codes.send_phone_code(conn, "+15551230077", "6.6.6.7", twilio_says_no)
+try:
+    codes.check_phone_code(conn, "+15551230077", "123456", twilio_says_no)
+    check("a texted code that cannot be checked lets nobody in", False)
+except codes.CodeError as exc:
+    check("a texted code that cannot be checked is not blamed on the number",
+          "run out or could not be checked" in str(exc) and "number" not in str(exc), exc)
+check("nor counted as a wrong guess",
+      conn.execute("SELECT SUM(attempts) FROM login_codes WHERE target='+15551230077'")
+      .fetchone()[0] == 0)
 
 saved_cap = codes.PHONE_PER_HOUR
 codes.PHONE_PER_HOUR = conn.execute(
@@ -231,6 +422,7 @@ again = A.upsert_phone_user(conn, "+15551234567")
 check("a phone number always reaches the same account", first.id == again.id)
 check("which is shown by its number, not a placeholder address",
       first.contact == "+15551234567" and first.display == "+15551234567")
+check("with a digit, not the plus, on its picture", first.initial == "1", first.initial)
 check("whose placeholder address can never be delivered to",
       first.email.endswith("@users.invalid"))
 try:
@@ -312,18 +504,28 @@ try:
     outbox = {}
     real_send, real_twilio = codes._smtp_send, codes._twilio
     codes._smtp_send = lambda to, code: outbox.__setitem__(to, code)
-    codes._twilio = fake_twilio
+    twilio_asked = []
+    codes._twilio = lambda *a, **k: (twilio_asked.append(a), fake_twilio(*a, **k))[1]
     try:
         r = c.post("/signin/email", data={"to": "Fay@Example.com", "next": "/trades"})
         check("asking for a code moves on to the code page",
               r.status_code == 302 and "/signin/email/code" in r.headers["Location"],
               r.status_code)
-        page = c.get("/signin/email/code").data.decode("utf-8", "replace")
+        r = c.get("/signin/email/code")
+        page = r.data.decode("utf-8", "replace")
         check("which says where it was sent", "fay@example.com" in page)
+        check("and so is kept by no browser", r.headers.get("Cache-Control")
+              == "private, no-store", r.headers.get("Cache-Control"))
         r = c.post("/signin/email/code", data={"code": "999999"
                                                if outbox["fay@example.com"] != "999999" else "888888"})
+        page = r.data.decode("utf-8", "replace")
         check("a wrong code keeps them on the page with a reason",
-              r.status_code == 200 and "not right" in r.data.decode("utf-8", "replace"))
+              r.status_code == 200 and "not right" in page)
+        check("read out, and tied to the box it is about",
+              'role="alert" id="code-error"' in page
+              and 'aria-describedby="code-error" aria-invalid="true">' in page)
+        check("and starting again still goes where they were headed",
+              'href="/signin/email?next=/trades"' in page)
         r = c.post("/signin/email/code", data={"code": outbox["fay@example.com"]})
         check("the right code signs them in and goes where they were headed",
               r.status_code == 302 and r.headers["Location"].endswith("/trades"),
@@ -344,6 +546,24 @@ try:
         check("a bad address is explained, not crashed on",
               bad.status_code == 200
               and "does not look like an email" in bad.data.decode("utf-8", "replace"))
+        check("and tied to the box", 'value="not-an-email" aria-describedby="to-error" '
+              'aria-invalid="true">' in bad.data.decode("utf-8", "replace"))
+        # A form on another site would mail an address of its choosing.
+        for path, to in (("/signin/email", "victim@example.com"),
+                         ("/signin/phone", "+1 555 765 9999")):
+            sent = len(outbox), len(twilio_asked)
+            stranger = web.app.test_client()
+            r = stranger.post(path, data={"to": to}, headers={
+                "Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})
+            check("a form on another site sends no code by %s" % path[8:],
+                  (len(outbox), len(twilio_asked)) == sent
+                  and not r.headers.getlist("Set-Cookie")
+                  and "here to be sent a code" in r.data.decode("utf-8", "replace"),
+                  (r.status_code, r.headers))
+            r = stranger.post(path, data={"to": to}, headers={
+                "Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"})
+            check("while the form here does", r.status_code == 302
+                  and (len(outbox), len(twilio_asked)) != sent)
         check("going to the code page with nothing pending starts over",
               c.get("/signin/phone/code").status_code == 302)
     finally:
@@ -352,6 +572,55 @@ finally:
     for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SMTP_HOST", "SMTP_USER",
                 "SMTP_PASSWORD", "MAIL_FROM", "TWILIO_ACCOUNT_SID",
                 "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SID"):
+        _os.environ.pop(key, None)
+
+print()
+print("=" * 72)
+print("A SETTING TYPED WRONG")
+print("=" * 72)
+
+# A stray letter in the first stopped every start of the site, and in the
+# second every code sent by email answered that something had broken.
+import subprocess  # noqa: E402
+
+ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for typed, used in (("forty", 40), ("", 40), (" ", 40), ("-3", 40), ("12", 12), ("0", 0)):
+    ran = subprocess.run(
+        [_sys.executable, "-c", "import sys; sys.path.insert(0, %r); "
+         "from bot import codes; print(codes.PHONE_PER_HOUR)" % ROOT],
+        env=dict(_os.environ, PHONE_CODES_PER_HOUR=typed),
+        capture_output=True, text=True, timeout=60)
+    check("texts an hour typed as %r are %d" % (typed, used),
+          ran.stdout.strip() == str(used), (ran.stdout, ran.stderr[-300:]))
+    check("and the log says when it was not usable",
+          ("PHONE_CODES_PER_HOUR" in ran.stderr) == (typed in ("forty", "-3")), ran.stderr)
+
+asked = []
+
+
+class Refuses:
+    def __init__(self, host, port, **kw):
+        asked.append(port)
+        raise OSError("made up")
+
+
+real_smtp = codes.smtplib.SMTP
+codes.smtplib.SMTP = Refuses
+_os.environ.update({"SMTP_HOST": "smtp.example.com", "SMTP_USER": "u",
+                    "SMTP_PASSWORD": "p", "MAIL_FROM": "hi@example.com"})
+try:
+    for typed, used in (("tls", 587), ("", 587), ("99999", 587), ("2525", 2525)):
+        _os.environ["SMTP_PORT"] = typed
+        try:
+            codes.send_mail("a@example.com", "s", "b")
+        except codes.CodeError:
+            pass
+        except Exception as exc:
+            asked.append("%s: %s" % (type(exc).__name__, exc))
+        check("a mail port typed as %r is %d" % (typed, used), asked[-1:] == [used], asked)
+finally:
+    codes.smtplib.SMTP = real_smtp
+    for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM", "SMTP_PORT"):
         _os.environ.pop(key, None)
 
 print()

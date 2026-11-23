@@ -15,7 +15,9 @@ exactly, which matters only for coins: futures and stocks are shut then.
 A trading day for futures and coins starts at 18:00 New York time, the futures
 reopen, so a bar at 18:30 belongs to the next date. A US stock or fund trades
 09:30 to 16:00 only, and its data has nothing outside that (market.fetch_bars
-asks for no pre- or after-market prices), so it has no Asia or London ranges.
+asks for no pre- or after-market prices), so it has no Asia or London ranges. A
+listing on another exchange (elsewhere()) keeps that exchange's own dates: cut
+at New York's midnight, one Tokyo session was parts of two days.
 
 A session counts only when at least 80% of its bars are there; a day or
 session with fewer is left out of every level (NaN) and can be counted by the
@@ -76,17 +78,6 @@ LAB_WINDOWS = (("asia", 18 * 60, 3 * 60), ("london", 3 * 60, 8 * 60 + 30),
                ("late_morning", 10 * 60 + 10, 10 * 60 + 30),
                ("midday", 10 * 60 + 30, 12 * 60), ("afternoon", 12 * 60, 16 * 60),
                ("after", 16 * 60, 18 * 60))
-LAB_WINDOW_LABELS = {
-    "asia": "Asia (18:00 to 03:00)",
-    "london": "London (03:00 to 08:30)",
-    "ny_pre": "Before the open (08:30 to 09:30)",
-    "open_drive": "9:30 to 9:50",
-    "macro": "9:50 to 10:10",
-    "late_morning": "10:10 to 10:30",
-    "midday": "10:30 to 12:00",
-    "afternoon": "12:00 to 16:00",
-    "after": "After 16:00",
-}
 
 # app choice: a session (or day) with under 80% of its bars is not a range;
 # the data source leaves holes, and a range with a hole in it is too narrow.
@@ -274,9 +265,31 @@ def kind_of(bars) -> str:
     return instrument_of(bars)
 
 
-def trading_day(ts, kind: str) -> date:
+def elsewhere(bars) -> bool:
+    """Whether this is a listing that does not trade New York's hours: a stock
+    or index on an exchange abroad, or a currency.
+
+    Told the way sessions._kind tells it: the time zone the data names, and
+    the marks Yahoo keeps in symbols ("." before another exchange's suffix,
+    "=" in a currency's). An index in New York's time zone (^GSPC) trades New
+    York's hours. Futures and coins have rules of their own here.
+    """
+    if instrument_of(bars) != "stock":
+        return False
+    zone = (getattr(bars, "meta", None) or {}).get("exchangeTimezoneName")
+    if zone and zone != sessions_mod.NEW_YORK:
+        return True
+    symbol = getattr(bars, "symbol", "") or ""
+    return "." in symbol or "=" in symbol
+
+
+def trading_day(ts, kind: str, bars=None) -> date:
     """The trading day a time belongs to: for futures and coins the day starts
-    at 18:00 New York time; for a stock (and daily bars) it is the date there."""
+    at 18:00 New York time; for a stock (and daily bars) it is the date there,
+    or the exchange's own date when `bars` are of a listing elsewhere."""
+    if bars is not None and elsewhere(bars):
+        gmt = int(getattr(bars, "gmt_offset", 0) or 0)
+        return date.fromordinal(EPOCH + (int(ts) + gmt) // DAY)
     day, minute, _ = ny_clock(ts)
     if kind in ("future", "coin") and minute >= 18 * 60:
         return day + timedelta(days=1)
@@ -301,6 +314,48 @@ def head(bars, n: int):
         rebuilt=[t for t in (getattr(bars, "rebuilt", None) or []) if int(t) <= last])
 
 
+def tail(bars, n: int):
+    """The last n bars, as Bars of their own, for a read that needs no more."""
+    n = max(1, int(n))
+    if n >= len(bars.close):
+        return bars
+    first = int(bars.timestamp[-n])
+    factor = getattr(bars, "dividend_factor", None)
+    return dataclasses.replace(
+        bars, timestamp=bars.timestamp[-n:], open=bars.open[-n:], high=bars.high[-n:],
+        low=bars.low[-n:], close=bars.close[-n:], volume=bars.volume[-n:],
+        session_id=bars.session_id[-n:],
+        dividend_factor=(factor[-n:] if factor is not None and len(factor) >= n else None),
+        splits=[sp for sp in (getattr(bars, "splits", None) or []) if int(sp[0]) >= first],
+        rebuilt=[t for t in (getattr(bars, "rebuilt", None) or []) if int(t) >= first])
+
+
+def live_day(bars) -> Optional[date]:
+    """The trading day the live price is in, when that is a later one than the
+    last finished bar's; None when it is the same day, or not known.
+
+    A day's forming bar is kept apart from the finished ones
+    (market.fetch_bars), so while a market trades the last finished daily bar
+    is yesterday's, and so is the last intraday one until the day's first bar
+    is over. What was yesterday as of that bar is then a day too old. Bars cut
+    by head() have no live price and give None.
+    """
+    if not len(bars.close) or getattr(bars, "live_price", None) is None:
+        return None
+    try:
+        when = int((getattr(bars, "meta", None) or {}).get("regularMarketTime") or 0)
+    except (TypeError, ValueError):
+        return None
+    if when <= 0:
+        return None
+    two = np.array([int(bars.timestamp[-1]), when], dtype=np.int64)
+    instrument = instrument_of(bars)
+    last, live = _day_numbers(bars, two, instrument, kind_of(bars) == "daily").tolist()
+    if instrument == "future":            # Sunday evening is Monday's, on daily bars too
+        live = trading_day(when, instrument).toordinal() - EPOCH
+    return date.fromordinal(EPOCH + live) if live > last else None
+
+
 # --- Bars placed in New York time ------------------------------------------------
 
 @dataclass
@@ -308,6 +363,7 @@ class _Frame:
     kind: str
     instrument: str
     step: int
+    away: bool                    # elsewhere(): the exchange's own dates
     ts: np.ndarray
     minute: np.ndarray            # New York minutes after midnight, -1 for daily bars
     day: np.ndarray               # trading day, days since 1970
@@ -333,28 +389,38 @@ def _daily_days(bars, ts: np.ndarray, instrument: str) -> np.ndarray:
     return (ts + gmt) // DAY
 
 
+def _day_numbers(bars, ts: np.ndarray, instrument: str, daily: bool) -> np.ndarray:
+    """The trading day of each of these times, in days since 1970."""
+    if daily:
+        return _daily_days(bars, ts, instrument)
+    if elsewhere(bars):
+        return (ts + int(getattr(bars, "gmt_offset", 0) or 0)) // DAY
+    local = ts + offsets(ts)
+    day = local // DAY
+    if instrument in ("future", "coin"):
+        day = day + ((local % DAY) // 60 >= 18 * 60)
+    return day
+
+
 def _frame(bars) -> _Frame:
     ts = np.asarray(bars.timestamp, dtype=np.int64)
     n = len(ts)
     instrument = instrument_of(bars)
     step = bar_seconds(bars) if n else DAY
     kind = "daily" if step >= DAY else instrument
+    day = _day_numbers(bars, ts, instrument, kind == "daily")
     if kind == "daily":
-        day = _daily_days(bars, ts, instrument)
         minute = np.full(n, -1, dtype=np.int64)
     else:
-        local = ts + offsets(ts)
-        day = local // DAY
-        minute = (local % DAY) // 60
-        if instrument in ("future", "coin"):
-            day = day + (minute >= 18 * 60)
+        minute = ((ts + offsets(ts)) % DAY) // 60
     blocks: List[Tuple[int, int, int]] = []
     if n:
         cuts = np.flatnonzero(np.diff(day)) + 1
         starts = [0] + cuts.tolist()
         ends = cuts.tolist() + [n]
         blocks = [(int(day[s]), s, e) for s, e in zip(starts, ends)]
-    return _Frame(kind, instrument, int(step), ts, minute.astype(np.int64),
+    return _Frame(kind, instrument, int(step), kind != "daily" and elsewhere(bars),
+                  ts, minute.astype(np.int64),
                   day.astype(np.int64), blocks)
 
 
@@ -384,6 +450,25 @@ def _expected_day(fr: _Frame, day_number: int) -> int:
 
 def _complete(count: int, expected: int) -> bool:
     return expected > 0 and count >= COMPLETE_SHARE * expected
+
+
+def _reaches(ts: np.ndarray, step: int, day_number: int) -> bool:
+    """Whether a US stock's bars reach from the open to the close with no
+    stretch longer than a fifth of the session (1 - COMPLETE_SHARE) missing.
+
+    The source has no bar where nothing traded, so a thinly traded stock can
+    have two bars in three all day, and its high and low are still the day's.
+    Counted, its days were all incomplete, and the levels called yesterday's
+    were from weeks before. A hole in the data leaves one long stretch empty.
+    """
+    d = date.fromordinal(EPOCH + day_number)
+    hours = sessions_mod.us_session(d)
+    if hours is None:                     # trading on a day the calendar has shut
+        opened = ny(d.year, d.month, d.day, 9, 30)
+        hours = (opened, opened + 390 * 60)
+    ends = np.concatenate([[hours[0]], ts + step])
+    starts = np.concatenate([ts, [hours[1]]])
+    return bool(np.max(starts - ends) <= (1 - COMPLETE_SHARE) * (hours[1] - hours[0]) + 1e-6)
 
 
 # --- Days and sessions ---------------------------------------------------------------
@@ -451,14 +536,24 @@ def _days(bars, fr: _Frame) -> List[Day]:
     step_min = max(1, fr.step // 60)
     out: List[Day] = []
     ranges_seen: List[float] = []        # whole days' ranges, for the roll rule
+    counts: List[int] = []               # bars of the days before, for a listing elsewhere
     for b, (day_number, s, e) in enumerate(fr.blocks):
         d = date.fromordinal(EPOCH + day_number)
         idx = np.arange(s, e)
         whole = _stats(o, h, l_, c, ts, idx, "day", 1)
-        expected = 1 if fr.kind == "daily" else _expected_day(fr, day_number)
+        if fr.away:
+            # Its exchange's hours are not known here: a whole day is told by
+            # how many bars its earlier days had. The first has none to go by.
+            expected = int(np.median(counts[-ROLL_DAYS:])) if counts else 0
+            counts.append(e - s)
+        else:
+            expected = 1 if fr.kind == "daily" else _expected_day(fr, day_number)
+        complete = _complete(e - s, expected)
+        if not complete and fr.kind == "stock" and not fr.away:
+            complete = _reaches(ts[s:e], fr.step, day_number)
         iso = d.isocalendar()
         day = Day(day=d, weekday=d.weekday(), week=(iso[0], iso[1]), first=s, last=e - 1,
-                  bars=e - s, expected=expected, complete=_complete(e - s, expected),
+                  bars=e - s, expected=expected, complete=complete,
                   open=whole.open, high=whole.high, low=whole.low, close=whole.close,
                   high_at=whole.high_at, low_at=whole.low_at)
         if fr.kind != "daily":
@@ -466,7 +561,8 @@ def _days(bars, fr: _Frame) -> List[Day]:
             for name, start, end in SESSIONS:
                 inside = idx[_inside(minute, step_min, start, end)]
                 want = _session_minutes(start, end) // step_min
-                if fr.instrument == "stock" and not (9 * 60 + 30 <= start < end <= 16 * 60):
+                if fr.away or (fr.instrument == "stock"
+                               and not (9 * 60 + 30 <= start < end <= 16 * 60)):
                     want = 0                    # a stock's data has nothing outside the day session
                 day.sessions[name] = _stats(o, h, l_, c, ts, inside, name, want)
         if b > 0 and fr.instrument != "coin":
@@ -816,6 +912,12 @@ def buckets(bars, hours: int = 4) -> List[Tuple[int, int, int, int, int]]:
     minute = fr.minute
     if fr.instrument in ("future", "coin"):
         since = (minute - 18 * 60) % (24 * 60)
+    elif fr.away:
+        # From the first bar of the exchange's own day.
+        first = np.zeros(n, dtype=np.int64)
+        for _, s, e in fr.blocks:
+            first[s:e] = fr.ts[s]
+        since = (fr.ts - first) // 60
     else:
         since = minute - (9 * 60 + 30)
     bucket = since // length
@@ -828,7 +930,7 @@ def buckets(bars, hours: int = 4) -> List[Tuple[int, int, int, int, int]]:
         end = start + length * 60
         if fr.instrument == "future":
             end = start + (min((b + 1) * length, 23 * 60) - b * length) * 60   # the 17:00 pause
-        elif fr.instrument == "stock":
+        elif fr.instrument == "stock" and not fr.away:
             hours_day = sessions_mod.us_session(date.fromordinal(EPOCH + int(fr.day[s])))
             if hours_day:
                 end = min(end, hours_day[1])
@@ -842,7 +944,8 @@ def resample(bars, hours: int = 4):
 
     Futures and coins: buckets from the 18:00 New York reopen (18:00, 22:00,
     02:00, 06:00, 10:00, 14:00 for four hours; the last one ends at the 17:00
-    pause for futures). Stocks: from 09:30 (09:30-13:30, 13:30-16:00). The
+    pause for futures). Stocks: from 09:30 (09:30-13:30, 13:30-16:00), or from
+    the day's first bar for a listing elsewhere. The
     bucket still forming at the end is dropped: a bucket counts once its time
     is up, or the market shut for the day, by the last bar given.
     """

@@ -11,6 +11,7 @@ between changing your mind on evidence and rationalising afterwards.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -64,6 +65,8 @@ class Thesis:
     falsifiers: List[str] = field(default_factory=list)
     unknowns: List[str] = field(default_factory=list)
     all_sources: List[Dict] = field(default_factory=list)
+    # Worth reading, and on neither side: it never moves the balance.
+    neutral: List[Point] = field(default_factory=list)
 
     @property
     def evidence_count(self) -> int:
@@ -97,6 +100,7 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
     rather than presenting itself as complete.
     """
     bull, bear = Case("bull"), Case("bear")
+    neutral: List[Point] = []
     unknowns: List[str] = []
     sources: List[Dict] = []
     now = int(time.time())
@@ -133,19 +137,27 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
                                    "strong")],
                 weight=1.2))
 
+    mixed = f.currency_problem() if f is not None else ""
+    if mixed:
+        unknowns.append("The cash flow models of what it might be worth. " + mixed)
     if valuation is not None and valuation.get("usable"):
         _valuation_points(valuation, price, bull, bear, stamp)
-    else:
-        unknowns.append("No valuation model could run, usually because free "
-                        "cash flow or share count was not reported.")
+    elif not mixed:
+        why = (valuation or {}).get("reason")
+        unknowns.append("What it might be worth. " + why if why else
+                        "No valuation model could run on what was reported.")
+    if valuation is not None:
+        _implied_points(valuation, price, bull, bear, stamp)
 
     if sec_history and sec_history.get("available"):
         _filed_points(sec_history, bull, bear, stamp)
+        filed = sec_history.get("years") or []
         sources.append({"name": "SEC EDGAR filed financials",
                         "url": sec_history.get("source_url", ""),
-                        "detail": "%s, fiscal years %s" % (
+                        "detail": "%s%s" % (
                             sec_history.get("entity", ""),
-                            ", ".join(str(y) for y in sec_history.get("years", [])[-4:]))})
+                            ", fiscal years %s to %s" % (filed[0], filed[-1])
+                            if filed else "")})
 
     if risk_profile is not None and risk_profile.reliable:
         _risk_points(risk_profile, bear, bull, stamp)
@@ -163,24 +175,26 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
                            _items(sentiment.n_social, "post"), sentiment.method)})
 
     if filings:
-        _filing_points(filings, bull, bear, stamp)
+        _filing_points(filings, bull, bear, stamp, neutral)
 
     if options_stats:
-        _options_points(options_stats, bull, bear, stamp)
+        _options_points(options_stats, bull, bear, stamp, neutral)
 
     bull.strength = sum(p.weight for p in bull.points)
     bear.strength = sum(p.weight for p in bear.points)
     total = bull.strength + bear.strength
     balance = ((bull.strength - bear.strength) / total) if total else 0.0
 
-    bull.summary = _summarise(bull, "supports owning this")
-    bear.summary = _summarise(bear, "argues against it")
+    bull.summary = _summarise(bull, "supports", "support", "owning this")
+    bear.summary = _summarise(bear, "argues", "argue", "against it")
 
     thesis = Thesis(symbol=symbol.upper(), price=price, created=now,
                     bull=bull, bear=bear, balance=balance,
-                    unknowns=unknowns, all_sources=sources)
+                    unknowns=unknowns, all_sources=sources, neutral=neutral)
     thesis.verdict = _verdict(balance, bull, bear, thesis.evidence_count)
-    thesis.falsifiers = _falsifiers(bull, bear, f, price, balance)
+    files = bool(filings or (sec_history or {}).get("entity")
+                 or getattr(f, "sec_facts", None))
+    thesis.falsifiers = _falsifiers(f, price, balance, files)
     return thesis
 
 
@@ -243,19 +257,22 @@ def _fundamental_points(f, bull: Case, bear: Case, stamp: str) -> None:
 
     fcf = f.get("free_cashflow")
     if fcf is not None:
+        cash = _money(fcf)
+        if f.accounts_currency not in ("", "USD"):
+            cash += " " + f.accounts_currency
         if fcf > 0:
             bull.points.append(Point(
                 "Generates cash",
                 "Free cash flow of %s after paying for its own capital spending."
-                % _money(fcf),
-                [Evidence("Free cash flow", _money(fcf), "Yahoo Finance", url, stamp,
+                % cash,
+                [Evidence("Free cash flow", cash, "Yahoo Finance", url, stamp,
                           "strong")], 1.2))
         else:
             bear.points.append(Point(
                 "Burns cash",
                 "Free cash flow is %s. Continuing requires either existing cash "
-                "or new money from somebody." % _money(fcf),
-                [Evidence("Free cash flow", _money(fcf), "Yahoo Finance", url, stamp,
+                "or new money from somebody." % cash,
+                [Evidence("Free cash flow", cash, "Yahoo Finance", url, stamp,
                           "strong")], 1.5))
 
     short = f.get("short_pct_float")
@@ -275,11 +292,12 @@ def _fundamental_points(f, bull: Case, bear: Case, stamp: str) -> None:
         if side is not None:
             side.points.append(Point(
                 "Analysts see %s" % ("upside" if gap > 0 else "downside"),
-                "Average target of %.2f against %.2f today, from %d analysts. "
-                "Worth knowing, but targets follow prices at least as often as "
-                "they lead them." % (target, f.get("price"), int(count)),
+                "Average target of %.2f against %.2f today, from %s. "
+                "Worth knowing, but a target is an opinion, not a measurement."
+                % (target, f.get("price"), _items(int(count), "analyst")),
                 [Evidence("Mean analyst target", "%.2f" % target,
-                          "Yahoo Finance, %d analysts" % int(count), url, stamp, "weak")],
+                          "Yahoo Finance, %s" % _items(int(count), "analyst"),
+                          url, stamp, "weak")],
                 0.6))
 
 
@@ -289,8 +307,14 @@ def _valuation_points(v: Dict, price: float, bull: Case, bear: Case, stamp: str)
     if mid is None or upside is None:
         return
 
-    detail = "Models centre on %.2f against %.2f today, a range of %.2f to %.2f." % (
-        mid, price, low or mid, high or mid)
+    alone = v.get("agreement") == "single"
+    said_by = "discounted cash flow" if alone else "discounted cash flow and multiples"
+    if alone:
+        detail = ("The one model that could run gives %.2f against %.2f today."
+                  % (mid, price))
+    else:
+        detail = "Models centre on %.2f against %.2f today, a range of %.2f to %.2f." % (
+            mid, price, low or mid, high or mid)
     if v.get("agreement") == "wide":
         detail += (" They disagree widely, so this is weak evidence either way.")
 
@@ -299,36 +323,47 @@ def _valuation_points(v: Dict, price: float, bull: Case, bear: Case, stamp: str)
 
     if upside > 0.20:
         bull.points.append(Point(
-            "Looks cheap on the models", detail,
-            [Evidence("Modelled fair value", "%.2f" % mid,
-                      "discounted cash flow and multiples", "", stamp, strength)],
+            "Looks cheap on the model" + ("" if alone else "s"), detail,
+            [Evidence("Modelled fair value", "%.2f" % mid, said_by, "", stamp,
+                      strength)],
             weight))
     elif upside < -0.20:
         bear.points.append(Point(
-            "Looks expensive on the models", detail,
-            [Evidence("Modelled fair value", "%.2f" % mid,
-                      "discounted cash flow and multiples", "", stamp, strength)],
+            "Looks expensive on the model" + ("" if alone else "s"), detail,
+            [Evidence("Modelled fair value", "%.2f" % mid, said_by, "", stamp,
+                      strength)],
             weight))
 
+
+def _implied_points(v: Dict, price: float, bull: Case, bear: Case, stamp: str) -> None:
+    """What the price takes for granted, which needs no fair value to be said."""
     for model in v.get("models", []):
-        if getattr(model, "implied_growth", None) is not None:
-            g = model.implied_growth
+        if getattr(model, "implied_average", None) is not None:
+            # The average over the ten years. The rate it starts at fades, so
+            # asking for that every year would be asking for far more.
+            g = model.implied_average
             if g > 0.25:
                 bear.points.append(Point(
                     "The price already assumes a lot",
                     "To justify %.2f, free cash flow has to grow about %s a year "
-                    "for a decade. That is a demanding bar, and missing it does "
-                    "not require anything to go wrong, only for things to go "
-                    "less than perfectly." % (price, _pct(g)),
+                    "on average for a decade. That is a demanding bar, and missing "
+                    "it does not require anything to go wrong, only for things to "
+                    "go less than perfectly." % (price, _pct(g)),
                     [Evidence("Growth implied by the price", _pct(g),
                               "reverse discounted cash flow", "", stamp, "strong")],
                     1.3))
             elif g < 0.03:
+                at_most = getattr(model, "implied_at_limit", False)
                 bull.points.append(Point(
                     "The price assumes very little",
-                    "At %.2f the market is pricing in only about %s annual growth. "
-                    "Modest delivery would be enough." % (price, _pct(g)),
-                    [Evidence("Growth implied by the price", _pct(g),
+                    ("At %.2f the price is below what the model gives even if free "
+                     "cash flow starts out shrinking by 30%% a year." % price
+                     if at_most else
+                     "At %.2f the market is pricing in only about %s of growth a "
+                     "year on average. Modest delivery would be enough."
+                     % (price, _pct(g))),
+                    [Evidence("Growth implied by the price",
+                              ("below " if at_most else "") + _pct(g),
                               "reverse discounted cash flow", "", stamp, "strong")],
                     1.3))
 
@@ -338,20 +373,22 @@ def _filed_points(h: Dict, bull: Case, bear: Case, stamp: str) -> None:
     cagr = h.get("cagr") or {}
 
     rev_cagr = cagr.get("revenue")
+    span = (h.get("cagr_years") or {}).get("revenue")
+    over = "from %d to %d" % tuple(span) if span else "over the filed years"
     if rev_cagr is not None:
         if rev_cagr > 0.12:
             bull.points.append(Point(
                 "Long record of growth",
-                "Revenue has compounded at %s a year over the filed history. "
-                "That is delivery, not a forecast." % _pct(rev_cagr),
-                [Evidence("Revenue CAGR from filings", _pct(rev_cagr),
+                "Revenue has compounded at %s a year %s. "
+                "That is delivery, not a forecast." % (_pct(rev_cagr), over),
+                [Evidence("Revenue growth a year from filings", _pct(rev_cagr),
                           "SEC EDGAR", url, stamp, "strong")], 1.4))
         elif rev_cagr < 0:
             bear.points.append(Point(
                 "Long-term decline",
-                "Revenue has shrunk at %s a year across the filed history."
-                % _pct(abs(rev_cagr)),
-                [Evidence("Revenue CAGR from filings", _pct(rev_cagr),
+                "Revenue has shrunk at %s a year %s."
+                % (_pct(abs(rev_cagr)), over),
+                [Evidence("Revenue growth a year from filings", _pct(rev_cagr),
                           "SEC EDGAR", url, stamp, "strong")], 1.5))
 
     derived = h.get("derived") or {}
@@ -404,7 +441,9 @@ def _risk_points(r, bear: Case, bull: Case, stamp: str) -> None:
             "more than compensated for volatility." % r.sharpe,
             [Evidence("Sharpe ratio", "%.2f" % r.sharpe,
                       "computed from %d returns" % r.samples, "", stamp)], 0.9))
-    if r.beta is not None and r.beta < 0.4:
+    # Near zero either way. An inverse fund's -3 is the market turned round,
+    # three times over, not something that goes its own way.
+    if r.beta is not None and abs(r.beta) < 0.4:
         bull.points.append(Point(
             "Moves independently",
             "Beta of %.2f against the market, so it can diversify a portfolio "
@@ -423,8 +462,7 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
     if composite is None:
         return
     # Counted from the registry: a typed-in number said 34 on one page and 33
-    # on the next. Only the strategies that vote make the composite; those on
-    # trial are measured but have no say in it.
+    # on the next. Only the strategies that vote make the composite.
     from .strategies import voting_names
     count = len(voting_names())
     # The odds are measured on the side the call takes, which follows the
@@ -439,7 +477,8 @@ def _technical_points(t: Dict, bull: Case, bear: Case, stamp: str) -> None:
         composite, count, regime or "mixed")
     if expectancy is not None and samples:
         detail += (" %s scoring like this have returned %+.3fR on %d "
-                   "comparable historical cases." % (kind, expectancy, samples))
+                   "comparable historical case%s."
+                   % (kind, expectancy, samples, "" if samples == 1 else "s"))
 
     if composite > 0.25:
         bull.points.append(Point("Price action is constructive", detail,
@@ -509,7 +548,8 @@ def _sentiment_points(s, bull: Case, bear: Case, stamp: str) -> None:
             [Evidence("Fresh catalyst", "within 3 hours", s.method, "", stamp)], 0.7))
 
 
-def _filing_points(filings, bull: Case, bear: Case, stamp: str) -> None:
+def _filing_points(filings, bull: Case, bear: Case, stamp: str,
+                   neutral: List[Point]) -> None:
     recent = list(filings)[:10]
     eights = [f for f in recent if f.form == "8-K"]
     offerings = [f for f in recent if f.form in ("424B5", "S-1")]
@@ -540,30 +580,33 @@ def _filing_points(filings, bull: Case, bear: Case, stamp: str) -> None:
             [Evidence("Schedule 13D", "filed %s" % f.filed, "SEC EDGAR",
                       f.index_url, f.filed)], 0.9))
 
-    annual = [f for f in recent if f.form in ("10-K", "20-F")]
+    annual = [f for f in recent if f.form in ("10-K", "20-F", "40-F")]
     if annual:
+        # Every company that files has one, so it argues for neither side.
         f = annual[0]
-        bull.points.append(Point(
+        neutral.append(Point(
             "Recent annual report available",
             "The %s filed %s is the primary source for anything above. Read the "
             "risk factors before acting on any of it." % (f.form, f.filed),
             [Evidence("Annual report", "%s filed %s" % (f.form, f.filed),
-                      "SEC EDGAR", f.index_url, f.filed, "strong")], 0.3))
+                      "SEC EDGAR", f.index_url, f.filed, "strong")], 0.0))
 
 
-def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str) -> None:
+def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str,
+                    neutral: List[Point]) -> None:
     iv = stats.get("atm_iv")
     pc = stats.get("put_call_oi")
     em = stats.get("expected_move")
 
     if em and em.get("percent"):
-        bull.points.append(Point(
+        # A size, not a direction: up and down alike, so on neither side.
+        neutral.append(Point(
             "The options market has a view on the size of the move",
             "Roughly %s either way by %s, priced from the at-the-money straddle. "
             "That is a forward-looking number, unlike everything derived from "
             "past prices." % (_pct(em["percent"]), stats.get("expiry_date", "expiry")),
             [Evidence("Expected move", _pct(em["percent"]),
-                      "at-the-money straddle", "", stamp, "strong")], 0.4))
+                      "at-the-money straddle", "", stamp, "strong")], 0.0))
 
     if iv and iv > 0.7:
         bear.points.append(Point(
@@ -588,24 +631,36 @@ def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str) -> None:
                       stamp, "weak")], 0.5))
 
 
-def _summarise(case: Case, phrase: str) -> str:
+def _summarise(case: Case, one: str, several: str, what: str) -> str:
     if not case.points:
-        return "Nothing in the available evidence %s." % phrase
+        return "Nothing in the available evidence %s %s." % (one, what)
     strong = [p for p in case.points if any(e.strength == "strong" for e in p.evidence)]
     # Headlines are phrases of every shape ("Highly profitable", "A catalyst
     # just landed"), so the lead follows a colon rather than being fitted
     # into a sentence: "the clearest is that it coverage is positive" was on
     # the page.
     lead = case.points[0].headline
-    return "%d point%s %s, %d of them on strong evidence. The clearest: %s." % (
-        len(case.points), "" if len(case.points) == 1 else "s", phrase,
-        len(strong), lead[:1].lower() + lead[1:])
+    if len(case.points) == 1:
+        return "1 point %s %s, on %s evidence: %s." % (
+            one, what, "strong" if strong else "less than strong",
+            lead[:1].lower() + lead[1:])
+    return "%d points %s %s, %d of them on strong evidence. The clearest: %s." % (
+        len(case.points), several, what, len(strong), lead[:1].lower() + lead[1:])
+
+
+# How the verdict of a case too thin to mean anything begins. It is also how
+# such a thesis is known again once saved, so these words must not change.
+_TOO_THIN = "Too little evidence was available to form a view."
+
+
+def no_view(verdict: Optional[str]) -> bool:
+    """Whether a saved thesis said that it came to no view."""
+    return (verdict or "").startswith(_TOO_THIN)
 
 
 def _verdict(balance: float, bull: Case, bear: Case, evidence_count: int) -> str:
     if evidence_count < 4:
-        return ("Too little evidence was available to form a view. Do not read "
-                "the balance below as meaningful.")
+        return _TOO_THIN + " Do not read the balance as meaningful."
     if balance > 0.45:
         return ("The evidence leans clearly bullish. The bear case is thin, which "
                 "is itself worth suspicion: look for what is missing rather than "
@@ -622,32 +677,55 @@ def _verdict(balance: float, bull: Case, bear: Case, evidence_count: int) -> str
             "the difference; it usually means waiting costs nothing.")
 
 
-def _falsifiers(bull: Case, bear: Case, f, price: float, balance: float) -> List[str]:
-    """What would have to happen for the leading case to be wrong."""
-    out: List[str] = []
-    leaning_bull = balance > 0
+def _at(price: float) -> str:
+    """A price with the digits it needs: a coin can cost a fraction of a cent."""
+    if price >= 1:
+        return "%.2f" % price
+    if price <= 0:
+        return "0"
+    digits = 3 - int(math.floor(math.log10(price)))
+    return "%.*f" % (min(digits, 12), price)
 
-    if leaning_bull:
-        out.append("Revenue growth turning negative for two consecutive quarters "
-                   "would remove the main support for this case.")
-        if f is not None and f.get("net_margin") is not None:
-            out.append("Net margin falling below %s would mean the profitability "
-                       "argument no longer holds."
-                       % _pct(max(0.0, f.get("net_margin") - 0.05)))
-        out.append("A price below %.2f, roughly 20%% under today, would say the "
-                   "market has seen something this evidence has not." % (price * 0.8))
+
+def _falsifiers(f, price: float, balance: float, files: bool) -> List[str]:
+    """What would have to happen for the leading case to be wrong.
+
+    Only what this instrument has can go wrong with it: a coin has no revenue
+    to fall and files nothing, and a case that leans neither way has nothing
+    to be wrong about.
+    """
+    if not balance:
+        return []
+    out: List[str] = []
+
+    def figure(key):
+        return f.get(key) if f is not None else None
+
+    growth, margin, cash = figure("revenue_growth"), figure("net_margin"), figure("free_cashflow")
+    if balance > 0:
+        if growth is not None and growth > 0:
+            out.append("Revenue growth turning negative for two consecutive quarters "
+                       "would weaken the case for it.")
+        if margin is not None and margin > 0:
+            out.append("Net margin falling below %s would mean the business is no "
+                       "longer as profitable as it is in these figures."
+                       % (_pct(margin - 0.05) if margin > 0.05 else "zero"))
+        out.append("A price below %s, roughly 20%% under today, would say the "
+                   "market has seen something this evidence has not." % _at(price * 0.8))
     else:
-        out.append("Two consecutive quarters of margin improvement would undermine "
-                   "the central bear argument.")
-        out.append("A price above %.2f on rising volume would say the market "
-                   "disagrees and is acting on it." % (price * 1.2))
-        if f is not None and f.get("free_cashflow") is not None and f.get("free_cashflow") < 0:
+        if margin is not None:
+            out.append("Two consecutive quarters of better profit margins would "
+                       "weaken the case against it.")
+        out.append("A price above %s on rising volume would say the market "
+                   "disagrees and is acting on it." % _at(price * 1.2))
+        if cash is not None and cash < 0:
             out.append("Free cash flow turning positive would remove the cash-burn "
                        "objection entirely.")
 
-    out.append("Any 8-K describing a change of chief executive, an auditor "
-               "resignation, or a restatement would invalidate this analysis "
-               "until it has been read.")
+    if files:
+        out.append("Any filing that announces a change of chief executive, an "
+                   "auditor resigning, or accounts being restated would put this "
+                   "analysis out of date until it has been read.")
     return out
 
 
@@ -665,7 +743,11 @@ def review(stored: Dict, current_price: float) -> Dict:
     balance = stored.get("balance", 0)
     days = max(0, (int(time.time()) - int(stored.get("created", 0))) // 86400)
 
-    if abs(balance) < 0.15:
+    if no_view(stored.get("verdict")):
+        outcome = "no call"
+        note = ("There was too little evidence for a view when this was saved, so "
+                "the price move neither confirms nor refutes it.")
+    elif abs(balance) < 0.15:
         outcome = "no call"
         note = ("The thesis was balanced, so the price move neither confirms nor "
                 "refutes it.")

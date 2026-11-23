@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .calibrate import simulate_trade, wilson_interval
+from .calibrate import sample_points, simulate_trade, wilson_interval
 from .strategies import (BY_NAME, Context, RANGING, REGISTRY, Regime,
                          TRANSITIONAL, TRENDING, classify_regime, evaluate)
 
@@ -188,14 +188,10 @@ def measure_strategies(ctx: Context, stop_atr: float, target_atr: float,
                 "with config.horizon_for(interval, cfg) first." % (horizon,))
 
     report = StrategyReport()
-    n_bars = len(ctx.bars)
-    start, end = ctx.warmup, n_bars - horizon - 1
-    if end <= start:
+    # The same bars as the odds are measured on, chosen by their own time.
+    indices = sample_points(ctx, horizon, stride, max_samples)
+    if not indices:
         return report
-
-    indices = list(range(start, end, max(1, stride)))
-    if len(indices) > max_samples:
-        indices = indices[-max_samples:]
 
     sim_cache: Dict[Tuple[int, int], Optional[tuple]] = {}
 

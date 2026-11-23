@@ -5,8 +5,11 @@ webhook that stops arriving (a firewall answering Stripe with 403, a changed
 signing secret) would otherwise end Pro for people Stripe had just charged.
 This also covers the copy of the database taken before a new release.
 """
+import contextlib
+import io
 import os as _os
 import sqlite3
+import subprocess
 import sys as _sys
 import time
 
@@ -216,6 +219,76 @@ conn.close()
 check("when an account goes, so does the note of when its plan was read",
       gone is not None and kept == 0, kept)
 
+# Deleted while Stripe was being asked about it: its row is refused, as it
+# should be, and the plans after it in the queue are read all the same.
+conn = db.connect(DB)
+going = A.upsert_email_user(conn, "going@example.com")
+billing.set_plan(conn, going.id, "pro", "active", "cus_going", int(NOW - 3600))
+after = A.upsert_email_user(conn, "after@example.com")
+billing.set_plan(conn, after.id, "pro", "active", "cus_after", int(NOW - 60))
+read = []
+
+
+def stripe_going(method, path, data=None):
+    read.append(path.rsplit("customer=", 1)[-1])
+    if read[-1] == "cus_going":
+        A.delete_user(conn, going.id)
+    return {"data": []}
+
+
+try:
+    billing.recheck(conn, NOW, call=stripe_going, limit=2)
+    broke = ""
+except sqlite3.Error as exc:
+    broke = repr(exc)
+check("an account deleted while its plan is read does not end the run",
+      not broke and read == ["cus_going", "cus_after"], (broke, read))
+conn.rollback()
+billing.set_plan(conn, after.id, "free", "")
+conn.close()
+
+head("A PLAN WITH NO RECORDED END IS READ TOO")
+# A paid checkout says nothing of when its period ends. If the subscription's
+# own messages never come, nothing else would ever read the plan again.
+conn = db.connect(DB)
+endless = A.upsert_email_user(conn, "endless@example.com")
+billing.handle(conn, {"type": "checkout.session.completed", "created": int(NOW),
+                      "data": {"object": {"client_reference_id": str(endless.id),
+                                          "mode": "subscription", "customer": "cus_endless",
+                                          "payment_status": "paid"}}})
+conn.close()
+answers = {"data": []}
+
+
+def stripe_endless(method, path, data=None):
+    customer = path.rsplit("customer=", 1)[-1]
+    heard.append(customer)
+    return answers if customer == "cus_endless" else {"data": []}
+
+
+def reads_at(when):
+    del heard[:]
+    conn = db.connect(DB)
+    try:
+        billing.recheck(conn, when, call=stripe_endless, limit=1000)
+    finally:
+        conn.close()
+    return heard.count("cus_endless")
+
+
+check("it is read, and one Stripe has nothing for is left alone",
+      reads_at(NOW) == 1 and billing.is_pro(user(endless)))
+check("but asked about once a day, not every hour",
+      [reads_at(NOW + h * 3600) for h in (1, 12, 25)] == [0, 0, 1])
+answers["data"] = [{"id": "sub_e", "status": "active", "created": int(NOW - 60),
+                    "cancel_at_period_end": True,
+                    "current_period_end": int(NOW + 30 * DAY)}]
+reads_at(NOW + 2.5 * DAY)
+e = user(endless)
+check("its end is then known, and that it is cancelled",
+      billing.is_pro(e) and (e.plan_until, e.plan_ends) == (int(NOW + 30 * DAY),) * 2,
+      (e.plan_until, e.plan_ends))
+
 head("THE JOB IS STARTED WITH THE OTHERS")
 check("start_background_jobs schedules it hourly",
       "_recheck_plans_job" in open(web.__file__, encoding="utf-8").read()
@@ -296,7 +369,7 @@ class Held:
     def start(self):
         pass
 
-    def stop(self):
+    def stop(self, timeout=2.0):
         pass
 
     def check_now(self):
@@ -323,9 +396,20 @@ for key in [k for k in _os.environ if k.startswith("BACKUP_S3_")] + [
         "SENTRY_DSN", "STOCKBOT_BACKUP_DIR", "STOCKBOT_BACKUP_HOURS"]:
     _os.environ.pop(key, None)
 _os.environ["RENDER_GIT_COMMIT"] = "ffff6666"
+had_public = _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+said = {}
 try:
     started = serve.main([])
+    timed = len(jobs)
+    for address in ("orenth.example", "http://orenth.example", "HTTPS://orenth.example"):
+        _os.environ["STOCKBOT_PUBLIC_URL"] = address
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            serve.main([])
+        said[address] = "PUBLIC ADDRESS IS NOT HTTPS" in out.getvalue()
 finally:
+    _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+    if had_public is not None:
+        _os.environ["STOCKBOT_PUBLIC_URL"] = had_public
     (waitress.serve, web.start_alert_loop, web.start_background_jobs,
      scheduler_mod.Scheduler) = real
     web.app.config["DB_PATH"] = DB
@@ -333,7 +417,20 @@ new = sorted(set(held()) - set(before))
 check("serve.main takes the copy for a new release, and notes the release",
       started == 0 and len(new) == 1 and release_noted() == "ffff6666",
       (started, new, release_noted()))
-check("the timed backups are set up beside it", len(jobs) == 1, jobs)
+check("a public address that is not https is said loudly at the start, and only then",
+      said == {"orenth.example": True, "http://orenth.example": True,
+               "HTTPS://orenth.example": False}, said)
+# Read once, as web.py is imported, so in a process of its own.
+child = subprocess.run(
+    [_sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import web; "
+     "print(bool(web.app.config['SESSION_COOKIE_SECURE']), "
+     "type(web.app.wsgi_app).__name__)", harness.ROOT],
+    cwd=harness.ROOT, capture_output=True, text=True, timeout=120,
+    env=dict(_os.environ, STOCKBOT_PUBLIC_URL="HTTPS://orenth.example",
+             STOCKBOT_BEHIND_PROXY=""))
+check("an https address typed in capitals still makes the cookies secure",
+      child.stdout.split() == ["True", "ProxyFix"], (child.stdout, child.stderr[-300:]))
+check("the timed backups are set up beside it", timed == 1, timed)
 age_copies()
 jobs[0]()                               # a timed backup, every 12 hours
 check("each timed backup also deletes the copies a week old, so one goes "
@@ -352,6 +449,385 @@ check("it is deleted, not left to be trusted", held() == before, (before, held()
 check("and the release is not noted, so the next start tries again",
       release_noted() == "ffff6666", release_noted())
 _os.environ.pop("RENDER_GIT_COMMIT", None)
+
+head("A MISTYPED BACKUP SETTING NEVER STOPS THE SERVER OR ITS BACKUPS")
+# 12h in the host's settings used to end every start in a traceback, with the
+# site down; a blank one quietly switched backups off; and a mistyped number
+# to keep failed every backup after it was taken and before it was copied
+# anywhere else.
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import signal  # noqa: E402
+import threading  # noqa: E402
+from bot import offsite as offsite_mod  # noqa: E402
+
+copied = []
+intervals = []
+stopped = []
+
+
+class Kept(Held):
+    def __init__(self, job, interval_seconds=0, **kw):
+        Held.__init__(self, job, **kw)
+        intervals.append(interval_seconds)
+
+    def stop(self, timeout=0):
+        stopped.append(timeout)
+
+
+def start(serving=lambda *a, **k: None, loop=None, **settings):
+    """serve.main([]) with these settings, and the lines it printed."""
+    del jobs[:], intervals[:], copied[:]
+    real = (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+            scheduler_mod.Scheduler, offsite_mod.copy_in_background)
+    waitress.serve = serving
+    web.start_alert_loop = lambda cfg: loop
+    web.start_background_jobs = lambda: None
+    scheduler_mod.Scheduler = Kept
+    offsite_mod.copy_in_background = copied.append
+    web.app.config["DB_PATH"] = None
+    _os.environ.update(settings)
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(said):
+            code = serve.main([])
+            for job in jobs:
+                job()
+    finally:
+        (waitress.serve, web.start_alert_loop, web.start_background_jobs,
+         scheduler_mod.Scheduler, offsite_mod.copy_in_background) = real
+        web.app.config["DB_PATH"] = DB
+        for key in settings:
+            _os.environ.pop(key, None)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    return code, said.getvalue()
+
+
+for typed in ("twelve", "12h", " ", "", "nan", "inf", "99999999"):
+    code, said = start(STOCKBOT_BACKUP_HOURS=typed)
+    check("hours between backups typed as %r are the usual twelve, and the log "
+          "says so" % typed, code == 0 and intervals == [12 * 3600.0]
+          and "STOCKBOT_BACKUP_HOURS is" in said, (code, intervals, said[-400:]))
+code, said = start(STOCKBOT_BACKUP_HOURS="6")
+check("a number is used as it is, with nothing to say", intervals == [6 * 3600.0]
+      and "STOCKBOT_BACKUP_HOURS" not in said, (intervals, said[-400:]))
+code, said = start(STOCKBOT_BACKUP_HOURS="0")
+check("only 0 switches backups off", code == 0 and not jobs
+      and "backups        off" in said, said[-400:])
+code, said = start()
+check("not set at all is twelve hours, with nothing to say",
+      intervals == [12 * 3600.0] and "    setting" not in said, (intervals, said[-400:]))
+for typed, kept in (("eight", 8), ("", 8), ("8.0", 8), ("nan", 8), ("3", 3),
+                    ("0", 0)):
+    _os.environ["STOCKBOT_BACKUP_KEEP"] = typed
+    check("backups to keep typed as %r are %d" % (typed, kept),
+          serve._backups_to_keep() == kept, serve._backups_to_keep())
+_os.environ.pop("STOCKBOT_BACKUP_KEEP", None)
+code, said = start(STOCKBOT_BACKUP_KEEP="eight")
+check("with it mistyped a backup is still taken, and copied off the server",
+      code == 0 and len(copied) == 1 and "STOCKBOT_BACKUP_KEEP is 'eight'" in said,
+      (code, copied, said[-400:]))
+real_prune = backup_mod.prune
+
+
+def broken_prune(*_a, **_kw):
+    raise RuntimeError("made up")
+
+
+backup_mod.prune = broken_prune
+try:
+    code, said = start()
+finally:
+    backup_mod.prune = real_prune
+check("nor does failing to delete old ones fail the new one", len(copied) == 1, copied)
+from bot import export as export_mod  # noqa: E402
+
+real_write = export_mod.write_csv
+
+
+def broken_export(conn, name, fh, user=None):
+    if name == "alerts":
+        fh.write("half of it")
+        raise ValueError("made up")
+    return real_write(conn, name, fh, user)
+
+
+export_mod.write_csv = broken_export
+had = set(_os.listdir(backup_mod.folder()))
+try:
+    code, said = start()
+finally:
+    export_mod.write_csv = real_write
+new = sorted(set(_os.listdir(backup_mod.folder())) - had)
+check("nor does one export that cannot be written: the copy is checked and "
+      "copied off the server, beside the exports that could be",
+      len(copied) == 1 and _os.path.basename(copied[0]) in new
+      and len([f for f in new if f.endswith(".csv")]) == len(export_mod.DATASETS) - 1
+      and not any("-alerts-" in f for f in new)
+      and "could not be written" in said, (copied, new, said[-300:]))
+code, said = start(STOCKBOT_BEHIND_PROXY="yes please")
+check("a proxy setting that is not understood is said to be off",
+      code == 0 and "STOCKBOT_BEHIND_PROXY is 'yes please', which is read as off" in said,
+      said[-400:])
+
+head("NOR DOES A MISTYPED PORT OR NUMBER OF THREADS STOP IT")
+listened = []
+
+
+def listen(*_a, **kw):
+    listened.append((kw["port"], kw["threads"]))
+
+
+for typed in ("", " ", "many", "8.5", "0", "-1", "99999999"):
+    del listened[:]
+    try:
+        code, said = start(serving=listen, PORT=typed, WEB_THREADS=typed)
+    except (Exception, SystemExit) as exc:
+        code, said = "%s: %s" % (type(exc).__name__, exc), ""
+    check("typed as %r they are the usual 8000 and 8, and the log says so" % typed,
+          code == 0 and listened == [(8000, 8)]
+          and "PORT is" in said and "WEB_THREADS is" in said,
+          (code, listened, said[-300:]))
+code, said = start(serving=listen, PORT="10000", WEB_THREADS=" 6 ")
+check("numbers are used as they are, with nothing to say",
+      listened[-1] == (10000, 6) and "    setting" not in said, (listened, said[-300:]))
+
+head("NOR DOES A SETTING OF THE ANALYSIS THAT CANNOT BE USED")
+for key, typed in (("STOCKBOT_INTERVAL", "daily"), ("STOCKBOT_INTERVAL", " "),
+                   ("STOCKBOT_ACCOUNT_SIZE", "nan"), ("STOCKBOT_ACCOUNT_SIZE", "-5"),
+                   ("STOCKBOT_RISK_PCT", "50"), ("STOCKBOT_RISK_PCT", "1%")):
+    try:
+        code, said = start(**{key: typed})
+    except Exception as exc:
+        code = "%s: %s" % (type(exc).__name__, exc)
+    check("%s typed as %r is left out" % (key, typed), code == 0, code)
+_os.environ["STOCKBOT_RISK_PCT"] = "2.5"
+check("one that can be is used",
+      web.config_mod.load(web.app.config.get("CFG_PATH"))["risk_per_trade_pct"] == 2.5)
+_os.environ.pop("STOCKBOT_RISK_PCT")
+
+head("ERROR REPORTING STARTS BEFORE THE APP IS LOADED")
+# A release that could not be loaded looped on restart with the site down, and
+# error reporting heard nothing of it.
+import builtins  # noqa: E402
+from bot import monitoring as monitoring_mod  # noqa: E402
+
+order = []
+real_import, real_start = builtins.__import__, monitoring_mod.start
+
+
+def watched(name, *args, **kwargs):
+    if name == "web":
+        order.append("app")
+    return real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = watched
+monitoring_mod.start = lambda *a, **k: order.append("reports")
+try:
+    start()
+finally:
+    builtins.__import__, monitoring_mod.start = real_import, real_start
+check("the reports first, then the app", order[:2] == ["reports", "app"], order)
+
+head("A COPY BEFORE A RELEASE THAT FAILS IS AN ERROR IN THE LOG")
+import logging  # noqa: E402
+
+errors = []
+
+
+class Errors(logging.Handler):
+    def emit(self, record):
+        errors.append((record.levelname, record.getMessage()))
+
+
+handler = Errors(level=logging.ERROR)
+logging.getLogger("serve").addHandler(handler)
+real_take, real_prune = backup_mod.take, backup_mod.prune
+
+
+def no_room(*_a, **_kw):
+    raise OSError("made up")
+
+
+backup_mod.take = no_room
+_os.environ["RENDER_GIT_COMMIT"] = "hhhh8888"
+try:
+    serve._copy_before_release(DB)
+    backup_mod.prune = no_room
+    serve._prune_release_copies(DB)
+finally:
+    backup_mod.take, backup_mod.prune = real_take, real_prune
+    _os.environ.pop("RENDER_GIT_COMMIT", None)
+    logging.getLogger("serve").removeHandler(handler)
+check("so error reporting hears of it, and of old ones that cannot be deleted",
+      [level for level, _ in errors] == ["ERROR", "ERROR"]
+      and "before this release failed" in errors[0][1], errors)
+
+head("THE HOST STOPPING THE SERVER STOPS IT IN ORDER")
+# SIGTERM, which the host sends at every deploy, used to be ignored until the
+# process was killed half a minute later.
+from waitress.server import create_server  # noqa: E402
+
+
+def told_to_stop(app, **settings):
+    """A real waitress server, sent SIGTERM as soon as it is answering."""
+    settings.update(host="127.0.0.1", port=0)
+    # With no handler of our own the signal would end this suite instead.
+    if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, signal.SIG_IGN, None):
+        raise RuntimeError("nothing handles SIGTERM")
+    server = create_server(app, **settings)
+    threading.Timer(0.5, lambda: signal.raise_signal(signal.SIGTERM)).start()
+    server.run()
+    server.close()
+
+
+del stopped[:]
+began = time.time()
+try:
+    code, said = start(serving=told_to_stop)
+except (Exception, SystemExit) as exc:
+    code = "%s: %s" % (type(exc).__name__, exc)
+check("it ends by itself, and cleanly", code == 0, code)
+check("within seconds", time.time() - began < 15, time.time() - began)
+check("after waiting for a backup being written", stopped and stopped[0] >= 10, stopped)
+
+# What fired is recorded as told before the notices and emails go, each from a
+# thread that ends with the process.
+import types  # noqa: E402
+
+told = []
+
+
+class Round:
+    """The alert loop, stopped while a round of it is being checked."""
+
+    def stop(self, timeout=2.0):
+        told.append(("round", timeout))
+        hit = [types.SimpleNamespace(user_id=1)]
+        web.push_mod.deliver_later(DB, hit, "")
+        web.alerts_mod.deliver_later(DB, hit, None, lambda conn: None)
+
+
+def slowly(what):
+    def send(*_a, **_kw):
+        time.sleep(0.7)
+        told.append(what)
+    return send
+
+
+real = web.push_mod.deliver, web.alerts_mod.deliver
+web.push_mod.deliver, web.alerts_mod.deliver = slowly("notice"), slowly("email")
+try:
+    code, said = start(loop=Round())
+    at_the_end = list(told)
+    web.push_mod.wait_idle()
+    web.alerts_mod.mail_idle()
+finally:
+    web.push_mod.deliver, web.alerts_mod.deliver = real
+check("and the alerts that had just fired have been told, to phones and by email",
+      {"notice", "email"} <= set(at_the_end), at_the_end)
+check("a round being checked has longer than two seconds to end",
+      told[0][0] == "round" and told[0][1] >= 5, told)
+
+head("WHO IS ASKING, THROUGH THE REAL SERVER")
+# waitress deletes the proxy's headers unless told otherwise, and every
+# visitor then had the proxy's own address, over http.
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+CHILD = r"""
+import http.client, json, os, socket, sys, threading
+sys.path[:0] = [%r, %r]
+import harness
+harness.isolate("serve-child")
+import types
+keys = []
+sys.modules["dotenv"] = types.ModuleType("dotenv")
+sys.modules["dotenv"].load_dotenv = keys.append
+import serve, web
+from flask import jsonify, request
+from waitress.server import create_server
+
+@web.app.route("/asking")
+def asking():
+    return jsonify(address=request.remote_addr, scheme=request.scheme,
+                   host=request.host, root=request.script_root)
+
+web.PUBLIC_ENDPOINTS.add("asking")
+server = create_server(web.app, host="127.0.0.1", port=0, threads=4,
+                       **serve._server_settings(web.behind_proxy()))
+port = server.effective_port
+threading.Thread(target=server.run, daemon=True).start()
+
+def ask(**headers):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    sent = {"Host": "orenth.example"}
+    sent.update({k.replace("_", "-"): v for k, v in headers.items()})
+    conn.request("GET", "/asking", headers=sent)
+    answer = json.loads(conn.getresponse().read())
+    conn.close()
+    return answer
+
+out = {"one": ask(X_Forwarded_For="203.0.113.7", X_Forwarded_Proto="https"),
+       "spoofed": ask(X_Forwarded_For="198.51.100.9, 203.0.113.7",
+                      X_Forwarded_Proto="https", X_Forwarded_Host="evil.example",
+                      X_Forwarded_Prefix="/evil"),
+       "plain": ask(), "dotenv": len(keys)}
+
+raw = socket.create_connection(("127.0.0.1", port), timeout=20)
+raw.sendall(b"POST /trades/open HTTP/1.1\r\nHost: orenth.example\r\n"
+            b"Content-Type: application/x-www-form-urlencoded\r\n"
+            b"Content-Length: 300000000\r\n\r\nsymbol=")
+raw.settimeout(5)
+try:
+    out["huge"] = raw.recv(100).split(b"\r\n")[0].decode()
+except OSError as exc:
+    out["huge"] = str(exc)
+raw.close()
+print("ANSWER " + json.dumps(out))
+sys.stdout.flush()
+os._exit(0)
+""" % (_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+       _os.path.dirname(_os.path.abspath(__file__)))
+
+
+def through_waitress(**settings):
+    env = {k: v for k, v in _os.environ.items()
+           if k not in ("STOCKBOT_BEHIND_PROXY", "STOCKBOT_PUBLIC_URL")}
+    env.update(settings)
+    # It ends without tidying up, so its folders go inside one that is tidied.
+    import tempfile
+    room = tempfile.mkdtemp(prefix="stockbot-test-serve-child-")
+    env.update(TEMP=room, TMP=room, TMPDIR=room)
+    ran = subprocess.run([_sys.executable, "-c", CHILD], env=env, timeout=120,
+                         capture_output=True, text=True)
+    for line in ran.stdout.splitlines():
+        if line.startswith("ANSWER "):
+            return json.loads(line[len("ANSWER "):])
+    return {"one": {}, "spoofed": {}, "plain": {}, "dotenv": None, "huge": ran.stderr[-500:]}
+
+
+on = through_waitress(STOCKBOT_BEHIND_PROXY="1")
+check("behind a proxy the app sees the visitor's address, scheme and host",
+      on["one"] == {"address": "203.0.113.7", "scheme": "https",
+                    "host": "orenth.example", "root": ""}, on)
+check("what a visitor wrote in front of the proxy's own answer is not believed, "
+      "nor a host or path of their choosing", on["spoofed"] == on["one"], on["spoofed"])
+check("and a request the proxy added nothing to is as it came",
+      on["plain"] == {"address": "127.0.0.1", "scheme": "http",
+                      "host": "orenth.example", "root": ""}, on["plain"])
+for label, settings in (("with no proxy", {}),
+                        ("with no proxy and an https public address",
+                         {"STOCKBOT_PUBLIC_URL": "https://orenth.example"})):
+    off = through_waitress(**settings)
+    check("%s, nobody can write their own address or scheme" % label,
+          off["one"] == off["spoofed"] == off["plain"]
+          and off["plain"].get("address") == "127.0.0.1"
+          and off["plain"].get("scheme") == "http", off)
+check("and a test run never reads the keys in a .env file", on["dotenv"] == 0, on["dotenv"])
+check("a body of 300 MB is refused before it is sent",
+      on["huge"].startswith("HTTP/1.") and " 413 " in on["huge"], on["huge"])
 
 print()
 print("%d failure(s)" % len(fails))

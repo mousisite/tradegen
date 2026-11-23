@@ -58,10 +58,38 @@ class Score:
     missing: List[str] = field(default_factory=list)
     reliable: bool = True
     source: str = "Filed with the SEC"
+    # For a score that counts passes: how many tests could be measured, and
+    # the financial year it compares with the one before.
+    measured: int = 0
+    year: Optional[int] = None
 
     @property
     def usable(self) -> bool:
         return self.value is not None
+
+
+def strength_band(score: Optional[Score]) -> str:
+    """Whether a Piotroski score is "strong", "weak" or "mixed"; "" for none.
+
+    Seven of nine or better and three of nine or worse, as a share of the
+    tests that could be measured: three passed of six is half, not the same
+    thing as three of nine.
+    """
+    if score is None or not score.usable:
+        return ""
+    of = getattr(score, "measured", 0) or 9
+    if score.value * 9 >= 7 * of:
+        return "strong"
+    if score.value * 9 <= 3 * of:
+        return "weak"
+    return "mixed"
+
+
+def _of_measured(score: Score) -> str:
+    of = score.measured or 9
+    if of == 9:
+        return "%d of the nine measures" % int(score.value)
+    return "%d of the %d measures that could be checked" % (int(score.value), of)
 
 
 def _series(table: Dict, key: str, years: List[int]) -> Dict[int, float]:
@@ -144,17 +172,57 @@ _NOT_FOR_Z = ("financial services", "financial", "banks", "insurance",
               "capital markets", "credit services", "asset management")
 
 
+def _financial(sector: str) -> bool:
+    return bool(sector) and any(word in sector.lower() for word in _NOT_FOR_Z)
+
+
+def _refuse_financial(out: Score, sector: str) -> bool:
+    """Refuse a model whose tests do not fit a bank or an insurer.
+
+    A bank's operating cash flow moves with its lending and trading, its debt
+    is its raw material, and it has no current ratio or gross margin to
+    improve, so a sound one scores low by construction.
+    """
+    if not _financial(sector):
+        return False
+    out.reliable = False
+    out.verdict = (
+        "Not applicable to a %s company. This was made for companies that sell "
+        "goods or services. Where the business is handling other people's "
+        "money, cash and debt move with that money, and a sound company can "
+        "look like a weak one. A number here would mislead rather than inform."
+        % sector.lower())
+    return True
+
+
 def _safe(numerator, denominator):
     if numerator is None or denominator in (None, 0):
         return None
     return numerator / denominator
 
 
+def _years_compared(year: int, prior: Optional[int] = None) -> str:
+    """Which financial year a score is of, for its scale line."""
+    if prior is None:
+        return "fiscal %d" % year
+    return "fiscal %d against %d" % (year, prior)
+
+
+# What each of the nine tests is about, for naming those that could not be run.
+_TEST_SUBJECTS = {
+    "Profitable": "profit", "Cash generative": "cash flow",
+    "Returns improving": "returns", "Profit backed by cash": "cash against profit",
+    "Debt not rising": "debt", "Liquidity improving": "liquidity",
+    "No dilution": "share count", "Margins improving": "gross margin",
+    "Assets working harder": "sales against assets",
+}
+
+
 # ---------------------------------------------------------------------------
 # Piotroski F-Score
 # ---------------------------------------------------------------------------
 
-def piotroski(history: Dict) -> Score:
+def piotroski(history: Dict, sector: str = "") -> Score:
     """Nine tests of whether the business got stronger or weaker last year.
 
     Deliberately binary. The model's value is that it refuses to weigh a small
@@ -165,6 +233,9 @@ def piotroski(history: Dict) -> Score:
         name="Piotroski F-Score", scale="0 to 9",
         meaning="How many of nine measures of financial strength improved. "
                 "Published in 2000 and tested on twenty years of filings.")
+
+    if _refuse_financial(out, sector):
+        return out
 
     table = history.get("table") or {}
     years = history.get("years") or []
@@ -219,7 +290,9 @@ def piotroski(history: Dict) -> Score:
         "Returns improving",
         None if (roa_now is None or roa_before is None) else roa_now > roa_before,
         "Return on assets %s"
-        % ("%.1f%% against %.1f%% last year" % (roa_now * 100, roa_before * 100)
+        % ("%.1f%% against %.1f%% %s"
+           % (roa_now * 100, roa_before * 100,
+              "the year before" if prior == year - 1 else "in %d" % prior)
            if (roa_now is not None and roa_before is not None) else "not comparable"),
         "%d against %d" % (year, prior)))
 
@@ -297,21 +370,32 @@ def piotroski(history: Dict) -> Score:
 
     passed = sum(1 for t in known if t.passed)
     out.value = float(passed)
+    out.measured = len(known)
+    out.year = year
     out.reliable = len(known) == 9
     scored = "%d of %d" % (passed, len(known))
+    if not out.reliable:
+        out.scale = "0 to %d, the tests that could be measured" % len(known)
+    out.scale += "; " + _years_compared(year, prior)
 
-    if passed >= 8:
+    # Judged on the share of the tests that could be measured: three passed
+    # of six is not three of nine. With all nine the steps are 8, 6 and 4.
+    share = passed * 9 / len(known)
+    if share >= 8:
         out.verdict = "Strong and improving on almost every measure (%s)." % scored
-    elif passed >= 6:
+    elif share >= 6:
         out.verdict = "Solid. More improved than deteriorated (%s)." % scored
-    elif passed >= 4:
+    elif share > 3:
         out.verdict = "Mixed. As much got worse as got better (%s)." % scored
     else:
         out.verdict = ("Weak. Most measures of financial strength went the "
                        "wrong way (%s)." % scored)
     if not out.reliable:
-        out.verdict += (" Scored out of %d rather than 9, because %s was not "
-                        "reported." % (len(known), " and ".join(out.missing)))
+        out.verdict += (" Scored out of %d rather than 9, because %d of them "
+                        "could not be measured (%s)."
+                        % (len(known), len(out.missing),
+                           ", ".join(_TEST_SUBJECTS.get(name, name.lower())
+                                     for name in out.missing)))
     return out
 
 
@@ -368,7 +452,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
         out.verdict = problem
         return out
 
-    if sector and any(word in sector.lower() for word in _NOT_FOR_Z):
+    if _financial(sector):
         out.reliable = False
         out.verdict = (
             "Not applicable to a %s company. Altman's coefficients were fitted "
@@ -399,7 +483,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
     out.missing = [label for label, value in needed.items() if not value]
     if out.missing or not assets:
         out.reliable = False
-        out.verdict = ("Cannot be calculated: %s %s not reported."
+        out.verdict = ("Cannot be calculated: %s %s not available."
                        % (", ".join(out.missing),
                           "was" if len(out.missing) == 1 else "were"))
         return out
@@ -420,6 +504,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
     }
     z = 1.2 * a + 1.4 * b + 3.3 * c + 0.6 * d + 1.0 * e
     out.value = z
+    out.scale += "; " + _years_compared(year)
 
     if z > 8:
         out.verdict = (
@@ -443,7 +528,7 @@ def altman_z(history: Dict, market_cap: Optional[float] = None,
 # Beneish M-Score
 # ---------------------------------------------------------------------------
 
-def beneish_m(history: Dict) -> Score:
+def beneish_m(history: Dict, sector: str = "") -> Score:
     """Eight ratios that tend to move together when earnings are massaged.
 
     A smoke detector rather than a verdict. Plenty of honest companies trip it,
@@ -455,6 +540,9 @@ def beneish_m(history: Dict) -> Score:
         meaning="Eight ratios that moved together in companies later found to "
                 "have manipulated earnings. A reason to read more closely, "
                 "not a conclusion.")
+
+    if _refuse_financial(out, sector):
+        return out
 
     table = history.get("table") or {}
     years = history.get("years") or []
@@ -541,14 +629,27 @@ def beneish_m(history: Dict) -> Score:
     m = (-4.84 + 0.920 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi
          + 0.115 * depi - 0.172 * sgai + 4.679 * tata - 0.327 * lvgi)
     out.value = m
+    out.scale += "; " + _years_compared(year, prior)
 
     if m > -1.78:
-        worst = sorted(out.inputs.items(), key=lambda kv: -abs(kv[1] - 1))[:2]
+        # How far each ratio moves the score from where an unchanged company
+        # sits. Unchanged is 1 for a ratio of two years and 0 for accruals,
+        # and for overheads and leverage a rise pulls the score down.
+        pulls = {
+            "receivables against sales": 0.920 * (dsri - 1),
+            "gross margin": 0.528 * (gmi - 1), "asset quality": 0.404 * (aqi - 1),
+            "sales growth": 0.892 * (sgi - 1), "depreciation rate": 0.115 * (depi - 1),
+            "overheads against sales": -0.172 * (sgai - 1),
+            "accruals": 4.679 * tata, "leverage": -0.327 * (lvgi - 1),
+        }
+        worst = [name for name, pull in sorted(pulls.items(), key=lambda kv: -kv[1])
+                 if pull > 0][:2]
         out.verdict = (
-            "%.2f, above the -1.78 line. The ratios pulling it up are %s. This "
+            "%.2f, above the -1.78 line. %s. This "
             "happens to fast-growing companies as readily as to dishonest "
             "ones, so read the filing rather than drawing a conclusion."
-            % (m, " and ".join(name for name, _ in worst)))
+            % (m, ("The ratios pulling it up most are %s" % " and ".join(worst))
+               if len(worst) == 2 else "The ratio pulling it up is %s" % worst[0]))
     else:
         out.verdict = ("%.2f, below the -1.78 line. Nothing in the pattern of "
                        "these eight ratios looks unusual." % m)
@@ -559,7 +660,7 @@ def beneish_m(history: Dict) -> Score:
 # Accruals
 # ---------------------------------------------------------------------------
 
-def accruals(history: Dict) -> Score:
+def accruals(history: Dict, sector: str = "") -> Score:
     """How much of the profit arrived as cash.
 
     Sloan (1996) showed that the part of earnings not backed by cash tends to
@@ -570,6 +671,9 @@ def accruals(history: Dict) -> Score:
         name="Earnings quality", scale="lower is better",
         meaning="The gap between reported profit and cash actually generated. "
                 "Profit that never becomes cash tends not to repeat.")
+
+    if _refuse_financial(out, sector):
+        return out
 
     table = history.get("table") or {}
     years = history.get("years") or []
@@ -606,14 +710,35 @@ def accruals(history: Dict) -> Score:
 
     ratio = (net_income - cfo) / average_assets
     out.value = ratio
+    out.scale += "; " + _years_compared(year)
     out.inputs = {"net income": net_income, "operating cash flow": cfo,
                   "average assets": average_assets}
 
     covered = _safe(cfo, net_income)
     cash_note = ("Cash flow covered %.0f%% of reported profit."
-                 % (covered * 100)) if covered and net_income > 0 else ""
+                 % (covered * 100)) if covered and net_income > 0 and cfo > 0 else ""
 
-    if ratio <= 0:
+    if net_income <= 0:
+        # No profit for the cash to back. Costs that are not cash make the
+        # cash going out smaller than the loss at nearly every company that
+        # loses money, which is not the good direction of anything.
+        lost = "It lost money" if net_income < 0 else "It made no profit"
+        if cfo > 0:
+            out.verdict = ("%s on paper, but its operations still brought in "
+                           "more cash than they used." % lost)
+        elif cfo == 0:
+            out.verdict = "%s, and its operations brought in no cash." % lost
+        elif net_income < 0 and cfo != net_income:
+            out.verdict = ("It lost money; the cash going out was %s than the "
+                           "reported loss."
+                           % ("smaller" if cfo > net_income else "larger"))
+        else:
+            out.verdict = "%s, and its operations used up cash." % lost
+    elif cfo <= 0:
+        out.verdict = ("It reported a profit while its operations %s. Earnings "
+                       "like this have historically tended to reverse."
+                       % ("used up cash" if cfo < 0 else "brought in no cash"))
+    elif ratio <= 0:
         out.verdict = ("Cash exceeded reported profit. That is the good "
                        "direction. %s" % cash_note).strip()
     elif ratio < 0.05:
@@ -632,6 +757,13 @@ def accruals(history: Dict) -> Score:
 # Everything, in one call
 # ---------------------------------------------------------------------------
 
+def cash_gap_words(score: Score) -> str:
+    """What a high accruals ratio says, for a company with a profit or a loss."""
+    if score.inputs.get("net income", 1.0) > 0:
+        return "reported profit is running well ahead of cash"
+    return "cash fell well short of the result it reported"
+
+
 def assess(history: Dict, market_cap: Optional[float] = None,
            sector: str = "") -> Dict:
     """Run every model and summarise what they agree on."""
@@ -641,23 +773,21 @@ def assess(history: Dict, market_cap: Optional[float] = None,
                 or "No SEC filings, so none of these can be measured."}
 
     scores = {
-        "piotroski": piotroski(history),
+        "piotroski": piotroski(history, sector),
         "altman": altman_z(history, market_cap, sector),
-        "beneish": beneish_m(history),
-        "accruals": accruals(history),
+        "beneish": beneish_m(history, sector),
+        "accruals": accruals(history, sector),
     }
 
     concerns: List[str] = []
     strengths: List[str] = []
 
     f = scores["piotroski"]
-    if f.usable:
-        if f.value >= 7:
-            strengths.append("fundamentals improved on %d of the nine measures"
-                             % int(f.value))
-        elif f.value <= 3:
-            concerns.append("fundamentals improved on only %d of nine measures"
-                            % int(f.value))
+    band = strength_band(f)
+    if band == "strong":
+        strengths.append("fundamentals improved on %s" % _of_measured(f))
+    elif band == "weak":
+        concerns.append("fundamentals improved on only %s" % _of_measured(f))
 
     z = scores["altman"]
     if z.usable:
@@ -674,11 +804,14 @@ def assess(history: Dict, market_cap: Optional[float] = None,
     a = scores["accruals"]
     if a.usable:
         if a.value > 0.10:
-            concerns.append("reported profit is running well ahead of cash")
-        elif a.value <= 0:
+            concerns.append(cash_gap_words(a))
+        elif a.value <= 0 and a.inputs["operating cash flow"] > 0:
             strengths.append("cash generation exceeds reported profit")
 
-    if concerns and strengths:
+    if not any(s.usable for s in scores.values()):
+        headline = ("None of these models could be used on these accounts. "
+                    "Each one says why below.")
+    elif concerns and strengths:
         headline = ("Mixed: %s, but %s." % (strengths[0], concerns[0]))
     elif concerns:
         headline = ("Worth care: %s." % "; ".join(concerns))

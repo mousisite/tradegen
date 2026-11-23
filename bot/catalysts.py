@@ -41,6 +41,9 @@ class Calendar:
     dividend_paid: Optional[int] = None
     notes: List[str] = field(default_factory=list)
     available: bool = True
+    # Seconds the exchange's clock is ahead of UTC, so that "today" and
+    # "tomorrow" are its own.
+    gmt_offset: int = 0
 
     def days_to(self, stamp: Optional[int]) -> Optional[float]:
         if not stamp:
@@ -119,12 +122,36 @@ def fetch(symbol: str) -> Calendar:
     return out
 
 
-def _when(days: float) -> str:
-    if days < 1:
-        return "today or tomorrow"
-    if days < 2:
+def _dates_away(cal: Calendar, stamp: int) -> int:
+    """How many dates ahead an event is: 0 today, 1 tomorrow.
+
+    Counted in dates rather than blocks of 24 hours, by which Tuesday's report
+    was "tomorrow" on Sunday evening. The event's date is the one shown for it.
+    """
+    today = (time.time() + cal.gmt_offset) // 86400
+    return max(0, int(stamp // 86400 - today))
+
+
+def _when(cal: Calendar, stamp: int) -> str:
+    away = _dates_away(cal, stamp)
+    if away < 1:
+        return "today"
+    if away < 2:
         return "tomorrow"
-    return "in %d days" % round(days)
+    return "in %d days" % away
+
+
+def unread_warning(cal: Calendar, bars) -> Optional[str]:
+    """What to say when a company's calendar could not be read, or None.
+
+    Saying nothing reads as no earnings coming. Only for a company's shares:
+    a fund, an index or a coin does not report.
+    """
+    kind = str((getattr(bars, "meta", None) or {}).get("instrumentType") or "EQUITY")
+    if cal.available or bars.asset_class != "equity" or kind.upper() != "EQUITY":
+        return None
+    return ("The earnings calendar could not be read just now, so this plan was "
+            "not checked against an earnings date. Check when the company reports.")
 
 
 def warnings_for(cal: Calendar, interval: str, horizon_bars: int,
@@ -142,31 +169,38 @@ def warnings_for(cal: Calendar, interval: str, horizon_bars: int,
     if days is not None and days >= 0:
         confirmed = "" if not cal.earnings_estimated else ", though the date is " \
                                                           "an estimate rather than confirmed"
+        # Bars of a few minutes have a window of hours, not "0 days".
+        span = ("the time" if window < 1 else "the %d-day window" % round(window))
         if days <= window:
             out.append(
-                "Earnings are due %s%s, inside the %d-day window this plan "
+                "Earnings are due %s%s, inside %s this plan "
                 "expects to need. Earnings gap price to wherever the new "
                 "information puts it, and a stop does not survive a gap. Either "
                 "size this as a position you can afford to have gap against you, "
                 "or wait until after the report."
-                % (_when(days), confirmed, round(window)))
+                % (_when(cal, cal.earnings), confirmed, span))
         elif days <= window * 2:
             out.append(
-                "Earnings are due %s%s. That is outside this plan's %d-day "
-                "window, but not by much, so a trade that runs long will meet "
-                "them." % (_when(days), confirmed, round(window)))
+                "Earnings are due %s%s. That is outside %s this plan expects "
+                "to need, but not by much, so a trade that runs long will meet "
+                "them." % (_when(cal, cal.earnings), confirmed, span))
 
+    # By the date, as it is shown: the stamp is midnight in London, the evening
+    # before in New York, and from then until the morning the warning was gone
+    # while the calendar beside it said "tomorrow". On the day itself the price
+    # has dropped, and a share sold short that day owes nothing.
     ex_div = cal.days_to_ex_dividend
-    if ex_div is not None and 0 <= ex_div <= window:
+    if ex_div is not None and _dates_away(cal, cal.ex_dividend) > 0 \
+            and ex_div <= window:
         if direction < 0:
             out.append(
                 "This goes ex-dividend %s. A short position pays the dividend "
-                "rather than receiving it." % _when(ex_div))
+                "rather than receiving it." % _when(cal, cal.ex_dividend))
         else:
             out.append(
                 "This goes ex-dividend %s, so the price drops by roughly the "
                 "dividend that morning. That is not the thesis failing."
-                % _when(ex_div))
+                % _when(cal, cal.ex_dividend))
     return out
 
 
@@ -184,12 +218,15 @@ def describe(cal: Calendar) -> List[Dict]:
         if not stamp:
             continue
         days = cal.days_to(stamp)
-        if days is None or days < -1:
+        # An event dated today stays up all day; yesterday's is over.
+        if days is None or (days < 0 and stamp // 86400
+                            < (time.time() + cal.gmt_offset) // 86400):
             continue
         rows.append({
             "label": label,
             "when": datetime.fromtimestamp(stamp, timezone.utc).strftime("%d %b %Y"),
             "days": days,
+            "due": _when(cal, stamp),
             "estimated": label == "Next earnings" and cal.earnings_estimated,
             "meaning": meaning,
         })

@@ -1,15 +1,25 @@
 # Kept out of the server image: the iPhone app's project, tests, editor
 # folders and anything personal. Render builds from a fresh clone, so
-# untracked files never reach it either way.
+# untracked files never reach it either way, but an image built from a working
+# folder would otherwise carry the settings, keys and backups lying in it.
 .git
 .claude
+.impeccable
 .runtime
 data
 docs
 mobile
 tests
-*.db
-*.db-wal
-*.db-shm
-.env
-__pycache__
+backups
+config.json
+secret.key
+**/*.p8
+**/*.pem
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env
+**/.env.*
+!.env.example
+**/__pycache__
+**/*.pyc

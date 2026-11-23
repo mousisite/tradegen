@@ -14,7 +14,8 @@
     {% endif %}
   </p>
 
-  {% if error %}<div class="notice">{{ error }}</div>{% endif %}
+  {% set said = ' aria-describedby="to-error" aria-invalid="true"'|safe if error else '' %}
+  {% if error %}<div class="notice" role="alert" id="to-error">{{ error }}</div>{% endif %}
 
   <form class="codeform" method="post"
         action="{{ url_for('code_start', channel=channel) }}">
@@ -23,11 +24,11 @@
     {% if channel == 'email' %}
       <input class="field" id="to" name="to" type="email" required autofocus
              autocomplete="email" inputmode="email" placeholder="you@example.com"
-             value="{{ value }}">
+             value="{{ value }}"{{ said }}>
     {% else %}
       <input class="field" id="to" name="to" type="tel" required autofocus
              autocomplete="tel" inputmode="tel" placeholder="+1 555 123 4567"
-             value="{{ value }}">
+             value="{{ value }}"{{ said }}>
     {% endif %}
     <button class="btn" type="submit">Send me a code</button>
   </form>

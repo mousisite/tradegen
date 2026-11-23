@@ -10,6 +10,12 @@
     counts never leave this server.</p>
 </div>
 
+{% if plans_off %}
+  <p class="notice" role="alert"><b>Paid plans are off:</b> {{ plans_off }}
+    on the server, though the rest of Stripe is. Until that is put right,
+    everyone has Pro and nobody can buy it.</p>
+{% endif %}
+
 <div class="card">
   <div class="figs">
     <div class="f"><div class="k">Accounts</div>
@@ -28,7 +34,8 @@
       <div class="v fig">{{ data.stats.instruments }}</div></div>
     <div class="f"><div class="k">Acted on</div>
       <div class="v fig">{{ data.stats.trades + data.stats.theses }}</div>
-      <div class="n">{{ data.stats.trades }} trades, {{ data.stats.theses }} theses</div></div>
+      <div class="n">{{ data.stats.trades }} trade{{ '' if data.stats.trades == 1 else 's' }},
+        {{ data.stats.theses }} {{ 'thesis' if data.stats.theses == 1 else 'theses' }}</div></div>
   </div>
 </div>
 
@@ -42,7 +49,17 @@
 {% if trend %}
 <section>
   <div class="sechead"><h2>Analyses per day</h2></div>
-  <div class="card">{{ trend|safe }}</div>
+  <style>
+    .daychart .narrow { display: none; }
+    @media (max-width: 600px) {
+      .daychart .wide { display: none; }
+      .daychart .narrow { display: block; }
+    }
+  </style>
+  <div class="card daychart">
+    <div class="wide">{{ trend|safe }}</div>
+    <div class="narrow">{{ trend_narrow|safe }}</div>
+  </div>
 </section>
 {% endif %}
 
@@ -83,7 +100,8 @@
       Front page views are by people not signed in, with robots that say what
       they are left out; a robot posing as a browser is still counted. A first
       analysis is someone's first on the site, counted once. Turned Pro is a
-      change of plan from Free, not a renewal. Days with nothing counted are
+      change of plan from Free, on the website or in the iPhone app, not a
+      renewal. Days with nothing counted are
       left out.
     </p>
   </div>
@@ -171,11 +189,11 @@
       <p class="prose" style="margin-top:var(--s2)">
         <b>{{ host }}</b>:
         {% if state.open_for > 0 %}
-          <span class="loss">rate limited, not being asked for another
+          <span class="loss">{{ 'not answering' if state.why == 'down' else 'rate limited' }}, not being asked for another
             {{ "%.0f"|format(state.open_for) }} seconds</span>
         {% else %}
           answering normally{% if state.times_opened %}, throttled
-          {{ state.times_opened }} time(s) since this server started{% endif %}
+          {{ state.times_opened }} time{{ '' if state.times_opened == 1 else 's' }} since this server started{% endif %}
         {% endif %}
       </p>
     {% endfor %}
@@ -200,6 +218,23 @@
         everything in it: every journal, every thesis, every account. Mount a
         disk and point <span class="fig">STOCKBOT_DB</span> at it before
         anyone relies on this.</p>
+    {% endif %}
+    {% if not backups.hours %}
+      <p class="prose loss"><b>No backups are being taken.</b>
+        The timer that takes them is switched off, or this copy of the app was
+        started without it.
+        {% if backups.kept %}Last backup: {{ backups.taken|ago }},
+        {{ backups.kept }} kept.{% endif %}</p>
+    {% elif backups.age is none %}
+      <p class="prose loss"><b>No backup has been taken yet.</b> The first is
+        taken about five minutes after the server starts. If this still says
+        so later, the server log says why.</p>
+    {% else %}
+      <p class="prose{% if backups.late %} loss{% endif %}">Last backup:
+        {{ backups.taken|ago }}, {{ backups.kept }} kept. One is taken every
+        {{ "%g"|format(backups.hours) }} hours.
+        {% if backups.late %}<b>It is overdue.</b> The server log says
+        why.{% endif %}</p>
     {% endif %}
   </div>
 </section>

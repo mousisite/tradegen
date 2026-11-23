@@ -1,21 +1,34 @@
 {% extends "base.html" %}
-{% from "_learn.html" import kept, versus, diff, rate, said, pooled_table, claim_measured, claim_usual with context %}
+{% from "_learn.html" import kept, versus, diff, rate, said, pooled_table, claim_measured, claim_figure, claim_against with context %}
 {% set active = 'stocks' %}
 {% set page_blurb = page.title ~ ": " ~ page.concept.what ~ " What the course teaches, the exact rule Orenth tests, and the result on real prices after trading costs. Not financial advice." %}
 {% block title %}{{ page.title }}: what the course teaches, and what testing found · Orenth{% endblock %}
 {% block og_title %}{{ page.title }}, tested · Orenth{% endblock %}
+{# The example comes drawn twice. Shrunk to a phone, the wide drawing's labels
+   would be a few pixels tall, so a phone gets the narrow one. #}
 {% block head_extra %}{% if not page.measured %}<meta name="robots" content="noindex">{% endif %}
 <style>
-  .learn-steps { list-style: none; margin: 0; padding: 0; }
-  .learn-steps li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--s2);
+  {# The stamps and labels are one column, so the sentences start in line. #}
+  .learn-steps { list-style: none; margin: 0; padding: 0; display: grid;
+                 grid-template-columns: auto minmax(0, 1fr); column-gap: var(--s2); }
+  .learn-steps li { grid-column: 1 / -1;
+                    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--s2);
+                    grid-template-columns: subgrid;
                     padding: 10px 0; border-bottom: 1px solid var(--hairline);
                     font-size: var(--t-sm); color: var(--ink-2); line-height: 1.6; }
   .learn-steps li:last-child { border-bottom: 0; }
+  .learn-steps li > span:last-child { max-width: 68ch; }
   .learn-stamp { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3);
                  white-space: nowrap; padding-top: 2px; }
   .learn-steps .chip { align-self: start; justify-self: start; white-space: nowrap; }
-  .learn-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
-  .learn-figure svg { width: 100%; height: auto; display: block; }
+  .learn-source { max-width: 76ch; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
+  .learn-figure .chart { max-height: 380px; }
+  .learn-figure .narrow { display: none; }
+  @media (max-width: 600px) {
+    .learn-figure .wide { display: none; }
+    .learn-figure .narrow { display: block; }
+    .learn-figure .chart { max-height: none; }
+  }
   @media (max-width: 560px) {
     .learn-steps li { grid-template-columns: minmax(0, 1fr); }
   }
@@ -32,7 +45,7 @@
 <div class="plainbox">
   <span class="eyebrow">The short answer</span>
   {% if not page.measured %}
-    <p class="lead">Being tested. This fills in after the first nightly run.</p>
+    <p class="lead">{% if page.no_cases %}No cases in the days tested.{% else %}Being tested. This fills in after the next nightly run.{% endif %}</p>
   {% else %}
     {% set ns = namespace(said=false) %}
     {% for v in page.setups %}
@@ -41,7 +54,7 @@
         {% set ns.said = true %}
         <p class="lead">{{ v.setup.label }}, on {{ main.interval_words }} prices with
           {{ main.rule_words }}, all instruments together: a trade averaged
-          {{ kept(main) }} after costs, over {{ "{:,}".format(main.n) }} trades.
+          {{ kept(main) }} after costs, over {{ "{:,}".format(main.n) }} trade{{ '' if main.n == 1 else 's' }}.
           {% if main.verdict is none %}That is too few to say anything{% else %}It {{ main.words }}{% endif %}{% if main.diff_verdict is not none %},
           and {{ main.diff_words }}{% endif %}.</p>
       {% elif v.daily and v.daily.tested %}
@@ -55,7 +68,7 @@
     {% for c in page.claims if c.measured %}
       {% set ns.said = true %}
       <p class="prose"><b>{{ c.statement }}</b> Measured: {{ claim_measured(c) }}.
-        {% if c.measure != 'descriptive' %}Usually: {{ claim_usual(c) }}.{% endif %}
+        {% if c.measure != 'descriptive' %}Compared with: {{ claim_against(c) }}.{% endif %}
         In words: it {{ c.words }}.</p>
     {% endfor %}
     {% if page.bias and page.bias.pooled and page.bias.pooled.rate %}
@@ -69,6 +82,10 @@
     {% if not ns.said %}
       <p class="lead">This idea is not a setup with a result of its own. The
         measurements it rests on are on the other topics.</p>
+    {% endif %}
+    {% if page.fresh and page.fresh.stale %}
+      <p class="prose">Some of the lab's figures have not been refreshed since
+        {{ page.fresh.oldest|day }}. The newest were measured on {{ page.fresh.newest|day }}.</p>
     {% endif %}
   {% endif %}
 </div>
@@ -121,7 +138,7 @@
       together:</p>
     <div class="card pad0">{{ pooled_table(v.lab.pooled) }}</div>
     <details class="card" style="margin-top:var(--s2)">
-      <summary>Every instrument ({{ v.lab.rows|length }})</summary>
+      <summary>Every instrument, bar size and target ({{ v.lab.rows|length }} row{{ 's' if v.lab.rows|length != 1 }})</summary>
       <div class="tablewrap" style="margin-top:var(--s2)">
         <table class="stack">
           <thead><tr><th>Instrument</th><th class="r">Trades</th><th class="r">Hit rate</th>
@@ -145,32 +162,37 @@
       </div>
       <p class="learn-source" style="margin-top:var(--s2)"><b>Later days</b>: whether
         the last third of the days, read on its own, kept or lost money the same
-        way as the whole.</p>
+        way as the first two thirds.</p>
     </details>
     {% if v.lab.k3 %}
       <p class="prose" style="margin-top:var(--s2)">With wider swings (three bars
-        each side instead of two):
+        each side instead of two) and a target twice the risk:
         {% for k in v.lab.k3 %}{{ k.name }}, {{ k.interval_words }}: {{ "{:,}".format(k.n) }}
-          trades, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
+          trade{{ '' if k.n == 1 else 's' }}, <span class="fig">{{ k.mean|signed(2) }}R</span>{% if k.margin is not none %}
           ±{{ '%.2f'|format(k.margin) }}{% endif %}{{ '; ' if not loop.last else '.' }}{% endfor %}</p>
     {% endif %}
-    {% if v.lab.tight or v.lab.no_control %}
+    {% if v.lab.left_out %}
       <p class="prose" style="margin-top:var(--s1)">Left out and counted:
-        {{ v.lab.tight }} with a stop too close to trade, {{ v.lab.no_control }}
-        with no random entries to compare.</p>
+        {{ v.lab.left_out|join('; ') }}.</p>
+    {% endif %}
+    {% if v.lab.no_control %}
+      <p class="prose" style="margin-top:var(--s1)">{{ "{:,}".format(v.lab.no_control) }}
+        {{ 'trade had no random entries to set beside it: it is' if v.lab.no_control == 1 else 'trades had no random entries to set beside them: they are' }}
+        in the result, not in the comparison.</p>
     {% endif %}
   {% else %}
     <div class="card"><p class="prose">Being tested on 5- and 15-minute prices. This
-      fills in after the first nightly run.</p></div>
+      fills in after the next nightly run.</p></div>
   {% endif %}
   {% if v.daily %}
     <p class="prose" style="margin-top:var(--s2)">{% if v.daily.tested %}On up to five
       years of daily prices of the popular stocks and coins, with Orenth's own stop and
       target, a trade averaged <span class="fig">{{ v.daily.kept|signed(2) }}R</span>{% if v.daily.margin is not none %}
       ±{{ '%.2f'|format(v.daily.margin) }}{% endif %}{% if v.daily.verdict is not none %}:
-      it {{ v.daily.words }}{% endif %}.{% else %}The
-      daily test on popular stocks and coins has no result for it yet.{% endif %}
-      <a href="{{ url_for('backtest_page', name=v.daily.slug) }}">The daily test &rarr;</a></p>
+      it {{ v.daily.words }}{% endif %}.{% elif v.setup.intraday_only %}It reads
+      the sessions inside a trading day, so it is not in the daily test.{% else %}The
+      daily test on popular stocks and coins has no result for it yet.{% endif %}{% if v.daily.tested or not v.setup.intraday_only %}
+      <a href="{{ url_for('backtest_page', name=v.daily.slug) }}">The daily test &rarr;</a>{% endif %}</p>
   {% endif %}
 </section>
 {% endfor %}
@@ -187,10 +209,12 @@
         <li><b>Compared with:</b> {{ c.control_words }}</li>
         {% if c.measured %}
           <li><b>Result:</b> {{ claim_measured(c) }}{% if c.measure != 'descriptive' %};
-            usually {{ claim_usual(c) }}{% endif %}. It {{ c.words }}.</li>
+            compared with {{ claim_against(c) }}{% endif %}. It {{ c.words }}.</li>
+          {% for e in c.extras %}<li>{{ e.label }}: {{ rate(e.rate) }}; compared with
+            {{ rate(e.base) }}{% if c.versus %} <span class="soft">· {{ c.versus }}</span>{% endif %}.</li>{% endfor %}
           {% for note in c.notes %}<li>{{ note }}</li>{% endfor %}
         {% else %}
-          <li><b>Result:</b> being tested. This fills in after the first nightly run.</li>
+          <li><b>Result:</b> {% if c.no_cases %}no cases in the days tested.{% else %}being tested. This fills in after the next nightly run.{% endif %}</li>
         {% endif %}
       </ul>
       {% if c.by_symbol %}
@@ -198,17 +222,17 @@
           <summary>Each instrument ({{ c.by_symbol|length }})</summary>
           <div class="tablewrap">
             <table class="stack">
-              <thead><tr><th>Instrument</th><th class="r">Measured</th><th class="r">Usually</th></tr></thead>
+              <thead><tr><th>Instrument</th><th class="r">Measured</th><th class="r">Compared with</th></tr></thead>
               <tbody>
               {% for r in c.by_symbol %}
                 <tr>
                   <td class="lead"><b>{{ r.name }}</b></td>
                   {% if c.measure == 'mean' %}
-                    <td class="r fig" data-label="Measured">{% if r.mean is not none %}{{ '%.2f'|format(r.mean) }}{% else %}—{% endif %}</td>
-                    <td class="r fig" data-label="Usually">{% if r.base is not none %}{{ '%.2f'|format(r.base) }}{% else %}—{% endif %}</td>
+                    <td class="r" data-label="Measured">{{ claim_figure(c, r.mean, none) }}</td>
+                    <td class="r" data-label="Compared with">{{ claim_figure(c, r.base, none) }}</td>
                   {% else %}
                     <td class="r" data-label="Measured">{{ rate(r.rate) }}</td>
-                    <td class="r" data-label="Usually">{{ rate(r.base) }}</td>
+                    <td class="r" data-label="Compared with">{{ rate(r.base) }}</td>
                   {% endif %}
                 </tr>
               {% endfor %}
@@ -257,7 +281,8 @@
 <section style="margin-top:var(--s4)">
   <div class="sechead"><h2>One example, drawn from the prices</h2></div>
   <div class="card learn-figure">
-    {{ ex.svg|safe }}
+    <div class="wide">{{ ex.wide|safe }}</div>
+    <div class="narrow">{{ ex.narrow|safe }}</div>
     <p class="prose" style="margin-top:var(--s2)">{{ ex.setup }} on {{ ex.name }},
       {{ ex.interval_words }} bars. It appeared on the bar of {{ ex.entry_at }}: a
       {{ ex.side }} at {{ ex.entry }}, stop {{ ex.stop }}, target {{ ex.target }}.
@@ -297,14 +322,16 @@
         {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
     {% endif %}
     {% if page.skipped_days.incomplete or page.skipped_days.roll %}
-      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
-        with too few bars and {{ page.skipped_days.roll }} futures contract-change
-        days.</li>
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }}
+        day{{ '' if page.skipped_days.incomplete == 1 else 's' }} with too few bars and
+        {{ page.skipped_days.roll }} futures contract-change
+        day{{ '' if page.skipped_days.roll == 1 else 's' }}.</li>
     {% endif %}
     {% if page.cells %}
       <li>{{ "{:,}".format(page.cells) }} results got a verdict across the lab. About
         1 in 20 can clear its margin of error by luck alone.</li>
     {% endif %}
+    {% if page.fresh %}<li>Last measured {{ page.fresh.newest|day }}.</li>{% endif %}
   </ul>
   <ul class="list" style="margin-top:var(--s2)">
     {% for line in page.concept.limits %}<li>{{ line }}</li>{% endfor %}

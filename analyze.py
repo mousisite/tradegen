@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 """Screenshot-driven day-trading analysis.
 
-    python analyze.py chart.png              read the ticker off an image
-    python analyze.py --clipboard            use whatever you just snipped
-    python analyze.py --symbol BTC-USD       skip the image entirely
+    run.bat chart.png              read the ticker off an image
+    run.bat --clipboard            use whatever you just snipped
+    run.bat --symbol BTC-USD       skip the image entirely
 
 Run with --help for the full option list.
 """
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -47,10 +48,10 @@ def parse_args(argv=None):
                     "day-trade plan with measured odds.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
-               "  python analyze.py chart.png\n"
-               "  python analyze.py --clipboard --account 5000 --risk 0.5\n"
-               "  python analyze.py --symbol NVDA --interval 15m\n"
-               "  python analyze.py --symbol ETH-USD --json out.json\n")
+               "  run.bat chart.png\n"
+               "  run.bat --clipboard --account 5000 --risk 0.5\n"
+               "  run.bat --symbol NVDA --interval 15m\n"
+               "  run.bat --symbol ETH-USD --json out.json\n")
     p.add_argument("image", nargs="?", help="path to a chart screenshot")
     p.add_argument("--clipboard", action="store_true",
                    help="read the screenshot from the clipboard")
@@ -137,12 +138,24 @@ def main(argv=None) -> int:
         cfg["allow_shorts"] = True
     if args.no_llm:
         cfg["use_llm_sentiment"] = False
+    # What was typed is held to the same limits as the settings file.
+    try:
+        if not math.isfinite(cfg["account_size"]):
+            raise RuntimeError("Account size must be an ordinary number.")
+        config_mod.validate(cfg)
+    except RuntimeError as exc:
+        console.print("[red]Config error:[/] %s" % exc)
+        return 2
 
     started = time.time()
     try:
         symbol, name, chart_note, _read = resolve_symbol(args, cfg)
     except VisionError as exc:
         console.print("[red]Could not read the screenshot:[/] %s" % exc)
+        return 2
+    except DataError as exc:
+        console.print("[red]Market data error:[/] %s" % exc)
+        console.print("[dim]Check the ticker, or try again in a minute.[/]")
         return 2
 
     # The pipeline itself lives in bot.engine, shared with the web interface,
@@ -175,11 +188,15 @@ def main(argv=None) -> int:
                       sentiment, cfg, chart_note,
                       strategy_report=result.strategy_report,
                       show_all_signals=args.all_signals)
-    tail = "[dim]Analysed in %.1fs. Data from Yahoo Finance, Google News and StockTwits." % (
-        time.time() - started)
+    tail = "[dim]Analysed in %.1fs. Data from %s." % (
+        time.time() - started, "Yahoo Finance" if args.no_news
+        else "Yahoo Finance, Google News and StockTwits")
     if result.run_id:
-        tail += "  Recorded as run #%d; take it with: python paper.py take %s" % (
-            result.run_id, bars.symbol)
+        tail += "  Recorded as run #%d" % result.run_id
+        # Anything but a call to act now has no trade in it to take.
+        if plan.action in ("BUY", "SHORT"):
+            tail += "; take it with: paper.bat take %s" % bars.symbol
+        tail += "."
     console.print(tail + "[/]\n")
 
     if args.json:

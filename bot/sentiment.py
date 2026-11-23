@@ -19,18 +19,22 @@ raises guidance"). Without a key it falls back to a finance-tuned lexicon.
 """
 from __future__ import annotations
 
+import calendar
 import html
 import math
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import feedparser
 import requests
 
 from . import upstream
+from .market import coin_ticker
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
@@ -38,6 +42,17 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 _GOOGLE_NEWS = "https://news.google.com/rss/search"
 _YAHOO_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
 _STOCKTWITS = "https://api.stocktwits.com/api/2/streams/symbol/{sym}.json"
+
+# How long an analysis waits for the news and the posts. They are read side by
+# side, so it is the longest the page waits for all of them together; read one
+# after another, slow sources added up to most of a minute.
+SOURCES_WAIT = 12.0
+_TIMEOUT = (5, 10)
+
+
+class SocialUnavailable(RuntimeError):
+    """StockTwits refused or did not answer, which is not the same as nobody
+    having posted."""
 
 # Finance-specific polarity. Values are deliberately asymmetric: markets react
 # harder to bad news than good, so negative terms carry more weight.
@@ -69,7 +84,7 @@ _LEXICON = {
     "halted": -1.3, "layoffs": -1.0, "layoff": -1.0, "cuts": -0.9, "cut": -0.8,
     "weak": -0.9, "weakness": -0.9, "decline": -0.8, "declines": -0.8,
     "loss": -0.9, "losses": -0.9, "bearish": -1.1, "resign": -1.0, "resigns": -1.0,
-    "short seller": -1.3, "overvalued": -0.8, "downside": -0.8, "selloff": -1.2,
+    "overvalued": -0.8, "downside": -0.8, "selloff": -1.2,
     "correction": -0.7, "risk": -0.4, "concerns": -0.7, "disappointing": -1.2,
     "scandal": -1.5, "delay": -0.8, "delayed": -0.8, "denies": -0.6,
     "fell": -0.8, "falling": -0.8, "dropped": -0.8, "slipped": -0.7,
@@ -124,6 +139,9 @@ class Sentiment:
     # viewer of the same ticker, and only the owner of the copy can add a key,
     # so the page decides who is shown this.
     setup_hint: str = ""
+    # Why there are no posts, when there are none. Not in `notes` either: it
+    # says nothing against a trade, and the page shows it with the news.
+    social_note: str = ""
 
     def label(self) -> str:
         s = self.score
@@ -142,9 +160,8 @@ def _age_hours(published_struct) -> float:
     if not published_struct:
         return 48.0
     try:
-        ts = time.mktime(published_struct)
-        # feedparser returns UTC struct_time; mktime reads it as local.
-        ts -= time.timezone if not time.daylight else time.altzone
+        # feedparser returns UTC.
+        ts = calendar.timegm(published_struct)
         return max(0.0, (time.time() - ts) / 3600.0)
     except Exception:
         return 48.0
@@ -211,18 +228,15 @@ def lexicon_score(text: str) -> float:
 _YAHOO_HOST = "Yahoo Finance"
 
 
-def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
-    """Pull recent headlines from Google News and Yahoo Finance."""
+def _google_news(query: str, limit: int) -> List[Item]:
+    """Headlines from Google News, or none when it does not answer."""
     items: List[Item] = []
-    query = name if name and name.upper() != symbol.upper() else symbol
-    base = symbol.replace("-USD", "")
-
     try:
         url = "%s?q=%s&hl=en-US&gl=US&ceid=US:en" % (
             _GOOGLE_NEWS, requests.utils.quote('"%s" stock OR crypto' % query))
         # Fetched here rather than by feedparser, which waits with no time
         # limit at all, inside the request of whoever opened the page.
-        r = requests.get(url, headers=_HEADERS, timeout=10)
+        r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         feed = feedparser.parse(r.content if r.status_code == 200 else b"")
         for e in feed.entries[:limit]:
             items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
@@ -231,25 +245,63 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
                               url=e.get("link", "")))
     except Exception:
         pass
+    return items
 
+
+def _yahoo_news(symbol: str) -> List[Item]:
+    """Headlines from Yahoo Finance, or none when it does not answer.
+
+    Asked by Yahoo's own symbol. A coin's bare ticker is often a company's or
+    a fund's there (LINK, LTC, BTC), and its headlines were scored as the
+    coin's.
+    """
+    items: List[Item] = []
     try:
         # Yahoo's news search shares the rate limit with its prices. It asks
         # nothing while the source is refusing, and a refusal here is told to
         # the shared breaker so the price requests stand back too.
         upstream.check(_YAHOO_HOST)
-        r = requests.get(_YAHOO_SEARCH, params={"q": base, "newsCount": 15, "quotesCount": 0},
-                         headers=_HEADERS, timeout=15)
+    except upstream.Throttled:
+        return items
+    try:
+        r = requests.get(_YAHOO_SEARCH, params={"q": symbol, "newsCount": 15, "quotesCount": 0},
+                         headers=_HEADERS, timeout=_TIMEOUT)
         if upstream.is_throttle(r.status_code):
-            upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r))
+            upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r),
+                                    r.status_code)
         elif r.status_code == 200:
+            upstream.note_ok(_YAHOO_HOST)
             for n in r.json().get("news", []):
                 pub = n.get("providerPublishTime")
                 age = (time.time() - pub) / 3600.0 if pub else 48.0
                 items.append(Item(text=html.unescape(n.get("title", "")), kind="news",
                                   source=n.get("publisher", "Yahoo Finance"),
                                   age_hours=max(0.0, age), url=n.get("link", "")))
+        else:
+            upstream.note_unclear(_YAHOO_HOST)
     except Exception:
-        pass
+        upstream.note_unclear(_YAHOO_HOST)
+    return items
+
+
+def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
+    """Pull recent headlines from Google News and Yahoo Finance, side by side.
+
+    A source that has not answered in SOURCES_WAIT seconds is left out.
+    """
+    query = name if name and name.upper() != symbol.upper() else symbol
+    give_up = time.monotonic() + SOURCES_WAIT
+    pool = ThreadPoolExecutor(max_workers=2)
+    items: List[Item] = []
+    try:
+        for job in (pool.submit(_google_news, query, limit),
+                    pool.submit(_yahoo_news, symbol)):
+            try:
+                items += job.result(timeout=max(0.0, give_up - time.monotonic()))
+            except Exception:
+                pass
+    finally:
+        pool.shutdown(wait=False)
 
     # Drop near-duplicate headlines syndicated across outlets.
     seen, unique = set(), []
@@ -264,48 +316,62 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
 def gather_social(symbol: str, limit: int = 30) -> List[Item]:
     """Pull recent StockTwits posts, filtering out ticker-spam.
 
-    A post listing five or more tickers is almost always promotional noise
+    A post listing four or more tickers is almost always promotional noise
     rather than an opinion about this instrument, so it is discarded.
-    """
-    base = symbol.replace("-USD", ".X") if symbol.endswith("-USD") else symbol
-    out: List[Item] = []
-    for candidate in (base, symbol.replace("-USD", "")):
-        try:
-            r = requests.get(_STOCKTWITS.format(sym=candidate), headers=_HEADERS, timeout=15)
-            if r.status_code != 200:
-                continue
-            messages = r.json().get("messages", [])
-        except Exception:
-            continue
 
-        for m in messages[:limit]:
-            body = html.unescape((m.get("body") or "").strip())
-            if not body:
-                continue
-            if len(m.get("symbols") or []) >= 4:        # ticker-spam filter
-                continue
-            # Short @-replies are conversation between users, not a view on the
-            # instrument, and they add noise without adding signal.
-            if body.startswith("@") and len(body) < 80:
-                continue
-            created = m.get("created_at", "")
-            try:
-                ts = time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
-                ts -= time.timezone if not time.daylight else time.altzone
-                age = max(0.0, (time.time() - ts) / 3600.0)
-            except Exception:
-                age = 12.0
-            tag = ((m.get("entities") or {}).get("sentiment") or {})
-            tag = (tag or {}).get("basic")
-            out.append(Item(text=body, kind="social", source="StockTwits",
-                            age_hours=age, tagged=tag))
-        if out:
-            break
+    A coin's posts are under its ticker with .X on the end, and nowhere else:
+    the bare ticker is a company's or a fund's. Raises SocialUnavailable when
+    StockTwits refuses or does not answer.
+    """
+    coin = coin_ticker(symbol)
+    try:
+        r = requests.get(_STOCKTWITS.format(sym=requests.utils.quote(
+            coin + ".X" if coin else symbol, safe="")), headers=_HEADERS, timeout=_TIMEOUT)
+        if r.status_code == 404:               # a symbol it does not have
+            return []
+        if r.status_code != 200:
+            raise SocialUnavailable("HTTP %s" % r.status_code)
+        messages = r.json().get("messages") or []
+    except SocialUnavailable:
+        raise
+    except Exception as exc:
+        raise SocialUnavailable(type(exc).__name__) from exc
+
+    out: List[Item] = []
+    for m in messages[:limit]:
+        body = html.unescape((m.get("body") or "").strip())
+        if not body:
+            continue
+        if len(m.get("symbols") or []) >= 4:        # ticker-spam filter
+            continue
+        # Short @-replies are conversation between users, not a view on the
+        # instrument, and they add noise without adding signal.
+        if body.startswith("@") and len(body) < 80:
+            continue
+        created = m.get("created_at", "")
+        try:
+            ts = calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ"))
+            age = max(0.0, (time.time() - ts) / 3600.0)
+        except Exception:
+            age = 12.0
+        tag = ((m.get("entities") or {}).get("sentiment") or {})
+        tag = (tag or {}).get("basic")
+        out.append(Item(text=body, kind="social", source="StockTwits",
+                        age_hours=age, tagged=tag))
     return out
 
 
-def _score_with_claude(items: List[Item], symbol: str) -> bool:
-    """Score items with Claude. Returns True if scoring succeeded.
+# Scores Claude has given, by exactly what it was asked: when, how many it
+# scored, and the scores.
+SCORED_TTL = 30 * 60.0
+SCORED_KEPT = 200
+_SCORED: Dict[Tuple[str, str, str], Tuple[float, int, List[float]]] = {}
+_SCORED_LOCK = threading.Lock()
+
+
+def _score_with_claude(items: List[Item], symbol: str) -> int:
+    """Score items with Claude. Returns how many it scored, or 0 when that was
+    too few to use; the word list scores any it left out.
 
     Financial headlines routinely invert naive sentiment. "Beats earnings but
     guides lower" is bearish; a lexicon reads it as positive. When a key is
@@ -313,14 +379,24 @@ def _score_with_claude(items: List[Item], symbol: str) -> bool:
     """
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key or not items:
-        return False
+        return 0
     try:
         import anthropic
     except ImportError:
-        return False
+        return 0
 
     numbered = "\n".join("%d. %s" % (i + 1, it.text[:220])
                          for i, it in enumerate(items))
+    # The same items are the same question, and each asking is paid for. The
+    # analysis above this is kept per person's settings, so one account with a
+    # different size in each address asked it again every time.
+    asked = (os.environ.get("CLAUDE_MODEL", ""), symbol, numbered)
+    with _SCORED_LOCK:
+        kept = _SCORED.get(asked)
+    if kept is not None and time.time() - kept[0] < SCORED_TTL:
+        for it, score in zip(items, kept[2]):
+            it.score = score
+        return kept[1]
     prompt = (
         "You are scoring market sentiment for the instrument %s for a SHORT-TERM "
         "day trade (hours, not months).\n\n"
@@ -333,40 +409,74 @@ def _score_with_claude(items: List[Item], symbol: str) -> bool:
     )
     try:
         # The SDK would otherwise wait ten minutes, three times, inside a page
-        # request. A failure here only means the word list scores the items.
-        client = anthropic.Anthropic(api_key=key, timeout=20.0, max_retries=1)
+        # request. A failure here only means the word list scores the items,
+        # so it is not tried twice.
+        client = anthropic.Anthropic(api_key=key, timeout=20.0, max_retries=0)
         resp = client.messages.create(
             model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
-            max_tokens=1200,
+            max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     except Exception:
-        return False
+        return 0
 
-    got = 0
-    for line in text.splitlines():
+    # An answer that ran out of room stops part-way, perhaps inside a number,
+    # so its last line is not read.
+    ended = getattr(resp, "stop_reason", None)
+    if ended == "refusal":
+        return 0
+    lines = text.splitlines()
+    if ended == "max_tokens":
+        lines = lines[:-1]
+
+    got = {}
+    for line in lines:
         m = re.match(r"\s*(\d+)\s*[:.\)]\s*(-?\d*\.?\d+)", line)
         if not m:
             continue
         idx, val = int(m.group(1)) - 1, float(m.group(2))
         if 0 <= idx < len(items):
-            items[idx].score = max(-1.0, min(1.0, val))
-            got += 1
-    return got >= max(1, len(items) // 3)
+            got[idx] = max(-1.0, min(1.0, val))
+    if len(got) < max(1, len(items) // 3):
+        return 0
+    # An item it gave no score for used to count as neutral, whatever it said.
+    for idx, it in enumerate(items):
+        it.score = got[idx] if idx in got else lexicon_score(it.text)
+    # One cut short is worth asking again.
+    if ended != "max_tokens":
+        with _SCORED_LOCK:
+            _SCORED[asked] = (time.time(), len(got), [it.score for it in items])
+            while len(_SCORED) > SCORED_KEPT:
+                del _SCORED[min(_SCORED, key=lambda k: _SCORED[k][0])]
+    return len(got)
 
 
 def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     """Collect and score everything, then blend into one directional read."""
-    news = gather_news(symbol, name)
-    social = gather_social(symbol)
+    give_up = time.monotonic() + SOURCES_WAIT
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        posts = pool.submit(gather_social, symbol)
+        news = gather_news(symbol, name)
+        social_note = "No recent posts about this symbol on StockTwits."
+        try:
+            social = posts.result(timeout=max(0.0, give_up - time.monotonic()))
+        except Exception:
+            social = []
+            social_note = "StockTwits did not answer, so posts were not read."
+    finally:
+        pool.shutdown(wait=False)
     notes: List[str] = []
     setup_hint = ""
 
     scored_by = "a list of finance words"
     all_items = news + social
-    if use_llm and _score_with_claude(all_items, symbol):
+    by_claude = _score_with_claude(all_items, symbol) if use_llm else 0
+    if by_claude:
         scored_by = "Claude (%s)" % os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+        if by_claude < len(all_items):
+            scored_by += ", and a list of finance words where it gave no score"
     else:
         for it in all_items:
             it.score = lexicon_score(it.text)
@@ -416,8 +526,6 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
     fresh = any(i.age_hours <= 3.0 and abs(i.score) >= 0.5 for i in news)
     if not news:
         notes.append("No news retrieved for this symbol.")
-    if not social:
-        notes.append("No StockTwits activity found for this symbol.")
 
     return Sentiment(
         score=max(-1.0, min(1.0, combined)),
@@ -427,4 +535,5 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         method=scored_by,
         items=sorted(all_items, key=lambda i: -abs(i.score) * i.recency_weight)[:12],
         notes=notes, fresh_catalyst=fresh, setup_hint=setup_hint,
+        social_note="" if social else social_note,
     )

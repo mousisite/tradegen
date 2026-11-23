@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_learn.html" import kept, versus, claim_measured, claim_usual with context %}
+{% from "_learn.html" import kept, versus, claim_measured, claim_against with context %}
 {% set active = 'stocks' %}
 {% set page_blurb = "The ideas a popular free day-trading course teaches (liquidity sweeps, breaks of structure, fair value gaps, sessions, the daily lean), each in plain words and tested on real futures, funds, coins and stocks after trading costs, against random trades at the same times of day. Not financial advice." %}
 {% block title %}Price action, tested: do the day-trading course's ideas work? · Orenth{% endblock %}
@@ -13,7 +13,7 @@
   .learn-topics a { font-weight: 600; }
   .learn-topics .chip { margin-left: auto; }
   .learn-claim { font-size: var(--t-sm); color: var(--ink); }
-  .learn-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
+  .learn-source { max-width: 76ch; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
 </style>
 {% endblock %}
 {% block content %}
@@ -41,26 +41,36 @@
     {% if page.measured_setups %}
       <p class="lead">On {{ page.main_interval_words }} prices, with a target twice
         the risk and after costs, {{ t[1] }} of the {{ page.measured_setups }}
-        setup{{ 's' if page.measured_setups != 1 }} measured kept money by more than its margin of error,
-        {{ t[-1] }} lost money by more than its margin, and {{ t[0] }} cannot be
+        setup{{ 's' if page.measured_setups != 1 }} measured kept money by more than
+        {{ 'its' if 1 in (t[1], page.measured_setups) else 'their' }} margin of error,
+        {{ t[-1] }} lost money by more than {{ 'its' if 1 in (t[-1], page.measured_setups) else 'their' }} margin, and {{ t[0] }} cannot be
         told apart from luck{% if t[none] %}; {{ t[none] }} had too few trades to
         say{% endif %}.</p>
     {% endif %}
     {% set ct = page.claim_tally %}
     {% if page.measured_claims %}
       <p class="prose">Of the course's claims that could be checked and were
-        measured, {{ ct[1] }} happen more often than usual, {{ ct[-1] }} less
-        often, and {{ ct[0] }} cannot be told apart from what usually
-        happens{% if ct[none] %}; {{ ct[none] }} had too few cases to say{% endif %}.</p>
+        measured, {{ ct[1] }} held by more than {{ 'its' if ct[1] == 1 else 'their' }}
+        margin of error, {{ ct[-1] }} went the other way by more than
+        {{ 'its' if ct[-1] == 1 else 'their' }} margin, and {{ ct[0] }} cannot be told
+        either way{% if ct[none] %}; {{ ct[none] }} had too few cases to say{% endif %}.</p>
+    {% endif %}
+    {% if page.fresh and page.fresh.stale %}
+      <p class="prose">Some of these figures have not been refreshed since
+        {{ page.fresh.oldest|day }}. The newest were measured on {{ page.fresh.newest|day }}.</p>
     {% endif %}
     {% if page.cells %}
       <p class="prose">{{ "{:,}".format(page.cells) }} results got a verdict here
         (each setup, instrument, bar size and target). About 1 in 20 can clear
-        its margin of error by luck alone, so one or two green results on their
-        own are weak evidence.</p>
+        its margin of error by luck alone{% if page.cells >= 40 %}, which is about
+        {{ (page.cells / 20)|round|int }} of these{% endif %}, so a few green results
+        on their own are weak evidence.</p>
     {% endif %}
-    <p class="prose">These setups do not change Orenth's Buy, Wait or Avoid
-      calls. They are measured and shown, nothing more.</p>
+    <p class="prose">Ten of these setups also have a say in Orenth's Buy, Wait
+      or Avoid calls, beside its other strategies, since 19 November 2026.
+      Buying the breakout does not: it is only measured here. The results on
+      this page use the course's own stops and two targets, and are measured
+      apart from the calls.</p>
   {% endif %}
 </div>
 
@@ -97,12 +107,13 @@
 <section style="margin-top:var(--s4)">
   <div class="sechead"><h2>The claims, checked</h2></div>
   <p class="prose" style="margin-bottom:var(--s2)">What the course says happens,
-    in Orenth's words, beside how often it happened and how often the same thing
-    happens anyway (the comparison each topic describes).</p>
+    in Orenth's words: what was measured, what it is compared with, and how the
+    two came out. Each topic says exactly how. R is the amount risked on a
+    trade.</p>
   <div class="card pad0">
     <div class="tablewrap">
       <table class="stack">
-        <thead><tr><th>The claim</th><th class="r">Measured</th><th class="r">Usually</th>
+        <thead><tr><th>The claim</th><th class="r">Measured</th><th class="r">Compared with</th>
           <th>In words</th></tr></thead>
         <tbody>
         {% for c in page.claims %}
@@ -112,10 +123,10 @@
                  href="{{ url_for('learn_topic', slug=c.learn) }}">{{ c.title }} &rarr;</a>{% endif %}</td>
             {% if c.measured %}
               <td class="r" data-label="Measured">{{ claim_measured(c) }}</td>
-              <td class="r" data-label="Usually">{{ claim_usual(c) }}</td>
+              <td class="r" data-label="Compared with">{{ claim_against(c) }}</td>
               <td class="wide">{{ c.words|capitalize }}</td>
             {% else %}
-              <td class="wide soft" colspan="3">Being tested</td>
+              <td class="wide soft" colspan="3">{{ 'No cases in the days tested' if c.no_cases else 'Being tested' }}</td>
             {% endif %}
           </tr>
         {% endfor %}
@@ -131,7 +142,7 @@
     <ul class="learn-topics">
       {% for t in page.topics %}
         <li><a href="{{ url_for('learn_topic', slug=t.slug) }}">{{ t.title }}</a>
-          <span class="chip {{ 'mute' if t.measured else 'hold' }}">{{ 'measured' if t.measured else 'being tested' }}</span></li>
+          {% if t.own %}<span class="chip {{ 'mute' if t.measured else 'hold' }}">{{ 'measured' if t.measured else 'being tested' }}</span>{% endif %}</li>
       {% endfor %}
     </ul>
   </div>
@@ -150,18 +161,19 @@
         {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
     {% endif %}
     {% if page.skipped_days.incomplete or page.skipped_days.roll %}
-      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
-        with too few bars and {{ page.skipped_days.roll }} futures contract-change
-        days.</li>
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }}
+        day{{ '' if page.skipped_days.incomplete == 1 else 's' }} with too few bars and
+        {{ page.skipped_days.roll }} futures contract-change
+        day{{ '' if page.skipped_days.roll == 1 else 's' }}.</li>
     {% endif %}
   </ul>
   <span class="eyebrow" style="display:block;margin-top:var(--s3)">What this cannot tell you</span>
   <ul class="list">
     {% for line in page.limits %}<li>{{ line }}</li>{% endfor %}
   </ul>
-  {% if page.run and page.run.finished %}
+  {% if page.fresh %}
     <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s2)">Last
-      run finished {{ page.run.finished|day }}.</p>
+      measured {{ page.fresh.newest|day }}.</p>
   {% endif %}
 </div>
 

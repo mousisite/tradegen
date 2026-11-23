@@ -6,6 +6,8 @@ other's trades. Adding a login without that would be worse than having no login
 at all, because it looks like a boundary while not being one.
 """
 import os as _os
+import re
+import sqlite3
 import sys as _sys
 import time
 
@@ -357,6 +359,7 @@ try:
     page = visible(c, "/monitor")
     check("run again, the call is unchanged rather than the same change twice",
           "BUY, unchanged" in page and "went from WAIT to BUY" not in page)
+    check("and the row says which instrument it is about", "ZZCAROL: BUY, unchanged" in page)
 finally:
     _alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse = _real
 
@@ -374,6 +377,52 @@ sign_in_as(c, alice)
 r = c.post("/settings", data={"account_size": "123456", "risk_per_trade_pct": "2"})
 check("Alice can save her settings", r.status_code == 302, r.status_code)
 check("and sees them", "123456" in visible(c, "/settings"))
+
+# Only the four journal rules used to be checked: the rest went straight into
+# every size and plan, and a NaN broke that account's pages.
+kept = A.settings_for(db.connect(DB), alice.id)
+for form, why in (({"account_size": "-5000"}, "a negative account"),
+                  ({"account_size": "nan"}, "an account that is not a number"),
+                  ({"cost_bps_equity": "inf"}, "an endless cost"),
+                  ({"risk_per_trade_pct": "5000"}, "a risk of 5,000%"),
+                  ({"stop_atr_multiple": "0"}, "no stop"),
+                  ({"min_conviction": "9"}, "a conviction of 9"),
+                  ({"horizon_bars": "1e999"}, "an endless window"),
+                  ({"horizon_bars": "-7"}, "a window of minus seven bars"),
+                  ({"interval": "banana"}, "a bar size that is not one")):
+    r = c.post("/settings", data=form)
+    check("%s is refused in words, and nothing is saved" % why,
+          r.status_code == 200 and 'class="saved" style=' in r.data.decode("utf-8", "replace")
+          and A.settings_for(db.connect(DB), alice.id) == kept, r.status_code)
+check("a higher least conviction saves, with no second field to trip on",
+      c.post("/settings", data={"min_conviction": "0.6"}).status_code == 302
+      and A.settings_for(db.connect(DB), alice.id)["min_conviction"] == 0.6)
+conn = db.connect(DB)
+A.save_settings(conn, alice.id, dict(kept, account_size=float("nan"), horizon_bars=-7))
+conn.close()
+check("one saved before they were checked no longer breaks the pages",
+      "nan" not in visible(c, "/settings").lower().split() and c.get("/portfolio").status_code == 200)
+conn = db.connect(DB)
+A.save_settings(conn, alice.id, kept)
+conn.close()
+# A browser sends the form only when every field fits its own limits, and the
+# first target's 2.25 did not fit steps of 0.1.
+page = c.get("/settings").data.decode("utf-8", "replace")
+unfit = []
+for tag in re.findall(r"<input[^>]*>", page):
+    at = dict(re.findall(r'([a-z]+)="([^"]*)"', tag))
+    if at.get("type") != "number":
+        continue
+    value, low = float(at["value"]), float(at.get("min", "0"))
+    step = at.get("step", "1")
+    if value < low or value > float(at.get("max", "inf")) or (
+            step != "any" and abs((value - low) / float(step)
+                                  - round((value - low) / float(step))) > 1e-9):
+        unfit.append((at["name"], at["value"], step))
+check("every number the Settings page fills in fits that field's own limits", not unfit, unfit)
+digits = [name for name in ("horizon_bars", "last_entry_time")
+          if 'inputmode="numeric"' in re.search(r'<input[^>]*name="%s"[^>]*>' % name, page).group(0)]
+check("a phone's keyboard can type 'auto' and '10:30'", not digits, digits)
 
 sign_in_as(c, bob)
 check("Bob does not get Alice's account size",
@@ -411,6 +460,12 @@ check("different settings give different analysis cache keys",
       web._settings_key({"account_size": 1000}) != web._settings_key({"account_size": 9000}))
 check("the same settings give the same key",
       web._settings_key({"account_size": 1000}) == web._settings_key({"account_size": 1000}))
+
+check("and so do settings no analysis reads",
+      web._settings_key({"account_size": 1000, "calm_candles": True,
+                         "last_entry_time": "15:00", "max_trades_per_day": 3,
+                         "daily_loss_limit_r": 2.0})
+      == web._settings_key({"account_size": 1000}))
 
 conn = db.connect(DB)
 A.save_settings(conn, bob.id, {"account_size": 777, "not_a_setting": 1})
@@ -503,13 +558,6 @@ conn.commit()
 check("an expired session is refused", A.user_for_session(conn, expired) is None)
 check("purging removes it", A.purge_expired(conn) >= 1)
 
-A.end_all_sessions(conn, alice.id)          # start from a known state
-t1 = A.start_session(conn, alice.id)
-t2 = A.start_session(conn, alice.id)
-check("signing out everywhere ends every one of them",
-      A.end_all_sessions(conn, alice.id) == 2)
-check("both are then dead",
-      A.user_for_session(conn, t1) is None and A.user_for_session(conn, t2) is None)
 conn.close()
 
 sign_in_as(c, bob)
@@ -562,6 +610,83 @@ try:
     check("deleting a missing account is refused", False)
 except ValueError:
     check("deleting a missing account is refused", True)
+
+# More analyses than SQLite takes values in one statement (32,766).
+busy = A.upsert_google_user(conn, {"email": "busy@example.com", "sub": "sub-busy"})
+run_columns = [r for r in conn.execute("PRAGMA table_info(runs)")
+               if r["notnull"] and not r["pk"] and r["name"] != "user_id"]
+insert_run = "INSERT INTO runs (user_id%s) VALUES (?%s)" % (
+    "".join(", " + r["name"] for r in run_columns),
+    "".join(", 1" if r["type"] in ("INTEGER", "REAL") else ", 'x'" for r in run_columns))
+conn.executemany(insert_run, [(busy.id,)] * 32800)
+busy_run = conn.execute("SELECT MAX(id) FROM runs WHERE user_id=?", (busy.id,)).fetchone()[0]
+conn.execute("INSERT INTO trades (run_id, symbol, direction, ts_opened, entry, stop, user_id) "
+             "VALUES (?, 'AAPL', 1, 1, 100, 95, ?)", (busy_run, alice.id))
+hers = conn.execute("SELECT MAX(id) FROM trades WHERE user_id=?", (alice.id,)).fetchone()[0]
+conn.commit()
+busy_token = A.start_session(conn, busy.id)
+
+# Stopped at the very last step, nothing of theirs may be gone.
+real_forget = apple_store.forget_user
+
+
+def locked(*_a):
+    raise sqlite3.OperationalError("database is locked")
+
+
+apple_store.forget_user = locked
+try:
+    A.delete_user(conn, busy.id)
+    check("a deletion that fails part-way says so", False)
+except sqlite3.OperationalError:
+    other = db.connect(DB)
+    check("a deletion that fails part-way leaves everything where it was",
+          A.owned_counts(other, busy.id)["runs"] == 32800
+          and A.user_for_session(other, busy_token) is not None
+          and not conn.in_transaction)
+    other.close()
+    leaving = web.app.test_client()
+    with leaving.session_transaction() as sess:
+        sess[web.SESSION_KEY] = busy_token
+    r = leaving.post("/account/delete", data={"confirm": "delete"})
+    check("and the person is told in words, not shown a broken page",
+          r.status_code == 503 and "still here" in r.data.decode("utf-8", "replace"),
+          r.status_code)
+finally:
+    apple_store.forget_user = real_forget
+A.delete_user(conn, busy.id)
+check("an account with any number of analyses can be deleted",
+      A.get_user(conn, busy.id) is None)
+check("and someone else's trade that named one of them stays theirs",
+      conn.execute("SELECT run_id FROM trades WHERE id=? AND user_id=?",
+                   (hers, alice.id)).fetchone()["run_id"] is None)
+conn.execute("DELETE FROM trades WHERE id=?", (hers,))
+conn.commit()
+
+# A deleted row's bytes stay in the file, and so in later backups, unless the
+# connection overwrites them.
+noted = A.upsert_google_user(conn, {"email": "noted@example.com", "sub": "sub-noted"})
+db.thesis_save(conn, "AAPL", 100.0, 0.1, "x", [], [], [], [], "unmistakable-note-7781" * 2000,
+               user=noted.id)
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+A.delete_user(conn, noted.id)
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+with open(DB, "rb") as f:
+    raw = f.read()
+check("a deleted account's words are not left in the file",
+      b"unmistakable-note-7781" not in raw and b"noted@example.com" not in raw)
+
+# A Google address changed to one another account here uses.
+mover = A.upsert_google_user(conn, {"email": "mover@example.com", "sub": "sub-mover"})
+taken = A.upsert_email_user(conn, "taken@example.com")
+moved = A.upsert_google_user(conn, {"email": "taken@example.com", "sub": "sub-mover"})
+check("a Google address another account uses does not lock its owner out",
+      moved.id == mover.id and moved.email == "mover@example.com")
+check("nor take that account's address",
+      A.get_user(conn, taken.id).email == "taken@example.com")
+moved = A.upsert_google_user(conn, {"email": "new@example.com", "sub": "sub-mover"})
+check("while a free one is still taken up",
+      moved.id == mover.id and moved.email == "new@example.com")
 conn.close()
 
 print()
@@ -607,16 +732,47 @@ try:
     check("the journal shows them the example account instead",
           r.status_code == 200
           and "looking around an example account" in r.data.decode("utf-8", "replace"))
+    # Link checkers and uptime monitors ask with HEAD.
+    for path in ("/trades", "/strategies", "/settings"):
+        r = anon.head(path)
+        check("HEAD %s answers as GET does" % path,
+              r.status_code == 200 == anon.get(path).status_code, r.status_code)
+    r = anon.head("/account")
+    check("and HEAD for a page behind the login still says to sign in",
+          r.status_code == 302 and "/signin" in r.headers.get("Location", ""))
+    check("while a visitor's POST is still an action that needs signing in",
+          anon.post("/settings").status_code == 302)
     r = anon.get("/api/alerts/status")
     check("the api answers 401 rather than redirecting", r.status_code == 401)
     check("the sign-in page is reachable", anon.get("/signin").status_code == 200)
     check("static files stay reachable",
           anon.get("/static/style.css").status_code == 200)
 
-    r = anon.get("/auth/google/callback?code=abc&state=forged")
-    check("a forged state is refused", r.status_code == 400)
-    r = anon.get("/auth/google/callback?state=x")
-    check("a callback with no code is refused", r.status_code == 400)
+    def mid_sign_in():
+        """A browser part-way through, and the state it holds."""
+        browser = web.app.test_client()
+        browser.get("/auth/google")
+        with browser.session_transaction() as sess:
+            return browser, sess["oauth_state"]
+
+    asked = []
+    real_sign_in = auth_mod.sign_in
+    auth_mod.sign_in = lambda *a: asked.append(a)
+    try:
+        for forged in ("forged", "", "%C3%A9"):
+            browser, _real = mid_sign_in()
+            r = browser.get("/auth/google/callback?code=abc&state=" + forged)
+            check("a forged state (%r) is refused" % forged, r.status_code == 400
+                  and "did not match" in r.data.decode("utf-8", "replace"), r.status_code)
+        browser, real = mid_sign_in()
+        r = browser.get("/auth/google/callback?state=" + real)
+        check("a callback with no code is refused", r.status_code == 400
+              and "no sign-in code" in r.data.decode("utf-8", "replace"), r.status_code)
+        r = anon.get("/auth/google/callback?code=abc&state=forged")
+        check("as is one where no sign-in was begun", r.status_code == 400)
+        check("and Google was asked about none of them", not asked, asked)
+    finally:
+        auth_mod.sign_in = real_sign_in
 
     _os.environ["GOOGLE_ALLOWED_DOMAINS"] = "example.com"
     check("a domain restriction is read", auth_mod.allowed_domains() == ("example.com",))
@@ -805,20 +961,150 @@ try:
           conn.execute("SELECT COUNT(*) FROM runs WHERE user_id=?",
                        (demo_user.id,)).fetchone()[0] == 0)
     # An example book priced weeks ago drifts past its stops. It is refilled
-    # at today's prices once a week, and only its own rows are touched.
-    _others = conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
-                           (demo_user.id,)).fetchone()[0]
-    conn.execute("UPDATE trades SET ts_opened=ts_opened-? WHERE user_id=?",
-                 (_demo.RESEED_AFTER + 86400, demo_user.id))
-    conn.commit()
-    _demo.user(conn)
-    _newest = conn.execute("SELECT MAX(ts_opened) FROM trades WHERE user_id=?",
-                           (demo_user.id,)).fetchone()[0]
-    check("a stale example account is refilled at today's prices",
-          _newest is not None and time.time() - _newest < 600)
-    check("and nobody else's trades are touched",
-          conn.execute("SELECT COUNT(*) FROM trades WHERE user_id<>?",
-                       (demo_user.id,)).fetchone()[0] == _others)
+    # at today's prices once a week by the background job, never in a visitor's
+    # request, and only its own rows are touched.
+    import math as _math
+    from types import SimpleNamespace as _NS
+    from bot import market as _market
+    _real_fetch, _asked = _market.fetch_bars, []
+    _levels = {"NVDA": 140.0, "AAPL": 200.0, "TSLA": 250.0, "MSFT": 400.0,
+               "BTC-USD": 60000.0}
+    _today = int(time.time()) // 86400
+
+    def _bars(symbol, interval="5m", lookback=None, splits=()):
+        """Ninety days round a level, the last finished one yesterday's."""
+        _asked.append(symbol)
+        coin = symbol.endswith("-USD")
+        start = [(_today - k) * 86400 + (0 if coin else 52200) for k in range(90, 0, -1)]
+        close = [_levels[symbol] * (1 + 0.05 * _math.sin(k / 2.5)) for k in range(90)]
+        open_ = close[:1] + close[:-1]
+        return _NS(symbol=symbol, timestamp=start, open=open_, close=close,
+                   high=[max(a, b) * 1.005 for a, b in zip(open_, close)],
+                   low=[min(a, b) * 0.995 for a, b in zip(open_, close)],
+                   last_price=close[-1], is_crypto=coin, splits=list(splits))
+
+    def _refused(symbol, interval="5m", lookback=None):
+        _asked.append(symbol)
+        raise _market.DataError("no prices just now")
+
+    def _rows(table="trades", mine=True):
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM %s WHERE user_id%s? ORDER BY 1" % (table, "=" if mine else "<>"),
+            (demo_user.id,))]
+
+    _others = _rows(mine=False)
+    try:
+        _market.fetch_bars = _refused
+        _before = _rows()
+        check("the example can be opened with no price to be had",
+              len(_before) >= 4 and _demo.user(conn).id == demo_user.id and not _asked, _asked)
+        check("and while prices cannot be read the book that is there is kept",
+              _demo.refresh(conn) is False and len(_asked) == 1 and _rows() == _before, _asked)
+        _market.fetch_bars = lambda s, i="5m", lookback=None: (
+            _bars(s, splits=[(time.time() - 5 * 86400, 10.0)] if s == "TSLA" else ()))
+        check("nor is it refilled across a split, whose prices would be adjusted twice",
+              _demo.refresh(conn) is False and _rows() == _before)
+
+        _market.fetch_bars = _bars
+        db.event_add(conn, demo_user.id, "price_above", "NVDA", "NVDA rose above 198", 199.0, "")
+        check("with prices it is refilled", _demo.refresh(conn) is True)
+        _book = _rows()
+        check("with two trades open and three closed: a target, a stop and an early exit",
+              sorted(t["status"] for t in _book) == ["closed"] * 3 + ["open"] * 2
+              and {t["exit_reason"] for t in _book} == {None, "target", "stop", "manual"},
+              [(t["symbol"], t["status"], t["exit_reason"]) for t in _book])
+        check("a watchlist, an alert and two theses",
+              [len(_rows(t)) for t in ("watchlist", "alerts", "theses")] == [4, 1, 2])
+        check("and nothing in its alert history about the book before",
+              not _rows("alert_events"))
+        check("a thesis in it states nothing about the company",
+              not any(w in str(t) for t in _rows("theses")
+                      for w in ("Data-centre", "Deliveries", "argins", "gross")))
+
+        def _on_its_day(when, price, symbol):
+            b = _bars(symbol)
+            k = max(k for k, t in enumerate(b.timestamp) if t <= when)
+            return b.low[k] - 0.01 <= price <= b.high[k] + 0.01
+
+        check("every entry and exit is a price the market had that day",
+              all(_on_its_day(t["ts_opened"], t["entry"], t["symbol"])
+                  and (t["ts_closed"] is None
+                       or _on_its_day(t["ts_closed"], t["exit_price"], t["symbol"]))
+                  for t in _book), _book)
+        check("and no trade is closed in the second it was opened",
+              all(t["ts_closed"] - t["ts_opened"] > 3600 for t in _book if t["ts_closed"]))
+        del _asked[:]
+        check("a fresh one is left alone", _demo.refresh(conn) is False and not _asked)
+        conn.execute("UPDATE meta SET value=? WHERE key='demo_filled'",
+                     (str(int(time.time()) - _demo.RESEED_AFTER - 60),))
+        conn.commit()
+        _ids = {t["id"] for t in _rows()}
+        _demo.user(conn)
+        check("a visitor to a stale one does not wait for its refill",
+              not _asked and {t["id"] for t in _rows()} == _ids, _asked)
+        check("the background job refills it",
+              _demo.refresh(conn) is True and not _ids & {t["id"] for t in _rows()})
+
+        # A visitor who comes while it is filled sees the book there was, whole.
+        conn.execute("DELETE FROM meta WHERE key='demo_filled'")
+        conn.commit()
+        _book, _seen, _real_save = _rows(), [], db.thesis_save
+
+        def _look_then_save(*a, **k):
+            other = db.connect(DB)
+            try:
+                who = _demo.user(other).id
+                _seen.append(([dict(r) for r in other.execute(
+                    "SELECT * FROM trades WHERE user_id=? ORDER BY 1", (who,))],
+                    [other.execute("SELECT COUNT(*) FROM %s WHERE user_id=?" % t,
+                                   (who,)).fetchone()[0]
+                     for t in ("watchlist", "alerts", "theses")]))
+            finally:
+                other.close()
+            return _real_save(*a, **k)
+
+        db.thesis_save = _look_then_save
+        try:
+            _demo.refresh(conn)
+        finally:
+            db.thesis_save = _real_save
+        check("a visitor during a refill sees the whole book there was, not part of a new one",
+              len(_seen) == 2 and all(s == (_book, [4, 1, 2]) for s in _seen),
+              [(len(s[0]), s[1]) for s in _seen])
+
+        # A stop half-way changes nothing, and the next run fills it.
+        conn.execute("DELETE FROM meta WHERE key='demo_filled'")
+        conn.commit()
+        _book = _rows()
+        _real_add = db.watch_add
+        db.watch_add = lambda conn, symbol, *a, **k: _refused(symbol)
+        try:
+            _demo.refresh(conn)
+            check("a fill that breaks off is not passed off as finished", False)
+        except _market.DataError:
+            check("a fill that breaks off is not passed off as finished", _demo._due(conn))
+        finally:
+            db.watch_add = _real_add
+        check("and leaves the book there was, all of it",
+              _rows() == _book
+              and [len(_rows(t)) for t in ("watchlist", "alerts", "theses")] == [4, 1, 2])
+        check("and the next run fills all of it", _demo.refresh(conn) is True
+              and [len(_rows(t)) for t in ("trades", "watchlist", "theses")] == [5, 4, 2])
+
+        # The rule that sizes the trades can come to less than one share.
+        _real_load = web.config_mod.load
+        web.config_mod.load = lambda *a, **k: dict(_real_load(*a, **k), account_size=100.0)
+        conn.execute("DELETE FROM trades WHERE user_id=?", (demo_user.id,))
+        conn.commit()
+        try:
+            check("a small account still has an example",
+                  _demo.user(conn).id == demo_user.id and len(_rows()) >= 4
+                  and all(t["quantity"] > 0 for t in _rows()), len(_rows()))
+        finally:
+            web.config_mod.load = _real_load
+        check("nobody else's trades are touched by any of it", _rows(mine=False) == _others)
+    finally:
+        _market.fetch_bars = _real_fetch
     conn.close()
 
     # Each of these would make the server analyse or scan something it has

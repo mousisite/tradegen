@@ -34,6 +34,12 @@ _PIECES = {"fundamentals": "Company figures", "sec_history": "Filed accounts",
            "valuation": "Valuation"}
 
 
+# How long a research page waits for its sources, in seconds. EDGAR not
+# answering at all takes about half of it to give up on; Cloudflare gives up on
+# the whole page at 100.
+RESEARCH_WAIT = 45.0
+
+
 @dataclass
 class Research:
     """The fundamental side: what the business is, worth, and risks.
@@ -90,6 +96,25 @@ class Analysis:
     @property
     def symbol(self) -> str:
         return self.bars.symbol
+
+
+def house_method(cfg: Dict, symbol: str, asset_class: str, interval: str) -> bool:
+    """Whether a run measured its strategies the way this copy's own settings do.
+
+    The strategy record is one table everyone reads. Written by each run under
+    whoever's settings it ran with, it was rewritten by the last person to
+    open an instrument: a stop of a twentieth of an ATR, or costs of three
+    per cent, put nonsense on the Strategies page for every visitor.
+    """
+    house = config_mod.load()
+
+    def method(c: Dict):
+        return (float(c["stop_atr_multiple"]), float(c["target_atr_multiple"]),
+                int(c["calibration_stride"]), config_mod.horizon_for(interval, c),
+                float(config_mod.cost_bps_for_symbol(symbol, asset_class, c)),
+                dict(c["strategy_weights"] or {}))
+
+    return method(cfg) == method(house)
 
 
 def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
@@ -218,6 +243,8 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             calendar = catalysts_mod.Calendar(symbol=bars.symbol, available=False)
         finally:
             pool.shutdown(wait=False)
+    # So that its "today" is the exchange's own.
+    calendar.gmt_offset = bars.gmt_offset
 
     step("Deciding")
     plan = decide(ctx, bars, signals, composite, regime, calib, sentiment,
@@ -229,6 +256,19 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
                                            plan.direction):
         if note not in plan.risks:
             plan.risks.append(note)
+    # Asked for and not had. Silence would read as no earnings coming.
+    unread = catalysts_mod.unread_warning(calendar, bars) if with_calendar else None
+    if unread:
+        plan.risks.append(unread)
+
+    # What the call could not rest on, said on the page rather than only known
+    # to the code that went without it.
+    if len(bars) < ctx.warmup:
+        plan.risks.append("Only %d bars of history. The indicators need about 200 to "
+                          "settle, and there is no past record to measure." % len(bars))
+    if "lq_chain" not in ctx.s:
+        plan.risks.append("The price structure could not be read here, so the price-action "
+                          "setups took no part in this call.")
 
     run_id = None
     if record:
@@ -238,14 +278,16 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
                 run_id = db_mod.record_run(conn, bars, plan, signals, composite,
                                            regime, calib, sentiment,
                                            source=source, user=user)
-                if report is not None:
+                if report is not None and house_method(
+                        cfg, bars.symbol, bars.asset_class, bars.interval):
                     db_mod.save_strategy_stats(conn, bars.symbol, bars.interval,
                                                report)
             finally:
                 conn.close()
         except Exception:
-            # A database problem must never destroy a completed analysis.
-            run_id = None
+            # A database problem must never destroy a completed analysis, and
+            # must not pass unseen: history and paper trades stop without it.
+            log.exception("Could not record the analysis of %s", bars.symbol)
 
     return Analysis(bars=bars, context=ctx, signals=signals, composite=composite,
                     regime=regime, levels=levels, calibration=calib,
@@ -264,7 +306,7 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
     recorded in `unavailable` rather than taking the whole report down: a
     company with no options listed should still get a valuation.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
     from . import fundamentals as fund_mod
     from . import options as options_mod
@@ -292,14 +334,26 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
 
     step("Gathering fundamentals, filings and risk")
     results: Dict[str, object] = {}
-    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    # Waited for together, up to one limit: a source that has stopped
+    # answering costs the page that piece, not the page. Its thread is left to
+    # run out on its own timeouts.
+    pool = ThreadPoolExecutor(max_workers=len(jobs))
+    try:
         futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+        give_up = time.monotonic() + RESEARCH_WAIT
         for name, future in futures.items():
             try:
-                results[name] = future.result()
+                results[name] = future.result(
+                    timeout=max(0.0, give_up - time.monotonic()))
+            except FutureTimeout as exc:
+                results[name] = None
+                out.left_out(name, exc if future.done() else TimeoutError(
+                    "no answer in %.0f seconds" % RESEARCH_WAIT))
             except Exception as exc:
                 results[name] = None
                 out.left_out(name, exc)
+    finally:
+        pool.shutdown(wait=False)
 
     out.fundamentals = results.get("fundamentals")
     out.sec_history = results.get("sec_history")
@@ -319,7 +373,17 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
 
     # Published models applied to the filed figures. Runs on data already
     # fetched, so it costs no extra network request.
-    if out.sec_history:
+    unread = out.fundamentals is None or getattr(out.fundamentals, "unread", False)
+    if (unread and (out.sec_history or {}).get("available")
+            and not (out.sec_history.get("table") or {}).get("current_assets")):
+        # What sector it is in came from Yahoo, which did not answer. A bank's
+        # balance sheet is not split into current and long-term, and a sound
+        # bank scores as a company in trouble on these models.
+        out.scores = {"available": False,
+                      "reason": "The scored models were not run. They do not suit a "
+                                "bank or an insurer, and whether this is one could not "
+                                "be read just now."}
+    elif out.sec_history:
         from . import quality as quality_mod
         try:
             out.scores = quality_mod.assess(
@@ -331,6 +395,9 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             out.scores = {"available": False,
                           "reason": "The scored models could not be run on these "
                                     "filings."}
+
+    # Built on Yahoo's figures, so it does not wait on EDGAR having answered.
+    if out.fundamentals is not None:
         try:
             models = [val_mod.discounted_cash_flow(out.fundamentals, price),
                       val_mod.reverse_dcf(out.fundamentals, price),
@@ -347,6 +414,10 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
             "expectancy": analysis.calibration.expectancy_r,
             "hit_rate": analysis.calibration.hit_rate,
             "samples": analysis.calibration.bucket_samples,
+            # The side those odds were measured on, which the news can tip the
+            # other way from the signals; guessed from the signals alone, a
+            # short's winning record was filed under the case for buying.
+            "side": analysis.calibration.direction or None,
         }
 
     step("Building the case")
@@ -358,11 +429,12 @@ def research(symbol: str, price: float, cfg: Dict, analysis: Optional[Analysis] 
         sec_history=out.sec_history)
 
     if chain is not None and out.thesis is not None:
-        view = ("bullish" if out.thesis.balance > 0.15
-                else "bearish" if out.thesis.balance < -0.15 else "neutral")
+        # A case too thin to mean anything is no view: its one or two points
+        # lean all the way to a side, and a trade was offered that "fits" it.
+        lean = 0.0 if thesis_mod.no_view(out.thesis.verdict) else out.thesis.balance
+        view = ("bullish" if lean > 0.15 else "bearish" if lean < -0.15 else "neutral")
         try:
-            out.option_ideas = options_mod.suggest(chain, view,
-                                                   abs(out.thesis.balance))
+            out.option_ideas = options_mod.suggest(chain, view, abs(lean))
         except Exception:
             pass
 

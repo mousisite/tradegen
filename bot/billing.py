@@ -71,10 +71,55 @@ class BillingError(RuntimeError):
     """Stripe could not be reached or refused, phrased for the person."""
 
 
+class BillingRefused(BillingError):
+    """Stripe answered, and said no: asking the same again changes nothing.
+
+    Kept apart from a Stripe that could not be reached or broke. status is
+    its HTTP answer.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+REQUIRED = ("STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "STRIPE_WEBHOOK_SECRET")
+
+
+def _set(key: str) -> bool:
+    return bool((os.environ.get(key) or "").strip())
+
+
 def ready() -> bool:
-    return all((os.environ.get(k) or "").strip()
-               for k in ("STRIPE_SECRET_KEY", "STRIPE_PRICE_ID",
-                         "STRIPE_WEBHOOK_SECRET"))
+    return all(_set(k) for k in REQUIRED)
+
+
+def key_set() -> bool:
+    """Whether Stripe can be asked anything at all.
+
+    Enough to cancel a subscription, open Stripe's own page or read a plan
+    again: those must go on working for people who already pay, even with
+    another setting missing and nothing on sale.
+    """
+    return _set("STRIPE_SECRET_KEY")
+
+
+def half_set() -> str:
+    """Which settings are missing when only some are there, for whoever runs
+    this: paid plans are then off, which nobody chose. "" otherwise."""
+    missing = [k for k in REQUIRED if not _set(k)]
+    if not missing or len(missing) == len(REQUIRED):
+        return ""
+    return "%s %s not set" % (" and ".join(missing), "is" if len(missing) == 1 else "are")
+
+
+def describe() -> str:
+    """Whether paid plans are on, for the lines printed at start-up."""
+    if ready():
+        return "on"
+    missing = half_set()
+    return ("OFF, though partly set up: %s. Everyone has Pro and nobody can "
+            "buy it" % missing) if missing else "off"
 
 
 def price_label() -> str:
@@ -108,7 +153,18 @@ def price_id_for(plan: str) -> str:
 
 SYMBOLS = {"usd": "$", "eur": "€", "gbp": "£", "cad": "CA$", "aud": "A$"}
 PRICE_TTL = 3600.0
+# How long the last answer, or none, is shown before Stripe is asked again
+# after it failed, and how long it has to answer: a page waits on it.
+PRICE_RETRY = 60.0
+PRICE_TIMEOUT = 4
 _PRICES: Dict[str, tuple] = {}
+
+
+def _money(cents: int, currency: str) -> str:
+    """An amount as people write it: $9, $9.99, €2.50."""
+    currency = (currency or "usd").lower()
+    return SYMBOLS.get(currency, currency.upper() + " ") + (
+        "%d" % (cents // 100) if cents % 100 == 0 else "%.2f" % (cents / 100.0))
 
 
 def describe_price(price_id: str, call=None) -> Optional[Dict]:
@@ -116,20 +172,27 @@ def describe_price(price_id: str, call=None) -> Optional[Dict]:
     hit = _PRICES.get(price_id)
     if hit and time.time() - hit[0] < PRICE_TTL:
         return hit[1]
+    last = hit[1] if hit else None
+    again = time.time() - PRICE_TTL + PRICE_RETRY
+    if last is not None:
+        # One page asks, and those drawn meanwhile show the last answer
+        # rather than each waiting on Stripe as well.
+        _PRICES[price_id] = (again, last)
     try:
         found = (call or _stripe)("GET", "prices/" + price_id)
     except BillingError:
-        return hit[1] if hit else None
+        # Remembered too, for a minute: while Stripe is down, every pricing
+        # page used to hold a server thread for as long as it took to give up.
+        _PRICES[price_id] = (time.time() - PRICE_TTL + PRICE_RETRY, last)
+        return last
     cents = found.get("unit_amount")
     recurring = found.get("recurring") or {}
     if cents is None or recurring.get("interval") not in ("month", "year") \
             or recurring.get("interval_count", 1) != 1:
         return None
-    currency = (found.get("currency") or "usd").lower()
-    amount = SYMBOLS.get(currency, currency.upper() + " ") + (
-        "%d" % (cents // 100) if cents % 100 == 0 else "%.2f" % (cents / 100.0))
     info = {"cents": int(cents), "interval": recurring["interval"],
-            "label": "%s a %s" % (amount, recurring["interval"])}
+            "label": "%s a %s" % (_money(int(cents), found.get("currency")),
+                                  recurring["interval"])}
     _PRICES[price_id] = (time.time(), info)
     return info
 
@@ -163,11 +226,13 @@ def _describe(coupon: Dict) -> tuple:
         pct = float(coupon["percent_off"])
         what = "half price" if pct == 50 else "%g%% off" % pct
     else:
-        what = "$%g off" % (int(coupon.get("amount_off") or 0) / 100.0)
+        what = "%s off" % _money(int(coupon.get("amount_off") or 0),
+                                 coupon.get("currency"))
     months = coupon.get("duration_in_months")
     how_long = {"forever": "forever", "once": "on the first payment"}.get(
         coupon.get("duration"),
-        "for your first year" if months == 12 else "for %s months" % months)
+        "for your first year" if months == 12 else
+        "for 1 month" if months == 1 else "for %s months" % months)
     return what, how_long
 
 
@@ -189,12 +254,13 @@ def _missed(key: str) -> None:
         _MISSES[key] = now
 
 
-def promotion(code: str, call=None) -> Optional[Dict]:
+def promotion(code: str, call=None, customer: str = "") -> Optional[Dict]:
     """A typed code that would apply right now: Stripe's id and what it gives.
 
     Stripe matches the code whatever its capitals. A code that is switched
-    off or has used up its redemptions is turned away here, so the person
-    hears it on our page rather than as a refusal on Stripe's.
+    off or has used up its redemptions, or was made for one customer who is
+    not this one, is turned away here, so the person hears it on our page
+    rather than as a refusal on Stripe's.
     """
     code = code.strip()
     if not code:
@@ -223,6 +289,9 @@ def promotion(code: str, call=None) -> Optional[Dict]:
         if most and int(used or 0) >= int(most):
             _missed(key)
             return None
+    # Not remembered as a wrong code: it is right for the person it was made for.
+    if promo.get("customer") and promo["customer"] != customer:
+        return None
     what, how_long = _describe(coupon)
     return {"id": promo.get("id", ""), "code": promo.get("code") or code,
             "what": what, "how_long": how_long}
@@ -260,28 +329,52 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
 
 
-def may_view(conn: sqlite3.Connection, user_id: int, item: str) -> bool:
-    """Whether a free account can open this instrument today.
+def look_item(symbol: str, exact: bool = False) -> str:
+    """What a free look is counted against: the instrument, as Yahoo names it.
 
-    Counted per different instrument, not per page load: opening the same one
-    again, refreshing, or moving between its analysis and research pages costs
-    nothing more, so the allowance is about breadth, not about clicking.
+    Whatever its bar size, and however it was typed, as far as the text alone
+    can say: $tsla and NASDAQ:TSLA are TSLA, and BTC is the coin. LINK exactly
+    (Interlink Electronics) is not the bare LINK (the Chainlink coin), so each
+    is a look of its own. A company's name is only known to be its ticker once
+    the analysis has found it: show_view moves the look there.
     """
-    ensure_schema(conn)
-    if opened_today(conn, user_id, item):
-        return True
-    return views_today(conn, user_id) < free_limits()["analyses_per_day"]
+    from . import market
+    try:
+        item = market.normalise_symbol(symbol, exact=exact)
+    except market.DataError:
+        item = symbol.strip().upper()
+    return item.replace("|", " ")
+
+
+def _instrument(item: str) -> str:
+    """The instrument a counted row stands for. Rows written before looks were
+    counted per instrument also hold the bar size, as AAPL|1d or LINK|1d|exact."""
+    symbol, bar, rest = item.partition("|")
+    return look_item(symbol, rest.endswith("|exact")) if bar else item
+
+
+def _opened(conn: sqlite3.Connection, user_id: int, day: str) -> Dict[str, List[str]]:
+    """The instruments opened on a day, each with the rows that say so."""
+    out: Dict[str, List[str]] = {}
+    for row in conn.execute("SELECT item FROM usage_views WHERE user_id=? AND day=?",
+                            (user_id, day)):
+        out.setdefault(_instrument(row[0]), []).append(row[0])
+    return out
 
 
 def opened_today(conn: sqlite3.Connection, user_id: int, item: str) -> bool:
     """Whether this instrument already counts as one of today's looks."""
     ensure_schema(conn)
-    return conn.execute("SELECT 1 FROM usage_views WHERE user_id=? AND day=? "
-                        "AND item=?", (user_id, _today(), item)).fetchone() is not None
+    return _instrument(item) in _opened(conn, user_id, _today())
 
 
 def reserve_view(conn: sqlite3.Connection, user_id: int, item: str) -> str:
     """Take one of today's looks for an instrument, before it is analysed.
+
+    Counted per different instrument, not per page load: opening the same one
+    again, refreshing, changing its bar size, or moving between its analysis
+    and research pages costs nothing more, so the allowance is about breadth,
+    not about clicking.
 
     Returns "new" when a look was taken just now, "seen" when the instrument
     was already opened today and costs nothing more, and "" when none are
@@ -292,15 +385,13 @@ def reserve_view(conn: sqlite3.Connection, user_id: int, item: str) -> str:
     ensure_schema(conn)
     if conn.in_transaction:
         conn.commit()
-    day = _today()
+    day, item = _today(), _instrument(item)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        if conn.execute("SELECT 1 FROM usage_views WHERE user_id=? AND day=? "
-                        "AND item=?", (user_id, day, item)).fetchone():
+        opened = _opened(conn, user_id, day)
+        if item in opened:
             taken = "seen"
-        elif conn.execute("SELECT COUNT(*) FROM usage_views WHERE user_id=? AND "
-                          "day=?", (user_id, day)).fetchone()[0] \
-                >= free_limits()["analyses_per_day"]:
+        elif len(opened) >= free_limits()["analyses_per_day"]:
             taken = ""
         else:
             conn.execute("INSERT INTO usage_views (user_id, day, item) "
@@ -317,22 +408,46 @@ def release_view(conn: sqlite3.Connection, user_id: int, item: str) -> None:
     """Give back a look taken by reserve_view when nothing was shown for it."""
     ensure_schema(conn)
     conn.execute("DELETE FROM usage_views WHERE user_id=? AND day=? AND item=?",
-                 (user_id, _today(), item))
+                 (user_id, _today(), _instrument(item)))
     conn.commit()
 
 
 def count_view(conn: sqlite3.Connection, user_id: int, item: str) -> None:
     """Record an instrument as opened today, once it has actually been shown."""
+    show_view(conn, user_id, item, item)
+
+
+def show_view(conn: sqlite3.Connection, user_id: int, asked: str, shown: str) -> None:
+    """Count what was shown, and nothing for the words it was asked for by.
+
+    "tesla" takes its look as TESLA, which is all the text says. The analysis
+    then turns out to be TSLA, so the look moves there: what every link on
+    the page opens is already counted, and one opened before by its ticker is
+    not counted twice. Moving can only ever lower the count.
+    """
     ensure_schema(conn)
-    conn.execute("INSERT OR IGNORE INTO usage_views (user_id, day, item) "
-                 "VALUES (?, ?, ?)", (user_id, _today(), item))
-    conn.commit()
+    if conn.in_transaction:
+        conn.commit()
+    day, asked, shown = _today(), _instrument(asked), _instrument(shown)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        opened = _opened(conn, user_id, day)
+        if shown not in opened:
+            conn.execute("INSERT OR IGNORE INTO usage_views (user_id, day, item) "
+                         "VALUES (?, ?, ?)", (user_id, day, shown))
+        for row in opened.get(asked, []) if asked != shown else []:
+            conn.execute("DELETE FROM usage_views WHERE user_id=? AND day=? AND item=?",
+                         (user_id, day, row))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def views_today(conn: sqlite3.Connection, user_id: int) -> int:
+    """How many different instruments this account has opened today."""
     ensure_schema(conn)
-    return conn.execute("SELECT COUNT(*) FROM usage_views WHERE user_id=? AND "
-                        "day=?", (user_id, _today())).fetchone()[0]
+    return len(_opened(conn, user_id, _today()))
 
 
 # --- plan state ------------------------------------------------------------------
@@ -346,24 +461,57 @@ def customer_of(conn: sqlite3.Connection, user_id: int) -> str:
 # until is when the paid period ends, 0 when the change does not say. A plan
 # that turns into Pro starts with no known end, so an end left over from an
 # earlier subscription cannot cut the new one short before Stripe names its
-# own. SQLite reads the old row on the right of every assignment.
+# own. ends is when a cancelled plan stops, 0 when it renews, and -1 when the
+# change does not say. SQLite reads the old row on the right of every
+# assignment.
 _SET_PLAN = ("UPDATE users SET plan=?, plan_status=?, "
              "stripe_customer=CASE WHEN ?<>'' THEN ? ELSE stripe_customer END, "
              "plan_until=CASE WHEN ?>0 THEN ? WHEN ?='pro' AND plan<>'pro' "
-             "THEN 0 ELSE plan_until END WHERE id=?")
+             "THEN 0 ELSE plan_until END, "
+             "plan_ends=CASE WHEN ?>=0 THEN ? WHEN ?='pro' AND plan<>'pro' "
+             "THEN -1 ELSE plan_ends END WHERE id=?")
+
+
+def _set_args(user_id: int, plan: str, status: str, customer: str, until: int,
+              ends: int) -> tuple:
+    return (plan, status, customer, customer, until, until, plan, ends, ends,
+            plan, user_id)
 
 
 def set_plan(conn: sqlite3.Connection, user_id: int, plan: str, status: str,
-             customer: str = "", until: int = 0) -> None:
-    conn.execute(_SET_PLAN, (plan, status, customer, customer, until, until,
-                             plan, user_id))
+             customer: str = "", until: int = 0, ends: int = -1) -> None:
+    conn.execute(_SET_PLAN, _set_args(user_id, plan, status, customer, until, ends))
     conn.commit()
+
+
+def paid_until(user, now: Optional[float] = None) -> tuple:
+    """What a plan paid on the website does next: ("renews", when), ("ends",
+    when) once it is cancelled, or ("paid", when) while Stripe has not said
+    which. ("", 0) when there is no such plan, its time is not known, or its
+    last payment is still being tried.
+    """
+    now = now or time.time()
+    if user.plan != "pro" or user.plan_status not in ("active", "trialing"):
+        return "", 0
+    if user.plan_ends > 0:
+        return ("ends", user.plan_ends) if user.plan_ends > now else ("", 0)
+    if user.plan_until <= now:
+        return "", 0
+    return ("renews" if user.plan_ends == 0 else "paid"), user.plan_until
+
+
+def _known(conn: sqlite3.Connection, user_id: int) -> bool:
+    return conn.execute("SELECT 1 FROM users WHERE id=?",
+                        (user_id,)).fetchone() is not None
 
 
 def _apply(conn: sqlite3.Connection, user_id: int, created: int, plan: str,
            status: str, customer: str = "", until: int = 0,
-           in_order: bool = True) -> bool:
+           in_order: bool = True, ends: int = -1) -> bool:
     """Record a plan change unless something newer has already been recorded.
+
+    Nothing is recorded for an account that has gone: deleting one deletes its
+    Stripe customer, and Stripe then sends word of that subscription ending.
 
     Stripe does not deliver events in order, and retries a failed delivery
     for days, so an old "active" can arrive after the cancellation that
@@ -383,8 +531,11 @@ def _apply(conn: sqlite3.Connection, user_id: int, created: int, plan: str,
         if in_order and created and row is not None and created < int(row[0]):
             conn.commit()
             return False
-        conn.execute(_SET_PLAN, (plan, status, customer, customer, until, until,
-                                 plan, user_id))
+        found = conn.execute(_SET_PLAN, _set_args(user_id, plan, status, customer,
+                                                  until, ends))
+        if not found.rowcount:
+            conn.rollback()
+            return False
         if created:
             conn.execute("INSERT INTO plan_events (user_id, last_ts) VALUES (?, ?) "
                          "ON CONFLICT(user_id) DO UPDATE SET "
@@ -409,15 +560,22 @@ def _stamp(value) -> int:
 def _stripe(method: str, path: str, data: Optional[Dict] = None) -> Dict:
     import requests
     try:
-        r = requests.request(method, API + path, data=data, timeout=20,
-                             auth=(os.environ["STRIPE_SECRET_KEY"], ""))
+        r = requests.request(method, API + path, data=data,
+                             timeout=(PRICE_TIMEOUT if path.startswith("prices/")
+                                      else 20),
+                             # Pasted settings can end in a line break, which
+                             # Stripe would take as part of the key.
+                             auth=(os.environ["STRIPE_SECRET_KEY"].strip(), ""))
     except requests.RequestException as exc:
         raise BillingError("Payments could not be reached just now. Nothing "
                            "was charged; try again in a minute.") from exc
     if r.status_code == 404 and method == "DELETE":
         return {"deleted": True}                    # already gone is done
     if r.status_code >= 400:
-        raise BillingError("Payments refused the request. Nothing was charged.")
+        said = "Payments refused the request. Nothing was charged."
+        if r.status_code >= 500 or r.status_code == 429:
+            raise BillingError(said)
+        raise BillingRefused(said, r.status_code)
     return r.json()
 
 
@@ -449,31 +607,61 @@ def checkout_url(user, base: str, customer: str = "", call=None,
     return (call or _stripe)("POST", "checkout/sessions", data)["url"]
 
 
+def customer_gone(customer: str, call=None) -> bool:
+    """Whether Stripe no longer has a customer this server kept: deleted in
+    Stripe's dashboard, or made with test keys before the live ones."""
+    try:
+        return bool((call or _stripe)("GET", "customers/" + customer).get("deleted"))
+    except BillingRefused as exc:
+        return exc.status == 404
+
+
 def confirm_checkout(conn: sqlite3.Connection, session_id: str, user_id: int,
                      call=None) -> bool:
+    """Whether this person's checkout finished and is still running, recorded."""
+    return checkout_state(conn, session_id, user_id, call) == "pro"
+
+
+def checkout_state(conn: sqlite3.Connection, session_id: str, user_id: int,
+                   call=None) -> str:
     """Ask Stripe whether this person's checkout finished, and record it.
+
+    "pro" when it did and its subscription is running; "waiting" when they
+    finished it and the payment, or the subscription, is not settled yet;
+    "no" for anything else: no checkout of theirs, one given up, or one whose
+    subscription has ended. Raises BillingError when Stripe cannot say.
 
     A finished checkout stays complete and paid for ever, so on its own it
     proves only that a payment was once made: opening this page again after
     cancelling used to bring Pro back for good. The subscription it started is
     read with it, and only one still running counts.
     """
-    if not session_id.startswith("cs_"):
-        return False
-    found = (call or _stripe)("GET", "checkout/sessions/" + session_id
-                              + "?expand[]=subscription")
+    if not session_id.startswith("cs_") or not session_id.replace("_", "").isalnum():
+        return "no"
+    try:
+        found = (call or _stripe)("GET", "checkout/sessions/" + session_id
+                                  + "?expand[]=subscription")
+    except BillingRefused as exc:
+        if exc.status in (400, 404):
+            return "no"                             # Stripe knows no such checkout
+        raise
     if str(found.get("client_reference_id")) != str(user_id):
-        return False
-    if found.get("status") != "complete" or found.get("payment_status") not in PAID:
-        return False
+        return "no"
+    if found.get("status") != "complete":
+        return "no"
+    if found.get("payment_status") not in PAID:
+        return "waiting"
     sub = found.get("subscription")
-    if not isinstance(sub, dict) or sub.get("status") not in ACTIVE:
-        return False
+    if not isinstance(sub, dict) or sub.get("status") == "incomplete":
+        return "waiting"
+    if sub.get("status") not in ACTIVE:
+        return "no"
     # Events created before this checkout began describe an earlier
     # subscription, so the checkout's own time is where ordering starts.
     _apply(conn, user_id, _stamp(found.get("created")), "pro", sub["status"],
-           found.get("customer") or "", _period_end(sub), in_order=False)
-    return True
+           found.get("customer") or "", _period_end(sub), in_order=False,
+           ends=_ends(sub))
+    return "pro"
 
 
 # How long before a recorded period end a plan is read again from Stripe
@@ -484,11 +672,15 @@ def confirm_checkout(conn: sqlite3.Connection, session_id: str, user_id: int,
 # their period ended, though Stripe had charged them.
 RECHECK_BEFORE = 86400
 RECHECK_PER_RUN = 25
+# How often a plan with no recorded end at all is read: a paid checkout whose
+# subscription events never came would otherwise be Pro for ever.
+RECHECK_UNKNOWN = 86400
 
 
 def lapsing(conn: sqlite3.Connection, now: Optional[float] = None,
             limit: int = RECHECK_PER_RUN) -> list:
-    """Pro plans whose recorded period has ended, or ends within a day.
+    """Pro plans whose recorded period has ended, or ends within a day, and
+    those with no recorded end, once a day.
 
     Plans still inside their grace period come first, since they can still
     be kept, then the ones read longest ago (plan_checks). Picked by end date
@@ -502,10 +694,12 @@ def lapsing(conn: sqlite3.Connection, now: Optional[float] = None,
         "SELECT u.id AS id, u.stripe_customer AS stripe_customer, "
         "u.plan_until AS plan_until FROM users u "
         "LEFT JOIN plan_checks c ON c.user_id=u.id WHERE u.plan='pro' "
-        "AND u.plan_status IN ('active', 'trialing', 'past_due') AND u.plan_until>0 "
+        "AND u.plan_status IN ('active', 'trialing', 'past_due') "
         "AND u.plan_until<? AND u.stripe_customer<>'' "
+        "AND (u.plan_until>0 OR COALESCE(c.checked_ts, 0)<?) "
         "ORDER BY u.plan_until+?<?, COALESCE(c.checked_ts, 0), u.plan_until LIMIT ?",
-        (int(now + RECHECK_BEFORE), GRACE, int(now), int(limit))).fetchall()
+        (int(now + RECHECK_BEFORE), int(now - RECHECK_UNKNOWN), GRACE, int(now),
+         int(limit))).fetchall()
 
 
 def _current(subscriptions: List[Dict]) -> Optional[Dict]:
@@ -529,7 +723,7 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
     at Stripe; it only reads. Every plan asked about, answered or not, goes to
     the back of the queue.
     """
-    if not ready():
+    if not key_set():
         return {"checked": 0, "errors": []}
     now = now or time.time()
     checked, errors = 0, []
@@ -544,14 +738,17 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
             status = sub.get("status") or ""
             plan = "pro" if status in ACTIVE else "free"
             _apply(conn, int(row["id"]), int(now), plan, status, customer,
-                   _period_end(sub), in_order=False)
+                   _period_end(sub), in_order=False, ends=_ends(sub))
             checked += 1
         except Exception as exc:          # one customer must not stop the rest
             errors.append("user %d: %s" % (int(row["id"]), exc))
         finally:
-            conn.execute("INSERT INTO plan_checks (user_id, checked_ts) VALUES (?, ?) "
+            # Only for an account still here: one deleted while Stripe was being
+            # asked would refuse the row, and end the run for everyone after it.
+            conn.execute("INSERT INTO plan_checks (user_id, checked_ts) "
+                         "SELECT id, ? FROM users WHERE id=? "
                          "ON CONFLICT(user_id) DO UPDATE SET "
-                         "checked_ts=excluded.checked_ts", (int(row["id"]), int(now)))
+                         "checked_ts=excluded.checked_ts", (int(now), int(row["id"])))
             conn.commit()
     return {"checked": checked, "errors": errors}
 
@@ -570,6 +767,29 @@ def close_customer(customer: str, call=None) -> None:
     charged for an account that no longer exists.
     """
     (call or _stripe)("DELETE", "customers/" + customer)
+
+
+def end_subscription(conn: sqlite3.Connection, user_id: int, call=None) -> bool:
+    """Stop what an account about to be deleted is paying, if anything.
+
+    True when something was stopped at Stripe. Raises BillingError when it
+    could not be stopped, and the account must then be kept: a deleted account
+    would go on being charged with nobody left to say so. That includes a
+    running plan while the key to Stripe is missing and the other settings are
+    there, which is a mistake in them.
+    """
+    customer = customer_of(conn, user_id)
+    if not customer:
+        return False
+    if key_set():
+        close_customer(customer, call)
+        return True
+    if half_set():
+        row = conn.execute("SELECT plan, plan_status FROM users WHERE id=?",
+                           (user_id,)).fetchone()
+        if row["plan"] == "pro" and row["plan_status"] in ACTIVE:
+            raise BillingError("The subscription could not be cancelled just now.")
+    return False
 
 
 # --- the webhook -----------------------------------------------------------------
@@ -594,7 +814,9 @@ def verify(payload: bytes, header: str, secret: str,
     expected = hmac.new(secret.encode("utf-8"),
                         ("%d." % ts).encode("utf-8") + payload,
                         hashlib.sha256).hexdigest()
-    return any(hmac.compare_digest(expected, s) for s in signatures)
+    # As bytes: text with a letter outside ASCII raises here.
+    return any(hmac.compare_digest(expected.encode("ascii"), s.encode("utf-8", "replace"))
+               for s in signatures)
 
 
 def _period_end(sub: Dict) -> int:
@@ -609,19 +831,76 @@ def _period_end(sub: Dict) -> int:
         return 0
 
 
-def handle(conn: sqlite3.Connection, event: Dict) -> str:
-    """Apply one verified event. Safe to receive twice, and out of order."""
+def _ends(sub: Dict) -> int:
+    """When a subscription set to end does, 0 when it renews, -1 if not said.
+
+    Stripe says it as "at the end of this period" or as a time of its own.
+    """
+    at = _stamp(sub.get("cancel_at"))
+    if at:
+        return at
+    if sub.get("cancel_at_period_end"):
+        return _period_end(sub) or -1
+    return 0 if "cancel_at_period_end" in sub else -1
+
+
+def _still_paying(conn: sqlite3.Connection, user_id: int, customer: str,
+                  created: int, call=None) -> Optional[Dict]:
+    """The subscription Stripe is still running for someone an event would
+    make Free, or None.
+
+    An event speaks of one subscription, and a person can have several: a
+    first checkout given up at the bank's check expires a day later, after
+    they paid in a second one, and one of two can be cancelled. Two events of
+    one second also arrive in either order. So before Pro ends, Stripe is
+    asked what the person has now. Raises BillingError when it cannot be
+    reached, and the event waits for Stripe to send it again; when it refuses
+    to say (a deleted customer), the event decides.
+    """
+    row = conn.execute("SELECT plan, plan_status, stripe_customer FROM users WHERE id=?",
+                       (user_id,)).fetchone()
+    if row is None or row["plan"] != "pro" or row["plan_status"] not in ACTIVE \
+            or not key_set():
+        return None
+    ensure_schema(conn)
+    last = conn.execute("SELECT last_ts FROM plan_events WHERE user_id=?",
+                        (user_id,)).fetchone()
+    if created and last is not None and created < int(last[0]):
+        return None                                 # old news, turned away below
+    found: List[Dict] = []
+    for who in dict.fromkeys((row["stripe_customer"] or "", customer)):
+        if not who:
+            continue
+        try:
+            answer = (call or _stripe)(
+                "GET", "subscriptions?status=all&limit=100&customer=" + who)
+        except BillingRefused:
+            continue
+        found += [dict(sub, customer=who) for sub in answer.get("data") or []]
+    sub = _current(found)
+    return sub if sub and sub.get("status") in ACTIVE else None
+
+
+def handle(conn: sqlite3.Connection, event: Dict, call=None) -> str:
+    """Apply one verified event. Safe to receive twice, and out of order.
+
+    Raises BillingError when Stripe has to be asked and cannot be reached.
+    """
     kind = event.get("type") or ""
     obj = (event.get("data") or {}).get("object") or {}
     created = _stamp(event.get("created"))
 
     if kind == "checkout.session.completed":
+        if obj.get("mode", "subscription") != "subscription":
+            return "ignored"                        # a payment, not a plan
         who = str(obj.get("client_reference_id")
                   or (obj.get("metadata") or {}).get("user_id") or "")
         if not who.isdigit():
             return "ignored"
         if obj.get("payment_status") not in PAID:
             return "awaiting payment"
+        if not _known(conn, int(who)):
+            return "unknown customer"
         if not _apply(conn, int(who), created, "pro", "active",
                       obj.get("customer") or ""):
             return "stale"
@@ -635,12 +914,19 @@ def handle(conn: sqlite3.Connection, event: Dict) -> str:
         if user_id is None:
             who = str((obj.get("metadata") or {}).get("user_id") or "")
             user_id = int(who) if who.isdigit() else None
-        if user_id is None:
-            return "unknown customer"
+        if user_id is None or not _known(conn, user_id):
+            return "unknown customer"               # a deleted account's, too
         status = "canceled" if kind.endswith(".deleted") else (obj.get("status") or "")
         plan = "pro" if status in ACTIVE else "free"
+        if plan == "free":
+            running = _still_paying(conn, user_id, customer, created, call)
+            if running is not None:
+                _apply(conn, user_id, created, "pro", running["status"],
+                       running["customer"], _period_end(running), in_order=False,
+                       ends=_ends(running))
+                return "pro"
         if not _apply(conn, user_id, created, plan, status, customer,
-                      _period_end(obj)):
+                      _period_end(obj), ends=_ends(obj)):
             return "stale"
         return plan
 

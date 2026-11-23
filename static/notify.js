@@ -54,8 +54,8 @@
     blockedApp: 'Notifications are switched off for Orenth in this iPhone’s '
       + 'Settings. Turn them on under Settings, Notifications, Orenth.',
     serverOff: 'Notifications are not available here yet.',
-    stale: 'These were set up with an older key. Turn them on again to keep '
-      + 'them coming.'
+    stale: 'Orenth changed how it sends notifications, so the ones on this '
+      + 'device have stopped. Turn them on again to get them back.'
   };
 
   function read(key) {
@@ -450,11 +450,19 @@
   (function () {
     var push = native();
     if (!push) { return; }
-    push.addListener('pushNotificationActionPerformed', function (action) {
-      var data = action && action.notification && action.notification.data;
-      var address = tappedPage(data && data.url);
-      if (address) { window.location.assign(address); }
-    });
+    function hear() {
+      push.addListener('pushNotificationActionPerformed', function (action) {
+        var data = action && action.notification && action.notification.data;
+        var address = tappedPage(data && data.url);
+        if (address) { window.location.assign(address); }
+      });
+    }
+    hear();
+    // A page swiped back to can return as it was left, without running this
+    // again, and the app forgot the listener when the next page loaded.
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('pageshow', function (e) { if (e.persisted) { hear(); } });
+    }
   })();
 
   // --- the cards on the Monitor and Settings pages -----------------------------
@@ -488,8 +496,12 @@
       buttons.off.hidden = answer !== 'on';
       buttons.test.hidden = answer !== 'on';
     }
+    // A reason to end a sentence with: some come with their own full stop.
+    function reasonOf(text) {
+      return String(text || 'no reason given').replace(/\.+$/, '') + '.';
+    }
     function failed(err) {
-      said.textContent = 'That did not work: ' + ((err && err.message) || 'no reason given') + '.';
+      said.textContent = 'That did not work: ' + reasonOf(err && err.message);
     }
     function act(button, run) {
       button.addEventListener('click', function () {
@@ -504,7 +516,7 @@
       return API.test().then(function (out) {
         said.textContent = out.ok
           ? 'Sent. It should appear here within a few seconds.'
-          : 'It could not be sent: ' + ((out.errors || [])[0] || 'no reason given') + '.';
+          : 'It could not be sent: ' + reasonOf((out.errors || [])[0]);
       });
     });
 

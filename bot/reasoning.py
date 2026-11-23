@@ -26,8 +26,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .fundamentals import big_number
+from .market import format_price
+
 DEFAULT_MODEL = "claude-sonnet-5"
-_MAX_TOKENS = 2000
+# Room for the model's own thinking as well as the answer: where a model
+# thinks by default, that counts against the same limit, and a cut-off answer
+# cannot be read. Only what is used is charged for.
+_MAX_TOKENS = 8000
 
 log = logging.getLogger(__name__)
 
@@ -159,11 +165,18 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
     try:
         # Bounded, because this runs inside the research page's request: the
         # SDK's own default is ten minutes, three times. Longer than the other
-        # calls, because this answer is the longest one asked for.
+        # calls, because this answer is the longest one asked for. Not asked
+        # twice: an answer too slow once would be too slow again, be paid for
+        # again, and take the page past the 100 seconds Cloudflare allows it.
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
-                                     timeout=40.0, max_retries=1)
+                                     timeout=40.0, max_retries=0)
+        # Some thinking rather than as much as it likes, so that the answer
+        # comes inside that time. Another model chosen by the owner may not
+        # take the setting, so it is sent to the default only.
+        paced = ({"output_config": {"effort": "medium"}}
+                 if chosen == DEFAULT_MODEL else {})
         response = client.messages.create(
-            model=chosen, max_tokens=_MAX_TOKENS,
+            model=chosen, max_tokens=_MAX_TOKENS, **paced,
             messages=[{"role": "user", "content": prompt}])
         text = "".join(b.text for b in response.content
                        if getattr(b, "type", "") == "text").strip()
@@ -176,9 +189,15 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
 
     parsed = _parse(text)
     if parsed is None:
-        return Reasoning(False, raw=text, reason_unavailable=_FAILED,
-                         detail="The model's reply could not be read as "
-                                "structured output.")
+        # Why it stopped tells a reply cut off at the limit, or declined, from
+        # one that was simply not the JSON asked for.
+        stopped = getattr(response, "stop_reason", None)
+        detail = {"max_tokens": "The model's reply was cut off at the %d-token limit."
+                                % _MAX_TOKENS,
+                  "refusal": "The model declined to answer."}.get(
+            stopped, "The model's reply could not be read as structured output.")
+        log.warning("The reasoning reply was unusable (stop reason %s): %s", stopped, detail)
+        return Reasoning(False, raw=text, reason_unavailable=_FAILED, detail=detail)
 
     result = Reasoning(
         available=True,
@@ -200,8 +219,12 @@ def analyse(payload: Dict, model: Optional[str] = None) -> Reasoning:
 # Checking the answer against the evidence
 # ---------------------------------------------------------------------------
 
-# A figure inside prose. Captures 28%, 1,234.5, -0.31, $4.2B.
-_FIGURE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bn|bp|B|M|K|k|x)?")
+# A figure inside prose. Captures 28%, 1,234.5, -0.31, $4.2B. A hyphen straight
+# after a figure or a letter joins two things, as in "25.9%-24.0%", "383.3B-391.0B"
+# or "FY2021-2024", and is not a minus sign.
+_FIGURE = re.compile(r"(?:(?<![\d%A-Za-z])-)?\$?\d[\d,]*(?:\.\d+)?\s*(?:%|bn|bp|B|M|K|k|x)?")
+# The number in an index's name is not a figure about the company.
+_NAMES = re.compile(r"(?:S&P|Russell|Nasdaq|FTSE|Nikkei|Dow)[\s-]+\d+", re.IGNORECASE)
 
 
 def _numbers_in(text: str) -> List[str]:
@@ -228,9 +251,11 @@ def _grounded(value: float, evidence: List[float]) -> bool:
 
     Tolerant on purpose. The model is asked to write plainly, so it will round
     0.2812 to 28% and 416,161,000,000 to 416B, and neither is an invention. The
-    check is for figures with no relative anywhere in the evidence at all.
+    check is for figures with no relative anywhere in the evidence at all. The
+    sign is left out: "fell 32%" is how a measured -32% is said.
     """
-    for known in evidence:
+    value = abs(value)
+    for known in (abs(k) for k in evidence):
         if known == 0:
             if abs(value) < 1e-9:
                 return True
@@ -266,7 +291,7 @@ def verify(reasoning: "Reasoning", facts_text: str) -> "Reasoning":
     ])
 
     unverified, checked = [], 0
-    for token in _numbers_in(prose):
+    for token in _numbers_in(_NAMES.sub(" ", prose)):
         value = _as_float(token)
         if value is None:
             continue
@@ -310,7 +335,9 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
                   calibration=None, sentiment=None, sec_history=None,
                   filings=None, options_stats=None, thesis=None) -> Dict:
     """Collect everything measured into a compact, labelled brief."""
-    out: Dict = {"Instrument": {"symbol": symbol, "price": round(price, 4)}}
+    # A coin far below a cent keeps its figures, written out in full.
+    out: Dict = {"Instrument": {"symbol": symbol, "price":
+                                round(price, 4) if price >= 1 else format_price(price)}}
 
     if fundamentals is not None:
         f = fundamentals
@@ -328,7 +355,7 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         if block:
             out["Fundamentals (Yahoo Finance)"] = block
         if f.summary:
-            out["Business description (from SEC profile)"] = f.summary[:900]
+            out["Business description (Yahoo Finance)"] = f.summary[:900]
 
     if quality and quality.get("known"):
         out["Quality checks"] = {
@@ -340,15 +367,20 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
     if sec_history and sec_history.get("available"):
         block = {}
         cagr = sec_history.get("cagr") or {}
-        for key, label in (("revenue", "Revenue 5-year CAGR"),
-                           ("net_income", "Net income 5-year CAGR"),
-                           ("operating_income", "Operating income 5-year CAGR")):
+        for key, label in (("revenue", "Revenue growth a year"),
+                           ("net_income", "Net income growth a year"),
+                           ("operating_income", "Operating income growth a year")):
             if cagr.get(key) is not None:
-                block[label] = "%.1f%%" % (cagr[key] * 100)
+                span = (sec_history.get("cagr_years") or {}).get(key)
+                block[label + (", FY%d to FY%d" % span if span else "")] = (
+                    "%.1f%%" % (cagr[key] * 100))
         rev = (sec_history.get("table") or {}).get("revenue") or []
         if rev:
-            block["Revenue by fiscal year (as filed)"] = ", ".join(
-                "FY%s %.1fB" % (r["fy"], r["value"] / 1e9) for r in rev[-5:])
+            # Named when it is not dollars, or a yen figure is told as dollars.
+            unit = (rev[-1].get("unit") or "USD").split("/")[0]
+            block["Revenue by fiscal year (as filed%s)"
+                  % ("" if unit == "USD" else ", in " + unit)] = ", ".join(
+                "FY%s %s" % (r["fy"], big_number(r["value"])) for r in rev[-5:])
         derived = sec_history.get("derived") or {}
         margins = [(y, derived[y]["net_margin"]) for y in sorted(derived)
                    if "net_margin" in derived[y]]
@@ -361,13 +393,18 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
     if valuation and valuation.get("usable"):
         block = {"modelled range": "%.2f to %.2f" % (valuation["low"], valuation["high"]),
                  "midpoint": "%.2f" % valuation["midpoint"],
-                 "agreement between models": valuation.get("agreement", "")}
+                 "agreement between models": (
+                     "none, only one model gave a value"
+                     if valuation.get("agreement") == "single"
+                     else valuation.get("agreement_words", ""))}
         if valuation.get("upside") is not None:
             block["gap to price"] = "%.1f%%" % (valuation["upside"] * 100)
         for model in valuation.get("models", []):
-            if getattr(model, "implied_growth", None) is not None:
-                block["growth the current price implies"] = \
-                    "%.1f%% a year for a decade" % (model.implied_growth * 100)
+            if getattr(model, "implied_average", None) is not None:
+                block["free cash flow growth the current price implies"] = (
+                    "%s%.1f%% a year on average over ten years, starting at %.1f%%"
+                    % ("below " if model.implied_at_limit else "",
+                       model.implied_average * 100, model.implied_growth * 100))
         out["Valuation models"] = block
 
     if risk_profile is not None:
@@ -387,14 +424,14 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         out["Measured risk"] = block
 
     if plan is not None:
-        # The strategies that decide the call; those on trial have no say.
+        # The strategies that decide the call: those that vote.
         from .strategies import voting_names
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}
         if plan.entry:
-            block["entry"] = "%.4g" % plan.entry
-            block["stop"] = "%.4g" % plan.stop
-            block["first target"] = "%.4g" % plan.target1
+            block["entry"] = format_price(plan.entry)
+            block["stop"] = format_price(plan.stop)
+            block["first target"] = format_price(plan.target1)
             block["reward to risk"] = "%.2f" % (plan.reward_risk or 0)
         out["Technical plan (%d-strategy engine)" % len(voting_names())] = block
 

@@ -197,8 +197,8 @@ def why_not() -> str:
                                         ("APPLE_SIGNIN_PRIVATE_KEY", _key_text()))
                if not value]
     if missing:
-        return ("Sign in with Apple is off: %s is not set."
-                % " and ".join(missing))
+        return ("Sign in with Apple is off: %s %s not set."
+                % (" and ".join(missing), "is" if len(missing) == 1 else "are"))
     if _signing_key() is None:
         return ("Sign in with Apple is off: APPLE_SIGNIN_PRIVATE_KEY is not a "
                 "readable .p8 key.")

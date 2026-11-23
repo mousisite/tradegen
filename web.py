@@ -22,12 +22,14 @@ import io
 import json
 import math
 import os
+import secrets
 import sqlite3
 import sys
 import threading
 import time
 import webbrowser
-from typing import Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,7 +38,9 @@ prepare_output()
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # tests/harness.py sets this, so a test run never picks up real keys.
+    if not os.environ.get("STOCKBOT_NO_DOTENV"):
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
@@ -44,6 +48,8 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
 from flask.json.provider import DefaultJSONProvider
+from werkzeug.routing import IntegerConverter
+from werkzeug.wsgi import wrap_file
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -57,6 +63,7 @@ from bot import codes as codes_mod
 from bot import charts as charts_mod
 from bot import config as config_mod
 from bot import database as db_mod
+from bot import decision as decision_mod
 from bot import demo as demo_mod
 from bot import digest as digest_mod
 from bot import engine
@@ -64,11 +71,13 @@ from bot import events as events_mod
 from bot import ideas as ideas_mod
 from bot import invites as invites_mod
 from bot import export as export_mod
+from bot import fundamentals as fundamentals_mod
 from bot import market as market_mod
 from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import reasoning as reasoning_mod
 from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
@@ -80,10 +89,9 @@ from bot import webapp as webapp_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
-from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart
+from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart, upright
 
 app = Flask(__name__)
-app.config["JSON_SORT_KEYS"] = False
 # Chart screenshots are small. This cap stops a huge upload from tying up the
 # single-process dev server.
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
@@ -111,6 +119,19 @@ class _RequestJSON(DefaultJSONProvider):
 
 app.json = _RequestJSON(app)
 
+
+class _RowNumber(IntegerConverter):
+    """A whole number in an address, no longer than the database can hold.
+
+    Python refuses to read a number thousands of digits long, with an error
+    the router does not expect: anyone's address of one, signed in or not, was
+    a 500, a traceback and an error report. A longer one now matches nothing.
+    """
+    regex = r"\d{1,19}"
+
+
+app.url_map.converters["int"] = _RowNumber
+
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
 app.secret_key = auth_mod.session_secret()
@@ -118,6 +139,11 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(days=accounts_mod.SESSION_DAYS),
+    # The cookie is set at sign-in for as long as the server's own record of
+    # it lasts, and again only when it changes. Sent with every answer, it
+    # rode on files marked as the same for everybody, which no cache in front
+    # of the site may then keep.
+    SESSION_REFRESH_EACH_REQUEST=False,
 )
 
 # Behind a reverse proxy the app sees plain http on an internal hostname, so
@@ -125,19 +151,30 @@ app.config.update(
 # because the redirect address has to match the registered one exactly. These
 # headers are what the proxy uses to say what the browser actually asked for.
 # Only enabled deliberately, since trusting them when there is no proxy in
-# front would let a client spoof its own scheme and host.
+# front would let a client spoof its own scheme and address. The address
+# counts the one hop nearest the app, and the Host header is taken as it
+# arrives: the hosts pass the visitor's own on, and do not set
+# X-Forwarded-Host or X-Forwarded-Prefix, so those could only be a visitor's.
+# Under serve.py, waitress hands the headers on only behind a proxy.
 _public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
+
+
+def behind_proxy() -> bool:
+    """Whether the operator says a proxy is in front of this server."""
+    return ((os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
+            in ("1", "true", "yes"))
+
+
 # An https public address is an operator saying there is a TLS terminator in
 # front, which is the only way these headers get set at all.
-if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
-        in ("1", "true", "yes")) or _public.startswith("https://"):
+if behind_proxy() or _public.lower().startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
 # is served over https; on localhost it stays off or the cookie never arrives.
-if _public.startswith("https://"):
+if _public.lower().startswith("https://"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 
@@ -152,7 +189,8 @@ def _harden(response):
     h = response.headers
     h.setdefault("X-Content-Type-Options", "nosniff")
     h.setdefault("X-Frame-Options", "DENY")
-    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    h.setdefault("Content-Security-Policy",
+                 "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
     h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if app.config.get("SESSION_COOKIE_SECURE"):
@@ -165,6 +203,15 @@ def _harden(response):
             and request.endpoint != "static"
             and response.mimetype in ("text/html", "application/json", "text/csv")):
         h.setdefault("Cache-Control", "private, no-store")
+    # The address or number somebody is signing in with is on these, before
+    # there is an account to go by.
+    if request.endpoint in ("code_start", "code_verify", "review_signin"):
+        h.setdefault("Cache-Control", "private, no-store")
+    # A file asked for by this release's fingerprint never changes under that
+    # address, so a browser need not ask for it again on every page.
+    if (request.endpoint == "static" and response.status_code in (200, 206, 304)
+            and request.args.get("v") == ASSET_VERSION):
+        h["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
 
 
@@ -235,7 +282,7 @@ SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "16 November 2026"
+LEGAL_UPDATED = "23 November 2026"
 
 
 def _served_publicly() -> bool:
@@ -246,8 +293,7 @@ def _served_publicly() -> bool:
     means a TLS terminator in front.
     """
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().lower()
-    proxied = (os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
-    return public.startswith("https://") or proxied in ("1", "true", "yes")
+    return public.startswith("https://") or behind_proxy()
 
 
 def auth_required() -> bool:
@@ -309,8 +355,9 @@ def _moved_permanently():
 
 
 # Pages a visitor who is not signed in may open, as the example account. Only
-# ever for GET: nothing here can write, and every form on these pages posts to
-# an endpoint that is not on this list, so it sends them to sign up instead.
+# ever for GET (and HEAD, the same page without its body): nothing here can
+# write, and every form on these pages posts to an endpoint that is not on
+# this list, so it sends them to sign up instead.
 DEMO_ENDPOINTS = {"analyse", "research", "ideas", "screener", "portfolio",
                   "trades", "monitor", "strategies", "settings",
                   # The journal's breakdown and a trade's picture, of the
@@ -323,6 +370,10 @@ def _identify():
     """Attach the signed-in person, or the local account, to this request."""
     g.user = None
     g.demo = False
+    # Neither depends on who asks. A style sheet needs no database, and the
+    # health check has to reach its own answer when there is none to open.
+    if request.endpoint in ("static", "healthcheck"):
+        return None
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         token = session.get(SESSION_KEY)
@@ -334,10 +385,10 @@ def _identify():
         conn.close()
 
     if g.user is not None:
-        return None
+        return _sent_from_elsewhere()
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
-    if request.method == "GET" and request.endpoint in DEMO_ENDPOINTS:
+    if request.method in ("GET", "HEAD") and request.endpoint in DEMO_ENDPOINTS:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             g.user = demo_mod.user(conn)
@@ -353,10 +404,43 @@ def _identify():
         return jsonify({"error": "Not signed in."}), 401
     # A visitor who tried to do something. A POST cannot be replayed as a GET
     # after signing in, so they are brought back to the page they were on.
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return redirect(url_for("signin", next=_referrer_path()))
     # full_path always ends in "?" when there is no query string.
     return redirect(url_for("signin", next=request.full_path.rstrip("?")))
+
+
+# Posts that rightly come from elsewhere (Apple's sign-in, the servers of Apple
+# and Stripe, an inbox's unsubscribe button), and those that look at where they
+# came from themselves and answer in their own way.
+ELSEWHERE_ENDPOINTS = {"apple_callback", "apple_notifications",
+                       "appstore_notifications", "billing_webhook", "email_stop",
+                       "signout", "code_start", "app_finish", "apple_native",
+                       "learn_practice", "push_subscribe", "push_unsubscribe",
+                       "push_test", "apple_transactions", "apple_move"}
+
+
+def _sent_from_elsewhere():
+    """Refuse a change the browser says another site sent, or None.
+
+    On the live site the sign-in cookie (SameSite=Lax) never comes with such a
+    request. A copy run on somebody's own machine asks for no sign-in, so any
+    page open in the same browser could delete its trades or rewrite its
+    settings by posting to its address; and a cookie is sent from a sister
+    site under the same domain. Only what the browser itself says is gone by:
+    a program that says nothing is not a page somebody was tricked into.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS") \
+            or request.endpoint in ELSEWHERE_ENDPOINTS:
+        return None
+    fetched = request.headers.get("Sec-Fetch-Site", "")
+    if fetched not in ("cross-site", "same-site") and (fetched or _from_this_site()):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That request came from another site."}), 403
+    return render_template("error.html", symbol="",
+                           message="That was sent from another site, so nothing was "
+                                   "changed. Use the button on this site."), 403
 
 
 def _referrer_path() -> str:
@@ -394,11 +478,18 @@ def _pricing_page(reason: str = "", status: int = 200, code: str = "",
     # Inside the iPhone app no web price is shown, so Stripe is not asked.
     return render_template("pricing.html", reason=reason,
                            limits=billing_mod.free_limits(),
+                           watch_shown=ideas_mod.WATCH_SHOWN, watch_calls=WATCH_SHOWN,
                            offer={} if _in_app() else billing_mod.offers(),
                            code=code, applied=applied, code_error=code_error,
                            is_pro=user is not None and _pro(),
                            has_customer=bool(customer), fair=_fair_use(),
                            apple=_apple_plan()), status
+
+
+# What a plan paid on the website does next (billing.paid_until).
+PAID_SAID = {"renews": "Pro renews on %s.", "paid": "It is paid until %s.",
+             "ends": "The subscription is cancelled: Pro stays on until %s, and "
+                     "then ends."}
 
 
 def _apple_plan() -> Dict:
@@ -410,10 +501,12 @@ def _apple_plan() -> Dict:
     warning before an account is deleted. retrying: whether Apple may yet
     charge for Pro that has ended, so the website sells none meanwhile.
     via: how Pro was got otherwise, so the app can say why it sells nothing:
-    "web" (paid on the website), "invite" or "other".
+    "web" (paid on the website), "invite" or "other". paid_said: when what
+    was paid on the website renews or ends, in words, when that is known.
     """
     out = {"on": apple_store_mod.enabled(), "pro": None, "billing": None,
            "retrying": False, "products": apple_store_mod.product_ids(), "via": "",
+           "paid_said": "",
            "twice": False, "invite_until": 0, "subscriptions_url": APPLE_SUBSCRIPTIONS}
     user = getattr(g, "user", None)
     if user is None or getattr(g, "demo", False):
@@ -429,6 +522,9 @@ def _apple_plan() -> Dict:
     if billing_mod.ready() and billing_mod.is_pro(plain, _is_operator()):
         if plain.plan == "pro" and plain.plan_status in billing_mod.ACTIVE:
             out["via"] = "web"
+            what, when = billing_mod.paid_until(plain)
+            if what:
+                out["paid_said"] = PAID_SAID[what] % _day(when)
         elif plain.bonus_until > time.time():
             out["via"], out["invite_until"] = "invite", plain.bonus_until
         else:
@@ -447,7 +543,8 @@ def _fair_use() -> Dict[str, int]:
     """
     return {"images": (IMAGE_READS_PER_HOUR
                        if os.environ.get("ANTHROPIC_API_KEY") else 0),
-            "theses": THESES_PER_HOUR}
+            "theses": THESES_PER_HOUR, "json": JSON_READS_PER_HOUR,
+            "screens": SCREENS_PER_HOUR, "routines": ROUTINES_PER_HOUR}
 
 
 def _upgrade(reason: str):
@@ -476,17 +573,36 @@ def _just_signed_in(conn) -> bool:
     return age is not None and age < SIGNED_IN_JUST_NOW
 
 
-def _look_item(symbol: str, interval: str, exact: bool = False) -> str:
-    """What a free look is counted against: an instrument at a bar size.
+def _look_item(symbol: str, exact: bool = False) -> str:
+    """What a free look is counted against: an instrument, at any bar size.
 
     LINK exactly (Interlink Electronics) is not the bare LINK (the Chainlink
     coin), so each is its own look. The routines count the same way
     (workflows._Looks).
     """
-    return "%s|%s%s" % (symbol.upper(), interval, "|exact" if exact else "")
+    return billing_mod.look_item(symbol, exact)
 
 
-def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
+# What was typed, and the instrument it turned out to be ("TESLA" is TSLA),
+# from analyses shown since the server started. Read only when today's looks
+# are used up, so typing the name of one already opened still opens it.
+_TURNED_OUT: Dict[str, str] = {}
+_TURNED_OUT_LOCK = threading.Lock()
+TURNED_OUT_KEPT = 2000
+
+
+def _opened_under(conn, item: str) -> str:
+    """The item by which this account already opened the instrument today: the
+    one asked for, or what its words turned out to mean. "" for neither."""
+    with _TURNED_OUT_LOCK:
+        meant = _TURNED_OUT.get(item, item)
+    for known in (item, meant):
+        if billing_mod.opened_today(conn, g.user.id, known):
+            return known
+    return ""
+
+
+def _allowance_left(symbol: str, exact: bool = False) -> bool:
     """Whether a free account may open this instrument now, taking the look if so.
 
     The look is taken before the analysis runs, in one transaction with the
@@ -496,14 +612,16 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     """
     if g.demo or _pro():
         return True
-    item = _look_item(symbol, interval, exact)
+    item = _look_item(symbol, exact)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _from_another_site() and not _just_signed_in(conn) \
-                and not billing_mod.opened_today(conn, g.user.id, item):
+                and not _opened_under(conn, item):
             g.allowance_refused = "elsewhere"
             return False
         taken = billing_mod.reserve_view(conn, g.user.id, item)
+        if not taken and _opened_under(conn, item):
+            taken = "seen"
     finally:
         conn.close()
     if taken == "new":
@@ -511,18 +629,29 @@ def _allowance_left(symbol: str, interval: str, exact: bool = False) -> bool:
     return bool(taken)
 
 
-def _spend_view(symbol: str, interval: str, exact: bool = False) -> None:
-    """Counted once the analysis is on screen, so a mistyped ticker costs nothing."""
+def _spend_view(symbol: str, exact: bool = False, result=None, found: str = "") -> None:
+    """Counted once the analysis is on screen, so a mistyped ticker costs nothing.
+
+    result is that analysis: the look is counted against the instrument it
+    is of, whatever was typed to find it. Where the page was drawn from kept
+    research there is no analysis to hand, and found names the instrument.
+    """
     if g.demo or _pro():
         return
-    item = _look_item(symbol, interval, exact)
-    pending = g.get("views_pending") or set()
-    if item in pending:
-        pending.discard(item)       # shown, so the look taken for it stands
-        return
+    item = _look_item(symbol, exact)
+    found = found or getattr(getattr(result, "bars", None), "symbol", "") or ""
+    # The analysis names the instrument as Yahoo does, which is never read as
+    # anything else.
+    shown = _look_item(found, exact=True) if found else item
+    if shown != item and not exact:
+        with _TURNED_OUT_LOCK:
+            if len(_TURNED_OUT) >= TURNED_OUT_KEPT:
+                _TURNED_OUT.clear()
+            _TURNED_OUT[item] = shown
+    (g.get("views_pending") or set()).discard(item)   # shown, so it stands
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        billing_mod.count_view(conn, g.user.id, item)
+        billing_mod.show_view(conn, g.user.id, item, shown)
     finally:
         conn.close()
 
@@ -696,16 +825,6 @@ def _expose_user():
                             or (apple_mod.native_ready() and _in_app())}
 
 
-def _in_app() -> bool:
-    """Whether this page is drawn inside the Orenth iPhone app.
-
-    The app's web view adds OrenthApp/<version> to its User-Agent. It only
-    ever chooses what to show, never what is allowed: anyone can send any
-    User-Agent.
-    """
-    return "OrenthApp/" in request.headers.get("User-Agent", "")
-
-
 # The iPhone app is this same site inside a native shell, and it says so by
 # adding this to its User-Agent. Knowing it changes only what is drawn: no
 # visit counting by a third party, no web prices or Stripe buttons (inside an
@@ -731,7 +850,41 @@ def _note_app():
 
 @app.context_processor
 def _app_mode():
-    return {"in_app": _in_app()}
+    return {"in_app": _in_app(), "visit_host": _visit_host(),
+            "embedded_browser": _embedded_browser()}
+
+
+def _visit_host() -> str:
+    """The public site's host, the one place visits are counted.
+
+    Empty on a copy with no public address, such as one being worked on, and
+    the page then counts nothing.
+    """
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()).hostname
+    except ValueError:
+        host = None
+    return (host or "").removeprefix("www.")
+
+
+# What the browsers built into other apps put in their User-Agent: TikTok's
+# (under three names), Instagram's, Facebook's and Messenger's, Snapchat's,
+# LinkedIn's and Pinterest's, and the mark Android gives any such browser.
+EMBEDDED_BROWSERS = ("musical_ly", "BytedanceWebview", "trill_", "Instagram",
+                     "FBAN", "FBAV", "FB_IAB", "Snapchat/", "LinkedInApp",
+                     "[Pinterest/", "; wv)")
+
+
+def _embedded_browser() -> bool:
+    """Whether this page is open in the browser built into another app.
+
+    Google refuses to sign anyone in there, so the sign-in page says how to
+    get out of it. Like _in_app, it only ever chooses what to show. Orenth's
+    own app signs in through the system browser and is told nothing.
+    """
+    agent = request.headers.get("User-Agent") or ""
+    return not _in_app() and any(mark in agent for mark in EMBEDDED_BROWSERS)
 
 
 def uid() -> int:
@@ -747,6 +900,8 @@ def uid() -> int:
 _CACHE: Dict[Tuple, Tuple[float, engine.Analysis, Dict[int, int]]] = {}
 # Research costs several network round trips, so it gets its own cache.
 _RESEARCH_CACHE: Dict[Tuple, Tuple[float, object]] = {}
+# Research being put together right now, by cache key, as _RUNNING is below.
+_RESEARCH_RUNNING: Dict[Tuple, Dict] = {}
 _CACHE_TTL = 90.0
 # How long the example account's analyses are reused. Long, because visitors
 # looking around should cost the server one analysis per instrument per
@@ -777,16 +932,24 @@ def _cfg() -> Dict:
     if user is not None and not user.is_local:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            cfg.update(accounts_mod.settings_for(conn, user.id))
+            own = accounts_mod.settings_for(conn, user.id)
         finally:
             conn.close()
+        cfg = config_mod.with_personal(cfg, own)
     return cfg
+
+
+# Personal settings no analysis reads: the journal's daily rules, and how
+# candles are drawn, which is decided as each page is.
+_NOT_IN_ANALYSIS = ("daily_loss_limit_r", "max_trades_per_day", "last_entry_time",
+                    "calm_candles")
 
 
 def _settings_key(cfg: Dict) -> str:
     """A short fingerprint of everything that changes what an analysis says."""
     import hashlib
-    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS)
+    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS
+                    if k not in _NOT_IN_ANALYSIS)
     return hashlib.sha1(repr(picked).encode("utf-8")).hexdigest()[:12]
 
 
@@ -795,13 +958,72 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
     cfg = cfg or _cfg()
     return {"equity": float(cfg.get("cost_bps_equity", 2.0)) / 10000.0,
             "crypto": float(cfg.get("cost_bps_crypto", 20.0)) / 10000.0,
+            "other": float(cfg.get("cost_bps_other", 5.0)) / 10000.0,
             "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
+
+
+# How many analyses and pieces of research one account may have being worked
+# out, or waited for, at the same time. Each holds one of the server's eight
+# threads for seconds, or up to a minute of research, so one account asking for
+# eight at once (a different account size in each address is a different
+# analysis) kept every page from everybody. The example account is everybody
+# looking around, so it may have more.
+SLOW_AT_ONCE = 4
+DEMO_SLOW_AT_ONCE = 6
+SLOW_RETRY = 10
+_SLOW: Dict[int, int] = {}
+_SLOW_LOCK = threading.Lock()
+
+
+class _SlowSlot:
+    """One account's place among the slow work going on; taken at most once."""
+
+    def __init__(self):
+        self.mine = None
+
+    def take(self) -> None:
+        if self.mine is not None or g.user.is_local:
+            return
+        most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+        with _SLOW_LOCK:
+            if _SLOW.get(g.user.id, 0) >= most:
+                raise market_mod.DataThrottled(
+                    "Several pages are being worked out at once just now. Wait a few "
+                    "seconds for them to finish, then try again.", SLOW_RETRY)
+            _SLOW[g.user.id] = _SLOW.get(g.user.id, 0) + 1
+            self.mine = g.user.id
+
+    def free(self) -> None:
+        if self.mine is None:
+            return
+        with _SLOW_LOCK:
+            left = _SLOW.get(self.mine, 1) - 1
+            if left > 0:
+                _SLOW[self.mine] = left
+            else:
+                _SLOW.pop(self.mine, None)
+            self.mine = None
 
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
                     ttl: Optional[float] = None,
                     exact: bool = False) -> engine.Analysis:
+    """One analysis, worked out once for everyone asking for the same.
+
+    Raises DataThrottled when this account has too many going already.
+    """
+    slot = _SlowSlot()
+    try:
+        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
+                                exact)
+    finally:
+        slot.free()
+
+
+def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
+                     with_news: bool, record: bool, ttl: Optional[float],
+                     exact: bool) -> engine.Analysis:
     # The settings are part of the key. Position sizes, stops and the call
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
@@ -817,6 +1039,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
             hit = None
+            slot.take()
             running = _RUNNING.get(key)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -856,7 +1079,12 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
                                 user=me, record=record, exact=exact)
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
-            _CACHE[key] = (time.time(), result,
+            now = time.time()
+            # One past every time limit is never served again, and an intraday
+            # coin's takes some 16 MB: forty left lying fill the server.
+            for old in [k for k, v in _CACHE.items() if now - v[0] >= DEMO_TTL]:
+                _CACHE.pop(old)
+            _CACHE[key] = (now, result,
                            {me: result.run_id} if result.run_id else {})
             # Keep the cache from growing without bound in a long session.
             if len(_CACHE) > 40:
@@ -932,6 +1160,13 @@ def _pct(value, digits=0):
     return "%.*f%%" % (digits, number * 100) if number is not None else "-"
 
 
+@app.template_filter("big")
+def _big(value, digits=1):
+    """A large amount on the scale it needs: 3.4M, not 0.0B."""
+    number = _number(value)
+    return fundamentals_mod.big_number(number, digits) if number is not None else "-"
+
+
 @app.template_filter("signed")
 def _signed(value, digits=2):
     number = _number(value)
@@ -946,6 +1181,12 @@ def _signed(value, digits=2):
 def _strategy(name):
     """rsi_reversion as "RSI reversion", the name the public pages use too."""
     return public_mod.strategy_label(str(name or ""))
+
+
+@app.template_filter("bar_words")
+def _bar_words(interval):
+    """1d as "daily", 15m as "15-minute": a bar size as a page says it."""
+    return charts_mod.bar_words(interval)
 
 
 # Whether a coin's newest finished day is one the source left blank.
@@ -984,6 +1225,38 @@ def _day(ts):
         return "-"
 
 
+@app.template_filter("day_ny")
+def _day_ny(ts):
+    """'5 Nov 2026', the New York date of a moment, as the journal counts its days."""
+    from bot import clock as clock_mod
+    try:
+        return clock_mod.ny_clock(ts)[0].strftime("%d %b %Y").lstrip("0")
+    except (TypeError, ValueError, OverflowError):
+        return "-"
+
+
+@app.template_filter("plain_price")
+def _plain_price(value):
+    """A price to fill a number box with: no separators, and no noise a feed left.
+
+    Finer than format_price shows, since an exit is recorded at what is in
+    the box, and a currency pair's fourth decimal can be a good part of an R.
+    """
+    number = _number(value)
+    if number is None:
+        return ""
+    size = abs(number)
+    digits = 2 if size >= 1000 else 4 if size >= 10 else 6 if size >= 0.1 else 12
+    return ("%.*f" % (digits, number)).rstrip("0").rstrip(".")
+
+
+@app.template_filter("bare")
+def _bare(value):
+    """A number to fill a box with as a person would type it: 10000, not 10000.0."""
+    number = _number(value)
+    return "%.15g" % number if number is not None else ""
+
+
 @app.template_filter("ago")
 def _ago(ts):
     try:
@@ -1019,7 +1292,10 @@ def inject_globals():
 # a real analysis, labelled with how old it is.
 EXAMPLE_SYMBOL = "NVDA"
 EXAMPLE_TTL = 15 * 60
-_example_state = {"at": 0.0, "data": None, "busy": False}
+# How long a failed try is left before another: without it, while the source is
+# down every visit started an analysis of its own.
+EXAMPLE_RETRY = 120
+_example_state = {"at": 0.0, "data": None, "busy": False, "failed": 0.0}
 _example_lock = threading.Lock()
 
 
@@ -1030,7 +1306,8 @@ def _refresh_example() -> None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
         result = engine_mod.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
                                     with_news=False, with_learning=True,
-                                    record=False)
+                                    record=False, resolve_symbol=False,
+                                    with_calendar=False)
         said = plain_mod.explain_plan(result.plan, result.bars)
         plan = result.plan
         samples = plan.prob_samples or 0
@@ -1049,10 +1326,16 @@ def _refresh_example() -> None:
         with _example_lock:
             _example_state["data"] = data
             _example_state["at"] = data["at"]
-    except Exception:
+    except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
-        # visitor. The page simply renders without it.
-        pass
+        # visitor. The page simply renders without it, and the log says why: a
+        # source that is down in a line, anything else as an error.
+        with _example_lock:
+            _example_state["failed"] = time.time()
+        if isinstance(exc, DataError):
+            app.logger.warning("The front page example had no prices: %s", exc)
+        else:
+            app.logger.exception("The front page example could not be refreshed")
     finally:
         with _example_lock:
             _example_state["busy"] = False
@@ -1064,7 +1347,8 @@ def _example():
     with _example_lock:
         data = _example_state["data"]
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
-        if stale and not _example_state["busy"]:
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
+        if stale and rested and not _example_state["busy"]:
             _example_state["busy"] = True
             threading.Thread(target=_refresh_example, daemon=True).start()
     if data is None:
@@ -1090,9 +1374,12 @@ def index():
     try:
         runs = db_mod.recent_runs(conn, user=uid(), limit=12)
         # As held now: a position closed in part counts only what is left.
-        open_trades = db_mod.open_positions(conn, limit=20, user=uid())
+        # All of them, so a stop crossed on an old one is said too.
+        open_trades = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
-        counts = db_mod.stats(conn, user=uid())
+        # Only what the page prints: counting every signal and headline of
+        # every run took most of the time and was shown nowhere.
+        counts = db_mod.stats(conn, user=uid(), tables=("runs", "strategy_stats"))
         stored = _attention_stored(conn, uid())
     finally:
         conn.close()
@@ -1106,8 +1393,13 @@ def index():
     finally:
         conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # The bar size the box starts on is the one chosen in Settings.
+    chosen = _cfg().get("interval")
     return render_template("index.html", runs=runs,
-                           open_trades=_held(open_trades, attention["marks"]),
+                           default_interval=chosen if chosen in dict(INTERVALS) else "1d",
+                           open_trades=_held(open_trades[:POSITIONS_SHOWN],
+                                             attention["marks"]),
+                           open_more=max(0, len(open_trades) - POSITIONS_SHOWN),
                            summary=summary, counts=counts, attention=attention,
                            has_key=has_key,
                            ai_ok=has_key and _ai_consented())
@@ -1124,6 +1416,7 @@ DASHBOARD_WAIT = 4.0        # seconds the page waits for open positions' prices
 POPULAR_FRESH = 24 * 3600   # a popular check older than this is not today's
 ATTENTION_SHOWN = 6         # rows per list before "and N more"
 WATCH_SHOWN = 8
+POSITIONS_SHOWN = 20
 
 
 def _quote_day(snap: Dict) -> str:
@@ -1220,20 +1513,47 @@ def _attention_stored(conn, me: int) -> Dict:
                      for v in fresh if v.get("action") == "BUY"]}
 
 
+# The front page's price readings under way, by the positions being read: each
+# is an event set when it is done, and the marks, None until then.
+_MARKING: Dict[Tuple, Dict] = {}
+_MARKING_LOCK = threading.Lock()
+
+
 def _marks_within(open_trades, wait: float):
     """_mark_to_market's answer, and whether it was still not back after wait."""
     if not open_trades:
         return {}, False
-    done: Dict = {}
-    worker = threading.Thread(target=lambda: done.update(_mark_to_market(open_trades)),
-                              name="orenth-front-page-prices", daemon=True)
-    worker.start()
-    worker.join(wait)
-    if worker.is_alive():
+    key = (app.config.get("DB_PATH"),) + tuple(
+        (t["id"], t["trail_pct"], t["trail_dist"]) for t in open_trades)
+    with _MARKING_LOCK:
+        run = _MARKING.get(key)
+        mine = run is None
+        if mine:
+            run = _MARKING[key] = {"done": threading.Event(), "marks": None}
+
+    def read():
+        try:
+            run["marks"] = _mark_to_market(open_trades)
+        finally:
+            with _MARKING_LOCK:
+                _MARKING.pop(key, None)
+            run["done"].set()
+
+    if mine:
+        try:
+            threading.Thread(target=read, name="orenth-front-page-prices",
+                             daemon=True).start()
+        except RuntimeError:             # no room for another thread just now
+            with _MARKING_LOCK:
+                _MARKING.pop(key, None)
+            run["done"].set()
+    if not run["done"].wait(wait) or run["marks"] is None:
         # Left to finish on its own: what it fetches is kept for a minute, so
-        # the journal or the next look at this page gets it straight away.
+        # the journal or the next look at this page gets it straight away. A
+        # look while it is still reading waits for it rather than starting
+        # another: the page reloaded ten times was ten readings at once.
         return {}, True
-    return done, False
+    return run["marks"], False
 
 
 def _attention(stored: Dict, open_trades) -> Dict:
@@ -1242,6 +1562,8 @@ def _attention(stored: Dict, open_trades) -> Dict:
     positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
                  if (marks.get(t["id"]) or {}).get("status") in ("past stop",
                                                                  "past target")]
+    # Those past their stop first, so they are the ones listed when not all are.
+    positions.sort(key=lambda p: p["mark"]["status"] != "past stop")
     crossed = {p["trade"]["id"] for p in positions
                if p["mark"]["status"] == "past stop"}
     # The background check writes a crossed stop into the alert history as
@@ -1253,7 +1575,9 @@ def _attention(stored: Dict, open_trades) -> Dict:
     unchecked = sum(1 for t in open_trades
                     if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
-    return {"positions": positions, "late": late, "crossed": len(crossed),
+    return {"positions": positions[:POSITIONS_SHOWN],
+            "positions_more": max(0, len(positions) - POSITIONS_SHOWN),
+            "late": late, "crossed": len(crossed),
             "unchecked": unchecked, "marks": marks,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
@@ -1301,6 +1625,11 @@ def _safe_back(raw, fallback):
     return raw
 
 
+# Longer than any company's name. The address can hold a quarter of a megabyte,
+# and all of it went to the data source and back onto the page.
+SYMBOL_MOST = 100
+
+
 def _symbol_from(values) -> Tuple[str, bool]:
     """The ticker a request names, and whether it names Yahoo's symbol exactly.
 
@@ -1310,7 +1639,7 @@ def _symbol_from(values) -> Tuple[str, bool]:
     only where it changes the answer, so AAPL with or without it is one
     analysis, one cache entry and one free look.
     """
-    symbol = (values.get("symbol") or "").strip()
+    symbol = (values.get("symbol") or "").strip()[:SYMBOL_MOST]
     return symbol, values.get("exact") == "1" and market_mod.needs_exact(symbol)
 
 
@@ -1323,6 +1652,16 @@ def _canonical(endpoint: str, bars) -> str:
     return _public_base() + url_for(endpoint, symbol=bars.symbol,
                                     interval=bars.interval,
                                     exact=exact_arg(bars.symbol))
+
+
+# The largest account an address may name.
+ACCOUNT_MOST = config_mod.ACCOUNT_MOST
+
+
+def _address_number(name: str, most: float) -> Optional[float]:
+    """A number the address gives, when it is above zero and at most `most`."""
+    number = _number(request.args.get(name))
+    return number if number is not None and 0 < number <= most else None
 
 
 @app.route("/analyse")
@@ -1347,21 +1686,19 @@ def analyse():
                            "can look at any timeframe.")
 
     cfg = _cfg()
-    if request.args.get("account"):
-        try:
-            cfg["account_size"] = float(request.args["account"])
-        except ValueError:
-            pass
-    if request.args.get("risk"):
-        try:
-            cfg["risk_per_trade_pct"] = float(request.args["risk"])
-        except ValueError:
-            pass
+    # Within what Settings allows, or not at all: nan, a minus sign or a risk
+    # of 500 made sizes of nonsense, or no page.
+    account = _address_number("account", ACCOUNT_MOST)
+    if account is not None:
+        cfg["account_size"] = account
+    risk = _address_number("risk", 10.0)
+    if risk is not None:
+        cfg["risk_per_trade_pct"] = risk
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     if g.demo:
@@ -1382,7 +1719,7 @@ def analyse():
         detail = _plainly(exc, said)
         return render_template("error.html", symbol="", message=(
             said if detail == said else "%s (%s)" % (said, detail))), 500
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     families = _family_rollup(result)
     # What price is doing (levels, the clock, the day's lean): a part that
@@ -1394,9 +1731,13 @@ def analyse():
         app.logger.exception("Could not read the levels for %s", result.bars.symbol)
         extras = {}
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
-    # "10 bars" means nothing without the interval attached to it.
-    hold_text = config_mod.describe_horizon(
-        result.bars.interval, int(result.calibration.avg_bars_held or 0))
+    # "10 bars" means nothing without the interval attached to it, nor without
+    # how long the instrument trades in a day. Rounded as the page rounds it,
+    # and nothing at all when no past trade was measured.
+    held = int(round(result.calibration.avg_bars_held or 0))
+    hold_text = (config_mod.describe_horizon(result.bars.interval, held,
+                                             result.bars.asset_class, result.bars.symbol)
+                 if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
     suggestions = []
@@ -1415,7 +1756,8 @@ def analyse():
     try:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            open_rows = db_mod.list_trades(conn, status="open", user=uid())
+            open_rows = db_mod.list_trades(conn, status="open", account="paper",
+                                           limit=None, user=uid())
         finally:
             conn.close()
         if open_rows:
@@ -1433,7 +1775,9 @@ def analyse():
                            chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
-                           help_text=plain_mod.help_for(cfg, result.bars.interval),
+                           help_text=plain_mod.help_for(cfg, result.bars.interval,
+                                                        result.bars.asset_class,
+                                                        result.bars.symbol),
                            # A visitor cannot make a share, but every example
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
@@ -1486,9 +1830,9 @@ def _trade_chart(result, calm: bool = False) -> Dict:
 def _family_rollup(result: engine.Analysis):
     """Aggregate signals per family so the page shows structure, not a list.
 
-    Only the strategies that vote: those on trial have no say in the call, so
-    they are left out of the family leans, and a family with no voting member
-    is not shown at all rather than as "0 active".
+    Only the strategies that vote: one on trial (votes=False; none is today)
+    has no say in the call, so it is left out of the family leans, and a
+    family with no voting member is not shown at all rather than as "0 active".
     """
     rows = []
     trial = strategies_mod.TRIAL
@@ -1513,15 +1857,23 @@ def _family_rollup(result: engine.Analysis):
     return rows
 
 
+# Closed trades on one page of the journal. Open ones are always all shown:
+# each needs its Close form.
+CLOSED_SHOWN = 100
+
+
 @app.route("/trades")
 def trades():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        open_trades = db_mod.list_trades(conn, status="open", limit=50,
+        open_trades = db_mod.list_trades(conn, status="open", account="paper", limit=None,
                                          user=uid())
-        closed = db_mod.list_trades(conn, status="closed", limit=100,
-                                    user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
+        pages = max(1, math.ceil(summary["trades"] / CLOSED_SHOWN))
+        page = min(_closed_page(request.args), pages)
+        closed = db_mod.list_trades(conn, status="closed", account="paper",
+                                    limit=CLOSED_SHOWN, user=uid(), by_closed=True,
+                                    offset=(page - 1) * CLOSED_SHOWN)
         every = list(open_trades) + list(closed)
         exits = db_mod.exits_for(conn, [t["id"] for t in every])
         # What each trade's exits add up to: what is left of a position
@@ -1535,9 +1887,21 @@ def trades():
     # session rather than the address, so a link cannot put words here; and
     # looked for first, so a visitor's session is not touched.
     said = session.pop(EXIT_SAID, "") if EXIT_SAID in session else ""
+    note = session.pop(JOURNAL_NOTE, "") if JOURNAL_NOTE in session else ""
     return render_template("trades.html", open_trades=open_trades,
                            closed=closed, summary=summary, live=live,
-                           parts=parts, said=said, tags=_journal_lists())
+                           parts=parts, said=said, note=note,
+                           form_id=secrets.token_urlsafe(12), tags=_journal_lists(),
+                           page=page, pages=pages,
+                           closed_from=(page - 1) * CLOSED_SHOWN + 1)
+
+
+def _closed_page(values) -> int:
+    """Which page of closed trades was asked for: 1 for the first, or for nonsense."""
+    try:
+        return max(1, int(values.get("page") or 1))
+    except ValueError:
+        return 1
 
 
 def _journal_lists() -> Dict:
@@ -1588,7 +1952,8 @@ def _rules_stop(conn, cfg: Dict, opened_ts: Optional[int]):
     page, and broke_rule names the rules it broke, to keep with the trade.
     """
     from bot import journal as journal_mod
-    broken = journal_mod.rules_check(conn, uid(), cfg, opened_ts, costs=_costs(cfg))
+    broken = journal_mod.rules_check(conn, uid(), cfg, opened_ts, costs=_costs(cfg),
+                                     present=int(time.time()))
     if not broken:
         return None, None
     if request.form.get("override") == "1":
@@ -1597,7 +1962,8 @@ def _rules_stop(conn, cfg: Dict, opened_ts: Optional[int]):
     fields = [(k, v) for k in request.form for v in request.form.getlist(k)
               if k != "override"]
     page = render_template("rule_stop.html", said=journal_mod.rules_words(broken),
-                           broken=broken, fields=fields, action=request.path,
+                           broken=broken, past=broken[0]["past"], fields=fields,
+                           action=request.path,
                            settings_url=url_for("settings") + "#rules")
     return page, None
 
@@ -1620,8 +1986,10 @@ def _keep_trail_bests(conn, open_trades, marks) -> None:
             db_mod.stop_crossed(conn, int(t["id"]), *mark["crossed"])
 
 
-# The session key for what the journal says once after an exit.
+# The session key for what the journal says once after an exit, and for the
+# word that picks its other notices: "logged", "reviewed" or "changed".
 EXIT_SAID = "journal_exit_said"
+JOURNAL_NOTE = "journal_note"
 
 
 def _exit_words(symbol: str, done: Dict, typed: float, typed_qty: Optional[float],
@@ -1719,8 +2087,19 @@ def _mark_one(trade):
             # Where and when the stop was traded through, in the same shares.
             "touched": read.touched, "touched_at": read.touched_at,
             "touched_stop": read.touched_stop,
+            "touched_day": _touched_day(trade, bars, read.touched_at),
             # The crossing to keep, when the stop trails (_keep_trail_bests).
             "crossed": read.crossing(time.time())}
+
+
+def _touched_day(trade, bars, when: Optional[int]) -> str:
+    """The day a stop was traded through, for the journal and the front page."""
+    day = portfolio_mod.crossed_day(portfolio_mod.trade_interval(trade), bars, when)
+    return day.strftime("%d %b %Y").lstrip("0") if day else ""
+
+
+# Seconds the journal goes on asking for the prices of its open positions.
+MARK_FOR = 25.0
 
 
 def _mark_to_market(open_trades):
@@ -1729,16 +2108,25 @@ def _mark_to_market(open_trades):
     Each fetch is roughly a quarter of a second of network wait. Done one after
     another, twenty positions would hang the page for five seconds; done at the
     same time it stays under one. Failures are per-trade, so one delisted
-    symbol cannot blank the whole table.
+    symbol cannot blank the whole table. Those not asked for after MARK_FOR
+    seconds are left without a price, so that a slow source and a long journal
+    cannot hold one of the server's few threads for minutes.
     """
     out = {}
     if not open_trades:
         return out
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
+    give_up = time.monotonic() + MARK_FOR
+
+    def mark(trade):
+        if time.monotonic() >= give_up:
+            raise TimeoutError("too slow")
+        return _mark_one(trade)
+
     workers = min(8, len(open_trades))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_mark_one, t): t["id"] for t in open_trades}
+        futures = {pool.submit(mark, t): t["id"] for t in open_trades}
         for future in as_completed(futures):
             trade_id = futures[future]
             try:
@@ -1763,6 +2151,19 @@ def _form_number(name: str, label: str, required: bool = True) -> Optional[float
     if not math.isfinite(value):
         raise ValueError("%s must be an ordinary number." % label)
     return value
+
+
+def _row_id(raw) -> int:
+    """A trade's or an analysis's number as a form sends it, or a ValueError in words.
+
+    One outside what the database can number comes back as 0, which nothing
+    is numbered, so a mangled link reads as one to something not there.
+    """
+    try:
+        number = int((raw or "").strip())
+    except ValueError:
+        raise ValueError("That form was incomplete. Go back and try again.")
+    return number if 0 < number < 2 ** 63 else 0
 
 
 def _own_trade(conn, trade_id: int):
@@ -1819,7 +2220,7 @@ def close_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         price = _form_number("price", "The exit price")
         quantity = _form_number("quantity", "The size to close", required=False)
         # What the page showed still open: a size, or "all" for a trade
@@ -1854,14 +2255,15 @@ def close_trade():
             if quantity is not None:
                 quantity /= split
         done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
-                                 request.form.get("notes", ""), user=uid(),
+                                 request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
                                  expect_left=expect_left, expect_open=bool(seen),
                                  split=split if shares == "today" else _exit_split(row))
         session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
                                          split)
     except db_mod.TradeChanged:
         # Most often Close pressed twice: the first press did the work.
-        return redirect(url_for("trades", changed=trade_id))
+        session[JOURNAL_NOTE] = "changed"
+        return redirect(url_for("trades"))
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -1880,7 +2282,7 @@ def trail_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         amount = _form_number("trail", "The trail")
         atr = request.form.get("trail_kind") == "atr"
         pct = None if atr else amount / 100.0
@@ -1907,7 +2309,7 @@ def trail_trade():
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    return redirect(url_for("trades", _anchor="open"))
 
 
 class _NoTrade(ValueError):
@@ -1975,6 +2377,9 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
     direction = 1 if stop < entry else -1
     per_unit = abs(entry - stop)
     account = float(cfg["account_size"])
+    symbol = str(row["symbol"] if "symbol" in row.keys() else "").upper()
+    if symbol.endswith("=F"):
+        return _paper_contracts(row, symbol, direction, entry, stop, split, cfg)
     qty_raw = (account * cfg["risk_per_trade_pct"] / 100.0 / per_unit
                if per_unit > 0 else 0)
     cap = account * cfg["max_position_pct"] / 100.0
@@ -1985,22 +2390,64 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
     qty = round(qty_raw, 6) if crypto else float(int(qty_raw))
     if qty <= 0:
         raise _NoTrade("Account too small for one unit at this stop distance.")
-    target = float(row["target1"]) / split if row["target1"] else None
+    # A short on something that moves more than its price can have a target
+    # at or below zero, which no price reaches: logged with none set.
+    target = float(row["target1"]) / split if (row["target1"] or 0) > 0 else None
     try:
         second = row["target2"]
     except (KeyError, IndexError):
         second = None
     return {"direction": direction, "entry": entry, "stop": stop,
             "target": target, "per_unit": per_unit, "quantity": qty,
-            "target2": float(second) / split if second else None,
+            "target2": float(second) / split if (second or 0) > 0 else None,
             "split_words": market_mod.split_words(split) if split != 1.0 else "",
-            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
-                              else "{:,.0f}".format(qty)),
+            # Written as the analysis page writes it.
+            **decision_mod.size_words(qty, crypto),
             "notional": qty * entry, "risk": qty * per_unit,
             "risk_pct": (qty * per_unit / account * 100.0) if account else 0.0,
             "account": account, "capped": capped,
             "reward_risk": (abs(target - entry) / per_unit
                             if target and per_unit > 0 else None)}
+
+
+def _paper_contracts(row, symbol: str, direction: int, entry: float, stop: float,
+                     split: float, cfg: Dict) -> Dict:
+    """_paper_size for a futures plan: the contracts the analysis page sized.
+
+    The journal counts a unit as one dollar a point, so a contract is written
+    down as its dollars a point: the gain or loss it later shows is then the
+    contract's own.
+    """
+    sized = decision_mod.size_futures(symbol, entry, stop, cfg)
+    if "error" in sized:
+        raise _NoTrade(sized["error"])
+    target = float(row["target1"]) / split if (row["target1"] or 0) > 0 else None
+    second = row["target2"] if "target2" in row.keys() else None
+    units = sized["quantity"] * sized["multiplier"]
+    per_unit = abs(entry - stop)
+    return {"direction": direction, "entry": entry, "stop": stop, "target": target,
+            "per_unit": per_unit, "quantity": units,
+            "target2": float(second) / split if (second or 0) > 0 else None, "split_words": "",
+            "quantity_text": "{:,.2f}".format(units).rstrip("0").rstrip("."),
+            "unit_text": "unit" if units == 1 else "units",
+            "contract_words": "%s %s" % (sized["quantity_text"], sized["unit_text"]),
+            "multiplier": sized["multiplier"], "notional": sized["notional"],
+            "risk": sized["risk_amount"], "risk_pct": sized["risk_pct_of_account"],
+            "account": float(cfg["account_size"]), "capped": False,
+            "reward_risk": (abs(target - entry) / per_unit
+                            if target and per_unit > 0 else None)}
+
+
+# Trades logged by hand in an hour, and positions open at once: far more than
+# anyone keeps a journal of, and few enough that one account cannot fill the
+# disk or the background price checks with made-up tickers.
+TRADES_PER_HOUR = 120
+
+
+def _trade_cap() -> Optional[int]:
+    """The most positions this account may hold open; your own machine has no limit."""
+    user = getattr(g, "user", None)
+    return None if user is not None and user.is_local else db_mod.MAX_OPEN_TRADES
 
 
 def _own_run(conn, run_id: int):
@@ -2025,7 +2472,7 @@ def simulate_trade():
     over an hour old fetches daily prices, to check for a share split since.
     """
     try:
-        run_id = int(request.args.get("run_id") or "")
+        run_id = _row_id(request.args.get("run_id"))
     except ValueError:
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2061,7 +2508,7 @@ def take_trade():
     """Open a paper position from a recorded plan, as the review page showed it."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        run_id = int(request.form["run_id"])
+        run_id = _row_id(request.form.get("run_id"))
         row = _own_run(conn, run_id)
         # symbol="" on errors, because the error page's advice about mistyped
         # tickers is for an analysis that failed, and this one worked.
@@ -2069,13 +2516,24 @@ def take_trade():
         size = _paper_size(row, _cfg(), _run_split(row))
         if _logged_from(conn, run_id) is not None:
             # Confirm pressed twice: the first press already logged it.
-            return redirect(url_for("trades", logged=1))
+            session[JOURNAL_NOTE] = "logged"
+            return redirect(url_for("trades"))
         # The plan's entry is the price when it was analysed, so its trade is
         # logged now: no other entry time is taken from this form.
         tags = _tags_asked()
         stop_page, broke = _rules_stop(conn, _cfg(), None)
         if stop_page is not None:
             return stop_page
+        trail = _trail_asked(row["symbol"], row["interval"] or "1d")
+        # Looked at again in the transaction that writes it, now that the
+        # prices a trail may need are in hand: two presses at once both got
+        # past the first look, and the plan was logged twice.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if _logged_from(conn, run_id) is not None:
+            session[JOURNAL_NOTE] = "logged"
+            return redirect(url_for("trades"))
         db_mod.open_trade(conn, symbol=row["symbol"], interval=row["interval"],
                           direction=size["direction"], entry=size["entry"],
                           stop=size["stop"], target1=size["target"],
@@ -2084,15 +2542,17 @@ def take_trade():
                           strategy_note="from run #%d (%s)" % (run_id, row["action"]),
                           user=uid(), setup=tags["setup"], emotion=tags["emotion"],
                           checklist=tags["checklist"], broke_rule=broke,
-                          **_trail_asked(row["symbol"], row["interval"] or "1d"))
+                          cap=_trade_cap(), **trail)
         events_mod.bump(conn, "paper_trade")
-    except (ValueError, KeyError) as exc:
+    except ValueError as exc:
+        conn.rollback()              # nothing else waits while the page is drawn
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    # The journal opens on its form for trades entered by hand, so it says
-    # first that the confirmed one went in, and where to find it.
-    return redirect(url_for("trades", logged=1))
+    # The journal says first that the confirmed one went in, and where to
+    # find it.
+    session[JOURNAL_NOTE] = "logged"
+    return redirect(url_for("trades"))
 
 
 @app.route("/trades/open", methods=["POST"])
@@ -2102,13 +2562,21 @@ def open_trade_manual():
     Without this the journal can only ever hold the bot's own suggestions,
     which makes it useless for recording what you actually did.
     """
+    if _rate_limited("trade", TRADES_PER_HOUR):
+        return _too_often("logged trades")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        direction = 1 if request.form.get("direction", "long") == "long" else -1
+        side = request.form.get("direction", "long")
+        if side not in ("long", "short"):
+            raise ValueError("Say whether the trade is long or short.")
+        direction = 1 if side == "long" else -1
         entry = float(request.form["entry"])
         stop = float(request.form["stop"])
         target = request.form.get("target") or None
         qty = request.form.get("quantity") or None
+        target = float(target) if target else None
+        qty = float(qty) if qty else None
+        form_id = (request.form.get("form_id") or "")[:64]
         # The ticker an analysis would use, as the alert and watch forms do:
         # "btc" is Bitcoin, priced as BTC-USD, where it was the fund listed
         # as BTC. Picked from the suggestions with exact=1, BTC is that fund.
@@ -2117,26 +2585,42 @@ def open_trade_manual():
         symbol, exact = _symbol_from(request.form)
         if not symbol:
             raise KeyError("symbol")
-        symbol = market_mod.normalise_symbol(symbol, exact=exact)
+        # Too long for a ticker is refused before any price is asked for.
+        symbol = db_mod._symbol(market_mod.normalise_symbol(symbol, exact=exact))
         interval = request.form.get("interval") or "1d"
+        if interval not in dict(INTERVALS):
+            raise ValueError("Pick an interval from the list.")
         tags = _tags_asked()
+        same = (form_id, symbol, direction, entry, stop, target, qty, tags["opened_ts"],
+                uid())
+        if db_mod.already_logged(conn, *same):
+            # Add to journal pressed twice: the first press logged it.
+            return redirect(url_for("trades"))
         stop_page, broke = _rules_stop(conn, _cfg(), tags["opened_ts"])
         if stop_page is not None:
             return stop_page
+        trail = _trail_asked(symbol, interval)
+        # Looked at again in the transaction that writes it, for two presses
+        # at once, as Confirm does.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        if db_mod.already_logged(conn, *same):
+            return redirect(url_for("trades"))
         db_mod.open_trade(
             conn,
             symbol=symbol, interval=interval,
             direction=direction, entry=entry, stop=stop,
-            target1=float(target) if target else None,
-            quantity=float(qty) if qty else None,
-            risk_amount=(abs(entry - stop) * float(qty)) if qty else None,
+            target1=target, quantity=qty,
+            risk_amount=(abs(entry - stop) * qty) if qty else None,
             account="paper", strategy_note="entered by hand",
-            notes=request.form.get("notes", ""), user=uid(),
+            notes=request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
             setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
-            broke_rule=broke, opened_ts=tags["opened_ts"],
-            **_trail_asked(symbol, interval))
+            broke_rule=broke, opened_ts=tags["opened_ts"], cap=_trade_cap(),
+            form_id=form_id, **trail)
         events_mod.bump(conn, "paper_trade")
     except (KeyError, ValueError, DataError) as exc:
+        conn.rollback()              # nothing else waits while the page is drawn
         message = str(exc)
         if isinstance(exc, KeyError):
             message = "Instrument, entry and stop are all required."
@@ -2147,7 +2631,8 @@ def open_trade_manual():
         return render_template("error.html", symbol="", message=message), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    # To the open trades, where it now is: on a phone, below the figures.
+    return redirect(url_for("trades", _anchor="open"))
 
 
 @app.route("/trades/delete", methods=["POST"])
@@ -2155,12 +2640,19 @@ def delete_trade():
     """Remove a trade. A mistyped entry would otherwise skew every statistic."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        db_mod.delete_trade(conn, int(request.form["trade_id"]), user=uid())
-    except (KeyError, ValueError) as exc:
+        trade_id = _row_id(request.form.get("trade_id"))
+        try:
+            db_mod.delete_trade(conn, trade_id, user=uid())
+        except ValueError:
+            # Most often Delete pressed twice: the first press removed it.
+            raise ValueError("That trade is not in your journal. It may have been "
+                             "deleted already.")
+    except ValueError as exc:
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    page = _closed_page(request.form)
+    return redirect(url_for("trades", page=page if page > 1 else None))
 
 
 @app.route("/trades/review", methods=["POST"])
@@ -2172,7 +2664,7 @@ def review_trade():
     """
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        trade_id = int(_form_number("trade_id", "The trade"))
+        trade_id = _row_id(request.form.get("trade_id"))
         db_mod.review_trade(
             conn, trade_id, request.form.get("followed_plan"),
             request.form.get("lesson", ""), user=uid(),
@@ -2182,7 +2674,10 @@ def review_trade():
         return render_template("error.html", symbol="", message=str(exc)), 400
     finally:
         conn.close()
-    return redirect(url_for("trades", reviewed=trade_id) + "#t%d" % trade_id)
+    session[JOURNAL_NOTE] = "reviewed"
+    page = _closed_page(request.form)
+    return redirect(url_for("trades", page=page if page > 1 else None)
+                    + "#t%d" % trade_id)
 
 
 def _trade_picture(trade) -> Dict:
@@ -2194,7 +2689,6 @@ def _trade_picture(trade) -> Dict:
     bars are in today's, so after a split its prices are turned into
     today's to sit on them, and the page says so.
     """
-    import inspect
     from bot import clock as clock_mod
     from bot import journal as journal_mod
     symbol, own = trade["symbol"], trade["interval"] or "1d"
@@ -2255,12 +2749,11 @@ def _trade_picture(trade) -> Dict:
              "last": float(bars.last_price) if not closed else None}
     if intraday:
         drawn["day_label"] = clock_mod.label_ny
-    # Where the person went in and out, on charts that can mark a point.
-    if "marks" in inspect.signature(charts_mod.trade_chart).parameters:
-        marks = [(ts[first], levels["Entry"], direction, "Entry")]
-        if exit_price is not None:
-            marks.append((ts[last], exit_price, -direction, "Exit"))
-        drawn["marks"] = marks
+    # Where the person went in and out.
+    marks = [(ts[first], levels["Entry"], direction, "Entry")]
+    if exit_price is not None:
+        marks.append((ts[last], exit_price, -direction, "Exit"))
+    drawn["marks"] = marks
 
     def draw(before, after, most, **size):
         start, end = journal_mod.picture_window(n, first, last, before, after, most)
@@ -2290,14 +2783,23 @@ def trade_picture(trade_id: int):
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         try:
+            trade_id = _row_id(str(trade_id))
             row = _own_trade(conn, trade_id)
         except ValueError:
             abort(404)
         parts = db_mod.trade_parts(row, db_mod.exits_for(conn, [trade_id]).get(trade_id, []))
+        # The page of the journal a closed one is on, for the way back to it.
+        page = 1
+        if row["status"] == "closed":
+            page += conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='closed' "
+                "AND account='paper' AND (ts_closed>? OR (ts_closed=? AND id>?))",
+                (uid(), row["ts_closed"], row["ts_closed"], trade_id)
+            ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
     from bot import journal as journal_mod
-    return render_template("trade_picture.html", t=row, parts=parts,
+    return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
                            broke=journal_mod.broke_rules_of(row),
                            followed=journal_mod.FOLLOWED_LABELS.get(
@@ -2321,9 +2823,11 @@ def journal_breakdown():
             if not 0 < typed <= 100:
                 raise ValueError("The loss limit must be more than 0 and at most 100R.")
             limit_r = typed
-        target_r = _arg_number("target", "The profit target")
-        if target_r is not None and not 0 < target_r <= 1000:
-            raise ValueError("The profit target must be more than 0R.")
+        typed = _arg_number("target", "The profit target")
+        if typed is not None:
+            if not 0 < typed <= 1000:
+                raise ValueError("The profit target must be more than 0 and at most 1000R.")
+            target_r = typed
     except ValueError as exc:
         problem = str(exc)
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2459,8 +2963,8 @@ def strategies():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = db_mod.strategy_leaderboard(conn, symbol=symbol, regime=regime,
-                                           minimum=minimum, limit=40,
-                                           rank_by=rank_by)
+                                           minimum=minimum, rank_by=rank_by,
+                                           limit=len(strategies_mod.REGISTRY))
         seen = [r["symbol"] for r in conn.execute(
             "SELECT DISTINCT symbol FROM strategy_stats ORDER BY symbol")]
     finally:
@@ -2521,7 +3025,7 @@ def analyse_image():
         if used >= billing_mod.free_limits()["analyses_per_day"]:
             return _allowance_used()
     if _rate_limited("image", IMAGE_READS_PER_HOUR):
-        return _too_often("read screenshots")
+        return _too_often("sent screenshots")
 
     # Nothing a person uploads goes to another company's AI without their
     # explicit yes: the box on the Analyse page, ticked once and remembered,
@@ -2568,6 +3072,10 @@ def analyse_image():
             # Shrunk to what the vision model uses, before anything else, so
             # no full-size copy is ever made or passed on.
             img.thumbnail((MAX_EDGE, MAX_EDGE))
+            # A phone stores a photo as its sensor lay and notes which way up
+            # it was held. Saved as PNG the note is lost, and an upright chart
+            # was read lying on its side.
+            img = upright(img)
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
             png = io.BytesIO()
@@ -2601,7 +3109,11 @@ def analyse_image():
                                        "image. Try a clearer screenshot, or just "
                                        "type the ticker."), 422
 
-    interval = request.form.get("interval") or _interval_from(read.timeframe)
+    # The bar size chosen on the page, which says so under the picture box. A
+    # request that names none there is has the picture's own.
+    interval = request.form.get("interval")
+    if interval not in dict(INTERVALS):
+        interval = _interval_from(read.timeframe)
     return redirect(url_for("analyse", symbol=read.symbol, interval=interval,
                             fromimage="1"))
 
@@ -2641,12 +3153,126 @@ def _interval_from(timeframe: Optional[str]) -> str:
     """Map whatever the chart said its timeframe was onto one we support."""
     if not timeframe:
         return "1d"
-    t = timeframe.strip().lower().replace(" ", "")
+    t = str(timeframe).strip().lower().replace(" ", "")
     known = {"1m": "5m", "2m": "5m", "3m": "5m", "5m": "5m", "10m": "15m",
              "15m": "15m", "30m": "30m", "45m": "30m", "1h": "1h", "60m": "1h",
              "2h": "1h", "4h": "1h", "1d": "1d", "d": "1d", "1day": "1d",
              "daily": "1d", "1w": "1d", "w": "1d"}
     return known.get(t, "1d")
+
+
+# Each written reasoning is a paid request, asked for again whenever the
+# settings or the pieces left out differ, so one account could have the same
+# company reasoned over for ever. Per account and instrument, so it limits how
+# often, never how many instruments; past it the page comes without.
+REASONINGS_PER_HOUR = 10
+REASONED_ENOUGH = ("The written reasoning on this has been asked for many times in the "
+                   "last hour, so it was left out this time. Every measured figure on "
+                   "this page is unaffected.")
+
+
+def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
+                  with_options: bool) -> Tuple:
+    """What one piece of research is kept under.
+
+    Keyed like the analysis it is built from: the thesis and the reasoning
+    quote that person's own plan, so one person's stops and targets were
+    being shown to the next person who opened the same ticker. The example's
+    is kept apart from everyone's, because it has no reasoning in it.
+    """
+    return (symbol.upper(), interval, "research", _settings_key(cfg),
+            with_news, with_options, bool(g.demo))
+
+
+def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
+                     with_options: bool):
+    """The research for one analysis, built once for everyone asking at once.
+
+    Raises DataThrottled as cached_analysis does.
+    """
+    slot = _SlowSlot()
+    try:
+        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
+    finally:
+        slot.free()
+
+
+def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
+                   with_news: bool, with_options: bool):
+    key = _research_key(analysis.bars.symbol, interval, cfg, with_news, with_options)
+    ttl = DEMO_TTL if g.demo else _CACHE_TTL
+    owned = None
+    while True:
+        with _CACHE_LOCK:
+            hit = _RESEARCH_CACHE.get(key)
+            if hit and (time.time() - hit[0]) < ttl:
+                return hit[1]
+            slot.take()
+            running = _RESEARCH_RUNNING.get(key)
+            if running is None:
+                owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
+                break
+        if not running["done"].wait(_RUNNING_WAIT):
+            break                        # stuck: build one here rather than fail
+        if running["error"] is not None:
+            raise running["error"]
+    try:
+        # The written reasoning is a paid request, and the example is open to
+        # anyone, so it is not asked for there.
+        written = not g.demo
+        if written and reasoning_mod.available() and _rate_limited(
+                "reasoning:" + analysis.bars.symbol, REASONINGS_PER_HOUR):
+            written = False
+        found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
+                                cfg, analysis=analysis, with_options=with_options,
+                                with_reasoning=written)
+        if not written and not g.demo:
+            # This account's alone: the next person to ask has their own.
+            found.reasoning = reasoning_mod.Reasoning(
+                False, reason_unavailable=REASONED_ENOUGH)
+            return found
+        with _CACHE_LOCK:
+            _RESEARCH_CACHE[key] = (time.time(), found)
+            if len(_RESEARCH_CACHE) > 20:
+                oldest = min(_RESEARCH_CACHE, key=lambda k: _RESEARCH_CACHE[k][0])
+                _RESEARCH_CACHE.pop(oldest, None)
+        return found
+    except Exception as exc:
+        if owned is not None:
+            owned["error"] = exc
+        raise
+    finally:
+        if owned is not None:
+            with _CACHE_LOCK:
+                if _RESEARCH_RUNNING.get(key) is owned:
+                    _RESEARCH_RUNNING.pop(key, None)
+            owned["done"].set()
+
+
+def _year_chart(bars) -> Dict:
+    """The last year's closing prices, and what to call them; {} for none.
+
+    Always from daily bars. Opened from a 5-minute analysis, the page drew
+    that analysis's last 260 bars, three days of them, as "the last year".
+    """
+    if bars.interval != "1d":
+        try:
+            bars = market_mod.fetch_bars(bars.symbol, "1d")
+        except Exception:
+            return {}
+    stamps = [int(t) for t in bars.timestamp]
+    if not stamps:
+        return {}
+    start = next(k for k, t in enumerate(stamps) if t >= stamps[-1] - 366 * 86400)
+    days = (stamps[-1] - stamps[start]) // 86400
+    title = ("The last year" if days >= 350 else
+             "The last %d months" % round(days / 30.44) if days >= 60 else
+             "The last %d days" % days)
+    day = time.gmtime(stamps[start] + (getattr(bars, "gmt_offset", 0) or 0))
+    return {"title": title,
+            "draw": dict(closes=[float(v) for v in bars.close[start:]],
+                         labels=("%d %s" % (day.tm_mday, time.strftime("%b %Y", day)), "now"),
+                         title="%s price history" % bars.symbol)}
 
 
 @app.route("/research")
@@ -2671,48 +3297,35 @@ def research():
                            "can look at any timeframe.")
 
 
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
 
     cfg = _cfg()
-    with_news = request.args.get("news", "1") != "0"
-    with_options = request.args.get("options", "1") != "0"
+    # The example is one page for everyone: leaving pieces of it out by the
+    # address only made the server build it again, four times over.
+    with_news = bool(g.demo) or request.args.get("news", "1") != "0"
+    with_options = bool(g.demo) or request.args.get("options", "1") != "0"
     try:
         analysis = cached_analysis(symbol, interval, cfg, with_news,
                                    record=not g.demo,
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, analysis)
 
-    # Keyed like the analysis it is built from: the thesis and the reasoning
-    # quote that person's own plan, so one person's stops and targets were
-    # being shown to the next person who opened the same ticker.
-    key = (analysis.bars.symbol.upper(), interval, "research", _settings_key(cfg),
-           with_news, with_options)
-    now = time.time()
-    with _CACHE_LOCK:
-        hit = _RESEARCH_CACHE.get(key)
-    if hit and (now - hit[0]) < _CACHE_TTL:
-        found = hit[1]
-    else:
-        found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
-                                cfg, analysis=analysis, with_options=with_options)
-        with _CACHE_LOCK:
-            _RESEARCH_CACHE[key] = (time.time(), found)
-            if len(_RESEARCH_CACHE) > 20:
-                oldest = min(_RESEARCH_CACHE, key=lambda k: _RESEARCH_CACHE[k][0])
-                _RESEARCH_CACHE.pop(oldest, None)
+    try:
+        found = _cached_research(analysis, interval, cfg, with_news, with_options)
+    except market_mod.DataThrottled as exc:
+        return _no_prices(exc, symbol, 404)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
     # page's chart is: shrunk to a phone, the wide drawing's labels were 4
     # pixels tall. The narrow one is drawn for a phone's width.
-    year = dict(closes=[float(v) for v in analysis.bars.close[-260:]],
-                labels=("about a year ago", "now"),
-                title="%s price history" % analysis.bars.symbol)
-    price_svg = charts_mod.price_chart(**year)
-    price_svg_narrow = charts_mod.price_chart(width=300, height=190, **year)
+    year = _year_chart(analysis.bars)
+    price_svg = charts_mod.price_chart(**year["draw"]) if year else ""
+    price_svg_narrow = (charts_mod.price_chart(width=300, height=190, **year["draw"])
+                        if year else "")
     filed_charts = charts_mod.charts_for(found.sec_history or {})
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -2728,28 +3341,66 @@ def research():
 
     reviews = []
     for row in saved:
+        if row["outcome"]:
+            # Closed: the outcome recorded then stands, at the price it was
+            # closed at, whatever the price has done since.
+            at_close = row["closed_price"]
+            look = (thesis_mod.review(_stored_thesis(row), at_close)
+                    if at_close else {"usable": False, "reason": ""})
+            reviews.append((row, dict(look, now=at_close, quoted=None, split_words="",
+                                      no_view=thesis_mod.no_view(row["verdict"]))))
+            continue
         now_price, split = _thesis_price(row, analysis.bars)
-        look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
-                                   "created": row["created_ts"]}, now_price)
+        look = (thesis_mod.review(_stored_thesis(row), now_price)
                 if now_price else
                 {"usable": False, "reason": "Could not price %s today." % row["symbol"]})
         reviews.append((row, dict(
-            look, now=now_price,
+            look, now=now_price, no_view=thesis_mod.no_view(row["verdict"]),
             quoted=analysis.bars.last_price if split != 1.0 else None,
             split_words=market_mod.split_words(split) if split != 1.0 else "")))
 
     return render_template("research.html", r=found, a=analysis, cfg=cfg,
                            saved=reviews, watched=watched,
                            price_svg=price_svg, price_svg_narrow=price_svg_narrow,
+                           price_title=year.get("title", ""),
+                           with_news=with_news, with_options=with_options,
                            filed_charts=filed_charts,
                            plain=plain_mod.explain_company(found),
                            canonical_url=_canonical("research", analysis.bars))
 
 
-# Each save runs the research pipeline again: fundamentals, filings and risk.
+# A save whose research is no longer kept runs the pipeline again:
+# fundamentals, filings and risk.
 THESES_PER_HOUR = 30
+# How long the research on a page can still be saved from it, as it was read.
+SAVE_TTL = 15 * 60.0
 # A note is a reminder to yourself, not an essay, and it is stored for good.
 NOTE_LIMIT = 1000
+
+
+# Said for a thesis number that is not one, or is nobody's here: an old page's
+# button, or a form that was not this site's.
+THESIS_NOT_FOUND = "That thesis could not be found. Open Monitor and try again."
+
+
+def _thesis_id() -> Optional[int]:
+    """The thesis a form is about, or None when what it sent is not a number."""
+    try:
+        number = int(request.form.get("thesis_id") or "")
+    except ValueError:
+        return None
+    # SQLite holds no larger a number, and asking for one is an error there.
+    return number if 0 < number < 2 ** 63 else None
+
+
+def _thesis_not_found():
+    return render_template("error.html", symbol="", message=THESIS_NOT_FOUND), 400
+
+
+def _stored_thesis(row) -> Dict:
+    """A saved thesis as thesis.review reads it."""
+    return {"price": row["price"], "balance": row["balance"],
+            "created": row["created_ts"], "verdict": row["verdict"]}
 
 
 def _thesis_price(row, bars):
@@ -2782,20 +3433,39 @@ def save_thesis():
                                        "the thesis from there."), 400
     # Saving analyses the instrument, so it costs a free look as opening it
     # does. Without this a free account could research anything from here.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     if _rate_limited("thesis", THESES_PER_HOUR):
         return _too_often("saved theses")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         cfg = _cfg()
-        analysis = cached_analysis(symbol, interval, cfg, False, exact=exact)
-        found = engine.research(symbol, analysis.bars.last_price, cfg,
-                                analysis=analysis, with_options=False,
-                                with_reasoning=False)
-        t = found.thesis
+        with_news = request.form.get("news", "1") != "0"
+        with_options = request.form.get("options", "1") != "0"
+        # The research the page showed, when it is still kept: the case that
+        # was read is the one saved, and nothing is worked out twice. A bare
+        # ticker that is also a coin's does not name a page, so not for that.
+        hit = None
+        if exact or not market_mod.needs_exact(symbol):
+            with _CACHE_LOCK:
+                hit = _RESEARCH_CACHE.get(_research_key(
+                    symbol, interval, cfg, with_news, with_options))
+        if hit and time.time() - hit[0] < SAVE_TTL and hit[1].thesis is not None:
+            t, price, found = hit[1].thesis, hit[1].price, hit[1].symbol
+        else:
+            # As the page does it, so it is the same case by today's figures;
+            # the written reasoning is not part of a thesis.
+            analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
+            price = analysis.bars.last_price
+            found = getattr(analysis.bars, "symbol", "")
+            t = engine.research(symbol, price, cfg, analysis=analysis,
+                                with_options=with_options,
+                                with_reasoning=False).thesis
         db_mod.thesis_save(
-            conn, symbol, analysis.bars.last_price, t.balance, t.verdict,
+            # A case too thin to mean anything takes no side, whatever the one
+            # or two points it had came to.
+            conn, symbol, price,
+            0.0 if thesis_mod.no_view(t.verdict) else t.balance, t.verdict,
             [{"headline": p.headline, "detail": p.detail,
               "evidence": [{"claim": e.claim, "value": e.value,
                             "source": e.source, "url": e.url} for e in p.evidence]}
@@ -2811,24 +3481,30 @@ def save_thesis():
     except Exception:
         # The text of an unexpected error can carry file paths or SQL, which
         # are for the log, not the page.
-        app.logger.exception("Saving a thesis for %s failed", symbol)
+        app.logger.exception("Saving a thesis for %s failed",
+                             "".join(ch for ch in symbol if ch.isprintable()))
         return render_template("error.html", symbol=symbol,
                                message="That thesis could not be saved just now. "
                                        "Try again in a minute."), 500
     finally:
         conn.close()
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, found=found)
     return redirect(url_for("research", symbol=symbol, interval=interval,
-                            exact=1 if exact else None))
+                            exact=1 if exact else None,
+                            news=None if with_news else 0,
+                            options=None if with_options else 0))
 
 
 @app.route("/thesis/delete", methods=["POST"])
 def delete_thesis():
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        db_mod.thesis_delete(conn, int(request.form["thesis_id"]), user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+        db_mod.thesis_delete(conn, thesis_id, user=uid())
+    except ValueError:
+        return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2837,19 +3513,20 @@ def delete_thesis():
 @app.route("/thesis/close", methods=["POST"])
 def close_thesis():
     """Record how a thesis actually turned out, at today's price."""
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        thesis_id = int(request.form["thesis_id"])
         row = db_mod.thesis_get(conn, thesis_id, user=uid())
         if row is None:
-            return render_template("error.html", symbol="",
-                                   message="No thesis with id %d." % thesis_id), 400
+            return _thesis_not_found()
 
         outcome = request.form.get("outcome") or ""
         if outcome not in thesis_mod.OUTCOMES:
             return render_template("error.html", symbol=row["symbol"],
-                                   message="%r is not an outcome this records."
-                                           % outcome), 400
+                                   message="Choose how it turned out from the list, "
+                                           "then close it."), 400
 
         # Price it at close, not at whatever the user remembers. A thesis is
         # judged against the market, so the market supplies the number.
@@ -2868,9 +3545,11 @@ def close_thesis():
                         "cannot be priced to close the thesis. Try again in a "
                         "minute." % row["symbol"]), 503
 
-        db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+        try:
+            db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
+        except ValueError:
+            # Deleted from another tab between the look and the close.
+            return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2879,15 +3558,14 @@ def close_thesis():
 @app.route("/thesis/reopen", methods=["POST"])
 def reopen_thesis():
     """Undo a closing, for when it was recorded by mistake."""
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        thesis_id = int(request.form["thesis_id"])
-        if db_mod.thesis_get(conn, thesis_id, user=uid()) is None:
-            return render_template("error.html", symbol="",
-                                   message="No thesis with id %d." % thesis_id), 400
         db_mod.thesis_reopen(conn, thesis_id, user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+    except ValueError:
+        return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2938,8 +3616,8 @@ def google_start():
     if not auth_mod.configured():
         setup = not _served_publicly()
         why = auth_mod.why_not() if setup else ""
-        return render_template("signin.html", reason=why, setup=setup,
-                               why_not=why, next_url=""), 503
+        return render_template("signin.html", reason=why, setup=setup, why_not=why,
+                               next_url=_safe_back(request.args.get("next"), "")), 503
 
     challenge, refused = _app_challenge()
     if refused:
@@ -2962,8 +3640,14 @@ def google_start():
         url = auth_mod.authorization_url(_redirect_uri(), state, verifier)
     except auth_mod.AuthError as exc:
         return render_template("signin.html", reason=_sign_in_trouble(exc),
-                               why_not="", next_url=""), 503
+                               why_not="", next_url=session["oauth_next"]), 503
     return redirect(url)
+
+
+# Each of these asks Google's server something, and anyone can start one. Far
+# above what a school or a phone company's shared address needs: a network is
+# allowed three times this an hour (see _rate_limited).
+GOOGLE_SIGNINS_PER_HOUR = 100
 
 
 @app.route("/auth/google/callback")
@@ -2985,31 +3669,41 @@ def google_callback():
              "Google did not complete the sign-in. Start again from "
              "this page."),
             "cancelled" if request.args.get("error") == "access_denied"
-            else "failed")
+            else "failed", next_url=next_url)
 
     state = request.args.get("state", "")
     # Constant time, because this is a secret being compared.
-    if not expected or not hmac.compare_digest(str(expected), str(state)):
+    # As bytes, because text with a letter outside ASCII raises here.
+    if not expected or not hmac.compare_digest(
+            str(expected).encode("utf-8"), str(state).encode("utf-8", "replace")):
         return _sign_in_failed(
             challenge, "That sign-in link did not match this browser session. "
-                       "Start again from this page.", "expired")
+                       "Start again from this page.", "expired",
+            next_url=next_url)
 
     code = request.args.get("code", "")
     if not code:
-        return _sign_in_failed(challenge, "Google returned no sign-in code.")
+        return _sign_in_failed(challenge, "Google returned no sign-in code.",
+                               next_url=next_url)
 
+    if _rate_limited("google_signin", GOOGLE_SIGNINS_PER_HOUR):
+        return _sign_in_failed(
+            challenge, "Too many sign-ins were tried from this connection in "
+                       "the last hour. Wait a while, then try again.",
+            "failed", 429, next_url=next_url)
     try:
         profile = auth_mod.sign_in(code, _redirect_uri(), verifier)
     except auth_mod.AuthError as exc:
-        return _sign_in_failed(challenge, _sign_in_trouble(exc))
+        return _sign_in_failed(challenge, _sign_in_trouble(exc), next_url=next_url)
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _kept_for_review(conn, profile.get("email"), "Google sign-in"):
-            return _sign_in_failed(challenge, REVIEW_KEPT % "Google", "refused")
+            return _sign_in_failed(challenge, REVIEW_KEPT % "Google", "refused",
+                                   next_url=next_url)
         user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
-        return _sign_in_failed(challenge, str(exc), "refused")
+        return _sign_in_failed(challenge, str(exc), "refused", next_url=next_url)
     finally:
         conn.close()
     if challenge:
@@ -3024,6 +3718,10 @@ def google_callback():
 # sent only to /auth/apple and only over https.
 APPLE_FLOW = "apple_flow"
 APPLE_FLOW_SECONDS = 10 * 60
+# Ends the state of a sign-in the app started in its browser sheet. The state
+# comes back from Apple even when the cookie has run out, so the sheet can
+# still be sent back to the app instead of being left on the website.
+APPLE_FROM_APP = ".app"
 # Every one of these is a call to Apple, and anyone can start a sign-in, so
 # they are limited per network (_rate_limited allows a network three times
 # this an hour).
@@ -3066,6 +3764,8 @@ def apple_start():
     if refused:
         return _to_app(error="failed")
     state, nonce = apple_mod.new_state(), apple_mod.new_nonce()
+    if challenge:
+        state += APPLE_FROM_APP
     flow = {"state": state, "nonce": apple_mod.nonce_hash(nonce),
             "next": _safe_back(request.args.get("next"), ""), "app": challenge,
             # A friend's invite this visitor arrived with: it lives in the
@@ -3087,26 +3787,32 @@ def apple_callback():
     if not apple_mod.web_ready():
         abort(404)
     flow = _apple_flow()
-    challenge = flow.get("app", "")
+    challenge, next_url = flow.get("app", ""), flow.get("next", "")
     state = request.form.get("state", "")
     # Constant time, because this is a secret being compared.
     if not flow or not hmac.compare_digest(
             str(flow.get("state", "")).encode("utf-8"), state.encode("utf-8")):
+        # With no cookie, the person took longer than it lasts, or a page
+        # elsewhere made this up. Either way only a reason goes to the app.
         return _apple_done(_sign_in_failed(
-            challenge, "That sign-in did not match this browser. Start again "
-                       "from this page.", "expired"))
+            challenge or state.endswith(APPLE_FROM_APP),
+            "That sign-in did not match this browser. Start again from this "
+            "page." if flow else
+            "That Apple sign-in took too long, or was started in another "
+            "browser. Start again from this page.", "expired",
+            next_url=next_url))
     error = request.form.get("error", "")
     if error:
         cancelled = error == "user_cancelled_authorize"
         return _apple_done(_sign_in_failed(
             challenge, "Signing in with Apple was cancelled." if cancelled
             else "Apple did not complete the sign-in.",
-            "cancelled" if cancelled else "failed"))
+            "cancelled" if cancelled else "failed", next_url=next_url))
     if _rate_limited("apple_signin", APPLE_SIGNINS_PER_HOUR):
         return _apple_done(_sign_in_failed(
             challenge, "Too many sign-ins were tried from this connection in "
                        "the last hour. Wait a while, then try again.",
-            "failed", 429))
+            "failed", 429, next_url=next_url))
 
     client_id = apple_mod.services_id()
     try:
@@ -3117,26 +3823,27 @@ def apple_callback():
         identity = apple_mod.verify_identity(tokens.get("id_token"), client_id,
                                              flow.get("nonce", ""))
     except apple_mod.AppleError as exc:
-        return _apple_done(_sign_in_failed(challenge, str(exc)))
+        return _apple_done(_sign_in_failed(challenge, str(exc), next_url=next_url))
     refresh_token = tokens.get("refresh_token")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _kept_for_review(conn, identity.get("email"), "Sign in with Apple"):
             return _apple_done(_sign_in_failed(challenge, REVIEW_KEPT % "Apple",
-                                               "refused"))
+                                               "refused", next_url=next_url))
         user = events_mod.new_account(
             conn, accounts_mod.upsert_apple_user, identity,
             apple_mod.name_from_post(request.form.get("user", "")),
             refresh_token if isinstance(refresh_token, str) else "", client_id)
     except ValueError as exc:
-        return _apple_done(_sign_in_failed(challenge, str(exc), "refused"))
+        return _apple_done(_sign_in_failed(challenge, str(exc), "refused",
+                                           next_url=next_url))
     finally:
         conn.close()
     if challenge:
-        return _apple_done(_hand_to_app(user, challenge, flow.get("next", "")))
+        return _apple_done(_hand_to_app(user, challenge, next_url))
     if flow.get("ref"):
         session["ref"] = flow["ref"]
-    return _apple_done(_finish_sign_in(user, flow.get("next", "")))
+    return _apple_done(_finish_sign_in(user, next_url))
 
 
 @app.route("/auth/apple/nonce")
@@ -3298,9 +4005,7 @@ def apple_notifications():
             return jsonify({"received": True})
         # Their Apple Account is gone and nothing else opens this one. The
         # subscription stops first, as when they delete it themselves.
-        customer = billing_mod.customer_of(conn, user_id)
-        if customer and billing_mod.ready():
-            billing_mod.close_customer(customer)
+        billing_mod.end_subscription(conn, user_id)
         accounts_mod.delete_user(conn, user_id)
         app.logger.info("Deleted account %d: its Apple Account was deleted and "
                         "nothing else could open it", user_id)
@@ -3363,15 +4068,17 @@ def _hand_to_app(user, challenge: str, next_url: str):
     return _to_app(code=handoff_token)
 
 
-def _sign_in_failed(challenge: str, message: str, reason: str = "failed",
-                    status: int = 400):
+def _sign_in_failed(challenge, message: str, reason: str = "failed",
+                    status: int = 400, next_url: str = ""):
     """A sign-in that did not finish. Said on the sign-in page or, when the
     app started it, to the app in a word, so nobody is left on an error page
-    inside the browser sheet."""
+    inside the browser sheet. next_url is the page they were on their way
+    to, so the next try still ends there."""
     if challenge:
         return _to_app(error=reason)
     return app.make_response((render_template(
-        "signin.html", reason=message, why_not="", next_url=""), status))
+        "signin.html", reason=message, why_not="",
+        next_url=_safe_back(next_url, "")), status))
 
 
 def _from_this_site() -> bool:
@@ -3380,14 +4087,15 @@ def _from_this_site() -> bool:
     The rest of the site leans on the session cookie being SameSite=Lax. A
     sign-in cannot, being what starts the session: a form on another site
     could otherwise sign its visitor in to an account of its choosing.
-    Browsers set these headers themselves: Sec-Fetch-Site, then Origin, then,
-    for an older browser sending neither, the Referer. One that sends none of
-    them is let through, since then there is nothing to go on.
+    Browsers set these headers themselves: Sec-Fetch-Site, which settles it
+    whatever address this server believes it has, then Origin, then, for an
+    older browser sending neither, the Referer. One that sends none of them
+    is let through, since then there is nothing to go on.
     """
     from urllib.parse import urlparse
     fetched = request.headers.get("Sec-Fetch-Site", "")
-    if fetched and fetched != "same-origin":
-        return False
+    if fetched:
+        return fetched == "same-origin"
 
     def origin_of(url: str) -> str:
         parts = urlparse(url)
@@ -3417,10 +4125,12 @@ def app_finish():
         abort(404)
     if not _from_this_site():
         return _sign_in_failed("", HANDOFF_FAILED, status=403)
+    next_url = request.form.get("next", "")
     if _rate_limited("app_finish", APP_FINISHES_PER_HOUR):
         return _sign_in_failed("", "Too many sign-ins were tried from this "
                                    "connection in the last hour. Wait a while, "
-                                   "then try again.", status=429)
+                                   "then try again.", status=429,
+                               next_url=next_url)
     # Named so that an error report strips them, as it does any token.
     handoff_token = request.form.get("code", "")
     verifier_secret = request.form.get("verifier", "")
@@ -3431,8 +4141,8 @@ def app_finish():
     finally:
         conn.close()
     if user is None:
-        return _sign_in_failed("", HANDOFF_FAILED)
-    return _finish_sign_in(user, found[1] or request.form.get("next", ""))
+        return _sign_in_failed("", HANDOFF_FAILED, next_url=next_url)
+    return _finish_sign_in(user, found[1] or next_url)
 
 
 def _finish_sign_in(user, next_url: str):
@@ -3442,12 +4152,26 @@ def _finish_sign_in(user, next_url: str):
 
 
 def _open_session(user) -> None:
-    """The session itself, for a sign-in that answers with JSON, not a page."""
+    """The session itself, for a sign-in that answers with JSON, not a page.
+
+    It takes the place of any this browser already held, which ends as
+    signing out would end it: on a shared computer, someone else's would
+    otherwise stay good for weeks with nothing left to sign it out, and go
+    on sending their alerts to this browser.
+    """
+    old = session.get(SESSION_KEY, "")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         accounts_mod.purge_expired(conn)
         token = accounts_mod.start_session(
             conn, user.id, request.headers.get("User-Agent", ""))
+        if old:
+            # Their own device, when it is the same person signing in
+            # again, stays on, as this sign-in's: signing out of it is what
+            # must switch it off.
+            push_mod.forget_session(conn, _session_ref(old), keep_for=user.id,
+                                    keep_as=_session_ref(token))
+            accounts_mod.end_session(conn, old)
         # A friend's link they arrived through, credited once the account
         # exists. accept() ignores it for anyone who was not brand new.
         ref = session.pop("ref", "")
@@ -3465,10 +4189,23 @@ def _client_ip() -> str:
     Behind Cloudflare the connection comes from Cloudflare, shared by
     everyone, so its own header naming the visitor is preferred. It can be
     forged by going round Cloudflare to the host directly; that only weakens
-    the per-network limit, and the per-address limit still holds.
+    the per-network limit, and the per-address limit still holds. Anything
+    that is not an address is passed over: made-up words there were each a
+    network of their own. An IPv6 address counts as its /64, the least one
+    connection is given, or one home could ask from a new address every time.
     """
-    return (request.headers.get("CF-Connecting-IP")
-            or request.remote_addr or "")[:64]
+    import ipaddress
+    for said in (request.headers.get("CF-Connecting-IP"), request.remote_addr):
+        try:
+            address = ipaddress.ip_address((said or "").strip().partition("%")[0])
+        except ValueError:
+            continue
+        if address.version == 6:
+            address = address.ipv4_mapped or address
+        if address.version == 4:
+            return str(address)
+        return "%s/64" % ipaddress.IPv6Address(int(address) >> 64 << 64)
+    return ""
 
 
 _CHANNELS = {
@@ -3488,7 +4225,11 @@ def code_start(channel):
     next_url = _safe_back(request.values.get("next"), "")
     error = None
     value = ""
-    if request.method == "POST":
+    if request.method == "POST" and not _from_this_site():
+        # A form on another site would send a code to an address of its
+        # choosing, from its visitor's network.
+        error = "Type your %s here to be sent a code." % spec["label"]
+    elif request.method == "POST":
         value = (request.form.get("to") or "").strip()[:200]
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
@@ -3548,7 +4289,8 @@ def code_verify(channel):
         finally:
             conn.close()
     return render_template("code_verify.html", channel=channel,
-                           to=pending["to"], error=error)
+                           to=pending["to"], error=error,
+                           next_url=pending.get("next", ""))
 
 
 # Apple's reviewers must be able to sign in to the iPhone app, and they cannot
@@ -3742,8 +4484,23 @@ CODE_ERROR = ("That code does not work, or it has run out. Check the "
 # Codes are passed on by word of mouth, so they are words someone chose and
 # can be guessed, and every check is a call to Stripe.
 CODE_CHECKS_PER_HOUR = 10
+CODE_REFUSED = ("Payments would not take that code for this purchase. Nothing "
+                "was charged. Empty the box to pay full price.")
 CODE_TOO_OFTEN = ("Too many codes were tried in the last hour. Wait a while, "
                   "or empty the box to pay full price.")
+# Every other request that makes this server ask Stripe, per account an hour
+# (a network gets three times this), each counted on its own: without it, one
+# account in a loop could use up what Stripe allows and hold up real buyers.
+STRIPE_ASKS_PER_HOUR = 30
+STRIPE_TOO_OFTEN = ("That was asked for many times in the last hour. Wait a "
+                    "while, then try again. Nothing was charged.")
+
+
+def _code_said(status: int = 200, **said):
+    """The line under the discount box, marked as that and nothing else, so
+    the page never draws some other page there."""
+    return (render_template("_codesaid.html", **said), status,
+            {"X-Orenth-Part": "code"})
 
 
 @app.route("/billing/code", methods=["POST"])
@@ -3759,14 +4516,19 @@ def billing_code():
         abort(404)
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
-        return render_template("_codesaid.html", code_error=CODE_TOO_OFTEN), 429
+        return _code_said(429, code_error=CODE_TOO_OFTEN)
+    conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        found = billing_mod.promotion(code)
+        customer = billing_mod.customer_of(conn, g.user.id)
+    finally:
+        conn.close()
+    try:
+        found = billing_mod.promotion(code, customer=customer)
     except billing_mod.BillingError as exc:
-        return render_template("_codesaid.html", code_error=str(exc)), 502
+        return _code_said(502, code_error=str(exc))
     if code and not found:
-        return render_template("_codesaid.html", code_error=CODE_ERROR), 400
-    return render_template("_codesaid.html", applied=found)
+        return _code_said(400, code_error=CODE_ERROR)
+    return _code_said(applied=found)
 
 
 @app.route("/billing/checkout", methods=["POST"])
@@ -3792,42 +4554,87 @@ def billing_checkout():
     code = (request.form.get("code") or "").strip()[:40]
     if code and _rate_limited("code", CODE_CHECKS_PER_HOUR):
         return _pricing_page(code=code, code_error=CODE_TOO_OFTEN, status=429)
+    if _rate_limited("checkout", STRIPE_ASKS_PER_HOUR):
+        return _pricing_page(STRIPE_TOO_OFTEN, 429, code=code)
+    found = None
+
+    def checkout(as_customer: str) -> str:
+        return billing_mod.checkout_url(
+            g.user, _public_base(), as_customer,
+            price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
+            promotion=found["id"] if found else "")
+
     try:
-        found = billing_mod.promotion(code)
+        found = billing_mod.promotion(code, customer=customer)
         if code and not found:
             return _pricing_page(code=code, code_error=CODE_ERROR, status=400)
         if request.form.get("apply"):
             return _pricing_page(code=code, applied=found)
-        url = billing_mod.checkout_url(
-            g.user, _public_base(), customer,
-            price_id=billing_mod.price_id_for(request.form.get("plan", "monthly")),
-            promotion=found["id"] if found else "")
+        try:
+            url = checkout(customer)
+        except billing_mod.BillingRefused:
+            # A customer Stripe no longer has would be refused for ever. Only
+            # then is a new one started: for any other refusal it would be a
+            # second customer for the same person.
+            if not customer or not billing_mod.customer_gone(customer):
+                raise
+            app.logger.warning("Stripe no longer has the customer of account %d; "
+                               "checkout starts a new one", g.user.id)
+            url = checkout("")
     except billing_mod.BillingError as exc:
+        if found and isinstance(exc, billing_mod.BillingRefused):
+            # Stripe alone knows some limits a code can have, such as first
+            # purchases only, and it is the code it most likely refused.
+            return _pricing_page(code=code, code_error=CODE_REFUSED, status=400)
         return render_template("error.html", message=str(exc), symbol=""), 502
     return redirect(url, code=303)
 
 
 @app.route("/billing/done")
 def billing_done():
-    """Where Stripe sends a buyer back. Asks Stripe directly, not the browser."""
-    upgraded = False
+    """Where Stripe sends a buyer back. Asks Stripe directly, not the browser.
+
+    Anyone can open this address, so it speaks of a payment only when Stripe
+    knows of one by this person, or cannot be asked.
+    """
     session_id = (request.args.get("session_id") or "").strip()
-    if billing_mod.ready() and session_id and not g.demo:
+    if g.demo and session_id.startswith("cs_"):
+        # Signed out while paying: the account it belongs to is not known yet.
+        return redirect(url_for("signin", next=url_for("billing_done",
+                                                       session_id=session_id)))
+    state = "no"
+    asking = billing_mod.key_set() and session_id and not g.demo
+    if asking and _rate_limited("checkout_done", STRIPE_ASKS_PER_HOUR):
+        # Not asked again for a while, which is not a no: Stripe's own message
+        # may settle it meanwhile.
+        state = "waiting"
+    elif asking:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             with events_mod.counting_upgrades(conn):
-                upgraded = billing_mod.confirm_checkout(conn, session_id, g.user.id)
+                state = billing_mod.checkout_state(conn, session_id, g.user.id)
         except billing_mod.BillingError:
-            upgraded = False
+            app.logger.warning("Stripe could not confirm the checkout of account %d "
+                               "just now", g.user.id)
+            state = "waiting"
         finally:
             conn.close()
-    return render_template("billing_done.html", upgraded=upgraded)
+    if state == "no":
+        # The pricing page says which plan they have.
+        return redirect(url_for("pricing" if billing_mod.ready() else "index"))
+    # Stripe's own message may have made them Pro before this page asked.
+    return render_template("billing_done.html", session_id=session_id,
+                           upgraded=state == "pro" or (billing_mod.ready() and _pro()))
 
 
 @app.route("/billing/portal", methods=["POST"])
 def billing_portal():
-    """Stripe's own page for cancelling, changing card and receipts."""
-    if not billing_mod.ready() or g.demo or _in_app():
+    """Stripe's own page for cancelling, changing card and receipts.
+
+    Open to whoever already pays for as long as Stripe can be asked, even if
+    another setting went missing and nothing is on sale.
+    """
+    if not billing_mod.key_set() or g.demo or _in_app():
         abort(404)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -3835,7 +4642,9 @@ def billing_portal():
     finally:
         conn.close()
     if not customer:
-        return redirect(url_for("pricing"))
+        return redirect(url_for("pricing" if billing_mod.ready() else "account"))
+    if _rate_limited("portal", STRIPE_ASKS_PER_HOUR):
+        return render_template("error.html", message=STRIPE_TOO_OFTEN, symbol=""), 429
     try:
         url = billing_mod.portal_url(customer, _public_base() + url_for("account"))
     except billing_mod.BillingError as exc:
@@ -3843,14 +4652,54 @@ def billing_portal():
     return redirect(url, code=303)
 
 
+# Signed messages refused, by whose they claim to be and why: when the hour
+# being counted began, and how many since. One that keeps happening (a wrong
+# STRIPE_WEBHOOK_SECRET, APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once
+# an hour, and anyone posting rubbish fills neither the log nor memory.
+_REFUSED: Dict[str, Tuple[float, int]] = {}
+_REFUSED_LOCK = threading.Lock()
+REFUSALS_SAID = 3
+
+
+def _refusals(kind: str) -> int:
+    """Count one more refusal of this kind; how many this hour."""
+    now = time.time()
+    with _REFUSED_LOCK:
+        since, tries = _REFUSED.get(kind, (now, 0))
+        if now - since >= 3600:
+            since, tries = now, 0
+        _REFUSED[kind] = (since, tries + 1)
+    return tries + 1
+
+
+# Stripe's messages are a few kilobytes.
+STRIPE_NOTICE_LIMIT = 512 * 1024
+
+
 @app.route("/billing/webhook", methods=["POST"])
 def billing_webhook():
-    """Stripe telling the server a plan changed. Signed, so it can be believed."""
-    if not billing_mod.ready():
+    """Stripe telling the server a plan changed. Signed, so it can be believed.
+
+    Believed with only the signing secret set, so the plans on record stay
+    right while another setting is missing.
+    """
+    secret = (os.environ.get("STRIPE_WEBHOOK_SECRET") or "").strip()
+    if not secret:
         abort(404)
+    # Anyone can post here, and the site's own limit, for screenshots, would be
+    # read into memory before the signature could be looked at.
+    request.max_content_length = STRIPE_NOTICE_LIMIT
     payload = request.get_data()
     if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
-                              os.environ["STRIPE_WEBHOOK_SECRET"]):
+                              secret):
+        tries = _refusals("stripe")
+        if tries <= REFUSALS_SAID:
+            app.logger.warning("A message to Stripe's webhook address was refused: "
+                               "its signature does not check out")
+        if tries == REFUSALS_SAID:
+            from bot import monitoring
+            monitoring.note("Messages to Stripe's webhook address keep failing their "
+                            "check; STRIPE_WEBHOOK_SECRET may be wrong")
         return jsonify({"error": "bad signature"}), 400
     try:
         event = safejson.loads(payload.decode("utf-8"))
@@ -3860,6 +4709,11 @@ def billing_webhook():
     try:
         with events_mod.counting_upgrades(conn):
             outcome = billing_mod.handle(conn, event)
+    except billing_mod.BillingError:
+        # Nothing was recorded, and Stripe sends it again, for days if need be.
+        app.logger.warning("Stripe sent word of a plan ending and could not be "
+                           "asked what is still running; it will send it again")
+        return jsonify({"error": "try again later"}), 503
     finally:
         conn.close()
     return jsonify({"received": True, "outcome": outcome})
@@ -3892,21 +4746,13 @@ APPSTORE_JWS_PER_POST = 20
 APPSTORE_STATE_PER_HOUR = 240
 APPSTORE_POSTS_PER_HOUR = 60
 APPSTORE_MOVES_PER_HOUR = 5
-# Notifications refused by kind of failure, so one that keeps happening (a
-# wrong APPLE_APP_ID or APPLE_BUNDLE_ID) is said loudly, once an hour.
-_APPSTORE_REFUSED: Dict[str, list] = {}
-_APPSTORE_REFUSED_LOCK = threading.Lock()
 
 
 def _appstore_refused(status: str) -> None:
-    app.logger.warning("An App Store notification was refused: %s", status)
-    now = time.time()
-    with _APPSTORE_REFUSED_LOCK:
-        seen = [t for t in _APPSTORE_REFUSED.get(status, []) if now - t < 3600]
-        seen.append(now)
-        _APPSTORE_REFUSED[status] = seen
-        loud = len(seen) == 3
-    if loud:
+    tries = _refusals("app store: " + status)
+    if tries <= REFUSALS_SAID:
+        app.logger.warning("An App Store notification was refused: %s", status)
+    if tries == REFUSALS_SAID:
         from bot import monitoring
         monitoring.note("App Store notifications keep failing their check; "
                         "APPLE_APP_ID or APPLE_BUNDLE_ID may be wrong",
@@ -3936,8 +4782,9 @@ def appstore_notifications():
         return jsonify({"error": "No signedPayload."}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        status, outcome = apple_store_mod.handle_notification(
-            conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            status, outcome = apple_store_mod.handle_notification(
+                conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
     except sqlite3.Error:
         app.logger.exception("Could not store an App Store notification; Apple "
                              "will send it again")
@@ -4048,9 +4895,10 @@ def apple_transactions():
                                    "transactions." % APPSTORE_JWS_PER_POST}, 400)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        results = apple_store_mod.handle_app_transactions(
-            conn, apple_store_mod.verifier(), g.user.id, signed,
-            apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            results = apple_store_mod.handle_app_transactions(
+                conn, apple_store_mod.verifier(), g.user.id, signed,
+                apple_store_mod.product_ids())
         out = _apple_state(conn, mint=False)
     finally:
         conn.close()
@@ -4064,7 +4912,7 @@ def apple_move():
 
     JSON {"jws": one transaction the phone read just now from its current
     entitlements}. Only the subscription's running transaction moves it, at
-    most once in 30 days, and the account it leaves is told by email when it
+    most once in 30 days unless it goes back to the account it left, and the account it leaves is told by email when it
     has an address that can be written to; who it was is kept either way.
     """
     refused = _appstore_post_refused()
@@ -4121,7 +4969,8 @@ def _tell_pro_moved(person) -> None:
         "If that was you, there is nothing to do. If it was not, check who can "
         "use that Apple Account. To bring Pro back, open Orenth on that iPhone "
         "signed in to this account, go to Pricing and tap Move Pro to this "
-        "account. A subscription can move once every 30 days.\n" % (address, when))
+        "account. Moving it back here does not wait; moving it anywhere else "
+        "waits 30 days.\n" % (address, when))
     try:
         codes_mod.send_mail(address, "Your Orenth Pro moved to another account", body)
     except codes_mod.CodeError:
@@ -4133,9 +4982,13 @@ def _tell_pro_moved(person) -> None:
 def signout():
     """End this session everywhere, not just in this browser.
 
-    POST only. The session cookie travels with a link followed from another
-    site, so a GET here let any page sign its visitors out.
+    POST only, and only from a page here. The session cookie travels with a
+    link followed from another site, so a GET let any page sign its visitors
+    out. A form elsewhere arrives without the cookie, but the answer to it
+    told the browser to drop the one it had.
     """
+    if not _from_this_site():
+        return redirect(url_for("signin"))
     token = session.pop(SESSION_KEY, "")
     if token:
         conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -4162,6 +5015,14 @@ def account():
         conn.close()
     plan = {"on": billing_mod.ready(), "pro": _pro(), "customer": ""}
     invite = {}
+    if not plan["on"] and billing_mod.key_set():
+        # A setting is missing and nothing is on sale, but whoever already
+        # pays must still find the way to cancel.
+        conn = db_mod.connect(app.config.get("DB_PATH"))
+        try:
+            plan["customer"] = billing_mod.customer_of(conn, uid())
+        finally:
+            conn.close()
     if plan["on"]:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
@@ -4170,12 +5031,11 @@ def account():
             if not g.user.is_local:
                 invite = {"url": _public_base() + url_for(
                               "join", code=invites_mod.code_for(conn, uid())),
-                          "joined": invites_mod.joined(conn, uid())}
+                          "joined": invites_mod.joined(conn, uid()),
+                          "left": invites_mod.rewards_left(conn, uid())}
         finally:
             conn.close()
         plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
-        plan["bonus_until"] = (g.user.bonus_until
-                               if g.user.bonus_until > time.time() else 0)
     weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
               "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,
@@ -4183,6 +5043,7 @@ def account():
                            datasets=export_mod.DATASETS, plan=plan,
                            invite=invite, weekly=weekly,
                            invite_days=invites_mod.BONUS_DAYS,
+                           invite_max=invites_mod.MAX_REWARDS,
                            apple=_apple_plan())
 
 
@@ -4195,12 +5056,11 @@ def delete_account():
         return render_template("error.html", symbol="",
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
+    cancelled = False
     try:
         # Stop the subscription first, or a deleted account keeps being
         # charged. If Stripe cannot be reached, nothing is deleted.
-        customer = billing_mod.customer_of(conn, uid())
-        if customer and billing_mod.ready():
-            billing_mod.close_customer(customer)
+        cancelled = billing_mod.end_subscription(conn, uid())
         _end_apple_sign_in(conn, uid())
         accounts_mod.delete_user(conn, uid())
     except billing_mod.BillingError:
@@ -4208,6 +5068,16 @@ def delete_account():
             "error.html", symbol="",
             message="Your subscription could not be cancelled just now, so "
                     "nothing was deleted. Try again in a minute."), 502
+    except sqlite3.Error:
+        # Deleting is all or nothing, so nothing of theirs is gone, and the
+        # steps before it are safe to take again.
+        app.logger.exception("Account %d could not be deleted", uid())
+        message = ("Your account could not be deleted just now, so everything in "
+                   "it is still here. Try again in a minute.")
+        if cancelled:
+            message += (" Any Pro you were paying for on the Orenth website has "
+                        "already been cancelled.")
+        return render_template("error.html", symbol="", message=message), 503
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -4277,7 +5147,7 @@ def usage():
         return render_template(
             "error.html", symbol="",
             message="This page covers activity across every account, so it is "
-                    "limited to whoever runs this installation."), 403
+                    "limited to whoever runs this site."), 403
 
     try:
         days = max(1, min(365, int(request.args.get("days", "30"))))
@@ -4295,16 +5165,18 @@ def usage():
     finally:
         conn.close()
 
-    trend = ""
+    trend = trend_narrow = ""
     if len(data["daily"]) > 1:
         # Days come as epoch seconds and runs as counts: said as dates and
         # whole numbers, not as the years and percents of a filed figure.
-        trend = charts_mod.bar_chart(
+        # Drawn wide and narrow, as the research page's year is: shrunk to a
+        # phone, the wide drawing's labels were under five pixels tall.
+        trend, trend_narrow = (charts_mod.bar_chart(
             [d["day"] for d in data["daily"]],
             [float(d["runs"]) for d in data["daily"]],
-            width=720, height=180, title="Analyses per day",
+            width=width, height=180, title="Analyses per day",
             label=lambda ts: time.strftime("%d %b", time.gmtime(ts)).lstrip("0"),
-            fmt=lambda v: "%d" % round(v))
+            fmt=lambda v: "%d" % round(v)) for width in (720, 300))
 
     # Where the database actually sits, because the answer decides whether a
     # deploy keeps everyone's journal or silently deletes it, and nothing else
@@ -4322,9 +5194,25 @@ def usage():
         "on_disk": db_path.startswith("/data") or db_path.startswith("/var/data"),
     }
 
+    # The timed backups on this disk. serve.py says how often it takes them;
+    # started any other way, none are taken. A missing folder is no backups.
+    import backup as backup_mod
+    hours = app.config.get("BACKUP_HOURS") or 0
+    try:
+        age, kept = (backup_mod.newest_age(backup_mod.folder()),
+                     backup_mod.how_many(backup_mod.folder()))
+    except OSError:
+        age, kept = None, 0
+    backups = {"hours": hours, "kept": kept, "age": age,
+               "taken": None if age is None else time.time() - age,
+               "late": hours > 0 and (age is None or age > 2 * hours * 3600)}
+
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
+                           trend_narrow=trend_narrow,
                            storage=storage, counts=counts, offsite=offsite,
+                           plans_off=billing_mod.half_set(),
+                           backups=backups,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 
@@ -4336,6 +5224,10 @@ Allow: /privacy
 Allow: /terms
 Disallow: /analyse
 Disallow: /research
+Disallow: /ideas
+Disallow: /screener
+Disallow: /strategies
+Disallow: /settings
 Disallow: /trades
 Disallow: /portfolio
 Disallow: /monitor
@@ -4348,9 +5240,12 @@ Disallow: /api
 Sitemap: %s/sitemap.xml
 """
 
-# The pages a stranger can read without signing in. Everything else returns a
-# redirect to a crawler, which reads as a dead end and is worth saying plainly
-# rather than letting a robot discover one 302 at a time.
+# The pages a stranger can read without signing in, for the sitemap, which adds
+# the stock, strategy and Learn pages and the pricing page. The example
+# account's pages (DEMO_ENDPOINTS) are kept off it, and off limits above: they
+# are one person's made-up day, and every one a robot opens is work. Everything
+# else returns a redirect to a crawler, which reads as a dead end and is worth
+# saying plainly rather than letting a robot discover one 302 at a time.
 PUBLIC_PAGES = [("/", "weekly", "1.0"), ("/signin", "monthly", "0.6"),
                 ("/privacy", "yearly", "0.3"), ("/terms", "yearly", "0.3")]
 PUBLIC_PAGES.append(("/tools/size", "monthly", "0.5"))
@@ -4389,7 +5284,8 @@ def _brand():
             "site_logo": base + url_for("static", filename="logo.png"),
             "same_as": SAME_AS,
             # One source for every page that counts the strategies: those
-            # that decide the call, and apart from them those on trial.
+            # that decide the call, and apart from them any on trial (none
+            # today; a page says nothing about a trial while there is none).
             "strategy_count": len(strategies_mod.voting_names()),
             "daily_strategy_count": len(strategies_mod.daily_voting_names()),
             "trial_count": len(strategies_mod.TRIAL),
@@ -4505,9 +5401,11 @@ def sitemap():
         conn.close()
     # A strategy built for intraday prices never fires on the daily ones these
     # tests use, and its page would stay empty: not one to send a robot to.
-    pages = PUBLIC_PAGES + [("/stocks", "daily", "0.8")] + [
-        ("/stock/" + public_mod.slug(sym), "daily", "0.7")
-        for sym, _ in public_mod.POPULAR] + [
+    # Nor is a stock page whose check is days old, which asks them to wait.
+    plans = [("/pricing", "monthly", "0.6")] if billing_mod.ready() else []
+    pages = PUBLIC_PAGES + plans + [("/stocks", "daily", "0.8")] + [
+        ("/stock/" + public_mod.slug(v["symbol"]), "daily", "0.7")
+        for v in rows if not public_mod.stale(v)] + [
         ("/backtests", "daily", "0.8"), ("/record", "daily", "0.8")] + [
         ("/backtest/" + public_mod.strategy_slug(name), "daily", "0.7")
         for name in strategies_mod.strategy_names()
@@ -4548,6 +5446,10 @@ def privacy():
     # two cannot drift apart.
     release = {"keep": serve.KEEP_RELEASE_COPIES,
                "days": getattr(serve, "RELEASE_COPY_DAYS", 0)}
+    # The timed backups are kept by count, so one lasts that many times the
+    # hours between them. 0 is none ever replaced: every one kept, or no
+    # more being made.
+    backup_days = math.ceil(_backups_kept() * offsite_mod.backup_hours() / 24)
     # Who carries and runs this copy, named where it can be told: Cloudflare
     # adds CF-Connecting-IP to every request it carries (_client_ip reads
     # it), Render sets RENDER and RENDER_SERVICE_ID on its machines, and Fly
@@ -4560,8 +5462,14 @@ def privacy():
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
                            contact=_contact(), offsite=offsite, hosting=hosting,
-                           release=release,
+                           release=release, backup_days=backup_days,
                            sampled=_sampled_words(monitoring.status()["sampled"]))
+
+
+def _backups_kept() -> int:
+    """How many timed backups serve.py keeps; 0 when it deletes none."""
+    import serve
+    return max(0, serve._backups_to_keep())
 
 
 def _sampled_words(share: float) -> str:
@@ -4594,26 +5502,61 @@ def _contact() -> str:
     return (os.environ.get("STOCKBOT_CONTACT") or "").strip()
 
 
+# Each is everything of one kind ever kept, written out again. Enough for every
+# one of them in both formats, several times over.
+EXPORTS_PER_HOUR = 60
+# One at a time: the measured record is seconds of work.
+_EXPORTING = threading.BoundedSemaphore(1)
+
+
 @app.route("/export/<dataset>.<fmt>")
 def export_data(dataset, fmt):
     """Hand back one dataset as a file. Your record, in a format you can read."""
+    import tempfile
+    if _rate_limited("export", EXPORTS_PER_HOUR):
+        return _too_often("downloaded files")
+    if not _EXPORTING.acquire(timeout=20):
+        return render_template("error.html", symbol="",
+                               message="Other files are being written just now. Try "
+                                       "again in a moment."), 503
+    # On disk rather than in memory, and gone once it has been sent.
+    made = tempfile.TemporaryFile()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        built = export_mod.build(conn, dataset, fmt, user=uid())
+        # A CSV is marked as UTF-8, or Excel opens it as something older and an
+        # accent or a currency sign in a note comes out as two or three others.
+        text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
+                                newline="")
+        mimetype = export_mod.write(conn, dataset, fmt, text, user=uid())
+        text.detach()
     except ValueError as exc:
+        made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
+    except BaseException:
+        made.close()
+        raise
     finally:
         conn.close()
-
+        _EXPORTING.release()
+    size = made.tell()
+    made.seek(0)
     return Response(
-        built["body"], mimetype=built["mimetype"],
-        headers={"Content-Disposition":
-                 'attachment; filename="%s"' % built["filename"]})
+        wrap_file(request.environ, made), mimetype=mimetype, direct_passthrough=True,
+        headers={"Content-Length": str(size),
+                 "Content-Disposition": 'attachment; filename="%s"'
+                 % export_mod.filename(dataset, fmt)})
 
 
 def _utc_clock(ts) -> str:
     """A time of day in UTC, for saying when a list's prices were read."""
     return time.strftime("%H:%M UTC", time.gmtime(float(ts)))
+
+
+# A scan is minutes of work, one runs at a time, and one under settings of one's
+# own answers nobody else: an account changing its settings between scans kept
+# every place in the queue, and everybody else was told to come back later.
+# Opening a scan already made, or still running, is never counted.
+SCANS_PER_HOUR = 12
 
 
 @app.route("/ideas")
@@ -4641,7 +5584,9 @@ def ideas():
             # it has got.
             result = (_demo_shortlist(market, horizon, risk) if g.demo else
                       ideas_mod.find(market, horizon, cfg, risk,
-                                     wait=ideas_mod.PAGE_WAIT, join_wait=0))
+                                     wait=ideas_mod.PAGE_WAIT, join_wait=0,
+                                     may_start=lambda: not _rate_limited(
+                                         "scan", SCANS_PER_HOUR)))
         except ideas_mod.Busy as exc:
             # Said on the Find page itself, with the form, so asking again is
             # one press away.
@@ -4693,6 +5638,52 @@ def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
+# One screen is up to two requests to the data source for quotes and one a
+# company for fundamentals, all from a quota the whole site shares.
+SCREENS_PER_HOUR = 60
+# The example account's ready-made screens, by preset: when each was run, and
+# what it found. A store of their own, because the one the data source's
+# answers share holds everything as long as the longest any caller asks for.
+_DEMO_SCREENS: Dict[str, Tuple[float, screener_mod.ScreenResult]] = {}
+
+
+class _NotKept(Exception):
+    """A part-read screen, for whoever ran it and whoever waited for it."""
+
+    def __init__(self, found):
+        super().__init__("not kept")
+        self.found = found
+
+
+def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
+    """A ready-made screen, the same answer for every visitor.
+
+    Run once and shared rather than once per visit. Only a screen that read
+    everything is shared: one the data source refused is shown to the visitor
+    who ran it, and the next visitor gets a fresh try rather than that failure
+    for a quarter of an hour.
+    """
+    from bot import upstream as upstream_mod
+    kept = _DEMO_SCREENS.get(preset_key)
+    if kept is not None and time.time() - kept[0] < DEMO_TTL:
+        return kept[1]
+
+    def fresh():
+        found = screener_mod.run(symbols=None, universe=preset["universe"],
+                                 filters=dict(preset["filters"]), limit=40)
+        if not found.complete:
+            raise _NotKept(found)
+        _DEMO_SCREENS[preset_key] = (time.time(), found)
+        return found
+
+    try:
+        return upstream_mod.cached(
+            "demo-screen:" + preset_key, fresh,
+            # Longer than a screen can take, so a second visitor waits for
+            # the first one's answer rather than running the screen again.
+            wait=screener_mod.BUDGET + 30.0)
+    except _NotKept as part:
+        return part.found
 
 
 @app.route("/screener", methods=["GET"])
@@ -4703,6 +5694,10 @@ def screener():
 
     filters: Dict[str, float] = {}
     universe = request.args.get("universe") or "most_actives"
+    if universe not in screener_mod.UNIVERSES:
+        # Only the lists on the form: anything else would go to the data
+        # source, and back onto the page, as whoever wrote the link put it.
+        universe = "most_actives"
     symbols_raw = (request.args.get("symbols") or "").strip()
 
     if preset:
@@ -4740,37 +5735,14 @@ def screener():
                        "The example can run the ready-made screens. With an "
                        "account you can set your own filters.", examples=False)
     if g.demo and preset:
-        # A ready-made screen is the same answer for every visitor, so it is
-        # run once and shared rather than once per visit. Only a screen that
-        # read everything is shared: one the data source refused is shown to
-        # the visitor who ran it, and the next visitor gets a fresh try rather
-        # than that failure for a quarter of an hour.
-        from bot import upstream as upstream_mod
-
-        class _NotKept(Exception):
-            def __init__(self, found):
-                super().__init__("not kept")
-                self.found = found
-
-        def fresh():
-            found = screener_mod.run(symbols=None, universe=universe,
-                                     filters=filters, limit=40)
-            if not found.complete:
-                raise _NotKept(found)
-            return found
-
         try:
-            result = upstream_mod.cached(
-                "demo-screen:" + preset_key, fresh, ttl=DEMO_TTL,
-                # Longer than a screen can take, so a second visitor waits for
-                # the first one's answer rather than running the screen again.
-                wait=screener_mod.BUDGET + 30.0)
-        except _NotKept as kept:
-            result = kept.found
+            result = _demo_screen(preset_key, preset)
         except Exception as exc:
             return render_template("error.html", symbol="", message=_plainly(
                 exc, SCREEN_FAILED)), 500
     elif request.args.get("go") or preset:
+        if _rate_limited("screen", SCREENS_PER_HOUR):
+            return _too_often("run screens")
         symbols = [s.strip() for s in symbols_raw.replace(",", " ").split()
                    ] if symbols_raw else None
         try:
@@ -4795,13 +5767,14 @@ def portfolio():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         # What is held: a position closed in part counts only what is left.
-        rows = db_mod.open_positions(conn, limit=100, user=uid())
+        rows = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()
 
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
-        kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")})
+        kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")}
+        | {"futures": float(cfg.get("cost_bps_futures", 1.0))})
     # What the prices just read saw is kept, as the journal keeps it.
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
@@ -4814,6 +5787,10 @@ def portfolio():
                            summary=summary, shocks=shocks)
 
 
+# Saved theses on one page of Monitor.
+THESES_SHOWN = 20
+
+
 @app.route("/monitor")
 def monitor():
     """Alerts, watchlist, saved theses and the automated routines."""
@@ -4821,8 +5798,16 @@ def monitor():
     try:
         alert_rows = db_mod.alert_list(conn, user=uid())
         watch_rows = db_mod.watchlist(conn, user=uid())
-        thesis_rows = db_mod.thesis_list(conn, limit=20, user=uid())
+        # The record is of every thesis. The list shows a page of them, since
+        # each open one needs a price.
+        outcomes = [dict(r) for r in conn.execute(
+            "SELECT outcome FROM theses WHERE user_id=?", (uid(),))]
+        start = min(max(0, request.args.get("theses", 0, type=int)),
+                    max(0, len(outcomes) - 1))
+        thesis_rows = db_mod.thesis_list(conn, limit=start + THESES_SHOWN,
+                                         user=uid())[start:]
         events = db_mod.event_list(conn, uid(), limit=15)
+        events_total = db_mod.event_count(conn, uid())
     finally:
         conn.close()
 
@@ -4830,41 +5815,59 @@ def monitor():
                  for r in alert_rows]
 
     # Price each open thesis so the page can say how it is doing, and propose
-    # the outcome the price supports. One quote per distinct symbol.
-    judged = []
+    # the outcome the price supports. One quote per distinct symbol, several
+    # at once: one after another, a slow source held up the whole page, which
+    # is the one a notification opens.
+    def quote(sym):
+        try:
+            return sym, market_mod.fetch_bars(sym, "1d")
+        except Exception:
+            # One unpriceable symbol must not take the whole page down.
+            return sym, None
+
+    wanted = sorted({r["symbol"] for r in thesis_rows
+                     if not (r["outcome"] and r["closed_price"])})
     bars_of = {}
+    if wanted:
+        with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
+            bars_of = dict(pool.map(quote, wanted))
+    judged = []
     for row in thesis_rows:
         sym = row["symbol"]
-        if sym not in bars_of:
-            try:
-                bars_of[sym] = market_mod.fetch_bars(sym, "1d")
-            except Exception:
-                # One unpriceable symbol must not take the whole page down.
-                bars_of[sym] = None
+        stored = _stored_thesis(row)
+        if row["outcome"] and row["closed_price"]:
+            # Judged at the price it was closed at, the one shown as Now.
+            # What the price did afterwards is no part of it.
+            judged.append({"row": row, "now": float(row["closed_price"]),
+                           "review": thesis_mod.review(stored, float(row["closed_price"])),
+                           "no_view": thesis_mod.no_view(row["verdict"]),
+                           "proposed": None, "quoted": None, "split_words": ""})
+            continue
         price, split = _thesis_price(row, bars_of[sym])
-        stored = {"price": row["price"], "balance": row["balance"],
-                  "created": row["created_ts"]}
         look = (thesis_mod.review(stored, price) if price else
                 {"usable": False, "reason": "Could not price %s today." % sym})
         proposed = (thesis_mod.suggested_outcome(stored, price)
                     if price and not row["outcome"] else None)
         judged.append({"row": row, "now": price, "review": look,
                        "proposed": proposed,
+                       "no_view": thesis_mod.no_view(row["verdict"]),
                        "quoted": bars_of[sym].last_price if split != 1.0 else None,
                        "split_words": (market_mod.split_words(split)
                                        if split != 1.0 else "")})
 
-    board = thesis_mod.scoreboard([dict(r) for r in thesis_rows])
+    board = thesis_mod.scoreboard(outcomes)
 
     return render_template("monitor.html", alerts=described, watchlist=watch_rows,
                            theses=judged, board=board,
+                           theses_total=len(outcomes), theses_from=start,
+                           theses_page=THESES_SHOWN,
                            outcomes=thesis_mod.OUTCOMES, kinds=alerts_mod.KINDS,
                            workflows=workflows_mod.WORKFLOWS,
                            # This person's own last routine. A report holds
                            # their alerts, positions and watchlist.
                            last_run=(None if g.demo else
                                      app.config.get("LAST_WORKFLOW_BY_USER", {}).get(uid())),
-                           events=events,
+                           events=events, events_total=events_total,
                            loop=({k: v for k, v in ALERTS.status().items()
                                   if k in ("running", "interval", "last_run")}
                                  if ALERTS is not None else None),
@@ -4946,9 +5949,12 @@ def add_alert():
     # something that says it worked.
     back = _safe_back(request.form.get("back"), "")
     if back:
-        return redirect(back + ("alert_set=1" if back.endswith("?")
-                                else "&alert_set=1"))
-    return redirect(url_for("monitor"))
+        # Once, however many have been set from that page already.
+        page, _, query = back.partition("?")
+        kept = [p for p in query.split("&") if p and p != "alert_set=1"]
+        return redirect("%s?%s" % (page, "&".join(kept + ["alert_set=1"])))
+    # To the list, which on a phone is screens below the top of the page.
+    return redirect(url_for("monitor", _anchor="alerts"))
 
 
 @app.route("/monitor/alert/<action>", methods=["POST"])
@@ -4957,7 +5963,7 @@ def alert_action(action):
         return render_template("error.html", message="Unknown action.", symbol=""), 404
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        alert_id = int(request.form["alert_id"])
+        alert_id = _row_id(request.form.get("alert_id"))
         if action == "delete":
             db_mod.alert_delete(conn, alert_id, user=uid())
         elif action == "pause":
@@ -4982,24 +5988,32 @@ def alert_action(action):
             if refused is not None:
                 return refused
             db_mod.alert_reset(conn, alert_id, user=uid())
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
         message = str(exc)
         if "could not convert" in message:
             message = "The alert value must be a number."
         return render_template("error.html", message=message, symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("monitor"))
+    return redirect(url_for("monitor", _anchor="alerts"))
+
+
+# Every alert and open position is priced again, and a call alert may need an
+# analysis, all while the page waits.
+CHECKS_PER_HOUR = 60
 
 
 @app.route("/monitor/alerts/check", methods=["POST"])
 def check_alerts():
+    if _rate_limited("alert_check", CHECKS_PER_HOUR):
+        return _too_often("checked alerts")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = _check_and_tell(conn, user=uid())
     finally:
         conn.close()
-    return redirect(url_for("monitor", checked=result["checked"],
+    return redirect(url_for("monitor", checked=result["alerts"],
+                            stops=result["stops"] or None,
                             fired=len(result["fired"])))
 
 
@@ -5235,7 +6249,7 @@ def push_remove():
     if g.demo:
         abort(404)
     try:
-        device = int(request.form.get("device_id") or "")
+        device = _row_id(request.form.get("device_id"))
     except ValueError:
         return render_template("error.html", symbol="",
                                message="No device was named."), 400
@@ -5278,11 +6292,37 @@ def watch(action):
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
 
 
+# A routine is up to a minute of analysis, or a screen's worth of requests.
+ROUTINES_PER_HOUR = 20
+# Whose routine is running, so pressing the button again does not start a
+# second one beside the first.
+_ROUTINES: set = set()
+_ROUTINES_LOCK = threading.Lock()
+
+
 @app.route("/workflow/<name>", methods=["POST"])
 def run_workflow(name):
     if name not in workflows_mod.WORKFLOWS:
-        return render_template("error.html", message="No routine called %r." % name,
+        return render_template("error.html", message="There is no routine by that name.",
                                symbol=""), 404
+    if _rate_limited("routine", ROUTINES_PER_HOUR):
+        return _too_often("run routines")
+    me = uid()
+    with _ROUTINES_LOCK:
+        if me in _ROUTINES:
+            return render_template(
+                "error.html", symbol="",
+                message="A routine of yours is still running. What it found will "
+                        "be on the Monitor page when it is done."), 409
+        _ROUTINES.add(me)
+    try:
+        return _run_routine(name)
+    finally:
+        with _ROUTINES_LOCK:
+            _ROUTINES.discard(me)
+
+
+def _run_routine(name):
     cfg = _cfg()
     # Alerts the way the loop checks them: a call worked out, the fire kept
     # in the person's history and emailed if they asked. Crossed stops are
@@ -5293,11 +6333,11 @@ def run_workflow(name):
     # Kept per person. One shared slot showed whoever ran a routine last to
     # everybody's Monitor page, visitors included.
     app.config.setdefault("LAST_WORKFLOW_BY_USER", {})[uid()] = report
-    # A workflow can change what every analysis would say, so drop the caches.
-    with _CACHE_LOCK:
-        _CACHE.clear()
-        _RESEARCH_CACHE.clear()
-    return redirect(url_for("monitor"))
+    # The shared caches are left alone: a routine's analyses are its own, and
+    # emptying them made everyone else's pages, the example's included, be
+    # worked out again each time anybody pressed a button.
+    # To what it found, which is under the routines: on a phone, off the screen.
+    return redirect(url_for("monitor", _anchor="ran"))
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -5335,22 +6375,16 @@ def settings():
         cfg = _cfg()
         numbers = ("account_size", "risk_per_trade_pct", "max_position_pct",
                    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
-                   "target_atr_multiple", "min_conviction", "strong_conviction",
+                   "target_atr_multiple", "min_conviction",
                    "alert_check_minutes", "cost_bps_futures", "daily_loss_limit_r",
                    "max_trades_per_day")
         try:
             for key in numbers:
                 if request.form.get(key) not in (None, ""):
                     cfg[key] = float(request.form[key])
-            # The journal's daily rules: an empty time switches that rule off,
-            # and the three are checked here, since a person's own settings
-            # are not otherwise checked before they are saved.
+            # The journal's daily rules: an empty time switches that rule off.
             if request.form.get("last_entry_time") is not None:
                 cfg["last_entry_time"] = request.form["last_entry_time"].strip()
-            rules = ("cost_bps_futures", "daily_loss_limit_r", "max_trades_per_day",
-                     "last_entry_time")
-            config_mod.validate(dict(config_mod.DEFAULTS, **{k: cfg[k] for k in rules}))
-            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
             raw_horizon = (request.form.get("horizon_bars") or "").strip()
             if raw_horizon:
                 cfg["horizon_bars"] = ("auto" if raw_horizon.lower() == "auto"
@@ -5361,6 +6395,10 @@ def settings():
                          "use_llm_sentiment", "calm_candles"):
                 if request.form.get(flag) is not None:
                     cfg[flag] = request.form[flag] == "1"
+            # Every setting, a person's own too: those went unchecked into
+            # every size and plan made from them.
+            config_mod.validate(config_mod.lift_strong(cfg))
+            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
 
             if personal:
                 conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -5393,10 +6431,11 @@ def settings():
                 start_alert_loop(cfg)
             else:
                 ALERTS.set_interval(float(minutes) * 60.0)
-                if not ALERTS.running:
-                    ALERTS.start()
+                # Whatever it was doing: one still finishing a round after
+                # being told to stop counts as running, and carries on.
+                ALERTS.start()
             return redirect(url_for("settings", saved="1"))
-        except ValueError:
+        except (ValueError, OverflowError):
             error = "Every numeric field needs a number."
         except RuntimeError as exc:
             error = str(exc)
@@ -5434,10 +6473,22 @@ def _ai_consent_since() -> int:
         conn.close()
 
 
+# The addresses a program asks rather than a person: an analysis is seconds
+# of work and several requests to the data source, so an account looping one
+# over a list of tickers would slow every page and use up the source's limit
+# for everyone. Far more than anyone typing or pressing "View as JSON" makes.
+JSON_READS_PER_HOUR = 120
+SEARCHES_PER_HOUR = 600
+JSON_RETRY = 600            # seconds a program refused for this is told to wait
+
+
 @app.route("/api/search")
 def api_search():
     """Suggestions for a search box, from what has been typed so far."""
-    return jsonify(market_mod.search((request.args.get("q") or "")[:40]))
+    text = (request.args.get("q") or "")[:40]
+    if not text.strip() or _rate_limited("search", SEARCHES_PER_HOUR):
+        return jsonify([])
+    return jsonify(market_mod.search(text))
 
 
 @app.route("/api/analyse")
@@ -5447,8 +6498,19 @@ def api_analyse():
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
     interval = request.args.get("interval") or "1d"
+    if _rate_limited("json", JSON_READS_PER_HOUR):
+        answer = jsonify({"error": "That is a lot of analyses in one hour. Wait a "
+                                   "while, then ask again.",
+                          "retry_after": JSON_RETRY})
+        answer.status_code = 429
+        answer.headers["Retry-After"] = str(JSON_RETRY)
+        return answer
     # The same allowance as the pages, or the API is a way round it.
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
+        if g.get("allowance_refused") == "elsewhere":
+            return jsonify({"error": "This was asked for from another site, so it was "
+                                     "not opened: that would have used one of today's "
+                                     "free looks. Open it from the Analyse page."}), 402
         return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
@@ -5462,10 +6524,9 @@ def api_analyse():
             answer.headers["Retry-After"] = str(wait)
             return answer
         return jsonify({"error": str(exc)}), 404
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
 
     from bot import report as report_mod
-    import json as _json
     return app.response_class(
         report_mod.to_json(result.bars, result.plan, result.signals,
                            result.composite, result.regime, result.calibration,
@@ -5476,6 +6537,18 @@ def api_analyse():
 # ---------------------------------------------------------------------------
 # Pages anyone can read, sharing, invites and the weekly email
 # ---------------------------------------------------------------------------
+
+# Whether a popular instrument's stored check is too old to be shown as today's.
+app.jinja_env.globals["stale_check"] = public_mod.stale
+
+
+def _at_one_address(endpoint: str, **values):
+    """To a public page's own address, from another spelling of it. Answered
+    under every spelling, /stock/NVDA was a second copy of /stock/nvda."""
+    query = request.query_string.decode("utf-8", "replace")
+    return redirect(url_for(endpoint, **values) + ("?" + query if query else ""),
+                    code=301)
+
 
 def _png(data: bytes, max_age: int):
     return Response(data, mimetype="image/png",
@@ -5500,6 +6573,8 @@ def stock_page(sym):
     symbol = public_mod.from_slug(sym)
     if symbol is None:
         abort(404)
+    if sym != public_mod.slug(symbol):
+        return _at_one_address("stock_page", sym=public_mod.slug(symbol))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         snap = public_mod.verdict(conn, symbol)
@@ -5543,6 +6618,11 @@ def backtests():
              for s in strategies_mod.REGISTRY]
     table = [t for t in table if t["n"]]
     tested = len(table)
+    # Those that can fire on daily bars and have a say in the calls, but have
+    # too few separate trades anywhere to be in the table yet.
+    listed = {t["strategy"] for t in table}
+    unlisted = sum(1 for n in strategies_mod.daily_voting_names()
+                   if n not in listed) if table else 0
     # Buying and shorting on every tested day rank among them, so each
     # strategy reads against what the market's own drift paid its side, not
     # against zero.
@@ -5552,7 +6632,7 @@ def backtests():
             table.append(dict(base, strategy="", family="", baseline=side))
     table = sorted(table, key=lambda t: -t["kept"])
     return render_template("backtests.html", table=table, tested=tested,
-                           method=_house_method(),
+                           unlisted=unlisted, method=_house_method(),
                            label_of=public_mod.strategy_label,
                            strategy_slug=public_mod.strategy_slug)
 
@@ -5563,6 +6643,8 @@ def backtest_page(name):
     strategy = public_mod.strategy_from_slug(name)
     if strategy is None:
         abort(404)
+    if name != public_mod.strategy_slug(strategy):
+        return _at_one_address("backtest_page", name=public_mod.strategy_slug(strategy))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         rows = public_mod.verdicts(conn)
@@ -5575,21 +6657,48 @@ def backtest_page(name):
     return render_template(
         "backtest.html", strategy=strategy, info=info,
         label=public_mod.strategy_label(strategy), results=results,
+        asked=public_mod.strategy_asked(strategy), asked_of=public_mod.strategy_asked,
+        rare=public_mod.too_rare(rows, strategy),
+        course=strategy in setups_mod.BY_NAME,
         intraday=strategy in strategies_mod.INTRADAY_ONLY,
         summary=public_mod.strategy_summary(results), kin=kin,
-        method=_house_method(), label_of=public_mod.strategy_label,
+        method=_house_method(),
         strategy_slug=public_mod.strategy_slug, short=public_mod.short,
         slug=public_mod.slug)
+
+
+# The record is worked out from every call ever made, which takes longer with
+# each day's, and changes only when the hourly check writes to it. So what was
+# worked out is kept until a call is written, scored or marked, or for this
+# long, since which calls are old enough to count moves with the clock.
+RECORD_KEPT = 600.0
+_RECORD_KEPT: Dict[str, Tuple] = {}
+_RECORD_LOCK = threading.Lock()
+
+
+def _record_kept(what: str, conn, settings, work):
+    """work()'s answer, kept while the record and the settings stay the same.
+
+    Worked out under the lock: a second reader arriving meanwhile waits for
+    the first one's answer rather than working it out again beside it.
+    """
+    key = (app.config.get("DB_PATH"), public_mod.record_mark(conn), tuple(settings))
+    with _RECORD_LOCK:
+        kept = _RECORD_KEPT.get(what)
+        if kept is None or kept[0] != key or not 0 <= time.time() - kept[1] < RECORD_KEPT:
+            kept = _RECORD_KEPT[what] = (key, time.time(), work())
+        return kept[2]
 
 
 @app.route("/record")
 def record():
     """How every past public call turned out, for anyone to check."""
     method = _house_method()
+    costs = {"equity": method["equity"] / 100.0, "crypto": method["crypto"] / 100.0}
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        rec = public_mod.record(conn, costs={"equity": method["equity"] / 100.0,
-                                             "crypto": method["crypto"] / 100.0})
+        rec = _record_kept("page", conn, sorted(costs.items()),
+                           lambda: public_mod.record(conn, costs=costs))
         prints = public_mod.fingerprints(conn, limit=7)
     finally:
         conn.close()
@@ -5599,6 +6708,7 @@ def record():
     splits = "splits" in {f.name for f in dataclasses.fields(market_mod.Bars)}
     return render_template("record.html", rec=rec, method=method,
                            popular_count=len(public_mod.POPULAR),
+                           popular=public_mod.NAMES,
                            short=public_mod.short, slug=public_mod.slug,
                            how_words=public_mod.HOW_WORDS, splits=splits,
                            prints=prints)
@@ -5609,7 +6719,7 @@ def record_csv():
     """Every public call, left-out ones included, as a file anyone can check."""
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        body = public_mod.calls_csv(conn)
+        body = _record_kept("file", conn, (), lambda: public_mod.calls_csv(conn))
     finally:
         conn.close()
     return Response(body, mimetype="text/csv", headers={
@@ -5662,8 +6772,7 @@ def learn():
         page = learn_mod.hub(conn, _registered_setups())
     finally:
         conn.close()
-    return render_template("learn.html", page=page, links=_learn_links(),
-                           strategy_slug=public_mod.strategy_slug)
+    return render_template("learn.html", page=page, links=_learn_links())
 
 
 @app.route("/learn/<slug>")
@@ -5676,8 +6785,7 @@ def learn_topic(slug):
         conn.close()
     if page is None:
         abort(404)
-    return render_template("learn_topic.html", page=page, links=_learn_links(),
-                           strategy_slug=public_mod.strategy_slug)
+    return render_template("learn_topic.html", page=page, links=_learn_links())
 
 
 @app.route("/learn/practice", methods=["GET", "POST"])
@@ -5689,6 +6797,8 @@ def learn_practice():
         items = learn_mod.practice_items(conn)
     finally:
         conn.close()
+    # Each chart by its own key: its place in the list moves with every run.
+    places = {x["key"]: n for n, x in enumerate(items)}
     tally = session.get("practice_tally") or {"n": 0, "right": 0}
     if request.method == "POST":
         if not _from_this_site():
@@ -5697,33 +6807,38 @@ def learn_practice():
             for key in ("practice_tally", "practice_last", "practice_done"):
                 session.pop(key, None)
             return redirect(url_for("learn_practice"), code=303)
-        k = request.form.get("item", type=int)
+        key = request.form.get("item", "")
         pick = request.form.get("pick", "")
-        if not items or k is None or not 0 <= k < len(items) \
-                or pick not in dict(learn_mod.PRACTICE_PICKS):
+        if not key or pick not in dict(learn_mod.PRACTICE_PICKS):
             abort(400)
-        answer = learn_mod.practice_answer(items[k])
-        done = list(session.get("practice_done") or [])
-        if k not in done:
+        if key not in places:
+            # The nightly run replaced the chart while it was on screen, so
+            # there is nothing to mark the pick against: on to one there is.
+            return redirect(url_for("learn_practice", n=request.form.get("n", type=int)),
+                            code=303)
+        answer = learn_mod.practice_answer(items[places[key]])
+        # Charts no longer in the list are let go of, so the cookie stays small.
+        done = [x for x in session.get("practice_done") or [] if x in places]
+        if key not in done:
             # Answering the same chart again shows it again but is not counted.
             tally = {"n": int(tally.get("n", 0)) + 1,
                      "right": int(tally.get("right", 0)) + (pick == answer)}
             session["practice_tally"] = tally
-            session["practice_done"] = (done + [k])[-200:]
-        session["practice_last"] = {"item": k, "pick": pick, "answer": answer}
-        return redirect(url_for("learn_practice", shown=k), code=303)
+            session["practice_done"] = (done + [key])[-200:]
+        session["practice_last"] = {"item": key, "pick": pick, "answer": answer}
+        return redirect(url_for("learn_practice", shown=key), code=303)
 
     item = reveal = None
     k = 0
     if items:
-        shown = request.args.get("shown", type=int)
+        shown = request.args.get("shown", "")
         last = session.get("practice_last") or {}
-        if shown is not None and last.get("item") == shown and 0 <= shown < len(items):
-            k, reveal = shown, last
+        if shown in places and last.get("item") == shown:
+            k, reveal = places[shown], last
         else:
             k = (request.args.get("n", type=int) or 0) % len(items)
         item = items[k]
-    chart = learn_mod.practice_chart(item, bool(reveal)) if item else ""
+    chart = learn_mod.practice_chart(item, bool(reveal)) if item else {}
     return render_template(
         "learn_practice.html", item=item, k=k, count=len(items), reveal=reveal,
         chart=chart, tally=tally, picks=learn_mod.PRACTICE_PICKS,
@@ -5757,6 +6872,8 @@ app.jinja_env.globals["lab_box_data"] = _lab_box_data
 @app.route("/stock/<sym>/card.png")
 def stock_card(sym):
     symbol = public_mod.from_slug(sym)
+    if symbol and sym != public_mod.slug(symbol):
+        return _at_one_address("stock_card", sym=public_mod.slug(symbol))
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         snap = public_mod.verdict(conn, symbol) if symbol else None
@@ -5775,13 +6892,13 @@ def share():
     interval = request.form.get("interval") or "1d"
     if not symbol or interval not in dict(INTERVALS):
         abort(400)
-    if not _allowance_left(symbol, interval, exact):
+    if not _allowance_left(symbol, exact):
         return _allowance_used()
     try:
         result = cached_analysis(symbol, interval, _cfg(), record=False, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, interval, exact)
+    _spend_view(symbol, exact, result)
     snap = public_mod.snapshot(result, plain_mod.explain_plan(result.plan,
                                                               result.bars))
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -5894,11 +7011,18 @@ def _public_snapshot(symbol: str, indexes: Optional[dict] = None,
     fetch (None) keeps the one stored at the last check. The weekly email
     uses it for watched symbols too, with exact for an entry saved as
     Yahoo's own symbol (LINK for Interlink Electronics).
+
+    A popular instrument's ticker is already Yahoo's own, so it is not looked
+    up, and the earnings calendar is not read: it adds warnings to a plan,
+    which nothing here keeps, and never changes its call. Asked for on every
+    check, the two were hundreds of requests a day for nothing.
     """
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     result = engine.analyse(symbol, cfg, interval="1d", with_news=False,
                             with_learning=True, record=False,
-                            db_path=app.config.get("DB_PATH"), exact=exact)
+                            db_path=app.config.get("DB_PATH"), exact=exact,
+                            resolve_symbol=symbol not in public_mod.NAMES,
+                            with_calendar=False)
     horizon = config_mod.horizon_for("1d", cfg)
     stop, target = cfg["stop_atr_multiple"], cfg["target_atr_multiple"]
     stride = cfg["calibration_stride"]
@@ -6035,13 +7159,29 @@ def _refresh_popular_job():
         except Exception as exc:
             app.logger.exception("Could not check the watched instruments")
             watch = {"checked": 0, "errors": ["watched instruments: %s" % exc]}
-        return {"checked": done["checked"] + watch["checked"],
-                "errors": list(done["errors"]) + list(watch["errors"])}
+        errors = list(done["errors"]) + list(watch["errors"])
+        # The example visitors look around, refilled here once a week rather
+        # than while one of them waits. Nobody is shown it without sign-in.
+        try:
+            if auth_required():
+                demo_mod.refresh(conn)
+        except Exception as exc:
+            app.logger.exception("Could not refill the example account")
+            errors.append("example account: %s" % exc)
+        return {"checked": done["checked"] + watch["checked"], "errors": errors}
     finally:
         conn.close()
 
 
 def _weekly_email_job():
+    # Every copy carries a link that stops them, which the law asks for. With
+    # no public address to make it from, it would go to the reader's own
+    # computer, so nothing is sent until there is one.
+    if not _public_base_offline().lower().startswith("https://"):
+        if digest_mod.ready() and digest_mod.sending_window(time.time()):
+            app.logger.warning("The weekly email is not sent: without the site's https "
+                               "address its stop link would lead nowhere.")
+        return {"checked": 0}
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         return digest_mod.run(conn, app.secret_key, _public_base_offline(),
@@ -6128,11 +7268,42 @@ def _recheck_plans_job():
         conn.close()
 
 
+@app.errorhandler(400)
+@app.errorhandler(403)
+def refused(exc):
+    # A form with something missing, or sent from another site. Werkzeug's own
+    # page for these is bare white, with no way back.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That did not go through."}), exc.code
+    return render_template("error.html", symbol="",
+                           message="That did not go through. Go back, open the page "
+                                   "again and try once more."), exc.code
+
+
 @app.errorhandler(404)
 def not_found(_exc):
     if request.path.startswith("/api/"):
         return jsonify({"error": "No such address."}), 404
     return render_template("notfound.html"), 404
+
+
+@app.errorhandler(405)
+def wrong_method(exc):
+    # An old bookmark or a typed address, such as /signout, that is now a
+    # button. The web server's own page for this is bare, with no way back.
+    if request.path.startswith("/api/"):
+        response = jsonify({"error": "That address is not used this way."})
+    else:
+        response = app.make_response(render_template(
+            "error.html", symbol="",
+            message=("That address only works from a button on the site. Go "
+                     "back and use the button there."
+                     if request.method in ("GET", "HEAD") else
+                     "That page is for reading, and nothing can be sent to it.")))
+    response.status_code = 405
+    if getattr(exc, "valid_methods", None):
+        response.headers["Allow"] = ", ".join(sorted(exc.valid_methods))
+    return response
 
 
 @app.errorhandler(413)
@@ -6154,6 +7325,9 @@ def server_error(_exc):
     # Flask has already written the exception to the server log by the time
     # this runs. The visitor gets a plain sentence instead: an exception's text
     # can carry paths, queries and internal names, and helps nobody reading it.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Something broke on our side. Try again "
+                                 "in a minute."}), 500
     return render_template("error.html", symbol="",
                            message="Something broke on our side. Try again "
                                    "in a minute."), 500
@@ -6258,26 +7432,44 @@ def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True,
     in its own words. skip_closed leaves what cannot have changed, a stock
     whose market has been closed since its last good check, for the open.
     """
-    result = alerts_mod.check(conn, user=user, call_of=_call_now,
-                              limit_of=_alert_limits(conn),
-                              skip_closed=skip_closed, now=now)
-    crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed, now=now)
-               if stops else {"checked": 0, "fired": [], "errors": [], "skipped": 0})
-    fired = list(result["fired"]) + list(crossed["fired"])
-    if fired:
-        # To the phones and browsers people switched on, from push_mod's own
-        # thread: a push service that is slow or down must never hold up a
-        # check or a page, and its failure is kept on each device instead.
-        try:
-            push_mod.deliver_later(app.config.get("DB_PATH"), fired,
-                                   _public_base_offline())
-        except Exception:
-            app.logger.exception("Could not hand fired alerts to the notification sender")
-    if fired and codes_mod.email_ready():
-        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
+    fired: List[alerts_mod.Fired] = []
+    try:
+        result = alerts_mod.check(conn, user=user, call_of=_call_now,
+                                  limit_of=_alert_limits(conn),
+                                  skip_closed=skip_closed, now=now, fired=fired)
+        crossed = (alerts_mod.check_stops(conn, user=user, skip_closed=skip_closed,
+                                          now=now, fired=fired)
+                   if stops else {"checked": 0, "errors": [], "skipped": 0})
+    finally:
+        # Told even when the round broke off part-way, a database too busy
+        # for the stops, say: what fired is recorded, and its alerts switched
+        # off, so no later round would say it. The failure itself goes on to
+        # the caller, and the next round looks at what this one did not.
+        if fired:
+            _tell(fired)
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
+            "alerts": result["checked"], "stops": crossed["checked"],
             "errors": result["errors"] + crossed["errors"], "when": result["when"],
             "skipped": result.get("skipped", 0) + crossed.get("skipped", 0)}
+
+
+def _tell(fired) -> None:
+    """Hand what fired to the phones and browsers people switched on, and to
+    the inboxes that asked, each from a thread of its own: a push service or
+    a mail server that is slow or down must never hold up a check or a page.
+    Its failure is kept on each device, or on each event, instead.
+    """
+    path, site = app.config.get("DB_PATH"), _public_base_offline()
+    try:
+        push_mod.deliver_later(path, fired, site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the notification sender")
+    try:
+        if codes_mod.email_ready():
+            alerts_mod.deliver_later(path, fired, codes_mod.send_mail, _alert_address,
+                                     site=site)
+    except Exception:
+        app.logger.exception("Could not hand fired alerts to the mail sender")
 
 
 def _check_alerts_job(now: Optional[float] = None):
@@ -6326,9 +7518,12 @@ def alert_status():
     def number(name, kind):
         try:
             raw = request.args.get(name)
-            return kind(raw) if raw not in (None, "") else None
-        except ValueError:
+            value = kind(raw) if raw not in (None, "") else None
+        except (ValueError, OverflowError):
             return None
+        # A marker past what the database can hold, or not a number at all
+        # (nan, inf), is no marker: false for every comparison with one.
+        return value if value is None or abs(value) < 2 ** 62 else None
 
     after, since = number("after", int), number("since", float)
     if after is None and not since:
@@ -6390,6 +7585,9 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     app.config["CFG_PATH"] = args.config
+    if args.config:
+        # Code that loads the settings itself then reads the same file.
+        os.environ["STOCKBOT_CONFIG"] = os.path.abspath(args.config)
     app.config["DB_PATH"] = args.db
 
     # Fail loudly when the port is taken. Otherwise a server left running from

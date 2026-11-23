@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Thank you · Orenth{% endblock %}
+{% block title %}{{ 'Thank you' if upgraded else 'Confirming your payment' }} · Orenth{% endblock %}
 {% block content %}
 
 <div class="signin">
@@ -10,12 +10,16 @@
     <h1>You have Pro</h1>
     <p class="lede">Thank you. Everything is unlocked now.</p>
   {% else %}
-    <h1>Payment received</h1>
-    <p class="lede">Your account will switch to Pro within a minute. If it has
-      not, refresh your account page.</p>
+    <h1>We are confirming your payment</h1>
+    <p class="lede">Our payment company, Stripe, has not confirmed it yet. That
+      usually takes a minute, and a payment from a bank account can take a few
+      days. Checking again never charges you.</p>
   {% endif %}
   <div class="cta-stack">
-    <a class="btn" href="{{ url_for('ideas', market='stocks', horizon='medium', risk='balanced') }}">Find something to look at</a>
+    {% if not upgraded %}
+    <a class="btn" href="{{ url_for('billing_done', session_id=session_id) }}">Check again</a>
+    {% endif %}
+    <a class="btn{{ '' if upgraded else ' quiet' }}" href="{{ url_for('ideas', market='stocks', horizon='medium', risk='balanced') }}">Find something to look at</a>
     <a class="btn quiet" href="{{ url_for('account') }}">Your account</a>
   </div>
 </div>

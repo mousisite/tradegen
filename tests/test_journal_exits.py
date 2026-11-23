@@ -325,6 +325,26 @@ check("cash taken from a position still open is kept apart, after costs",
 
 
 # ---------------------------------------------------------------------------
+head("EACH INSTRUMENT PAYS WHAT THE ANALYSIS CHARGES IT")
+# ---------------------------------------------------------------------------
+# The journal knows only the symbol, so it must file each one as the prices
+# source does: a coin in any currency, a currency pair and an index.
+PAID = web._costs(web.config_mod.DEFAULTS)
+for symbol, kind in (("AAPL", "equity"), ("BRK-B", "equity"), ("BAC-PL", "equity"),
+                     ("REI-UN.TO", "equity"), ("BTC-USD", "crypto"), ("ETH-EUR", "crypto"),
+                     ("BTC-GBP", "crypto"), ("TAO22974-USD", "crypto"), ("EURUSD=X", "other"),
+                     ("^GSPC", "other"), ("ES=F", "other"), ("MC.PA", "equity"),
+                     ("USD", "equity"), ("BTC", "equity")):
+    want = web.config_mod.cost_bps_for_symbol(symbol, kind, web.config_mod.DEFAULTS)
+    got = db._cost_of({"symbol": symbol}, PAID) * 10000.0
+    check("%s pays %g bp, as in its analysis" % (symbol, want), close(got, want, 1e-6), got)
+check("a caller that knows no other rate charges the stock rate, as before",
+      close(db._cost_of({"symbol": "^GSPC"}, {"equity": 0.0002}), 0.0002))
+from bot import journal as journal_mod  # noqa: E402
+check("the journal's own costs are the same ones",
+      journal_mod.costs_from(web.config_mod.DEFAULTS) == PAID)
+
+# ---------------------------------------------------------------------------
 head("WHAT AN OLDER VERSION READS AND WRITES")
 # ---------------------------------------------------------------------------
 # The previous version's own code for these, as it was: it knows the trades
@@ -730,6 +750,128 @@ try:
     check("and closes part of it", code == 0 and "4 closed at 110, 6 still open" in said, said)
     code, said = cli("list")
     check("its list shows what is left", "6 of 10" in said, said)
+    code, said = cli("open", "ZZWRONG", "--entry", 100, "--stop", 90, "--target", 95)
+    check("a target on the losing side is refused there too", code == 2
+          and "the target must sit above the entry" in said, said)
+    code, said = cli("take", "ZZP", "--account-size", "nan")
+    check("and an account size that is not a number never ends in a traceback", code != 0, said)
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+                 "VALUES (?, 'ZZNO', '1d', 'AVOID', NULL, NULL, NULL, 1)", (int(time.time()),))
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id, "
+                 "asset_class) VALUES (?, 'ZZYES', '1d', 'BUY', 100, 90, 120, 1, 'equity')",
+                 (int(time.time()),))
+    conn.commit()
+    put_run = ("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, "
+               "user_id, asset_class) VALUES (?,?,'1d',?,?,?,?,1,?)")
+
+    def of(symbol):
+        return conn.execute("SELECT * FROM trades WHERE symbol=? ORDER BY id",
+                            (symbol,)).fetchall()
+
+    at = int(time.time())
+    conn.execute(put_run, (at - 1800, "ZZOLD", "BUY", 100, 90, 120, "equity"))
+    conn.execute(put_run, (at - 300, "ZZOLD", "AVOID", None, None, None, "equity"))
+    conn.execute(put_run, (at, "ZZDN", "WAIT", 100, 105, 90, "equity"))
+    conn.execute(put_run, (at, "BTC-USD", "BUY", 50000, 49000, 52000, "crypto"))
+    conn.commit()
+    code, said = cli("take", "ZZOLD")
+    check("an older plan is not taken once a newer analysis said AVOID", code == 1
+          and "said AVOID" in said and not of("ZZOLD"), said)
+    code, said = cli("take", "ZZDN", "--force", "--qty", 7)
+    check("the side is read off where the stop sits, and the money at risk is kept",
+          code == 0 and len(of("ZZDN")) == 1 and of("ZZDN")[0]["direction"] == -1
+          and close(of("ZZDN")[0]["risk_amount"], 35.0) and "risking 35" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000)
+    check("btc finds the analysis of BTC-USD", code == 0 and len(of("BTC-USD")) == 1
+          and "from analysis" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000)
+    check("one plan is not opened twice", code == 1 and len(of("BTC-USD")) == 1
+          and "already in the journal" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000, "--force")
+    check("unless told to", code == 0 and len(of("BTC-USD")) == 2, said)
+    for row in of("BTC-USD") + of("ZZDN"):
+        db.delete_trade(conn, row["id"])
+    conn.execute(put_run, (at, "MES=F", "BUY", 6000, 5990, 6030, "other"))
+    conn.commit()
+    code, said = cli("take", "MES=F", "--account-size", 10000)
+    check("a futures plan is logged in whole contracts, as the website logs it",
+          code == 0 and close(of("MES=F")[0]["quantity"], 10.0)
+          and close(of("MES=F")[0]["risk_amount"], 100.0), said)
+    code, said = cli("--account", "two", "take", "MES=F", "--account-size", 100)
+    check("and refused in words when not one fits", code == 2
+          and "Not even one MES contract fits" in said, said)
+    for row in of("MES=F"):
+        db.delete_trade(conn, row["id"])
+    real_load = paper.config_mod.load
+
+    def broken():
+        raise RuntimeError("config.json could not be read.")
+
+    paper.config_mod.load = broken
+    try:
+        for argv in (("stats",), ("open", "ZZDAY", "--entry", 100, "--stop", 90)):
+            try:
+                code, said = cli(*argv)
+            except SystemExit as exc:
+                code = exc.code
+            check("a settings file that cannot be read ends paper.py %s in words" % argv[0],
+                  code == 2 and not of("ZZDAY"), code)
+    finally:
+        paper.config_mod.load = real_load
+    code, said = cli("open", "ZZDAY", "--entry", 100, "--stop", 90)
+    check("a trade typed in is on daily bars, as everywhere else", code == 0
+          and of("ZZDAY")[0]["interval"] == "1d", said)
+    db.delete_trade(conn, of("ZZDAY")[0]["id"])
+    code, said = cli("--db", DB + ".second.db", "db")
+    check("the database named is the one --db opened", code == 0
+          and _os.path.basename(DB) + ".second.db" in said, said)
+    code, said = cli("take", "ZZNO")
+    check("a call that is no trade names a command that exists here", code == 1
+          and "`paper.bat open`" in said and "python paper.py" not in said, said)
+    code, said = cli("take", "ZZYES", "--account-size", "nan")
+    check("a plan is not sized on an account that is not a number", code == 2
+          and "account size" in said, said)
+
+    import analyze
+    from bot.market import DataThrottled
+
+    def analysis(*argv):
+        out = io.StringIO()
+        analyze.console = Console(file=out, width=200, color_system=None)
+        code = analyze.main([str(a) for a in argv] + ["--config", harness.CFG_PATH,
+                                                      "--db", DB])
+        return code, " ".join(out.getvalue().split())
+
+    def throttled(*_a, **_k):
+        raise DataThrottled("The source limits how often it may be asked.", 60)
+
+    real_analyze = (analyze.resolve, analyze.engine.analyse, analyze.report_mod.render)
+    analyze.resolve = throttled
+    try:
+        code, said = analysis("--symbol", "ZZP")
+        check("a refused ticker look-up is said in words, not a traceback", code == 2
+              and "Market data error: The source limits" in said, said)
+        for flag, value in (("--risk", 50), ("--risk", -3), ("--account", "nan"),
+                            ("--account", "inf"), ("--account", 0)):
+            code, said = analysis("--symbol", "ZZP", flag, value)
+            check("%s %s is held to the settings' own limits" % (flag, value), code == 2
+                  and "Config error" in said, said)
+        analyze.resolve = lambda s: {"symbol": s, "name": s}
+        analyze.report_mod.render = lambda *a, **k: None
+        for action, offered in (("BUY", True), ("SHORT", True), ("WAIT", False),
+                                ("AVOID", False)):
+            analyze.engine.analyse = lambda *a, **k: NS(
+                bars=NS(symbol="ZZP"), plan=NS(action=action), calibration=None, signals=[],
+                composite=0.0, regime=None, sentiment=None, strategy_report=None, run_id=7)
+            code, said = analysis("--symbol", "ZZP", "--no-news")
+            check("after %s, taking the trade is %s" % (action, "offered by a command that "
+                  "exists" if offered else "not offered"), code == 0
+                  and ("take it with: paper.bat take ZZP." in said) == offered
+                  and "Recorded as run #7" in said and "python paper.py" not in said, said)
+            check("and only sources that were read are named", "StockTwits" not in said
+                  and "Data from Yahoo Finance." in said, said)
+    finally:
+        analyze.resolve, analyze.engine.analyse, analyze.report_mod.render = real_analyze
     code, said = cli("trail", tp["id"], "--pct", 20)
     check("a wider trail is refused there too", code == 2 and "only tightens" in said, said)
     code, said = cli("trail", tp["id"], "--pct", 3)
@@ -738,6 +880,14 @@ try:
     code, said = cli("stats")
     check("its statistics keep the cash taken from an open position apart",
           "taken by closing part of" in said, said)
+    cfg_ = web.config_mod.load(harness.CFG_PATH)
+    costs_ = {"equity": cfg_["cost_bps_equity"] / 1e4, "crypto": cfg_["cost_bps_crypto"] / 1e4,
+              "futures": cfg_["cost_bps_futures"] / 1e4, "other": cfg_["cost_bps_other"] / 1e4}
+    after, before = (db.journal_summary(conn, costs=costs_), db.journal_summary(conn))
+    check("and are after costs, as the website's are, and say so",
+          "%+.3f" % after["expectancy_r"] != "%+.3f" % before["expectancy_r"]
+          and "%+.3fR per trade, after costs" % after["expectancy_r"] in said
+          and "P&L %.2f" % after["pnl"] in said, (said, after, before))
 
     tz = db.open_trade(conn, "ZZQ2", "1d", 1, 1000.0, 950.0, quantity=2)
     conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (NOW - 30 * DAY, tz))
@@ -777,6 +927,15 @@ try:
                                      "stop": "95", "quantity": "60", "interval": "1d",
                                      "trail": "5", "trail_kind": "pct"})
     tt = conn.execute("SELECT * FROM trades WHERE symbol='ZZT'").fetchone()
+    check("and the journal opens at the open trades, where it now is",
+          r.headers["Location"].endswith("/trades#open")
+          and '<section id="open">' in text(c.get("/trades")), r.headers["Location"])
+    wrong = flat(text(c.post("/trades/open", data={
+        "symbol": "ZZT", "direction": "long", "entry": "100", "stop": "120",
+        "interval": "1d"})))
+    check("what was wrong with one refused is a whole sentence",
+          ">For a long, the stop must sit below the entry.</p>" in wrong,
+          wrong[wrong.find("fig loss"):][:160])
     check("a trade logged by hand can trail from the start", r.status_code == 302
           and close(tt["trail_pct"], 0.05) and tt["trail_ts"] == tt["ts_opened"]
           and close(tt["trail_best"], 100.0), dict(tt) if tt else r.status_code)
@@ -813,14 +972,24 @@ try:
     r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "108", "quantity": "20",
                                       "reason": "target", "left": "60.0"})
     check("pressing Close twice closes one part, and says why nothing more was",
-          "changed=%d" % tt["id"] in r.headers.get("Location", "")
+          r.headers.get("Location", "").endswith("/trades")
           and len(db.exits_for(conn, [tt["id"]])[tt["id"]]) == 1
           and "had changed since the page was drawn" in flat(text(c.get(r.headers["Location"]))))
+    check("once, and a link cannot say it", "had changed since the page" not in flat(text(
+        c.get("/trades?changed=1&logged=1&reviewed=1")))
+        and "Logged as a paper trade" not in text(c.get("/trades?logged=1")))
     r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "abc", "left": "40.0"})
     page = text(r)
     check("a price that is not a number is refused in words",
           r.status_code == 400 and "The exit price must be a number." in page
           and "could not convert" not in page)
+    r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "1e308", "left": "40.0"})
+    r2 = c.post("/trades/open", data={"symbol": "ZZT", "direction": "short", "entry": "1",
+                                      "stop": "1e300", "interval": "1d"})
+    check("and one of hundreds of digits, which would leave the breakdown unable to add up",
+          r.status_code == 400 and "too large a number" in text(r)
+          and r2.status_code == 400 and "The stop is too large a number." in text(r2)
+          and c.get("/trades/breakdown").status_code == 200)
 
     r = c.post("/trades/trail", data={"trade_id": tt["id"], "trail": "10", "trail_kind": "pct"})
     check("a wider trail is refused: the stop only tightens",
@@ -861,7 +1030,7 @@ try:
     cell = flat(body[body.index("<b>ZZS</b>"):])
     cell = cell[:cell.index("</tr>")]
     check("after a split the close form is filled in today's shares, and says so",
-          'name="price" step="any" required placeholder="price" value="101.0"' in cell
+          'name="price" step="any" required placeholder="price" value="101"' in cell
           and '<option value="today" selected>today\'s shares</option>' in cell
           and '<option value="opened">shares opened with</option>' in cell, cell[:1500])
     check("with the split shown beside the price", "quoted 101 today, after a 10-for-1 split"

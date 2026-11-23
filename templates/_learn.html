@@ -23,12 +23,19 @@
 {% if c.verdict is none %}Too few trades, or too few separate days, to say.{% else %}After costs it {{ c.words }}{% if c.diff_verdict is not none %}, and {{ c.diff_words }}{% endif %}.{% endif %}
 {%- endmacro %}
 
-{% macro claim_measured(c) -%}
-{% if c.measure == 'mean' %}{% if c.mean is not none %}<span class="fig">{{ '%.2f'|format(c.mean) }}</span>{% if c.margin is not none %} <span class="soft">±{{ '%.2f'|format(c.margin) }}</span>{% endif %}{% else %}—{% endif %}{% else %}{{ rate(c.rate) }}{% endif %}
+{# An average with its unit: R for the lab's trades, else a share of the day's
+   usual bar. #}
+{% macro claim_figure(c, mean, margin) -%}
+{% if mean is none %}—{% elif c.in_r %}<span class="fig">{{ mean|signed(2) }}R</span>{% if margin is not none %} <span class="soft">±{{ '%.2f'|format(margin) }}</span>{% endif %}{% else %}<span class="fig">{{ '%.2f'|format(mean) }}</span>{% if margin is not none %} <span class="soft">±{{ '%.2f'|format(margin) }}</span>{% endif %} <span class="soft">of that day's average bar</span>{% endif %}
 {%- endmacro %}
 
-{% macro claim_usual(c) -%}
-{% if c.measure == 'mean' %}{% if c.base is not none %}<span class="fig">{{ '%.2f'|format(c.base) }}</span>{% if c.base_margin is not none %} <span class="soft">±{{ '%.2f'|format(c.base_margin) }}</span>{% endif %}{% else %}—{% endif %}{% elif c.base %}{{ rate(c.base) }}{% else %}<span class="soft">no comparison: it describes what happened</span>{% endif %}
+{% macro claim_measured(c) -%}
+{% if c.measure == 'mean' %}{{ claim_figure(c, c.mean, c.margin) }}{% else %}{{ rate(c.rate) }}{% endif %}
+{%- endmacro %}
+
+{# What a claim is compared with: its figure, and what it is in a few words. #}
+{% macro claim_against(c) -%}
+{% if c.measure == 'descriptive' %}<span class="soft">no comparison: it describes what happened</span>{% elif c.measure == 'mean' %}{{ claim_figure(c, c.base, c.base_margin) }}{% else %}{{ rate(c.base) }}{% endif %}{% if c.measure != 'descriptive' and c.versus and c.base is not none %} <span class="soft">· {{ c.versus }}</span>{% endif %}
 {%- endmacro %}
 
 {# The pooled cells of one setup: each bar size and target rule. #}
@@ -37,8 +44,8 @@
   <table class="stack">
     <thead><tr>
       <th>Prices and target</th><th class="r">Trades</th><th class="r">Hit rate</th>
-      <th class="r">Kept a trade</th><th class="r">Random entries</th>
-      <th class="r">Difference</th><th>In words</th>
+      <th class="r">Before costs</th><th class="r">Kept a trade</th>
+      <th class="r">Random entries</th><th class="r">Difference</th><th>In words</th>
     </tr></thead>
     <tbody>
     {% for c in cells %}
@@ -47,6 +54,7 @@
           <span class="soft">· {{ c.instruments }} instrument{{ 's' if c.instruments != 1 }}</span></td>
         <td class="r fig" data-label="Trades">{{ "{:,}".format(c.n) }}</td>
         <td class="r fig" data-label="Hit rate">{{ c.hit|pct(0) }}</td>
+        <td class="r" data-label="Before costs">{% if c.gross is not none %}<span class="fig">{{ c.gross|signed(2) }}R</span>{% else %}—{% endif %}</td>
         <td class="r" data-label="Kept a trade" style="white-space:nowrap">{{ kept(c) }}</td>
         <td class="r" data-label="Random entries">{{ versus(c) }}</td>
         <td class="r" data-label="Difference" style="white-space:nowrap">{{ diff(c) }}</td>

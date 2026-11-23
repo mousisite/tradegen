@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -30,8 +31,29 @@ import smtplib
 import sqlite3
 import ssl
 import time
+import unicodedata
 from email.message import EmailMessage
 from typing import Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
+
+
+def _number(key: str, default: int, least: int, most: int) -> int:
+    """A whole number from the settings, or the default when it is mistyped:
+    a stray letter must not stop the site, nor every code it sends."""
+    raw = (os.environ.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if least <= value <= most:
+            return value
+    except ValueError:
+        pass
+    log.warning("%s is %r, which is not a usable number, so %d is used",
+                key, raw, default)
+    return default
+
 
 CODE_TTL = 10 * 60
 MAX_ATTEMPTS = 5
@@ -48,7 +70,7 @@ PER_IP = (10, 60 * 60)
 # Texts cost money per message, and SMS-pumping fraud sends to thousands of
 # different numbers from thousands of addresses, which no per-number or
 # per-address limit stops. This caps what a bad hour can cost in total.
-PHONE_PER_HOUR = int(os.environ.get("PHONE_CODES_PER_HOUR") or 40)
+PHONE_PER_HOUR = _number("PHONE_CODES_PER_HOUR", 40, 0, 1_000_000)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS login_codes (
@@ -66,6 +88,13 @@ CREATE INDEX IF NOT EXISTS idx_login_codes_target ON login_codes(channel, target
 """
 
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[A-Za-z]{2,}$")
+# What an address in a To line can carry that is not part of where it goes: a
+# comment, a name, a group, quotes. me(1)@gmail.com and x:me@gmail.com both
+# reach me@gmail.com, so one inbox could pass as any number of people.
+_NOT_ADDRESS = re.compile(r'[()<>\[\]:;,\\"]|=\?')
+# Endings reserved never to be a real inbox. The placeholder addresses of
+# phone and Apple accounts are under .invalid.
+_NEVER_DELIVERED = (".invalid", ".test", ".example", ".localhost")
 
 
 class CodeError(ValueError):
@@ -93,7 +122,10 @@ def phone_ready() -> bool:
 
 def clean_email(raw: str) -> str:
     email = (raw or "").strip().lower()
-    if not _EMAIL.match(email) or len(email) > 254:
+    if not _EMAIL.match(email) or len(email) > 254 \
+            or _NOT_ADDRESS.search(email) or not email.isprintable() \
+            or unicodedata.normalize("NFKC", email) != email \
+            or email.endswith(_NEVER_DELIVERED):
         raise CodeError("That does not look like an email address.")
     return email
 
@@ -126,7 +158,9 @@ def clean_phone(raw: str) -> str:
     digits = re.sub(r"[\s().-]", "", raw or "")
     if digits.startswith("00"):
         digits = "+" + digits[2:]
-    if not re.match(r"^\+[1-9]\d{7,14}$", digits):
+    # The ten digits themselves: \d also takes every other script's, and the
+    # same number typed in those was a different number to the limits here.
+    if not re.fullmatch(r"\+[1-9][0-9]{7,14}", digits):
         raise CodeError("Type the number with its country code, for example "
                         "+1 555 123 4567.")
     allowed = [p.strip() for p in
@@ -134,7 +168,7 @@ def clean_phone(raw: str) -> str:
                if p.strip()]
     if allowed and not any(digits.startswith(p) for p in allowed):
         raise CodeError("Sign-in by text is not available for that country "
-                        "yet. Email or Google will work.")
+                        "yet. Sign in another way.")
     return digits
 
 
@@ -147,15 +181,32 @@ def _recent(conn, column: str, value: str, window: int) -> int:
         (value, since)).fetchone()[0]
 
 
-def _check_limits(conn, target: str, ip: str) -> None:
+def _check_limits(conn, channel: str, target: str, ip: str) -> None:
     count, window = PER_TARGET
-    if _recent(conn, "target", target, window) >= count:
-        raise CodeError("Several codes were sent to that address just now. "
-                        "Wait a few minutes, then try again.")
+    if channel == "email":
+        # By the inbox it reaches: counted by the address as typed, me+1@,
+        # me+2@ and so on were each allowed their own, all to one person.
+        inbox = inbox_of(target)
+        asked = sum(1 for row in conn.execute(
+            "SELECT target FROM login_codes WHERE channel='email' AND created_ts>=?",
+            (int(time.time()) - window,)) if inbox_of(row[0]) == inbox)
+    else:
+        asked = _recent(conn, "target", target, window)
+    if asked >= count:
+        raise CodeError("Several codes were asked for just now. Wait a few "
+                        "minutes, then try again.")
     count, window = PER_IP
     if ip and _recent(conn, "ip", ip, window) >= count:
         raise CodeError("Too many codes were asked for from this connection. "
                         "Try again in an hour.")
+
+
+_WRONG_TODAY = ("SELECT COALESCE(SUM(attempts), 0) FROM login_codes WHERE "
+                "channel=? AND target=? AND created_ts>=?")
+
+
+def _today_for(channel: str, target: str) -> Tuple[str, str, int]:
+    return channel, target, int(time.time()) - 24 * 60 * 60
 
 
 def _check_guesses(conn, channel: str, target: str) -> None:
@@ -164,13 +215,72 @@ def _check_guesses(conn, channel: str, target: str) -> None:
     Counted across codes, because a limit on each code alone is reset by
     asking for a new one.
     """
-    since = int(time.time()) - 24 * 60 * 60
-    wrong = conn.execute(
-        "SELECT COALESCE(SUM(attempts), 0) FROM login_codes WHERE channel=? "
-        "AND target=? AND created_ts>=?", (channel, target, since)).fetchone()[0]
+    wrong = conn.execute(_WRONG_TODAY, _today_for(channel, target)).fetchone()[0]
     if wrong >= WRONG_PER_DAY:
         raise CodeError("Too many wrong codes have been typed for this sign-in "
-                        "today. Try again tomorrow, or use Google.")
+                        "today. Try again tomorrow, or sign in another way.")
+
+
+def _count_guess(conn, row_id: int, channel: str, target: str) -> None:
+    """Count a guess against its code and its day before it is judged.
+
+    The look at both limits and the count are one statement, so guesses sent
+    at the same moment cannot all be judged against the same count. A guess
+    that turns out right is taken off again.
+    """
+    cur = conn.execute(
+        "UPDATE login_codes SET attempts=attempts+1 WHERE id=? AND attempts<? "
+        "AND (%s)<?" % _WRONG_TODAY,
+        (row_id, MAX_ATTEMPTS) + _today_for(channel, target) + (WRONG_PER_DAY,))
+    conn.commit()
+    if cur.rowcount != 1:
+        _check_guesses(conn, channel, target)
+        raise CodeError("Too many wrong tries. Ask for a new code.")
+
+
+def _uncount_guess(conn, row_id: int) -> None:
+    conn.execute("UPDATE login_codes SET attempts=attempts-1 WHERE id=? AND "
+                 "attempts>0", (row_id,))
+    conn.commit()
+
+
+def _use_up(conn, row_id: int, channel: str, target: str) -> None:
+    """A right code: spent, and with it every older one the address was sent,
+    which would otherwise open the account again until it ran out."""
+    conn.execute("UPDATE login_codes SET attempts=attempts-1 WHERE id=? AND "
+                 "attempts>0", (row_id,))
+    conn.execute("UPDATE login_codes SET used=1 WHERE channel=? AND target=? AND "
+                 "id<=? AND used=0", (channel, target, row_id))
+    conn.commit()
+
+
+def _ask(conn, channel: str, target: str, ip: str, code_hash: str = "") -> None:
+    """Write down one code request, if the limits allow it. Raises CodeError.
+
+    The look at the limits and the row they count are one transaction, so
+    requests sent at the same moment cannot all be let through by the same
+    count.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _check_limits(conn, channel, target, ip)
+        _check_guesses(conn, channel, target)
+        if channel == "phone" and _recent(conn, "channel", "phone",
+                                          60 * 60) >= PHONE_PER_HOUR:
+            raise CodeError("Sign-in by text is busy right now. Sign in another "
+                            "way, or try again later.")
+        _forget_old(conn)
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO login_codes (channel, target, code_hash, ip, created_ts, "
+            "expires_ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel, target, code_hash, ip, now, now + CODE_TTL))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _forget_old(conn) -> None:
@@ -190,16 +300,8 @@ def send_email_code(conn, email: str, ip: str, secret: bytes,
                     sender=None) -> None:
     """Make a code, store its hash, and email it. Raises CodeError."""
     ensure_schema(conn)
-    _check_limits(conn, email, ip)
-    _check_guesses(conn, "email", email)
-    _forget_old(conn)
     code = "%06d" % secrets.randbelow(10 ** 6)
-    now = int(time.time())
-    conn.execute(
-        "INSERT INTO login_codes (channel, target, code_hash, ip, created_ts, "
-        "expires_ts) VALUES ('email', ?, ?, ?, ?, ?)",
-        (email, _hash(secret, email, code), ip, now, now + CODE_TTL))
-    conn.commit()
+    _ask(conn, "email", email, ip, _hash(secret, email, code))
     (sender or _smtp_send)(email, code)
 
 
@@ -221,7 +323,7 @@ def send_mail(to: str, subject: str, body: str,
         msg[key] = value
     msg.set_content(body)
     host = os.environ["SMTP_HOST"]
-    port = int(os.environ.get("SMTP_PORT") or 587)
+    port = _number("SMTP_PORT", 587, 1, 65535)
     try:
         if port == 465:
             server = smtplib.SMTP_SSL(host, port, timeout=15,
@@ -231,10 +333,12 @@ def send_mail(to: str, subject: str, body: str,
             server.starttls(context=ssl.create_default_context())
         with server:
             server.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-            server.send_message(msg)
+            # To exactly this address, not to whatever can be read out of the
+            # To line.
+            server.send_message(msg, to_addrs=[to])
     except (OSError, smtplib.SMTPException) as exc:
         raise CodeError("The email could not be sent just now. Try again in a "
-                        "minute, or use Google.") from exc
+                        "minute, or sign in another way.") from exc
 
 
 def check_email_code(conn, email: str, code: str, secret: bytes) -> None:
@@ -247,18 +351,15 @@ def check_email_code(conn, email: str, code: str, secret: bytes) -> None:
         "ORDER BY id DESC LIMIT 1", (email,)).fetchone()
     if row is None or row["expires_ts"] < time.time():
         raise CodeError("That code has expired. Ask for a new one.")
-    if row["attempts"] >= MAX_ATTEMPTS:
-        raise CodeError("Too many wrong tries. Ask for a new code.")
+    _count_guess(conn, row["id"], "email", email)
     if len(code) != 6 or not hmac.compare_digest(
             row["code_hash"], _hash(secret, email, code)):
-        conn.execute("UPDATE login_codes SET attempts=attempts+1 WHERE id=?",
-                     (row["id"],))
-        conn.commit()
-        left = MAX_ATTEMPTS - row["attempts"] - 1
+        left = max(0, MAX_ATTEMPTS - conn.execute(
+            "SELECT attempts FROM login_codes WHERE id=?",
+            (row["id"],)).fetchone()[0])
         raise CodeError("That code is not right. %d tr%s left."
                         % (left, "y" if left == 1 else "ies"))
-    conn.execute("UPDATE login_codes SET used=1 WHERE id=?", (row["id"],))
-    conn.commit()
+    _use_up(conn, row["id"], "email", email)
 
 
 # --- phone, through Twilio Verify ----------------------------------------------
@@ -273,27 +374,17 @@ def _twilio(path: str, data: dict) -> dict:
                                 os.environ["TWILIO_AUTH_TOKEN"]))
     except requests.RequestException as exc:
         raise CodeError("The text could not be sent just now. Try again in a "
-                        "minute, or use Google.") from exc
+                        "minute, or sign in another way.") from exc
     if r.status_code >= 400:
         raise CodeError("That number could not be sent a code. Check it, or "
-                        "use email or Google instead.")
+                        "sign in another way.")
     return r.json()
 
 
 def send_phone_code(conn, phone: str, ip: str, poster=None) -> None:
     ensure_schema(conn)
-    _check_limits(conn, phone, ip)
-    _check_guesses(conn, "phone", phone)
-    _forget_old(conn)
-    if _recent(conn, "channel", "phone", 60 * 60) >= PHONE_PER_HOUR:
-        raise CodeError("Sign-in by text is busy right now. Use email or "
-                        "Google, or try again later.")
-    now = int(time.time())
-    # A row with no code, only so the limits above can count the request.
-    conn.execute(
-        "INSERT INTO login_codes (channel, target, ip, created_ts, expires_ts) "
-        "VALUES ('phone', ?, ?, ?, ?)", (phone, ip, now, now + CODE_TTL))
-    conn.commit()
+    # A row with no code, only so the limits can count the request.
+    _ask(conn, "phone", phone, ip)
     (poster or _twilio)("Verifications", {"To": phone, "Channel": "sms"})
 
 
@@ -306,13 +397,16 @@ def check_phone_code(conn, phone: str, code: str, poster=None) -> None:
         "ORDER BY id DESC LIMIT 1", (phone,)).fetchone()
     if row is None or row["expires_ts"] < time.time():
         raise CodeError("That code has expired. Ask for a new one.")
-    if row["attempts"] >= MAX_ATTEMPTS:
-        raise CodeError("Too many wrong tries. Ask for a new code.")
-    result = (poster or _twilio)("VerificationCheck", {"To": phone, "Code": code})
+    _count_guess(conn, row["id"], "phone", phone)
+    try:
+        result = (poster or _twilio)("VerificationCheck",
+                                     {"To": phone, "Code": code})
+    except CodeError as exc:
+        # Nothing was judged, so it was not a wrong guess. Twilio's own errors
+        # are about sending a text, which is not what went wrong here.
+        _uncount_guess(conn, row["id"])
+        raise CodeError("That code has run out or could not be checked. Try it "
+                        "once more, or ask for a new one.") from exc
     if result.get("status") != "approved":
-        conn.execute("UPDATE login_codes SET attempts=attempts+1 WHERE id=?",
-                     (row["id"],))
-        conn.commit()
         raise CodeError("That code is not right.")
-    conn.execute("UPDATE login_codes SET used=1 WHERE id=?", (row["id"],))
-    conn.commit()
+    _use_up(conn, row["id"], "phone", phone)

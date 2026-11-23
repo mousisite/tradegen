@@ -186,8 +186,13 @@ try:
     print("=" * 72)
     print("NO THIRD-PARTY COUNTING INSIDE THE APP")
     print("=" * 72)
-    outside = text(c.get("/", headers=IN_SAFARI))
-    inside = text(c.get("/", headers=IN_APP))
+    # Visits are counted at the site's own address only, so it needs one here.
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+    try:
+        outside = text(c.get("/", headers=IN_SAFARI))
+        inside = text(c.get("/", headers=IN_APP))
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
     check("a signed-out visit is counted in a browser", "metricool" in outside)
     check("but never inside the app", "metricool" not in inside.lower())
     check("the front page inside the app says nothing it must not",
@@ -243,11 +248,29 @@ try:
         inside = shown(text(member.get("/", headers=IN_APP)))
     finally:
         _os.environ.pop("ANTHROPIC_API_KEY", None)
-    check("in a browser the screenshot box says click, drag or paste",
-          "Click to browse, drag an image in, or paste with Ctrl+V" in on_web)
+    check("in a browser the screenshot box says choose, and with a mouse drag or paste",
+          'Choose a picture<span class="hover-only">, drag one in, or paste it</span>.'
+          in on_web)
     check("inside the app it says tap, or take a photo",
           "Tap to pick one, or take a photo of a chart." in inside
-          and "Ctrl+V" not in inside and "Click to browse" not in inside)
+          and "Ctrl+V" not in inside and "drag one in" not in inside)
+
+    # A form with something missing got the web server's own bare white page.
+    bad = member.post("/share", data={"x": "1"})
+    check("a form that cannot be read is answered on a page of the site, with a way back",
+          bad.status_code == 400 and "That did not go through." in text(bad)
+          and 'class="tabbar"' in text(bad), text(bad)[:200])
+    body = text(member.get("/settings"))
+    check("a setting reads 10000 in its box, not 10000.0",
+          'value="10000"' in body and 'value="10000.0"' not in body)
+    for path, form in (("/screener", "/screener#results"), ("/tools/size", "/tools/size#result"),
+                       ("/tools/survival", "/tools/survival#result")):
+        check("%s opens at its answer, which on a phone is off the screen" % path,
+              'action="%s"' % form in text(member.get(path)))
+    for path, spot in (("/tools/size?entry=100&stop=97", 'id="result"'),
+                       ("/tools/size?entry=abc&stop=97", 'id="result"'),
+                       ("/tools/survival?hit=250", 'id="result"')):
+        check("%s has that answer once" % path, text(member.get(path)).count(spot) == 1)
 
     print()
     print("=" * 72)
@@ -854,6 +877,7 @@ function page(ground) {
     getComputedStyle: () => ({ backgroundColor: ground }),
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     MutationObserver: function () { this.observe = function () {}; },
+    addEventListener: (type, fn) => { heard['window ' + type] = fn; },
   };
   ctx.window = ctx;
   vm.createContext(ctx);
@@ -868,6 +892,18 @@ function page(ground) {
     if (!p.heard['App.appUrlOpen']) { throw new Error('native.js does not listen for app links'); }
     p.heard['App.appUrlOpen']({ url: link });
     out.links[link] = p.went;
+  }
+  // Swiped back to, and returned as it was left: the app has forgotten its
+  // listeners, and the page's script does not run again.
+  out.back = {};
+  for (const persisted of [true, false]) {
+    const p = page('rgb(244, 243, 238)');
+    delete p.heard['App.appUrlOpen'];
+    delete p.heard['Browser.browserFinished'];
+    if (p.heard['window pageshow']) { p.heard['window pageshow']({ persisted: persisted }); }
+    const again = p.heard['App.appUrlOpen'];
+    if (again) { again({ url: LINKS[LINKS.length - 1] }); }
+    out.back[persisted] = { went: p.went, sheet: !!p.heard['Browser.browserFinished'] };
   }
   out.bar = {};
   const grounds = { light: 'rgb(244, 243, 238)', dark: 'rgb(25, 24, 23)', none: 'rgba(0, 0, 0, 0)' };
@@ -948,6 +984,11 @@ else:
               ran["links"][link])
     for link in refused_links:
         check("%r opens nothing" % link, ran["links"][link] == [], ran["links"][link])
+    last = list(GOOD_LINKS.values())[-1]
+    check("a page swiped back to that returns as it was left hears app links again",
+          ran["back"]["true"] == {"went": [last], "sheet": True}, ran["back"])
+    check("while one that has just run hears them once",
+          ran["back"]["false"] == {"went": [], "sheet": False}, ran["back"])
     # The page runs under the status bar, so only the bar's text is set: dark
     # on a light page, light (DARK) on a dark one, and again once the sheet
     # has closed, which puts the app's own style back.
@@ -1128,9 +1169,25 @@ check("Info.plist: one window, made by SceneDelegate",
 
 with open(_os.path.join(IOS_APP, "PrivacyInfo.xcprivacy"), "rb") as fh:
     privacy = plistlib.load(fh)
+collected = privacy.pop("NSPrivacyCollectedDataTypes", [])
 check("privacy manifest: no tracking, no tracking domains, no reasoned APIs",
       privacy == {"NSPrivacyTracking": False, "NSPrivacyTrackingDomains": [],
                   "NSPrivacyAccessedAPITypes": []}, privacy)
+# It listed nothing collected, while the App Privacy answers list ten types.
+KIND = "NSPrivacyCollectedDataType"
+store = guide[guide.index("### App Privacy"):guide.index("Add these only if the setting")]
+cells = [line.split("|")[1].split(":")[-1].replace("*", "") for line in store.splitlines()
+         if line.startswith("| ")][2:]
+answered = {"".join(w[0].upper() + w[1:] for w in cell.split()) for cell in cells}
+check("privacy manifest: the types collected are the App Privacy answers', but for the "
+      "phone number, which only a setting collects",
+      {row[KIND] for row in collected} == {KIND + a for a in answered - {"PhoneNumber"}}
+      and len(answered) == 11, (sorted(answered), [row.get(KIND) for row in collected]))
+check("privacy manifest: each linked to the person, never for tracking, only to make the "
+      "app work",
+      collected and all(row[KIND + "Linked"] is True and row[KIND + "Tracking"] is False
+                        and row[KIND + "Purposes"] == [KIND + "PurposeAppFunctionality"]
+                        for row in collected))
 
 board = ET.parse(_os.path.join(IOS_APP, "Base.lproj", "Main.storyboard")).getroot()
 screens = [(v.get("customClass"), v.get("customModule"), v.get("customModuleProvider"))

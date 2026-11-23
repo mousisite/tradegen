@@ -365,19 +365,35 @@
     new MutationObserver(syncStatusBar).observe(document.documentElement,
       { attributes: true, attributeFilter: ['data-theme', 'class'] });
   }
-  listen('Browser', 'browserFinished', function () {
-    lastStyle = '';
-    syncStatusBar();
-  });
 
   // ---------------------------------------------------------------------------
   // App links: app.orenth.ios://open?path=/monitor. A link that started the
   // app is held by the app until this listener is in place.
   // ---------------------------------------------------------------------------
-  listen('App', 'appUrlOpen', function (event) {
-    var address = deepLinkAddress(event && event.url);
-    if (address !== null) { location.assign(address); }
-  });
+  function hear() {
+    listen('Browser', 'browserFinished', function () {
+      lastStyle = '';
+      syncStatusBar();
+    });
+    listen('App', 'appUrlOpen', function (event) {
+      var address = deepLinkAddress(event && event.url);
+      if (address !== null) { location.assign(address); }
+    });
+  }
+  hear();
+
+  // Swiping back can bring a page back as it was left, without running its
+  // scripts again, and the app forgot its listeners when the next page
+  // loaded. Without this an app link did nothing there, until some later page
+  // loaded and was taken away by it.
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pageshow', function (e) {
+      if (!e.persisted) { return; }
+      lastStyle = '';
+      syncStatusBar();
+      hear();
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Once the page is ready: colours, launch screen, notifications.

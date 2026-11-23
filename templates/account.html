@@ -27,7 +27,8 @@
         {% elif methods and methods|length > 1 %}
           You can sign in with {{ methods[:-1]|join(', ') }} or {{ methods[-1] }}.
         {% else %}
-          Signed in with {{ current_user.provider|capitalize }}.
+          You can sign in with {{ methods[0] if methods else
+          current_user.provider|capitalize }}.
         {% endif %}
         {% if current_user.email.endswith(('@privaterelay.appleid.com', '@private.icloud.com')) %}
           This is a private address from Apple: email sent to it reaches your
@@ -49,12 +50,20 @@
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
     {% if plan.pro %}
-      <p class="prose"><b>Pro.</b> No limits.{% if apple.pro %} Through
+      <p class="prose"><b>Pro.</b> As many stocks and coins a day as you like, and
+        as many alerts.{% if apple.pro %} Through
         Apple{% if apple.pro.test %}, from a test purchase{% endif %},
-        {% if apple.pro.renews %}renewing on{% else %}until{% endif %}
-        {{ apple.pro.until|day }}.{% elif plan.bonus_until and not plan.customer %}
-        Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
+        {% if apple.pro.renews and not apple.pro.grace %}renewing on{% else %}until{% endif %}
+        {{ apple.pro.until|day }}.{% elif apple.paid_said %} {{ apple.paid_said }}{% elif apple.via == 'invite' %}
+        Free from invites until {{ apple.invite_until|day }}.{% endif %}</p>
       {% if apple.pro %}
+        {% if apple.pro.grace %}
+          <p class="notice" style="margin-top:var(--s2)">Apple could not take the
+            last payment. Pro stays on until that day while Apple tries
+            again{% if apple.pro.renews %}; to keep it after that, update the
+            payment method in your iPhone's Settings &gt; Apple
+            Account{% else %}, and then ends{% endif %}.</p>
+        {% endif %}
         <p class="fine">{{ apple_pro_said }}</p>
         {% if apple.twice %}
           <p class="notice" style="margin-top:var(--s2)">You are paying for Pro
@@ -67,15 +76,38 @@
       {# Stripe's own page, so never inside the iPhone app. #}
       {% if plan.customer and not in_app %}
         <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
-          <button class="btn quiet" type="submit">Manage subscription</button>
+          <button class="btn quiet" type="submit">{{ 'Manage subscription'
+            if apple.via == 'web' else 'Receipts and billing' }}</button>
         </form>
+        {% if apple.via == 'web' %}
         <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
+        {% else %}
+        <p class="fine">What you paid on the website before, and anything
+          still billed there, on Stripe's page.</p>
+        {% endif %}
       {% endif %}
     {% else %}
-      <p class="prose"><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
+      <p class="prose" data-plan-free><b>Free.</b> {{ plan.used }} of {{ plan.limit }}
         instruments looked at today.</p>
       <a class="btn" href="{{ url_for('pricing') }}" style="margin-top:var(--s2)">See Pro</a>
+      {% if plan.customer and not in_app %}
+        <form method="post" action="{{ url_for('billing_portal') }}" style="margin-top:var(--s2)">
+          <button class="btn quiet" type="submit">Receipts and billing</button>
+        </form>
+        <p class="fine">What you paid on the website before, and anything
+          still billed there, on Stripe's page.</p>
+      {% endif %}
     {% endif %}
+  </div>
+</section>
+{% elif plan.customer and not in_app %}
+<section>
+  <div class="sechead"><h2>Your plan</h2></div>
+  <div class="card">
+    <form method="post" action="{{ url_for('billing_portal') }}">
+      <button class="btn quiet" type="submit">Manage subscription</button>
+    </form>
+    <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
   </div>
 </section>
 {% endif %}
@@ -85,10 +117,27 @@
   <div class="sechead"><h2>Invite friends</h2>
     <span class="tail">{{ invite.joined }} joined so far</span></div>
   <div class="card">
+    {# The free days are a date on the account, so they run out alongside a
+       plan that is being paid for. #}
+    {% set paying = apple.pro or apple.via == 'web' %}
+    {% if not invite.left %}
+    <p class="prose">When a friend joins through your link, they get
+      {{ invite_days }} days of Pro free, no card needed. You have had your
+      own free days for {{ invite_max }} friends, which is as many as
+      invites give.</p>
+    {% elif paying %}
+    <p class="prose">When a friend joins through your link, they get
+      {{ invite_days }} days of Pro free, no card needed. You get
+      {{ invite_days }} days too, for your first {{ invite_max }} friends, but
+      they start when your friend joins, so they
+      add nothing while you are paying for Pro.</p>
+    {% else %}
     <p class="prose">When a friend joins through your link, you <b>both</b> get
-      {{ invite_days }} days of Pro free. No card needed.</p>
+      {{ invite_days }} days of Pro free, for your first {{ invite_max }}
+      friends. No card needed.</p>
+    {% endif %}
     <div class="sharebar" data-url="{{ invite.url }}"
-         data-text="I use Orenth to check stocks before I buy. Join with my link and we both get a free week of Pro.">
+         data-text="I use Orenth to check stocks before I buy. Join with my link and {{ 'get' if paying or not invite.left else 'we both get' }} a free week of Pro.">
       <input class="field" type="text" value="{{ invite.url }}" readonly
              aria-label="Your invite link" onclick="this.select()">
       <button class="btn" type="button" data-act="share">Share link</button>
@@ -152,8 +201,9 @@
     <p class="prose" style="margin-top:var(--s3)">
       The measured strategy record is deliberately not on this list. It is a set
       of measurements about how strategies behave on particular instruments,
-      which is a fact about the market rather than about you, and every analysis
-      anyone runs makes it better for everyone. It stays when an account goes.
+      which is a fact about the market rather than about you. Every analysis
+      anyone runs with the standard settings adds to it, and the Strategies page
+      is made from it. It stays when an account goes.
     </p>
     {# Inside the iPhone app a file has nowhere to go: the app's one screen
        would show it as bare text, with no way to keep it. #}
@@ -233,9 +283,11 @@
       want to keep first, {{ 'on the Orenth website' if in_app
       else 'using the buttons above' }}. The shared strategy record
       stays, because it was never yours alone.
-      {% if plan.on and plan.customer %}It also cancels your Pro subscription
-        {% if apple.billing %}on the website {% endif %}straight away, with no
-        further charges{% if apple.billing %} from it{% endif %}.{% endif %}
+      {# Also to someone who paid once and stopped, so "any", and whatever
+         other setting is missing: billing.end_subscription cancels then too. #}
+      {% if plan.customer %}It also cancels any Pro subscription you pay for
+        on the {{ 'Orenth website' if in_app else 'website' }} straight away,
+        with no further charges{% if apple.billing %} from it{% endif %}.{% endif %}
     </p>
     <form method="post" action="{{ url_for('delete_account') }}"
           onsubmit="return confirm('Delete this account and everything in it? This cannot be undone.');"

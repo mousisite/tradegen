@@ -41,6 +41,16 @@ DEFAULT_TTL = 45.0
 # waits and retries gets through.
 COOLDOWN = 60.0
 
+# The same for a source that is not answering at all. Shorter: nothing has
+# asked for a wait, and one request is enough to find out it is back.
+DOWN_COOLDOWN = 30.0
+
+# After the wait, one request goes first to see whether the source is back.
+# The rest wait this long for what it finds, and if it has not settled in
+# PROBE_FOR seconds another may go.
+PROBE_WAIT = 3.0
+PROBE_FOR = 30.0
+
 # Refusals in a row before the breaker opens. One 429 is noise; three in a row
 # is a message.
 THRESHOLD = 3
@@ -51,6 +61,8 @@ THRESHOLD = 3
 MAX_ENTRIES = 100
 
 _lock = threading.Lock()
+# Told when a request sent to see whether the source is back has settled.
+_settled = threading.Condition(_lock)
 _cache: Dict[str, Tuple[float, object]] = {}
 # One entry per question being asked right now: an event set when the answer
 # is in, and the error, when asking failed.
@@ -64,7 +76,7 @@ _max_ttl = 0.0
 def _plainly(seconds: int) -> str:
     """A wait a person can act on. Nobody plans around 847 seconds."""
     if seconds < 90:
-        return "%d seconds" % seconds
+        return "%d second%s" % (seconds, "" if seconds == 1 else "s")
     minutes = int(round(seconds / 60.0))
     if minutes < 60:
         return "%d minute%s" % (minutes, "" if minutes == 1 else "s")
@@ -73,11 +85,24 @@ def _plainly(seconds: int) -> str:
 
 
 class Throttled(RuntimeError):
-    """The source is refusing, and it is not this request's fault."""
+    """The source is refusing, and it is not this request's fault.
 
-    def __init__(self, host: str, seconds: float):
+    `why` is "limit" for a source that said it is being asked too often, and
+    "down" for one that is busy or not answering. Only the first is a limit
+    people share.
+    """
+
+    def __init__(self, host: str, seconds: float, why: str = "limit"):
         self.host = host
         self.seconds = max(1, int(round(seconds)))
+        self.why = why
+        if why == "down":
+            super().__init__(
+                "The market data source is not answering, so the request was "
+                "not sent rather than being left to time out. Try again in "
+                "about %s. It is nothing to do with your account."
+                % _plainly(self.seconds))
+            return
         super().__init__(
             "The market data source is rate limiting this site, so the "
             "request was not sent rather than being sent and failing. Try "
@@ -91,40 +116,105 @@ class Throttled(RuntimeError):
 def _breaker(host: str) -> Dict:
     state = _breakers.get(host)
     if state is None:
-        state = {"failures": 0, "open_until": 0.0, "opened": 0}
+        # "tripped" from the moment the breaker opens until a request
+        # succeeds, so once the wait is over one request goes first
+        # ("probe_until" is how long it has) and a single refusal shuts the
+        # door again.
+        state = {"failures": 0, "open_until": 0.0, "opened": 0,
+                 "tripped": False, "probe_until": 0.0, "why": "limit"}
         _breakers[host] = state
     return state
 
 
 def check(host: str) -> None:
-    """Raise rather than send a request the source is currently refusing."""
+    """Raise rather than send a request the source is currently refusing.
+
+    Call it once for each request about to be sent: after a wait the first
+    caller here is the one whose request finds out whether the source is back.
+    """
+    with _lock:
+        give_up = time.time() + PROBE_WAIT
+        while True:
+            state = _breaker(host)
+            now = time.time()
+            why = state.get("why", "limit")
+            if state["open_until"] > now:
+                raise Throttled(host, state["open_until"] - now, why)
+            if not state.get("tripped"):
+                return
+            probe_until = state.get("probe_until", 0.0)
+            if probe_until <= now:
+                state["probe_until"] = now + PROBE_FOR
+                return
+            if now >= give_up:
+                raise Throttled(host, min(probe_until - now, 10.0), why)
+            _settled.wait(min(give_up, probe_until) - now)
+
+
+def refusing(host: str) -> bool:
+    """Whether a request would be turned away just now. Sends nothing, waits
+    for nothing, and takes nobody's place."""
     with _lock:
         state = _breaker(host)
-        remaining = state["open_until"] - time.time()
-    if remaining > 0:
-        raise Throttled(host, remaining)
+        now = time.time()
+        return (state["open_until"] > now
+                or bool(state.get("tripped")) and state.get("probe_until", 0.0) > now)
 
 
-def note_throttled(host: str, retry_after: Optional[float] = None) -> None:
-    """Record a refusal, and open the breaker once they stop looking like noise."""
-    with _lock:
+def _failed(host: str, wait: float, why: str) -> None:
+    with _settled:
         state = _breaker(host)
         state["failures"] += 1
-        if state["failures"] >= THRESHOLD:
-            wait = retry_after if retry_after and retry_after > 0 else COOLDOWN
-            # Honour a stated Retry-After even when it is long: arguing with it
-            # is how an address gets blocked rather than throttled.
-            state["open_until"] = time.time() + min(float(wait), 900.0)
-            state["opened"] += 1
+        if state["failures"] >= THRESHOLD or state.get("tripped"):
+            now = time.time()
+            if state["open_until"] <= now:
+                state["opened"] += 1
+                state["why"] = why
+            # Never shorter than a wait already being kept.
+            state["open_until"] = max(state["open_until"], now + min(wait, 900.0))
+            state["tripped"] = True
             state["failures"] = 0
+        state["probe_until"] = 0.0
+        _settled.notify_all()
+
+
+def note_throttled(host: str, retry_after: Optional[float] = None,
+                   status: int = 429) -> None:
+    """Record a refusal, and open the breaker once they stop looking like noise."""
+    # Honour a stated Retry-After even when it is long: arguing with it is how
+    # an address gets blocked rather than throttled.
+    _failed(host, float(retry_after) if retry_after and retry_after > 0 else COOLDOWN,
+            "limit" if status == 429 else "down")
+
+
+def note_failed(host: str) -> None:
+    """Record a request that got no answer at all, on any of its tries.
+
+    Each one holds a server thread for as long as it is waited for, so with
+    the source down every page waited its full time. Enough in a row and
+    nothing is sent for a while.
+    """
+    _failed(host, DOWN_COOLDOWN, "down")
 
 
 def note_ok(host: str) -> None:
     """A success means whatever was wrong has passed."""
-    with _lock:
+    with _settled:
         state = _breaker(host)
-        if state["failures"]:
-            state["failures"] = 0
+        state["failures"] = 0
+        # One sent before the door shut says nothing about now.
+        if state["open_until"] <= time.time():
+            state["tripped"] = False
+            state["probe_until"] = 0.0
+            _settled.notify_all()
+
+
+def note_unclear(host: str) -> None:
+    """A request ended without showing whether the source is back, so the next
+    caller may find out instead."""
+    with _settled:
+        _breaker(host)["probe_until"] = 0.0
+        _settled.notify_all()
 
 
 def retry_after_seconds(response) -> Optional[float]:
@@ -184,30 +274,38 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
             flight = {"done": threading.Event(), "error": None}
             _inflight[key] = flight
 
+    def ask() -> object:
+        if host:
+            check(host)
+        try:
+            return fetch()
+        except BaseException:
+            if host:
+                note_unclear(host)
+            raise
+
     if not mine:
         # Somebody else is already fetching this. Wait for them rather than
         # asking the source the same question at the same moment.
         finished = flight["done"].wait(timeout=wait)
         with _lock:
             hit = _cache.get(key)
-        if hit:
+        # Only a fresh answer: when the fetch failed, what is kept under this
+        # key is an old one, and old prices were handed out as current.
+        if hit and (time.time() - hit[0]) < ttl:
             return hit[1]
         if finished and flight["error"] is not None:
             raise flight["error"]
         # Still not answered after `wait`, so the other caller is stuck. Ask
         # once here, but not past a source that has said stop in the meantime,
         # and keep what comes back for the next caller.
-        if host:
-            check(host)
-        result = fetch()
+        result = ask()
         with _lock:
             _store(key, result)
         return result
 
     try:
-        if host:
-            check(host)
-        result = fetch()
+        result = ask()
         with _lock:
             _store(key, result)
         return result
@@ -244,6 +342,7 @@ def stats() -> Dict:
                 host: {
                     "failing": state["failures"],
                     "open_for": max(0.0, state["open_until"] - time.time()),
+                    "why": state.get("why", "limit"),
                     "times_opened": state["opened"],
                 }
                 for host, state in _breakers.items()

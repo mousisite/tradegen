@@ -329,7 +329,10 @@ try:
     check("it says what else the cookie holds while something is under way",
           "the invite you arrived with, the email address or phone number a "
           "sign-in code was sent to" in page
-          and "a note of an exit the journal just recorded" in page)
+          and "a note of what the journal just recorded" in page)
+    # The Practice page's tally is in the same cookie, and the page did not say so.
+    check("and the Practice page's answers",
+          "which charts you answered and how many you got right" in page)
     check("and that it is signed, not encrypted",
           "signed so that it cannot be changed, but it is not encrypted" in page)
     check("with Apple off the website, no second cookie is spoken of",
@@ -507,6 +510,24 @@ try:
         elif hasattr(serve, "RELEASE_COPY_DAYS"):
             del serve.RELEASE_COPY_DAYS
 
+    # The timed backups: how many are kept, times the hours between them.
+    for said, env in (("it is replaced by newer ones, which takes about a week.", {}),
+                      ("it is replaced by newer ones, which takes about 15 days.",
+                       {"STOCKBOT_BACKUP_KEEP": "30"}),
+                      ("it is replaced by newer ones, which takes about 8 days.",
+                       {"STOCKBOT_BACKUP_HOURS": "24"}),
+                      ("it is deleted by hand.", {"STOCKBOT_BACKUP_KEEP": "0"}),
+                      ("it is deleted by hand.", {"STOCKBOT_BACKUP_HOURS": "0"})):
+        _os.environ.update(env)
+        try:
+            page = flat(text(visitor.get("/privacy")))
+        finally:
+            for _k in env:
+                _os.environ.pop(_k, None)
+        check("backups %s: the page says how long one lasts" % (env or "as usual"),
+              "still holds a copy until " + said in page,
+              page[page.find("A backup made before"):][:200])
+
     # Copies kept off the server are pruned only as each new one is sent, so
     # once the settings are removed nothing ever deletes those already there.
     from bot import offsite as offsite_mod  # noqa: E402
@@ -621,6 +642,18 @@ try:
     row = row[:row.find("</tr>")]
     check("and the page names Google among the places data goes, for the picture",
           "a request for your profile picture each time a page shows it" in row, row)
+
+    # Every page asks Google for its lettering, signed in or not, and the page
+    # named no one it went to; nor the search box, nor the posts sent to be scored.
+    front = text(visitor.get("/"))
+    check("the pages load their lettering from Google, and the page names it",
+          ("fonts.googleapis.com" in front) == ("<td>Google Fonts</td>" in page))
+    check("and what is typed in a ticker box goes to Yahoo, which it says",
+          "what you type in a ticker box, as you type it" in page)
+    check("and that posts go to Anthropic to be scored, as headlines do",
+          "Headlines, StockTwits posts, gathered figures" in page)
+    check("and it claims no analysis is made better by the shared record, which "
+          "none reads", "makes the analysis better" not in page)
 
     # -----------------------------------------------------------------------
     head("THE TERMS INSIDE THE IPHONE APP PROMISE NO BUTTON IT HIDES")

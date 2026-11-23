@@ -247,8 +247,12 @@ check("an exact pick of a ticker that needs none is the plain one",
       heading(text(c.get("/analyse?symbol=LINK-USD&interval=1d&news=0&exact=1")))
       == ("LINK-USD", "Chainlink USD"))
 check("each kind counts its own free look",
-      web._look_item("LINK", "1d", True) != web._look_item("LINK", "1d")
-      and web._look_item("LINK", "1d", True) == workflows._Looks._item("LINK", "1d", True))
+      web._look_item("LINK", True) != web._look_item("LINK")
+      and web._look_item("LINK", True) == workflows._Looks._item("LINK", True))
+check("and the coin's is one look however it is written",
+      len({web._look_item(s) for s in ("link", "LINK-USD", "LINKUSDT", "link/usd",
+                                       "BINANCE:LINKUSDT")}) == 1
+      and web._look_item("LINK") == web._look_item("LINK-USD", True))
 
 del NEWS[:]
 c.get("/analyse?symbol=LTC&interval=1d&exact=1")
@@ -490,9 +494,9 @@ try:
           and "  LINK   AVOID  Leave this one alone." in body
           and "  LINK-USD BUY    The app thinks this is worth buying now." in body,
           (subject, body))
-    check("in what changed since yesterday too",
-          "  LINK   Still AVOID; up 3.00% since the previous close." in body
-          and "  LINK-USD The daily call went from WAIT to BUY; up 3.00%" in body, body)
+    check("in what changed since the session before too, dated by it",
+          "  LINK   Sun 4 Oct: Still AVOID; up 3.00% since the previous close." in body
+          and "  LINK-USD Sun 4 Oct: The daily call went from WAIT to BUY; up 3.00%" in body, body)
     check("and a ticker that no other line shares keeps its short name",
           "  ETH    could not be checked this week." in body, body)
 finally:

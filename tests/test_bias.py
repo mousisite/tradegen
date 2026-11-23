@@ -10,6 +10,7 @@ at a time uses only the hourly bars closed by then. No network.
 import math
 import os as _os
 import sys as _sys
+from datetime import date
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -200,6 +201,29 @@ r = bias.read(stock, at=int(opening))
 check("a stock read at 09:30 uses the sessions before it and cannot use rule 1",
       r is not None and r.checks["rule"] != 1 and r.as_of == int(stock.timestamp[-1]),
       r.checks if r else None)
+ts = sc.stock_times(7 * 14, start=date(2026, 9, 14), step=3600)
+flat_row = np.full(len(ts), 104.0)
+high = flat_row + 0.5
+high[[i for i, t in enumerate(ts) if clock.label_ny(int(t)) == "16 Sep 11:30"]] = 110.0
+high[[i for i, t in enumerate(ts) if clock.label_ny(int(t)) == "22 Sep 11:30"]] = 112.0
+weeks = sc.make(flat_row, high, flat_row - 0.5, flat_row, ts, interval="1h")
+ready = bias.prepare(weeks)
+
+
+def targets_at(day, passed=True):
+    """The upward targets at 09:30 on a September day, before its first bar."""
+    at = clock.ny(2026, 9, day, 9, 30)
+    m = int(np.searchsorted(ts + HOUR, at, side="right"))
+    now = clock.trading_day(at, "stock").toordinal()
+    past = [d for d in ready.days if d.day.toordinal() < now and d.last < m]
+    s1 = {k: v[:m] for k, v in ready.s1.items()}
+    return bias._targets(clock.head(weeks, m), s1, m - 1, 1, now, "stock", past, -1)
+
+
+check("last week's high is a target until this week trades past it",
+      ("last week's high", 110.0) in targets_at(22), targets_at(22))
+check("and not after, before the next day's first bar either",
+      not any(name == "last week's high" for name, _ in targets_at(23)), targets_at(23))
 if r is not None and r.lean:
     check("its targets are on the lean's side, named",
           sane_targets(r, float(stock.close[-1])), r.targets)

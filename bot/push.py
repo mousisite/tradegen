@@ -335,12 +335,22 @@ def forget_ids(conn: sqlite3.Connection, user_id: int, ids: Sequence[int]) -> in
     return cur.rowcount
 
 
-def forget_session(conn: sqlite3.Connection, session_ref: str) -> int:
-    """Forget the devices a sign-in switched on, when it signs out."""
+def forget_session(conn: sqlite3.Connection, session_ref: str,
+                   keep_for: int = 0, keep_as: str = "") -> int:
+    """Forget the devices a sign-in switched on, when it signs out.
+
+    keep_for leaves one person's: when a new sign-in in the same browser
+    takes the old one's place, their own device there stays theirs, under
+    keep_as, the new sign-in's own mark, so that its sign-out forgets it.
+    """
     if not session_ref:
         return 0
     ensure_schema(conn)
-    cur = conn.execute("DELETE FROM push_devices WHERE session_ref=?", (session_ref,))
+    cur = conn.execute("DELETE FROM push_devices WHERE session_ref=? AND user_id<>?",
+                       (session_ref, int(keep_for)))
+    if keep_as:
+        conn.execute("UPDATE push_devices SET session_ref=? WHERE session_ref=? "
+                     "AND user_id=?", (keep_as, session_ref, int(keep_for)))
     conn.commit()
     return cur.rowcount
 
@@ -660,8 +670,13 @@ def alert_note(hits) -> Note:
     if len(hits) > SHOWN:
         lines.append("And %d more on your Monitor page." % (len(hits) - SHOWN))
     title = "Orenth" if len(hits) == 1 else "Orenth: %d alerts" % len(hits)
+    # To the list of what fired, well down the Monitor page. The newest one's
+    # id makes each address a new one: a page already at that place in the
+    # list would only be scrolled, not loaded again, and not show this.
+    newest = max((int(getattr(h, "event_id", 0) or 0) for h in hits), default=0)
     return Note(title=title, body=_fit("\n".join(lines), BODY_BYTES),
-                url="/monitor", tag=_tag(hits))
+                url="/monitor%s#told" % ("?told=%d" % newest if newest else ""),
+                tag=_tag(hits))
 
 
 def switched_on_note() -> Note:

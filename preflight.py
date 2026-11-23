@@ -110,6 +110,31 @@ def header(result: Dict, name: str) -> str:
     return ""
 
 
+def google_hand_off(base: str, report: Report) -> None:
+    """Where the Google button sends a browser, read without following it."""
+    from urllib.parse import parse_qs, urlsplit
+
+    start = fetch(base + "/auth/google")
+    going = urlsplit(header(start, "Location"))
+    if start["status"] not in (301, 302, 303, 307, 308) \
+            or going.hostname != "accounts.google.com":
+        report.warn("the Google button goes to Google",
+                    "got %d, so the hand-off could not be checked; Google "
+                    "sign-in may not be set up" % start["status"])
+        return
+    sent = parse_qs(going.query)
+    if sent.get("code_challenge") and sent.get("state"):
+        report.ok("sign-in reaches Google with PKCE and a state")
+    else:
+        report.bad("sign-in reaches Google with PKCE and a state",
+                   "missing %s" % " and ".join(
+                       k for k in ("code_challenge", "state") if not sent.get(k)))
+    if "client_secret" in going.query or "client_secret" in going.fragment:
+        report.bad("the client secret is not in that address", "it is there")
+    else:
+        report.ok("the client secret is not in that address")
+
+
 def run(base: str, report: Report) -> None:
     base = base.rstrip("/")
 
@@ -221,13 +246,24 @@ def run(base: str, report: Report) -> None:
             "/signin" in header(guarded, "Location"):
         report.ok("sign-in is switched on", "the account page requires one")
         signed_in_mode = True
+        # The account page asks even where nobody can sign in, so the sign-in
+        # page is read for whether there is a way.
+        door = fetch(base + "/signin")
+        if door["status"] != 200:
+            report.bad("there is a way to sign in",
+                       "the sign-in page returned %d" % door["status"])
+        elif "Signing in is off for now" in text(door):
+            report.bad("there is a way to sign in",
+                       "none is set up; the server's start-up log says what is missing")
+        else:
+            report.ok("there is a way to sign in")
     elif guarded["status"] == 200:
         report.warn("sign-in is switched on",
                     "the account page served content to a stranger")
         print()
         print("  A page holding personal data loaded without an account, which")
-        print("  means GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not both")
-        print("  set. Correct for a private test, wrong for a public launch.")
+        print("  means this is a private copy on one machine, or auth_mode is off")
+        print("  in config.json. Wrong for a public launch.")
         signed_in_mode = False
     else:
         report.bad("sign-in is switched on",
@@ -242,6 +278,7 @@ def run(base: str, report: Report) -> None:
         else:
             report.bad("a stranger sees the example account, labelled as one",
                        "got %d without the example banner" % journal["status"])
+        google_hand_off(base, report)
 
     print()
     print("=" * 74)

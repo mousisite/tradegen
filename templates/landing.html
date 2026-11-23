@@ -8,7 +8,7 @@
    so the page's job is to get someone to tap one. #}
 {% if session.get('ref') and billing_on %}
   <div class="notice" style="max-width:40rem;margin:0 auto var(--s3)"><b>A friend invited you.</b>
-    Join and you both get a week of Pro free.</div>
+    Join and you get a week of Pro free.</div>
 {% endif %}
 <section class="hero">
   <div class="mark" aria-hidden="true">
@@ -32,7 +32,7 @@
   <a class="card example" href="{{ url_for('analyse', symbol=example.symbol, interval='1d') }}">
     <span class="eyebrow">Latest check &middot; {{ example.symbol }} at
       {{ example.price|price }}{% if example.age_min %} &middot;
-      {{ example.age_min }} min ago{% endif %}</span>
+      {% if example.age_min < 120 %}{{ example.age_min }} min ago{% else %}{{ example.at|ago }}{% endif %}{% endif %}</span>
     <span class="lead">
       <span class="chip {{ 'long' if example.action == 'BUY'
            else 'short' if example.action == 'SHORT'
@@ -42,9 +42,7 @@
     {# The counts are pretend trades on past prices, and say what "worked"
        measured, in the same words as every other page that gives them. #}
     {% if example.samples %}
-      <span class="prose">{{ counts_line(example) }}{% if example.fall %} Here,
-        worked means a bet on the price falling paid off.{% endif %} A test,
-        not a promise.</span>
+      <span class="prose">{{ counts_line(example) }} A test, not a promise.</span>
     {% endif %}
     <span class="go">See the whole analysis &rarr;</span>
     {# Kept for the tests and for anyone reading the page source: this is a

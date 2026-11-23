@@ -12,10 +12,12 @@ that caused it.
 Two rules are enforced here rather than left to configuration, because getting
 them wrong is worse than having no monitoring at all:
 
-  Personal data never leaves. Trades, holdings, saved theses and email
-  addresses are not error-report material. `send_default_pii` stays off,
-  request bodies are never read, and anything that looks like a credential,
-  or a header saying where the visitor is, is stripped before sending. Page
+  As little personal data as possible leaves. `send_default_pii` stays off,
+  form contents are never read, and cookies, anything that looks like a
+  credential and a header saying where the visitor is are stripped before
+  sending. What is left is the error, the page address, the browser's own
+  description and the values the failing code was working with, which can
+  include an email or network address; the privacy page says the same. Page
   loads that worked are sent only when SENTRY_TRACES_RATE asks for a sample
   of them, and then with no query string at all; the privacy page says so
   whenever it is on.
@@ -97,6 +99,20 @@ def _scrub(event: Dict, _hint: Optional[Dict] = None) -> Optional[Dict]:
         user.pop("ip_address", None)
         event["user"] = user
 
+        # What was called just before. A path can hold a phone's push address
+        # or a customer's number, and a query a key, so only the site is kept.
+        crumbs = event.get("breadcrumbs")
+        if isinstance(crumbs, dict):
+            crumbs = crumbs.get("values")
+        for crumb in crumbs or []:
+            if not isinstance(crumb, dict):
+                continue
+            data = crumb.get("data")
+            if isinstance(data, dict):
+                _cut_to_site(data)
+            if isinstance(crumb.get("message"), str):
+                crumb["message"] = _SITE.sub(r"\1", crumb["message"])
+
         for frame in _frames(event):
             local_variables = frame.get("vars") or {}
             for name in list(local_variables):
@@ -143,11 +159,7 @@ def _scrub_sample(event: Dict, hint: Optional[Dict] = None) -> Optional[Dict]:
         event["request"].pop("query_string", None)
         event["request"].pop("headers", None)
         for span in event.get("spans") or []:
-            data = span.get("data") or {}
-            for key in ("http.query", "http.fragment"):
-                data.pop(key, None)
-            if isinstance(data.get("url"), str):
-                data["url"] = _SITE.sub(r"\1", data["url"])
+            _cut_to_site(span.get("data") or {})
             if isinstance(span.get("description"), str):
                 span["description"] = _SITE.sub(r"\1", span["description"])
     except Exception:
@@ -157,6 +169,14 @@ def _scrub_sample(event: Dict, hint: Optional[Dict] = None) -> Optional[Dict]:
 
 # An address cut to its site: "POST https://host/path?q" becomes "POST https://host".
 _SITE = re.compile(r"(\w+://[^/\s?#]+)[^\s]*")
+
+
+def _cut_to_site(data: Dict) -> None:
+    """Cut the address of one outside call to the site it went to."""
+    for key in ("http.query", "http.fragment"):
+        data.pop(key, None)
+    if isinstance(data.get("url"), str):
+        data["url"] = _SITE.sub(r"\1", data["url"])
 
 
 def _sample_rate() -> float:
