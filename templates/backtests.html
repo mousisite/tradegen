@@ -13,7 +13,7 @@
     after trading costs. Best first. Tap one to see every stock.
     {% if strategy_count > daily_strategy_count %}The other {{ strategy_count - daily_strategy_count }}
     of Orenth's {{ strategy_count }} read the inside of a trading day, so they only
-    fire on hourly or shorter bars and are not in this daily test.{% endif %}</p>
+    fire on shorter bars and are not in this daily test.{% endif %}</p>
   <p>{{ strategy_count }} strategies decide Orenth's calls; {{ trial_count }}
     price-action setups are measured on trial. On trial means measured here, not
     used in Orenth's calls until its record shows an edge. Each is marked
@@ -28,7 +28,7 @@
     are exactly that: a buy, and a short, on every tested day. Set each
     strategy beside the one on its side.</p>
   <p>How the same strategies did across the analyses people run on this site,
-    under their own settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
+    with its standard settings, is on <a href="{{ url_for('strategies') }}">Strategies</a>.</p>
   <p>Each result has a margin of error after it. It is green only when the
     whole margin is above zero, and red only when it is all below. With
     {{ shown }} strategies tested, one or two can look this good by luck alone.</p>

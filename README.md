@@ -377,13 +377,11 @@ SQLite at `data/stockbot.db`, created on first run.
 | Table | Holds |
 |---|---|
 | `runs` | Every analysis: price, regime, composite, action, levels, odds |
-| `run_signals` | All 34 strategy scores for every run |
 | `strategy_stats` | Measured performance per symbol, strategy and regime |
 | `trades` | The journal: entry, stop, exit, realised R, P&L, and any trailing stop |
 | `trade_exits` | Parts of a position closed while the rest stayed open |
-| `run_news` | Headlines and posts seen at each run |
 
-Strategy statistics are **replaced** per key, not accumulated. Two runs over
+Strategy statistics are **replaced** per instrument, not accumulated. Two runs over
 overlapping history describe the same bars, and summing them would manufacture
 confidence that was never earned.
 

@@ -503,7 +503,13 @@ def _own(sql: str, args: list, user, first: bool = False) -> tuple:
 def record_run(conn: sqlite3.Connection, bars, plan, signals, composite,
                regime, calib, sentiment, source: str = "cli",
                user: int = 1) -> int:
-    """Store one analysis run and everything it produced. Returns the run id."""
+    """Store one analysis run. Returns the run id.
+
+    The strategies' scores and the headlines behind it are not kept. They were
+    the bulk of every run, up to sixty-odd rows of it, and nothing read them
+    back: the disk filled with them and with other people's headlines. Rows
+    stored by earlier versions are left as they are.
+    """
     cur = conn.execute(
         """INSERT INTO runs (ts, symbol, name, asset_class, interval, price,
                market_open, regime_trend, regime_vol, regime_dir, adx,
@@ -521,19 +527,6 @@ def record_run(conn: sqlite3.Connection, bars, plan, signals, composite,
          plan.prob_samples, plan.expectancy_r, calib.cost_r, source,
          int(user)))
     run_id = int(cur.lastrowid)
-
-    conn.executemany(
-        "INSERT INTO run_signals (run_id, strategy, family, score, weight, reason) "
-        "VALUES (?,?,?,?,?,?)",
-        [(run_id, s.name, s.family, float(s.score), float(s.weight), s.reason)
-         for s in signals])
-
-    if getattr(sentiment, "items", None):
-        conn.executemany(
-            "INSERT INTO run_news (run_id, kind, source, age_hours, score, text) "
-            "VALUES (?,?,?,?,?,?)",
-            [(run_id, it.kind, it.source, float(it.age_hours), float(it.score),
-              it.text[:500]) for it in sentiment.items[:20]])
     conn.commit()
     return run_id
 
@@ -544,6 +537,9 @@ def save_strategy_stats(conn: sqlite3.Connection, symbol: str, interval: str,
 
     Rows are replaced rather than summed. Two runs over overlapping history
     describe the same bars, and adding them together would invent evidence.
+    The instrument's whole record is replaced, so a strategy that was renamed
+    or has stopped trading in one market state does not keep its old figures.
+    A measurement with nothing in it replaces nothing.
     """
     now = int(time.time())
     rows = []
@@ -554,6 +550,10 @@ def save_strategy_stats(conn: sqlite3.Connection, symbol: str, interval: str,
         rows.append((symbol, interval, st.name, st.family, st.regime, st.n,
                      st.wins, st.sum_r, st.sum_r_gross, st.sum_bars,
                      report.cost_r, now))
+    if not rows:
+        return 0
+    conn.execute("DELETE FROM strategy_stats WHERE symbol=? AND interval=?",
+                 (symbol, interval))
     conn.executemany(
         """INSERT OR REPLACE INTO strategy_stats
            (symbol, interval, strategy, family, regime, n, wins, sum_r,
