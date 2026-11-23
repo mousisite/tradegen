@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% set active = 'legal' %}
-{% block title %}{{ heading }} · Orenth{% endblock %}
+{% if page == 'privacy' %}
+  {% set page_blurb = "What Orenth collects, what you create here, where the data goes, how long it is kept, and how to delete it." %}
+{% else %}
+  {% set page_blurb = "The terms for using Orenth: what it is, what it is not, what its numbers mean, your account, Pro, and liability." %}
+{% endif %}
+{% block title %}{{ 'Privacy: what Orenth collects and keeps' if page == 'privacy' else heading }} · Orenth{% endblock %}
 {% block content %}
 
 <div class="pagehead">

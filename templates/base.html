@@ -16,7 +16,7 @@
 <meta name="description" content="{{ _blurb }}">
 <meta property="og:site_name" content="Orenth">
 <meta property="og:type" content="website">
-<meta property="og:title" content="{% block og_title %}Orenth{% endblock %}">
+<meta property="og:title" content="{% block og_title %}{{ self.title() }}{% endblock %}">
 <meta property="og:description" content="{{ _blurb }}">
 <meta property="og:url" content="{{ canonical_url }}">
 <meta property="og:image" content="{{ preview_image }}">

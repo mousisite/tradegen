@@ -742,6 +742,30 @@ try:
     check("the sign-in page says it signs in too",
           "<title>Sign in or create your free account" in page
           and "<h1>Sign in or create your free account</h1>" in page)
+    # Seven pages had one search description and one preview title ("Orenth").
+    _os.environ.update(STRIPE)
+    real_offers, billing.offers = billing.offers, lambda: {}
+    try:
+        heads = {}
+        for path in ("/", "/pricing", "/terms", "/privacy", "/signin", "/learn/practice",
+                     "/tools/size", "/tools/survival"):
+            page = c.get(path).data.decode("utf-8", "replace")
+            heads[path] = [_html.unescape(re.search(p, page).group(1)) for p in (
+                r"<title>(.*?)</title>", r'name="description" content="(.*?)"',
+                r'property="og:title" content="(.*?)"',
+                r'name="twitter:title" content="(.*?)"')]
+    finally:
+        billing.offers = real_offers
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+    check("each page a search finds has a title and a description of its own",
+          len({h[0] for h in heads.values()}) == len({h[1] for h in heads.values()})
+          == len(heads), heads)
+    check("and its preview carries that title", all(h[0] == h[2] == h[3] and h[2] != "Orenth"
+                                                    for h in heads.values()), heads)
+    check("short enough to be shown whole", all(
+        len(h[0]) < 60 and len(h[1]) < 155 for p, h in heads.items() if p != "/"),
+        {p: (len(h[0]), len(h[1])) for p, h in heads.items()})
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("asking someone to analyse a stock says analyse, like the button",
           "Analyse any stock or coin" in page and "Check any stock" not in page)
