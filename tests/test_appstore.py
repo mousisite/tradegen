@@ -1561,6 +1561,50 @@ class Routes(WebBase):
         cross = client.get("/api/apple/state", headers={"Sec-Fetch-Site": "cross-site"})
         self.assertEqual(cross.status_code, 403)
 
+    def turned_pro(self):
+        from bot import events
+        conn = db.connect(WEB_DB)
+        try:
+            return events.read(conn, 1)["total"]["turned_pro"]
+        finally:
+            conn.close()
+
+    def test_a_purchase_in_the_app_is_counted_as_turning_pro_once(self):
+        from bot import events
+        client, before = self.client(self.ann), self.turned_pro()
+        token = self.state(client)["appAccountToken"]
+        old = now_ms() - 2 * DAY
+        # Bought in the past and over: nobody turned Pro.
+        self.post(client, "/api/apple/transactions",
+                  {"jws": [self.tx(token, txid="1" + self.otid, purchase=old - 31 * DAY,
+                                   expires=old, signed=old)]})
+        self.assertEqual(self.turned_pro(), before)
+        # Renewed late, two days after it ended: a renewal, not a change of plan.
+        self.post(client, "/api/apple/transactions", {"jws": [self.tx(token)]})
+        self.assertGreater(self.apple_until(self.ann), time.time())
+        self.assertEqual(self.turned_pro(), before)
+        # Ben buys for the first time, and Apple's server says so as well.
+        ben = self.client(self.ben)
+        token = self.state(ben)["appAccountToken"]
+        otid = "8" + self.otid[1:]
+        bought = self.tx(token, otid=otid)
+        self.post(ben, "/api/apple/transactions", {"jws": [bought]})
+        self.assertEqual(self.turned_pro(), before + 1)
+        events._UPGRADED.clear()
+        payload = self.note("SUBSCRIBED", bought)
+        self.assertEqual(CLIENT.post("/apple/notifications",
+                                     json={"signedPayload": payload}).status_code, 200)
+        self.assertEqual(self.turned_pro(), before + 1)
+
+    def test_a_purchase_only_apple_told_of_is_counted(self):
+        token = self.state(self.client(self.ann))["appAccountToken"]
+        before = self.turned_pro()
+        payload = self.note("SUBSCRIBED", self.tx(token))
+        self.assertEqual(CLIENT.post("/apple/notifications",
+                                     json={"signedPayload": payload}).status_code, 200)
+        self.assertGreater(self.apple_until(self.ann), time.time())
+        self.assertEqual(self.turned_pro(), before + 1)
+
     def test_purchase_from_the_app(self):
         client = self.client(self.ann)
         token = self.state(client)["appAccountToken"]

@@ -3943,8 +3943,9 @@ def appstore_notifications():
         return jsonify({"error": "No signedPayload."}), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        status, outcome = apple_store_mod.handle_notification(
-            conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            status, outcome = apple_store_mod.handle_notification(
+                conn, apple_store_mod.verifier(), signed, apple_store_mod.product_ids())
     except sqlite3.Error:
         app.logger.exception("Could not store an App Store notification; Apple "
                              "will send it again")
@@ -4055,9 +4056,10 @@ def apple_transactions():
                                    "transactions." % APPSTORE_JWS_PER_POST}, 400)
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        results = apple_store_mod.handle_app_transactions(
-            conn, apple_store_mod.verifier(), g.user.id, signed,
-            apple_store_mod.product_ids())
+        with events_mod.counting_upgrades(conn):
+            results = apple_store_mod.handle_app_transactions(
+                conn, apple_store_mod.verifier(), g.user.id, signed,
+                apple_store_mod.product_ids())
         out = _apple_state(conn, mint=False)
     finally:
         conn.close()
