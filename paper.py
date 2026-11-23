@@ -204,12 +204,6 @@ def cmd_take(args, conn) -> int:
         if not 0 < account < float("inf"):
             console.print("[red]Rejected:[/] the account size must be more than zero")
             return 2
-        risk_amount = account * cfg["risk_per_trade_pct"] / 100.0
-        qty = (risk_amount / per_unit) if per_unit > 0 else 0
-        cap = account * cfg["max_position_pct"] / 100.0
-        if qty * run["entry"] > cap:
-            qty = cap / run["entry"]
-        qty = round(qty, 6) if run["asset_class"] == "crypto" else float(int(qty))
         if run["symbol"].upper().endswith("=F"):
             # The whole contracts the analysis sized, written down as their
             # dollars a point, as the website logs the same plan.
@@ -219,6 +213,13 @@ def cmd_take(args, conn) -> int:
                 console.print("[red]Rejected:[/] %s" % sized["error"])
                 return 2
             qty = sized["quantity"] * sized["multiplier"]
+        else:
+            risk_amount = account * cfg["risk_per_trade_pct"] / 100.0
+            qty = (risk_amount / per_unit) if per_unit > 0 else 0
+            cap = account * cfg["max_position_pct"] / 100.0
+            if qty * run["entry"] > cap:
+                qty = cap / run["entry"]
+            qty = round(qty, 6) if run["asset_class"] == "crypto" else float(int(qty))
         if qty <= 0:
             console.print("[red]Account too small for one unit at this stop distance.[/]")
             return 2

@@ -2063,6 +2063,19 @@ check("the money at risk is that of the rounded prices the review page uses",
 check("and whole shares are written whole",
       sized.position["quantity_text"] == "%d" % sized.position["quantity"]
       and sized.position["unit_text"] == "units", sized.position["quantity_text"])
+from bot.levels import Level as _Level  # noqa: E402
+
+_ctx = S.build_context(base_bars)
+_atr = float(_ctx.atr[-1])
+for nudge in (0.0004, 0.0006):             # rounded down, and up, onto its own side
+    near_at = float(np.floor((base_bars.last_price - 0.31 * _atr) * 1000) / 1000) + nudge
+    at_level = decision.decide(
+        _ctx, base_bars, [], 0.3, S.classify_regime(_ctx, len(base_bars) - 1), calib(), FLAT,
+        [_Level(near_at, "support", 2, "swing low", 0.5),
+         _Level(near_at - 1.5 * _atr, "support", 5, "swing low", 0.9)], calm)
+    check("an entry at a level (%+.4f) keeps its stop behind the next level below" % nudge,
+          at_level.entry == round(near_at, 3) and "5 touches" in at_level.stop_rationale,
+          (at_level.entry, near_at, at_level.stop_rationale))
 check("a dollar price says nothing about currency", not any("priced in" in r for r in sized.risks)
       and not sized.position["account_in"])
 yen = dataclasses.replace(base_bars, currency="JPY")
@@ -2091,6 +2104,24 @@ check("and the plain words count contracts", "Buying 4 ES contracts would put" i
     dataclasses.replace(sized, position=f_), es)["risk"])
 check("a size that was refused is not said to be at risk", plain.explain_plan(
     dataclasses.replace(sized, position=dear), yen)["risk"] == "")
+check("a size in the millions is written out", "Buying 416,666,666.5 of these" in plain.explain_plan(
+    dataclasses.replace(sized, position=dict(sized.position, quantity=416666666.5,
+                                             **decision.size_words(416666666.5, True))),
+    base_bars)["risk"])
+refused = plain.explain_plan(dataclasses.replace(
+    sized, action="AVOID", direction=-1, avoid_reason="negative_record",
+    stop=sized.entry + 5, target1=sized.entry - 7), base_bars)
+check("a short refused on its record is not told as a buy",
+      refused["risk"].startswith("Shorting ") and any("kept rising" in x for x in refused["points"])
+      and not any("If you bought" in x for x in refused["points"]), refused)
+unmeasured = plain.explain_plan(decision.Plan(
+    action="AVOID", direction=0, headline="", conviction=-0.3,
+    avoid_reason="bearish_no_shorts", odds_direction=-1), base_bars)
+check("and a fall with no record is not said to have one below",
+      not any("record below" in x for x in unmeasured["points"])
+      and "do not buy" in unmeasured["points"][0], unmeasured)
+check("a company's small sales name their currency once",
+      plain._big(450000, "EUR") == "450,000 euros" and plain._big(450000) == "$450,000")
 
 
 # ---------------------------------------------------------------------------
@@ -2363,6 +2394,11 @@ paper = web._paper_size(es_row, rich)
 check("the review sizes the same contracts, each counted as its dollars a point",
       paper["quantity"] == 200.0 and paper["risk"] == 10000.0
       and paper["contract_words"] == "4 ES contracts" and paper["reward_risk"] == 2.0, paper)
+penny = web._paper_size(dict(es_row, symbol="TINY-USD", asset_class="crypto", entry=1.667e-6,
+                             stop=1.544e-6, target1=1.8e-6), dict(CFG, account_size=10000.0))
+check("a coin's size in the millions is written as the analysis page writes it",
+      penny["quantity_text"] == decision.size_words(penny["quantity"], True)["quantity_text"]
+      and "," in penny["quantity_text"], penny["quantity_text"])
 try:
     web._paper_size(es_row, CFG)
     check("and refuses what one contract is too big for", False)

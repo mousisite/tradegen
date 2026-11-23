@@ -65,7 +65,7 @@
       <span class="eyebrow">The size</span>
       <dl class="pairs">
         <dt>Size</dt>
-        <dd><span class="fig">{{ size.quantity_text }}</span> unit{{ '' if size.quantity == 1 else 's' }}
+        <dd><span class="fig">{{ size.quantity_text }}</span> {{ size.unit_text }}
           <span class="faint">{{ size.notional|money }} at the entry</span></dd>
         <dt>Money at risk</dt>
         <dd><span class="fig">{{ size.risk|money }}</span>

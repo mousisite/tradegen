@@ -59,7 +59,7 @@ def _big(value: Optional[float], currency: str = "USD") -> str:
     for limit, word in ((1e12, "trillion"), (1e9, "billion"), (1e6, "million")):
         if abs(value) >= limit:
             return "%s%.1f %s%s" % (sign, value / limit, word, after)
-    return _money(value, currency) + after
+    return (_money(value) if currency == "USD" else format(value, ",.0f")) + after
 
 
 # --- the call ---------------------------------------------------------------
@@ -115,7 +115,8 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     action = (plan.action or "").upper()
     currency = getattr(bars, "currency", "USD")
     points: List[str] = []
-    short_side = (getattr(plan, "direction", 0) or 0) < 0 and action in ("WAIT", "SHORT")
+    down = (getattr(plan, "direction", 0) or 0) < 0
+    short_side = down and action in ("WAIT", "SHORT")
     why_avoid = getattr(plan, "avoid_reason", "") or ""
     # The odds are measured on the side the signals lean. When that is down and
     # the plan is not a short, every count below is a record of betting on a
@@ -146,9 +147,10 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             "because losses have no limit. Most beginners should skip it.")
     elif action == "AVOID" and why_avoid == "bearish_no_shorts":
         points.append(
-            "The signals point down. The record below is how often a bet on "
-            "the price falling worked here. Buying is the opposite bet, and "
-            "shorting is switched off, so the answer is: do not buy.")
+            "The signals point down. %sBuying is the opposite bet, and "
+            "shorting is switched off, so the answer is: do not buy."
+            % ("The record below is how often a bet on the price falling worked "
+               "here. " if plan.probability is not None and plan.prob_samples else ""))
     elif action == "AVOID" and why_avoid == "negative_record":
         points.append(
             "Setups like this one have lost money here once trading fees are "
@@ -158,7 +160,8 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
             "There is no setup here worth the trading fees right now. That is "
             "a normal answer, not a broken one.")
 
-    if plan.stop and plan.entry and short_side:
+    # A short refused on its record keeps its levels: its stop is above.
+    if plan.stop and plan.entry and down:
         points.append(
             "If the price kept rising to %s instead, the plan says get out. "
             "That is the point where the idea was wrong."
@@ -253,14 +256,14 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         # A short is a sale, and the jump that hurts it is upward
         # (decision._gap_risk measures that side for it).
         risk = ("%s %s %s would put %s at risk."
-                % ("Shorting" if short_side else "Buying",
-                   _trim(position.get("quantity")),
+                % ("Shorting" if down else "Buying",
+                   position.get("quantity_text") or _trim(position.get("quantity")),
                    position["unit_text"] if contracts else "of these",
                    _money(position["risk_amount"], currency)))
         if position.get("gap_loss") and (position.get("gap_multiple") or 0) > 1.4:
             risk += (" But if the price jumped %s overnight, which happens, "
                      "you could lose about %s instead."
-                     % ("up" if short_side else "down",
+                     % ("up" if down else "down",
                         _money(position["gap_loss"], currency)))
 
     hold = ""
