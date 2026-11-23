@@ -480,10 +480,11 @@ def build(rows, account: float, with_correlation: bool = True,
     view.exit_costs = sum(p.exit_cost for p in sized)
     view.gross_exposure = sum(abs(p.notional) for p in sized)
     view.net_exposure = sum(p.notional * p.direction for p in sized)
-    # An unpriced holding still holds money: its entry cost stays out of cash.
-    unpriced_cost = sum(p.entry * p.quantity for p in positions
-                        if p.price is None and p.sized)
-    view.cash = max(0.0, account - view.invested - unpriced_cost)
+    # What is left of the account is what was not paid out: a holding that has
+    # risen since was still bought at its entry, and one without a price still
+    # holds its money. Counted at today's value, cash fell when a holding rose.
+    paid = sum(p.entry * p.quantity for p in positions if p.sized)
+    view.cash = max(0.0, account - paid)
 
     for p in sized:
         key = p.sector or ("Crypto" if p.asset_class == "crypto" else "Unclassified")
@@ -497,10 +498,13 @@ def build(rows, account: float, with_correlation: bool = True,
         # perfectly even.
         view.concentration = sum(w * w for w in _name_weights(sized, view.gross_exposure).values())
 
-        # Signed: a short adds negative market exposure, not more of it.
-        betas = [(p.beta, p.notional * p.direction) for p in sized if p.beta is not None]
-        if betas:
-            view.portfolio_beta = sum(b * w for b, w in betas) / view.gross_exposure
+        # Signed: a short adds negative market exposure, not more of it. One
+        # with no measured beta is taken to move with the market, as what_if
+        # takes it, so this figure and the shock table agree; _assess names it.
+        if any(p.beta is not None for p in sized):
+            view.portfolio_beta = sum(
+                (p.beta if p.beta is not None else 1.0) * p.notional * p.direction
+                for p in sized) / view.gross_exposure
 
     if with_correlation and len({p.symbol for p in priced}) >= 2:
         try:
@@ -696,10 +700,18 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
                 "exposures." % avg)
 
     if view.portfolio_beta is not None:
+        # A book that is short on balance gains when the market falls.
+        against = ", in the opposite direction" if view.portfolio_beta <= -0.005 else ""
         view.observations.append(
             "Weighted beta is %.2f, so the portfolio tends to move %.0f%% as "
-            "much as the market." % (view.portfolio_beta,
-                                     abs(view.portfolio_beta) * 100))
+            "much as the market%s." % (view.portfolio_beta,
+                                       abs(view.portfolio_beta) * 100, against))
+        assumed = sorted({p.symbol for p in sized if p.beta is None})
+        if assumed:
+            view.observations.append(
+                "No beta could be measured for %s, so %s counted as moving exactly "
+                "with the market." % (", ".join(assumed),
+                                      "it is" if len(assumed) == 1 else "they are"))
 
     if view.net_exposure < 0 and view.gross_exposure > 0:
         view.observations.append("Net exposure is short.")

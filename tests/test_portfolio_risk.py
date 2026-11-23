@@ -156,6 +156,50 @@ check("a position with no size is left out of the money, and said so",
 check("an unpriced holding's cost stays out of cash",
       close(v.cash, max(0.0, 10000 - 10000 - 500)), v.cash)
 
+
+def whole(prices, rows, betas=None, account=10000):
+    """A portfolio of rows at the given prices and betas, nothing fetched."""
+    def enrich(positions, view):
+        for q in positions:
+            q.price, q.asset_class = prices[q.symbol], "equity"
+            q.beta = (betas or {}).get(q.symbol)
+            if q.price is None:
+                view.failed.append(q.symbol)
+    real, P._enrich = P._enrich, enrich
+    try:
+        return P.build(rows, account=account, with_correlation=False)
+    finally:
+        P._enrich = real
+
+
+def held(i, symbol, direction=1, qty=10, entry=100, stop=90):
+    return {"id": i, "symbol": symbol, "direction": direction, "quantity": qty,
+            "entry": entry, "stop": stop, "target1": None, "ts_opened": 0}
+
+
+up, down = whole({"AAA": 200.0}, [held(1, "AAA")]), whole({"AAA": 50.0}, [held(1, "AAA")])
+check("cash is what was not paid out, whatever the holding is worth now",
+      close(up.cash, 9000) and close(down.cash, 9000), (up.cash, down.cash))
+check("and deployed is still today's value", close(up.invested, 2000) and close(down.invested, 500))
+part = whole({"AAA": 60.0, "GONE": None}, [held(1, "AAA"), held(2, "GONE", qty=5)])
+check("with a price missing too", close(part.cash, 10000 - 1000 - 500), part.cash)
+
+v = whole({"AAA": 100.0, "NEW": 100.0}, [held(1, "AAA"), held(2, "NEW")], {"AAA": 1.5})
+check("a holding with no beta counts as one that moves with the market, as in the shock table",
+      close(v.portfolio_beta, 1.25) and close(P.what_if(v, -0.10)["total_change"], -250),
+      (v.portfolio_beta, P.what_if(v, -0.10)["total_change"]))
+check("and is named", any("No beta could be measured for NEW, so it is counted" in o
+                          for o in v.observations), v.observations)
+check("with no beta at all there is no weighted beta",
+      whole({"AAA": 100.0}, [held(1, "AAA")]).portfolio_beta is None)
+v = whole({"AAA": 100.0}, [held(1, "AAA", direction=-1, stop=110)], {"AAA": 0.6})
+check("a portfolio short on balance is said to move against the market",
+      any("Weighted beta is -0.60, so the portfolio tends to move 60% as much as the "
+          "market, in the opposite direction." == o for o in v.observations), v.observations)
+v = whole({"AAA": 100.0}, [held(1, "AAA")], {"AAA": 0.6})
+check("and one that is long is not",
+      any(o.endswith("60% as much as the market.") for o in v.observations), v.observations)
+
 print()
 print("=" * 72)
 print("A STOP THAT TRADED AND RECOVERED")
@@ -193,7 +237,7 @@ print("THE JOURNAL'S OWN NUMBERS")
 print("=" * 72)
 import harness
 from bot import database as db
-DB = harness.isolate("journal")[0]
+client, DB = harness.isolated_web("journal")
 conn = db.connect(DB)
 for bad, kw in (("a size of zero", {"quantity": 0}), ("a negative size", {"quantity": -5}),
                 ("a stop of zero", {"stop": 0}), ("an infinite entry", {"entry": float("inf")}),
@@ -300,6 +344,61 @@ check("so it is not past its stop", not spl.breached and not v.breached)
 check("its open profit is what it is", close(spl.open_pnl, 20.0), spl.open_pnl)
 check("and the page says why its price is not today's quote",
       any("split 10-for-1" in o for o in v.observations), v.observations)
+
+print()
+print("=" * 72)
+print("THE PAGE SAYS WHAT IS NOT KNOWN, NOT 0.00")
+print("=" * 72)
+import re as _re  # noqa: E402
+
+conn = db.connect(DB)
+conn.execute("DELETE FROM trades")
+conn.commit()
+for symbol, qty in (("KNOWN", 10), ("NOSIZE", None), ("DEAD", 50)):
+    db.open_trade(conn, symbol, "1d", 1, entry=100, stop=95, target1=None, quantity=qty)
+conn.close()
+
+
+def page_prices(positions, view):
+    for q in positions:
+        q.price = {"KNOWN": 110.0, "NOSIZE": 90.0, "DEAD": None}[q.symbol]
+        q.asset_class = "equity"
+        if q.price is None:
+            view.failed.append(q.symbol)
+
+
+real = (P._enrich, P.risk_mod.correlation_matrix)
+P._enrich, P.risk_mod.correlation_matrix = page_prices, offline
+try:
+    html = client.get("/portfolio").data.decode("utf-8")
+finally:
+    P._enrich, P.risk_mod.correlation_matrix = real
+
+
+def cells(symbol):
+    row = html[html.index("<td><b>%s</b></td>" % symbol):]
+    row = row[:row.index("</tr>")]
+    return [" ".join(_re.sub(r"<[^>]+>", " ", c).split())
+            for c in _re.findall(r"<td[^>]*>(.*?)</td>", row, _re.S)], row
+
+
+# Instrument, side, entry, now, value, open P&L, R, still at risk, weight.
+known, _row = cells("KNOWN")
+check("a holding with a size and a price shows its money",
+      known[4:6] == ["1,100.00", "100.00"] and known[8] == "100%", known)
+sizeless, row = cells("NOSIZE")
+check("one with no size has a dash for its money and its weight",
+      sizeless[4] == sizeless[5] == sizeless[8] == "—" and sizeless[6] == "-2.00", sizeless)
+check("and one with no price too",
+      cells("DEAD")[0][3:9] == ["—"] * 6, cells("DEAD")[0])
+check("a dash is not coloured as a loss",
+      'fig loss' not in cells("DEAD")[1], cells("DEAD")[1])
+breach = " ".join(_re.sub(r"<[^>]+>", " ", html[html.index("Stop breached"):
+                                                html.index("A stop in the journal")]).split())
+check("the red box says the size was not logged, not that it lost -0.00",
+      "stop of 95: size not logged (-2.00R)." in breach
+      and "0.00 (" not in breach, breach)
+check("and so does the figure beside it", "0.00 open" not in html)
 
 print()
 print("%d failure(s)" % len(fails))
