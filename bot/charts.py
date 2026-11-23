@@ -120,7 +120,7 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
     fill = "var(--gain-wash)" if rising else "var(--loss-wash)"
 
     parts = ['<svg class="chart" viewBox="0 0 %d %d" role="img" '
-             'preserveAspectRatio="none" aria-label="%s">'
+             'aria-label="%s">'
              % (width, height, _escape(title or "Price history"))]
 
     ticks = []
@@ -489,7 +489,7 @@ def bar_chart(years: Sequence[int], values: Sequence[Optional[float]],
         label = str
 
     parts = ['<svg class="chart" viewBox="0 0 %d %d" role="img" '
-             'preserveAspectRatio="none" aria-label="%s">'
+             'aria-label="%s">'
              % (width, height, _escape(title or "Filed figures by year"))]
 
     for tick in (axis_low, axis_high) if axis_low else (0.0, axis_high):

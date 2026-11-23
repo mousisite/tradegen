@@ -5,11 +5,11 @@
    Shrunk to a phone, the wide drawing's labels were 4 pixels tall, so a
    phone gets the narrow one, drawn for its width. #}
 {% block head_extra %}{% if price_svg and price_svg_narrow %}<style>
+  .yearchart .chart { max-height: none; }
   .yearchart .narrow { display: none; }
   @media (max-width: 600px) {
     .yearchart .wide { display: none; }
     .yearchart .narrow { display: block; }
-    .yearchart .chart { max-height: none; }
   }
 </style>{% endif %}{% endblock %}
 
@@ -42,7 +42,7 @@
     {% if f and f.country %}<span>{{ f.country }}</span>{% endif %}
     <span>researched in {{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
-  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap">
+  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap;align-items:flex-start">
     {% set exact = exact_arg(r.symbol) %}
     <a class="btn quiet sm" data-working
        href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval, exact=exact) }}">
@@ -84,7 +84,7 @@
    for the owner of a copy on their own machine (and the server log). #}
 {% set owner = current_user and current_user.is_local %}
 {% if r.unavailable %}
-  <div class="card" style="border-color:var(--hold)">
+  <div class="card" style="border-color:var(--hold);margin-bottom:var(--s3)">
     <span class="eyebrow">Not available here</span>
     <ul class="list warn">{% for u in r.unavailable %}<li>{{ u }}</li>{% endfor %}</ul>
     <p class="prose" style="margin-top:var(--s2)">Either the source has none for
