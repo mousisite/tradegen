@@ -208,6 +208,19 @@ except sqlite3.OperationalError as exc:
 finally:
     again.close()
 
+# paper.py --db journal.db: a file name with no folder is one in this folder.
+here = os.getcwd()
+os.chdir(tempfile.mkdtemp(prefix="stockbot-bare-"))
+try:
+    bare = db.connect("bare.db")
+    bare.execute("SELECT COUNT(*) FROM trades").fetchone()
+    bare.close()
+    check("a database named without a folder opens", os.path.exists("bare.db"))
+except OSError as exc:
+    check("a database named without a folder opens", False, exc)
+finally:
+    os.chdir(here)
+
 print("\nDATABASE OK" if not fails else "\nFAILURES: %s" % fails)
 
 

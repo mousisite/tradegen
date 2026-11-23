@@ -750,6 +750,64 @@ try:
     check("and closes part of it", code == 0 and "4 closed at 110, 6 still open" in said, said)
     code, said = cli("list")
     check("its list shows what is left", "6 of 10" in said, said)
+    code, said = cli("open", "ZZWRONG", "--entry", 100, "--stop", 90, "--target", 95)
+    check("a target on the losing side is refused there too", code == 2
+          and "the target must sit above the entry" in said, said)
+    code, said = cli("take", "ZZP", "--account-size", "nan")
+    check("and an account size that is not a number never ends in a traceback", code != 0, said)
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "
+                 "VALUES (?, 'ZZNO', '1d', 'AVOID', NULL, NULL, NULL, 1)", (int(time.time()),))
+    conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id, "
+                 "asset_class) VALUES (?, 'ZZYES', '1d', 'BUY', 100, 90, 120, 1, 'equity')",
+                 (int(time.time()),))
+    conn.commit()
+    code, said = cli("take", "ZZNO")
+    check("a call that is no trade names a command that exists here", code == 1
+          and "`paper.bat open`" in said and "python paper.py" not in said, said)
+    code, said = cli("take", "ZZYES", "--account-size", "nan")
+    check("a plan is not sized on an account that is not a number", code == 2
+          and "account size" in said, said)
+
+    import analyze
+    from bot.market import DataThrottled
+
+    def analysis(*argv):
+        out = io.StringIO()
+        analyze.console = Console(file=out, width=200, color_system=None)
+        code = analyze.main([str(a) for a in argv] + ["--config", harness.CFG_PATH,
+                                                      "--db", DB])
+        return code, " ".join(out.getvalue().split())
+
+    def throttled(*_a, **_k):
+        raise DataThrottled("The source limits how often it may be asked.", 60)
+
+    real_analyze = (analyze.resolve, analyze.engine.analyse, analyze.report_mod.render)
+    analyze.resolve = throttled
+    try:
+        code, said = analysis("--symbol", "ZZP")
+        check("a refused ticker look-up is said in words, not a traceback", code == 2
+              and "Market data error: The source limits" in said, said)
+        for flag, value in (("--risk", 50), ("--risk", -3), ("--account", "nan"),
+                            ("--account", "inf"), ("--account", 0)):
+            code, said = analysis("--symbol", "ZZP", flag, value)
+            check("%s %s is held to the settings' own limits" % (flag, value), code == 2
+                  and "Config error" in said, said)
+        analyze.resolve = lambda s: {"symbol": s, "name": s}
+        analyze.report_mod.render = lambda *a, **k: None
+        for action, offered in (("BUY", True), ("SHORT", True), ("WAIT", False),
+                                ("AVOID", False)):
+            analyze.engine.analyse = lambda *a, **k: NS(
+                bars=NS(symbol="ZZP"), plan=NS(action=action), calibration=None, signals=[],
+                composite=0.0, regime=None, sentiment=None, strategy_report=None, run_id=7)
+            code, said = analysis("--symbol", "ZZP", "--no-news")
+            check("after %s, taking the trade is %s" % (action, "offered by a command that "
+                  "exists" if offered else "not offered"), code == 0
+                  and ("take it with: paper.bat take ZZP." in said) == offered
+                  and "Recorded as run #7" in said and "python paper.py" not in said, said)
+            check("and only sources that were read are named", "StockTwits" not in said
+                  and "Data from Yahoo Finance." in said, said)
+    finally:
+        analyze.resolve, analyze.engine.analyse, analyze.report_mod.render = real_analyze
     code, said = cli("trail", tp["id"], "--pct", 20)
     check("a wider trail is refused there too", code == 2 and "only tightens" in said, said)
     code, said = cli("trail", tp["id"], "--pct", 3)

@@ -23,7 +23,6 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 SCHEMA_VERSION = 1
@@ -172,9 +171,7 @@ CREATE TABLE IF NOT EXISTS watch_calls (
 CREATE TABLE IF NOT EXISTS alerts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol      TEXT NOT NULL,
-    kind        TEXT NOT NULL,      -- price_above | price_below | pct_move |
-                                    -- rsi_above | rsi_below | signal_flip |
-                                    -- near_stop | near_target
+    kind        TEXT NOT NULL,      -- one of bot.alerts.KINDS
     threshold   REAL,
     interval    TEXT NOT NULL DEFAULT '1d',
     note        TEXT,
@@ -248,7 +245,8 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
     migrations write, so running them each time made every page and the health
     check wait for the write lock behind whatever else was writing.
     """
-    path = path or default_path()
+    # In full, so a bare file name (--db journal.db) is one in this folder.
+    path = os.path.abspath(path or default_path())
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # The web server is threaded, so two requests can want the database at once.
     # Without a busy timeout the loser raises "database is locked" immediately
@@ -561,13 +559,6 @@ def save_strategy_stats(conn: sqlite3.Connection, symbol: str, interval: str,
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
     conn.commit()
     return len(rows)
-
-
-def load_strategy_stats(conn: sqlite3.Connection, symbol: str,
-                        interval: str) -> List[sqlite3.Row]:
-    return list(conn.execute(
-        "SELECT * FROM strategy_stats WHERE symbol=? AND interval=? "
-        "ORDER BY regime, strategy", (symbol, interval)))
 
 
 # ---------------------------------------------------------------------------

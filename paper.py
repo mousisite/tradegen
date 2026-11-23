@@ -4,18 +4,18 @@
 Record what you actually took, let the bot mark it to market, and measure
 whether the process works before any real money is involved.
 
-    python paper.py take AAPL              open a trade from the bot's last plan
-    python paper.py open AAPL --entry 315 --stop 313.5 --target 317.5 --qty 60
-    python paper.py check                  mark open trades to market
-    python paper.py close 3 --price 317.5  close a position
-    python paper.py close 3 --price 317.5 --qty 20   close part of it
-    python paper.py trail 3 --pct 5        trail its stop 5% behind the best price
-    python paper.py list                   show open positions
-    python paper.py stats                  realised performance so far
-    python paper.py leaderboard            which strategies measure best
-    python paper.py runs                   recent analyses
+    paper.bat take AAPL              open a trade from the bot's last plan
+    paper.bat open AAPL --entry 315 --stop 313.5 --target 317.5 --qty 60
+    paper.bat check                  mark open trades to market
+    paper.bat close 3 --price 317.5  close a position
+    paper.bat close 3 --price 317.5 --qty 20   close part of it
+    paper.bat trail 3 --pct 5        trail its stop 5% behind the best price
+    paper.bat list                   show open positions
+    paper.bat stats                  realised performance so far
+    paper.bat leaderboard            which strategies measure best
+    paper.bat runs                   recent analyses
 
-Run with --help, or `python paper.py <command> --help`, for the full options.
+Run with --help, or `paper.bat <command> --help`, for the full options.
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def cmd_take(args, conn) -> int:
         console.print(Panel(
             "The most recent %s analysis said [bold]%s[/], %s ago.\n\n%s\n\n"
             "[dim]The journal only takes plans the bot actually proposed. To "
-            "record a trade it advised against, use `paper.py open` with "
+            "record a trade it advised against, use `paper.bat open` with "
             "explicit numbers.[/]" % (
                 sym, latest["action"], _age(latest["ts"]),
                 latest["headline"] or ""),
@@ -173,7 +173,10 @@ def cmd_take(args, conn) -> int:
     risk_amount = None
     if qty is None:
         cfg = config_mod.load()
-        account = args.account_size or cfg["account_size"]
+        account = args.account_size if args.account_size is not None else cfg["account_size"]
+        if not 0 < account < float("inf"):
+            console.print("[red]Rejected:[/] the account size must be more than zero")
+            return 2
         risk_amount = account * cfg["risk_per_trade_pct"] / 100.0
         per_unit = abs(run["entry"] - run["stop"])
         qty = (risk_amount / per_unit) if per_unit > 0 else 0
@@ -190,7 +193,9 @@ def cmd_take(args, conn) -> int:
         trade_id = db.open_trade(
             conn, symbol=run["symbol"], interval=run["interval"], direction=direction,
             entry=float(run["entry"]), stop=float(run["stop"]),
-            target1=run["target1"], target2=run["target2"], quantity=qty,
+            # A target at or below zero is no price the market can reach.
+            target1=run["target1"] if (run["target1"] or 0) > 0 else None,
+            target2=run["target2"] if (run["target2"] or 0) > 0 else None, quantity=qty,
             risk_amount=risk_amount, run_id=int(run["id"]), account=args.account,
             strategy_note="from run #%d (%s)" % (run["id"], run["action"]))
     except ValueError as exc:
@@ -445,7 +450,7 @@ def cmd_check(args, conn) -> int:
         lines = ["#%d %s is at or beyond its %s" % (
             i, s, "stop" if "STOP" in st else "target") for i, s, st in alerts]
         console.print(Panel("\n".join(lines) +
-                            "\n\n[dim]Close them with: python paper.py close <id> "
+                            "\n\n[dim]Close them with: paper.bat close <id> "
                             "--price <fill> --reason stop|target[/]",
                             title="Action needed", border_style="yellow"))
     return 0
