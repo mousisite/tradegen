@@ -36,7 +36,9 @@ prepare_output()
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # tests/harness.py sets this, so a test run never picks up real keys.
+    if not os.environ.get("STOCKBOT_NO_DOTENV"):
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
@@ -125,14 +127,25 @@ app.config.update(
 # because the redirect address has to match the registered one exactly. These
 # headers are what the proxy uses to say what the browser actually asked for.
 # Only enabled deliberately, since trusting them when there is no proxy in
-# front would let a client spoof its own scheme and host.
+# front would let a client spoof its own scheme and address. The address
+# counts the one hop nearest the app, and the Host header is taken as it
+# arrives: the hosts pass the visitor's own on, and do not set
+# X-Forwarded-Host or X-Forwarded-Prefix, so those could only be a visitor's.
+# Under serve.py, waitress hands the headers on only behind a proxy.
 _public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
+
+
+def behind_proxy() -> bool:
+    """Whether the operator says a proxy is in front of this server."""
+    return ((os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
+            in ("1", "true", "yes"))
+
+
 # An https public address is an operator saying there is a TLS terminator in
 # front, which is the only way these headers get set at all.
-if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
-        in ("1", "true", "yes")) or _public.startswith("https://"):
+if behind_proxy() or _public.startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
@@ -246,8 +259,7 @@ def _served_publicly() -> bool:
     means a TLS terminator in front.
     """
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().lower()
-    proxied = (os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
-    return public.startswith("https://") or proxied in ("1", "true", "yes")
+    return public.startswith("https://") or behind_proxy()
 
 
 def auth_required() -> bool:

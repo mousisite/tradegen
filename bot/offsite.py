@@ -809,12 +809,19 @@ def _read(conn: sqlite3.Connection, key: str) -> Optional[Dict]:
         return None
 
 
+BACKUP_HOURS = 12.0
+
+
 def backup_hours() -> float:
-    """Hours between automatic backups, read as serve.py reads them; 0 when off."""
+    """Hours between automatic backups, the number serve.py runs them by; 0
+    when off. Only a number of 0 or less switches them off: a blank or a
+    mistyped setting is the default, because people's data depends on it."""
     try:
-        return max(0.0, float(os.environ.get("STOCKBOT_BACKUP_HOURS", "12") or 0))
+        hours = float((os.environ.get("STOCKBOT_BACKUP_HOURS") or "").strip())
     except ValueError:
-        return 0.0
+        return BACKUP_HOURS
+    # "nan" and "inf" are floats too; more than a year apart is a typing slip.
+    return max(0.0, hours) if hours <= 8760 else BACKUP_HOURS
 
 
 def status(conn: sqlite3.Connection) -> Dict:
