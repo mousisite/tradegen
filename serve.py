@@ -22,6 +22,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 
 # The bundled runtime is an embeddable build, whose ._pth deliberately keeps the
 # script's own directory off sys.path. Every entry point has to put it back or
@@ -434,12 +435,23 @@ def main(argv=None) -> int:
         serve(web.app, host=args.host, port=args.port, threads=args.threads,
               **_server_settings(web.behind_proxy()))
     finally:
+        # All of it inside the half minute Render allows, of which waitress
+        # may have taken five seconds.
+        ends = time.monotonic() + 22.0
+
+        def up_to(most):
+            return max(0.1, min(most, ends - time.monotonic()))
+
+        # An alert that fired is recorded, and switched off, before anyone is
+        # told of it, so a round being checked and the notices and emails
+        # still to go are seen out: no later round would say them.
         if loop is not None:
-            loop.stop()
+            loop.stop(timeout=up_to(8.0))
+        web.push_mod.wait_idle(up_to(4.0))
+        web.alerts_mod.mail_idle(up_to(4.0))
         if backups is not None:
-            # Long enough for a backup being written to finish, and still
-            # inside the half minute Render allows.
-            backups.stop(timeout=15.0)
+            # Long enough for a backup being written to finish.
+            backups.stop(timeout=up_to(15.0))
     return 0
 
 

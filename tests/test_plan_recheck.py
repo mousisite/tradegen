@@ -447,13 +447,13 @@ class Kept(Held):
         stopped.append(timeout)
 
 
-def start(serving=lambda *a, **k: None, **settings):
+def start(serving=lambda *a, **k: None, loop=None, **settings):
     """serve.main([]) with these settings, and the lines it printed."""
     del jobs[:], intervals[:], copied[:]
     real = (waitress.serve, web.start_alert_loop, web.start_background_jobs,
             scheduler_mod.Scheduler, offsite_mod.copy_in_background)
     waitress.serve = serving
-    web.start_alert_loop = lambda cfg: None
+    web.start_alert_loop = lambda cfg: loop
     web.start_background_jobs = lambda: None
     scheduler_mod.Scheduler = Kept
     offsite_mod.copy_in_background = copied.append
@@ -663,6 +663,44 @@ except (Exception, SystemExit) as exc:
 check("it ends by itself, and cleanly", code == 0, code)
 check("within seconds", time.time() - began < 15, time.time() - began)
 check("after waiting for a backup being written", stopped and stopped[0] >= 10, stopped)
+
+# What fired is recorded as told before the notices and emails go, each from a
+# thread that ends with the process.
+import types  # noqa: E402
+
+told = []
+
+
+class Round:
+    """The alert loop, stopped while a round of it is being checked."""
+
+    def stop(self, timeout=2.0):
+        told.append(("round", timeout))
+        hit = [types.SimpleNamespace(user_id=1)]
+        web.push_mod.deliver_later(DB, hit, "")
+        web.alerts_mod.deliver_later(DB, hit, None, lambda conn: None)
+
+
+def slowly(what):
+    def send(*_a, **_kw):
+        time.sleep(0.7)
+        told.append(what)
+    return send
+
+
+real = web.push_mod.deliver, web.alerts_mod.deliver
+web.push_mod.deliver, web.alerts_mod.deliver = slowly("notice"), slowly("email")
+try:
+    code, said = start(loop=Round())
+    at_the_end = list(told)
+    web.push_mod.wait_idle()
+    web.alerts_mod.mail_idle()
+finally:
+    web.push_mod.deliver, web.alerts_mod.deliver = real
+check("and the alerts that had just fired have been told, to phones and by email",
+      {"notice", "email"} <= set(at_the_end), at_the_end)
+check("a round being checked has longer than two seconds to end",
+      told[0][0] == "round" and told[0][1] >= 5, told)
 
 head("WHO IS ASKING, THROUGH THE REAL SERVER")
 # waitress deletes the proxy's headers unless told otherwise, and every
