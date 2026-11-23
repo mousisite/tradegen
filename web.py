@@ -1491,9 +1491,8 @@ def _canonical(endpoint: str, bars) -> str:
                                     exact=exact_arg(bars.symbol))
 
 
-# The largest account an address may name: a trillion, past which a size has
-# more digits than it is worth printing.
-ACCOUNT_MOST = 1e12
+# The largest account an address may name.
+ACCOUNT_MOST = config_mod.ACCOUNT_MOST
 
 
 def _address_number(name: str, most: float) -> Optional[float]:
