@@ -680,7 +680,8 @@ try:
     check("every page says do not sniff, do not frame, and keep the referrer short",
           h.get("X-Content-Type-Options") == "nosniff"
           and h.get("X-Frame-Options") == "DENY"
-          and h.get("Content-Security-Policy") == "frame-ancestors 'none'"
+          and h.get("Content-Security-Policy").split("; ")
+          == ["frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'"]
           and h.get("Referrer-Policy") == "strict-origin-when-cross-origin", dict(h))
     check("but not to use https only, when it is not served that way",
           "Strict-Transport-Security" not in h)
@@ -1102,6 +1103,251 @@ try:
           r.status_code == 200 and not fresh(reader.id).weekly_email)
     for key in list(MAIL) + ["MAIL_POSTAL_ADDRESS"]:
         _os.environ.pop(key, None)
+
+    print()
+    print("=" * 72)
+    print("WHAT A STRANGER, OR ONE ACCOUNT, CAN SEND")
+    print("=" * 72)
+    import json
+    import threading
+    from bot import export as export_mod
+    from bot import ideas as ideas_mod
+
+    def page_of(response):
+        return response.data.decode("utf-8", "replace")
+
+    web.app.config["PROPAGATE_EXCEPTIONS"] = False
+    web.app.config["TESTING"] = False
+    try:
+        sign_out()
+        long = "9" * 5000
+        check("a number thousands of digits long in an address is not a page",
+              c.get("/trades/%s/picture" % long).status_code == 404)
+        guest = user("numbers@example.com")
+        sign_in(guest)
+        past = {act: c.post("/monitor/alert/" + act, data={
+            "alert_id": "9" * 25, "threshold": "1"}).status_code
+            for act in ("delete", "pause", "resume", "reset", "edit")}
+        check("an alert number the database cannot hold is refused, not a fault",
+              set(past.values()) == {400}, past)
+        check("nor is a device's", c.post("/settings/notifications/remove", data={
+            "device_id": "9" * 25}).status_code == 302)
+    finally:
+        web.app.config["TESTING"] = True
+        web.app.config["PROPAGATE_EXCEPTIONS"] = None
+
+    # A page on another site, against a copy that asks for no sign-in.
+    sign_out()
+    web.app.config["AUTH_MODE"] = "off"
+    try:
+        c.post("/watch/add", data={"symbol": "KEPT"})
+
+        def kept():
+            return "KEPT" in page_of(c.get("/monitor"))
+
+        answers = [c.post("/watch/remove", data={"symbol": "KEPT"}, headers=h).status_code
+                   for h in ({"Sec-Fetch-Site": "cross-site",
+                              "Origin": "https://evil.example"},
+                             {"Sec-Fetch-Site": "same-site"},
+                             {"Origin": "https://evil.example"},
+                             {"Referer": "https://evil.example/x"})]
+        check("a change sent by a page on another site is refused",
+              answers == [403] * 4 and kept(), answers)
+        check("a program's too, in JSON", c.post(
+            "/api/alerts/check-now", headers={"Sec-Fetch-Site": "cross-site"}).json
+            == {"error": "That request came from another site."})
+        c.post("/watch/remove", data={"symbol": "KEPT"},
+               headers={"Sec-Fetch-Site": "same-origin", "Origin": "http://localhost"})
+        check("one from the site itself goes through", not kept())
+    finally:
+        web.app.config["AUTH_MODE"] = None
+
+    with web.app.test_request_context("/", headers={"CF-Connecting-IP": "2001:db8:1:2::5"}):
+        one = web._client_ip()
+    with web.app.test_request_context("/", headers={
+            "CF-Connecting-IP": "2001:db8:1:2:ffff::9"}):
+        two = web._client_ip()
+    check("every IPv6 address of one connection is one network to the limits",
+          one == two == "2001:db8:1:2::/64", (one, two))
+    with web.app.test_request_context("/", headers={"CF-Connecting-IP": "made up"},
+                                      environ_base={"REMOTE_ADDR": "192.0.2.7"}):
+        made_up = web._client_ip()
+    check("and words that are no address are not a network of their own",
+          made_up == "192.0.2.7", made_up)
+
+    _os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_x"
+    try:
+        check("a message to the payments address is never read past a size Stripe sends",
+              c.post("/billing/webhook", data=b"x" * (2 * 1024 * 1024),
+                     content_type="application/json").status_code == 413)
+    finally:
+        _os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
+    with web.app.test_request_context("/analyse?symbol=" + "A" * 5000):
+        check("a ticker is cut to the length of a long name",
+              len(web._symbol_from(web.request.args)[0]) == 100)
+    sign_in(guest)
+    check("one with a line break in it is refused", c.post("/trades/open", data={
+        "symbol": "A\nB", "entry": "10", "stop": "9"}).status_code == 400)
+    c.post("/trades/open", data={"symbol": "NOTED", "entry": "10", "stop": "9",
+                                 "quantity": "100", "notes": "n" * 15000})
+    conn = db.connect(DB)
+    try:
+        row = conn.execute("SELECT id, notes FROM trades WHERE symbol='NOTED'").fetchone()
+        check("a trade's note is a note", len(row["notes"]) == web.NOTE_LIMIT,
+              len(row["notes"]))
+        for _ in range(12):
+            db.exit_trade(conn, row["id"], 11.0, 1.0, notes="m" * 1000, user=guest.id)
+        check("and closing it in parts does not grow it for ever",
+              conn.execute("SELECT LENGTH(notes) FROM trades WHERE id=?",
+                           (row["id"],)).fetchone()[0] == db.MAX_TRADE_NOTES)
+    finally:
+        conn.close()
+
+    # Everything kept, as a file: written a row at a time, never built whole.
+    real_build = export_mod.build
+    export_mod.build = None
+    try:
+        r = c.get("/export/trades.json")
+        body = json.loads(r.data)
+        check("an export is written to a file a row at a time",
+              r.status_code == 200 and body["dataset"] == "trades"
+              and body["count"] == len(body["rows"]) == 1
+              and body["rows"][0]["symbol"] == "NOTED"
+              and int(r.headers["Content-Length"]) == len(r.data), body)
+        empty = json.loads(c.get("/export/theses.json").data)
+        check("an empty one is still whole JSON", empty["rows"] == [] and empty["count"] == 0)
+        sheet = c.get("/export/trades.csv")
+        check("a spreadsheet says it is UTF-8, and has its name",
+              sheet.data.startswith(b"\xef\xbb\xbfid,symbol,")
+              and sheet.headers["Content-Type"] == "text/csv; charset=utf-8"
+              and 'filename="orenth-trades-' in sheet.headers["Content-Disposition"],
+              dict(sheet.headers))
+        check("marked as nothing to keep a copy of",
+              r.headers.get("Cache-Control") == "private, no-store", dict(r.headers))
+    finally:
+        export_mod.build = real_build
+    web._RATE.clear()
+    real_most, web.EXPORTS_PER_HOUR = web.EXPORTS_PER_HOUR, 1
+    try:
+        answers = [c.get("/export/trades.csv").status_code for _ in range(2)]
+        check("and only so many an hour", answers == [200, 429], answers)
+    finally:
+        web.EXPORTS_PER_HOUR = real_most
+    real_most, web.CHECKS_PER_HOUR = web.CHECKS_PER_HOUR, 1
+    try:
+        answers = [c.post("/monitor/alerts/check").status_code for _ in range(2)]
+        check("as are checks of every alert at once", answers == [302, 429], answers)
+    finally:
+        web.CHECKS_PER_HOUR = real_most
+
+    # One account and the server's few threads.
+    going, let_go = threading.Semaphore(0), threading.Event()
+
+    def slow(symbol, *a, **k):
+        going.release()
+        let_go.wait(30)
+        raise web.DataError("enough")
+
+    def another():
+        mine = web.app.test_client()
+        conn = db.connect(DB)
+        try:
+            token = A.start_session(conn, guest.id, "test")
+        finally:
+            conn.close()
+        with mine.session_transaction() as sess:
+            sess[web.SESSION_KEY] = token
+        return mine
+
+    def ask(n, out):
+        out.append(another().get("/analyse?symbol=AAPL&interval=1d&news=0&account=%d"
+                                 % (1000 + n)).status_code)
+
+    real_analyse, web.engine.analyse = web.engine.analyse, slow
+    out = []
+    threads = [threading.Thread(target=ask, args=(n, out)) for n in range(web.SLOW_AT_ONCE)]
+    try:
+        for t in threads:
+            t.start()
+        for _ in threads:
+            going.acquire(timeout=20)
+        refused = []
+        ask(99, refused)
+        check("one account cannot have every thread at work for it", refused == [503], refused)
+        other = web.app.test_client()
+        conn = db.connect(DB)
+        try:
+            token = A.start_session(conn, user("patient@example.com").id, "test")
+        finally:
+            conn.close()
+        with other.session_transaction() as sess:
+            sess[web.SESSION_KEY] = token
+        late = threading.Thread(target=lambda: other.get(
+            "/analyse?symbol=MSFT&interval=1d&news=0"))
+        late.start()
+        check("while somebody else's is still worked out", going.acquire(timeout=20))
+        let_go.set()
+        late.join(20)
+    finally:
+        let_go.set()
+        for t in threads:
+            t.join(20)
+        web.engine.analyse = real_analyse
+    check("and each is let go of when it is done", out == [404] * web.SLOW_AT_ONCE
+          and not web._SLOW, (out, web._SLOW))
+
+    def stopped(job, *a):
+        job.update(running=False, error="no source", retry_at=time.time() + 60)
+        job["finished"].set()
+
+    real_run, ideas_mod._run = ideas_mod._run, stopped
+    real_most, web.SCANS_PER_HOUR = web.SCANS_PER_HOUR, 1
+    try:
+        web._RATE.clear()
+        ideas_mod._JOBS.clear()
+        c.get("/ideas?market=crypto&horizon=medium")
+        first = len(ideas_mod._JOBS)
+        c.get("/ideas?market=crypto&horizon=medium")
+        c.post("/settings", data={"cost_bps_crypto": "33"})
+        r = c.get("/ideas?market=crypto&horizon=medium")
+        check("new scans under settings changed each time are limited too",
+              first == 1 and len(ideas_mod._JOBS) == 1
+              and "started a lot of new scans" in page_of(r), page_of(r)[:200])
+    finally:
+        ideas_mod._run, web.SCANS_PER_HOUR = real_run, real_most
+        ideas_mod._JOBS.clear()
+
+    # A paid request for each piece of written reasoning.
+    from bot import reasoning as reasoning_mod
+    asked_for = []
+    real = (web.engine.research, reasoning_mod.available, web.REASONINGS_PER_HOUR)
+
+    def researched(symbol, price, cfg, with_reasoning=True, **k):
+        asked_for.append(with_reasoning)
+        return SimpleNamespace(reasoning="written" if with_reasoning else None)
+
+    web.engine.research, reasoning_mod.available = researched, lambda: True
+    web.REASONINGS_PER_HOUR = 2
+    try:
+        web._RATE.clear()
+        web._RESEARCH_CACHE.clear()
+        got = []
+        with web.app.test_request_context("/research"):
+            web.g.user, web.g.demo = guest, False
+            found = fake_result("NVDA")
+            for n in range(3):
+                got.append(web._cached_research(found, "1d", dict(
+                    web.config_mod.DEFAULTS, account_size=1000 + n), True, True))
+        check("one account has the same company reasoned over only so often an hour",
+              asked_for == [True, True, False]
+              and got[2].reasoning.reason_unavailable == web.REASONED_ENOUGH, asked_for)
+        check("and the page without it is nobody else's answer",
+              len(web._RESEARCH_CACHE) == 2)
+    finally:
+        web.engine.research, reasoning_mod.available, web.REASONINGS_PER_HOUR = real
+        web._RESEARCH_CACHE.clear()
+        web._RATE.clear()
 
     print()
     print("=" * 72)

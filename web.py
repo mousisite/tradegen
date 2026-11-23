@@ -48,6 +48,8 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
 from flask.json.provider import DefaultJSONProvider
+from werkzeug.routing import IntegerConverter
+from werkzeug.wsgi import wrap_file
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -75,6 +77,7 @@ from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import reasoning as reasoning_mod
 from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
@@ -115,6 +118,19 @@ class _RequestJSON(DefaultJSONProvider):
 
 
 app.json = _RequestJSON(app)
+
+
+class _RowNumber(IntegerConverter):
+    """A whole number in an address, no longer than the database can hold.
+
+    Python refuses to read a number thousands of digits long, with an error
+    the router does not expect: anyone's address of one, signed in or not, was
+    a 500, a traceback and an error report. A longer one now matches nothing.
+    """
+    regex = r"\d{1,19}"
+
+
+app.url_map.converters["int"] = _RowNumber
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -173,7 +189,8 @@ def _harden(response):
     h = response.headers
     h.setdefault("X-Content-Type-Options", "nosniff")
     h.setdefault("X-Frame-Options", "DENY")
-    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    h.setdefault("Content-Security-Policy",
+                 "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
     h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if app.config.get("SESSION_COOKIE_SECURE"):
@@ -185,6 +202,10 @@ def _harden(response):
     if (getattr(g, "user", None) is not None and not getattr(g, "demo", False)
             and request.endpoint != "static"
             and response.mimetype in ("text/html", "application/json", "text/csv")):
+        h.setdefault("Cache-Control", "private, no-store")
+    # The address or number somebody is signing in with is on these, before
+    # there is an account to go by.
+    if request.endpoint in ("code_start", "code_verify", "review_signin"):
         h.setdefault("Cache-Control", "private, no-store")
     # A file asked for by this release's fingerprint never changes under that
     # address, so a browser need not ask for it again on every page.
@@ -364,7 +385,7 @@ def _identify():
         conn.close()
 
     if g.user is not None:
-        return None
+        return _sent_from_elsewhere()
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
     if request.method in ("GET", "HEAD") and request.endpoint in DEMO_ENDPOINTS:
@@ -387,6 +408,39 @@ def _identify():
         return redirect(url_for("signin", next=_referrer_path()))
     # full_path always ends in "?" when there is no query string.
     return redirect(url_for("signin", next=request.full_path.rstrip("?")))
+
+
+# Posts that rightly come from elsewhere (Apple's sign-in, the servers of Apple
+# and Stripe, an inbox's unsubscribe button), and those that look at where they
+# came from themselves and answer in their own way.
+ELSEWHERE_ENDPOINTS = {"apple_callback", "apple_notifications",
+                       "appstore_notifications", "billing_webhook", "email_stop",
+                       "signout", "code_start", "app_finish", "apple_native",
+                       "learn_practice", "push_subscribe", "push_unsubscribe",
+                       "push_test", "apple_transactions", "apple_move"}
+
+
+def _sent_from_elsewhere():
+    """Refuse a change the browser says another site sent, or None.
+
+    On the live site the sign-in cookie (SameSite=Lax) never comes with such a
+    request. A copy run on somebody's own machine asks for no sign-in, so any
+    page open in the same browser could delete its trades or rewrite its
+    settings by posting to its address; and a cookie is sent from a sister
+    site under the same domain. Only what the browser itself says is gone by:
+    a program that says nothing is not a page somebody was tricked into.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS") \
+            or request.endpoint in ELSEWHERE_ENDPOINTS:
+        return None
+    fetched = request.headers.get("Sec-Fetch-Site", "")
+    if fetched not in ("cross-site", "same-site") and (fetched or _from_this_site()):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That request came from another site."}), 403
+    return render_template("error.html", symbol="",
+                           message="That was sent from another site, so nothing was "
+                                   "changed. Use the button on this site."), 403
 
 
 def _referrer_path() -> str:
@@ -908,10 +962,68 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
             "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
 
 
+# How many analyses and pieces of research one account may have being worked
+# out, or waited for, at the same time. Each holds one of the server's eight
+# threads for seconds, or up to a minute of research, so one account asking for
+# eight at once (a different account size in each address is a different
+# analysis) kept every page from everybody. The example account is everybody
+# looking around, so it may have more.
+SLOW_AT_ONCE = 4
+DEMO_SLOW_AT_ONCE = 6
+SLOW_RETRY = 10
+_SLOW: Dict[int, int] = {}
+_SLOW_LOCK = threading.Lock()
+
+
+class _SlowSlot:
+    """One account's place among the slow work going on; taken at most once."""
+
+    def __init__(self):
+        self.mine = None
+
+    def take(self) -> None:
+        if self.mine is not None or g.user.is_local:
+            return
+        most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+        with _SLOW_LOCK:
+            if _SLOW.get(g.user.id, 0) >= most:
+                raise market_mod.DataThrottled(
+                    "Several pages are being worked out at once just now. Wait a few "
+                    "seconds for them to finish, then try again.", SLOW_RETRY)
+            _SLOW[g.user.id] = _SLOW.get(g.user.id, 0) + 1
+            self.mine = g.user.id
+
+    def free(self) -> None:
+        if self.mine is None:
+            return
+        with _SLOW_LOCK:
+            left = _SLOW.get(self.mine, 1) - 1
+            if left > 0:
+                _SLOW[self.mine] = left
+            else:
+                _SLOW.pop(self.mine, None)
+            self.mine = None
+
+
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
                     ttl: Optional[float] = None,
                     exact: bool = False) -> engine.Analysis:
+    """One analysis, worked out once for everyone asking for the same.
+
+    Raises DataThrottled when this account has too many going already.
+    """
+    slot = _SlowSlot()
+    try:
+        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
+                                exact)
+    finally:
+        slot.free()
+
+
+def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
+                     with_news: bool, record: bool, ttl: Optional[float],
+                     exact: bool) -> engine.Analysis:
     # The settings are part of the key. Position sizes, stops and the call
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
@@ -927,6 +1039,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
             hit = None
+            slot.take()
             running = _RUNNING.get(key)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -1495,6 +1608,11 @@ def _safe_back(raw, fallback):
     return raw
 
 
+# Longer than any company's name. The address can hold a quarter of a megabyte,
+# and all of it went to the data source and back onto the page.
+SYMBOL_MOST = 100
+
+
 def _symbol_from(values) -> Tuple[str, bool]:
     """The ticker a request names, and whether it names Yahoo's symbol exactly.
 
@@ -1504,7 +1622,7 @@ def _symbol_from(values) -> Tuple[str, bool]:
     only where it changes the answer, so AAPL with or without it is one
     analysis, one cache entry and one free look.
     """
-    symbol = (values.get("symbol") or "").strip()
+    symbol = (values.get("symbol") or "").strip()[:SYMBOL_MOST]
     return symbol, values.get("exact") == "1" and market_mod.needs_exact(symbol)
 
 
@@ -2121,7 +2239,7 @@ def close_trade():
             if quantity is not None:
                 quantity /= split
         done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
-                                 request.form.get("notes", ""), user=uid(),
+                                 request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
                                  expect_left=expect_left, expect_open=bool(seen),
                                  split=split if shares == "today" else _exit_split(row))
         session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
@@ -2479,7 +2597,7 @@ def open_trade_manual():
             target1=target, quantity=qty,
             risk_amount=(abs(entry - stop) * qty) if qty else None,
             account="paper", strategy_note="entered by hand",
-            notes=request.form.get("notes", ""), user=uid(),
+            notes=request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
             setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
             broke_rule=broke, opened_ts=tags["opened_ts"], cap=_trade_cap(),
             form_id=form_id, **trail)
@@ -3017,6 +3135,16 @@ def _interval_from(timeframe: Optional[str]) -> str:
     return known.get(t, "1d")
 
 
+# Each written reasoning is a paid request, asked for again whenever the
+# settings or the pieces left out differ, so one account could have the same
+# company reasoned over for ever. Per account and instrument, so it limits how
+# often, never how many instruments; past it the page comes without.
+REASONINGS_PER_HOUR = 10
+REASONED_ENOUGH = ("The written reasoning on this has been asked for many times in the "
+                   "last hour, so it was left out this time. Every measured figure on "
+                   "this page is unaffected.")
+
+
 def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
                   with_options: bool) -> Tuple:
     """What one piece of research is kept under.
@@ -3032,7 +3160,19 @@ def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
 
 def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
                      with_options: bool):
-    """The research for one analysis, built once for everyone asking at once."""
+    """The research for one analysis, built once for everyone asking at once.
+
+    Raises DataThrottled as cached_analysis does.
+    """
+    slot = _SlowSlot()
+    try:
+        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
+    finally:
+        slot.free()
+
+
+def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
+                   with_news: bool, with_options: bool):
     key = _research_key(analysis.bars.symbol, interval, cfg, with_news, with_options)
     ttl = DEMO_TTL if g.demo else _CACHE_TTL
     owned = None
@@ -3041,6 +3181,7 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
             hit = _RESEARCH_CACHE.get(key)
             if hit and (time.time() - hit[0]) < ttl:
                 return hit[1]
+            slot.take()
             running = _RESEARCH_RUNNING.get(key)
             if running is None:
                 owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -3052,9 +3193,18 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
     try:
         # The written reasoning is a paid request, and the example is open to
         # anyone, so it is not asked for there.
+        written = not g.demo
+        if written and reasoning_mod.available() and _rate_limited(
+                "reasoning:" + analysis.bars.symbol, REASONINGS_PER_HOUR):
+            written = False
         found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
                                 cfg, analysis=analysis, with_options=with_options,
-                                with_reasoning=not g.demo)
+                                with_reasoning=written)
+        if not written and not g.demo:
+            # This account's alone: the next person to ask has their own.
+            found.reasoning = reasoning_mod.Reasoning(
+                False, reason_unavailable=REASONED_ENOUGH)
+            return found
         with _CACHE_LOCK:
             _RESEARCH_CACHE[key] = (time.time(), found)
             if len(_RESEARCH_CACHE) > 20:
@@ -3137,7 +3287,10 @@ def research():
         return _no_prices(exc, symbol, 404)
     _spend_view(symbol, exact, analysis)
 
-    found = _cached_research(analysis, interval, cfg, with_news, with_options)
+    try:
+        found = _cached_research(analysis, interval, cfg, with_news, with_options)
+    except market_mod.DataThrottled as exc:
+        return _no_prices(exc, symbol, 404)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
@@ -3302,7 +3455,8 @@ def save_thesis():
     except Exception:
         # The text of an unexpected error can carry file paths or SQL, which
         # are for the log, not the page.
-        app.logger.exception("Saving a thesis for %s failed", symbol)
+        app.logger.exception("Saving a thesis for %s failed",
+                             "".join(ch for ch in symbol if ch.isprintable()))
         return render_template("error.html", symbol=symbol,
                                message="That thesis could not be saved just now. "
                                        "Try again in a minute."), 500
@@ -4009,10 +4163,23 @@ def _client_ip() -> str:
     Behind Cloudflare the connection comes from Cloudflare, shared by
     everyone, so its own header naming the visitor is preferred. It can be
     forged by going round Cloudflare to the host directly; that only weakens
-    the per-network limit, and the per-address limit still holds.
+    the per-network limit, and the per-address limit still holds. Anything
+    that is not an address is passed over: made-up words there were each a
+    network of their own. An IPv6 address counts as its /64, the least one
+    connection is given, or one home could ask from a new address every time.
     """
-    return (request.headers.get("CF-Connecting-IP")
-            or request.remote_addr or "")[:64]
+    import ipaddress
+    for said in (request.headers.get("CF-Connecting-IP"), request.remote_addr):
+        try:
+            address = ipaddress.ip_address((said or "").strip().partition("%")[0])
+        except ValueError:
+            continue
+        if address.version == 6:
+            address = address.ipv4_mapped or address
+        if address.version == 4:
+            return str(address)
+        return "%s/64" % ipaddress.IPv6Address(int(address) >> 64 << 64)
+    return ""
 
 
 _CHANNELS = {
@@ -4479,6 +4646,10 @@ def _refusals(kind: str) -> int:
     return tries + 1
 
 
+# Stripe's messages are a few kilobytes.
+STRIPE_NOTICE_LIMIT = 512 * 1024
+
+
 @app.route("/billing/webhook", methods=["POST"])
 def billing_webhook():
     """Stripe telling the server a plan changed. Signed, so it can be believed.
@@ -4489,6 +4660,9 @@ def billing_webhook():
     secret = (os.environ.get("STRIPE_WEBHOOK_SECRET") or "").strip()
     if not secret:
         abort(404)
+    # Anyone can post here, and the site's own limit, for screenshots, would be
+    # read into memory before the signature could be looked at.
+    request.max_content_length = STRIPE_NOTICE_LIMIT
     payload = request.get_data()
     if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
                               secret):
@@ -5299,31 +5473,61 @@ def _contact() -> str:
     return (os.environ.get("STOCKBOT_CONTACT") or "").strip()
 
 
+# Each is everything of one kind ever kept, written out again. Enough for every
+# one of them in both formats, several times over.
+EXPORTS_PER_HOUR = 60
+# One at a time: the measured record is seconds of work.
+_EXPORTING = threading.BoundedSemaphore(1)
+
+
 @app.route("/export/<dataset>.<fmt>")
 def export_data(dataset, fmt):
     """Hand back one dataset as a file. Your record, in a format you can read."""
+    import tempfile
+    if _rate_limited("export", EXPORTS_PER_HOUR):
+        return _too_often("downloaded files")
+    if not _EXPORTING.acquire(timeout=20):
+        return render_template("error.html", symbol="",
+                               message="Other files are being written just now. Try "
+                                       "again in a moment."), 503
+    # On disk rather than in memory, and gone once it has been sent.
+    made = tempfile.TemporaryFile()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        built = export_mod.build(conn, dataset, fmt, user=uid())
+        # A CSV is marked as UTF-8, or Excel opens it as something older and an
+        # accent or a currency sign in a note comes out as two or three others.
+        text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
+                                newline="")
+        mimetype = export_mod.write(conn, dataset, fmt, text, user=uid())
+        text.detach()
     except ValueError as exc:
+        made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
+    except BaseException:
+        made.close()
+        raise
     finally:
         conn.close()
-
-    body = built["body"]
-    if fmt == "csv":
-        # Marked as UTF-8, or Excel opens it as something older and an accent
-        # or a currency sign in a note comes out as two or three others.
-        body = "\ufeff" + body
+        _EXPORTING.release()
+    size = made.tell()
+    made.seek(0)
     return Response(
-        body, mimetype=built["mimetype"],
-        headers={"Content-Disposition":
-                 'attachment; filename="%s"' % built["filename"]})
+        wrap_file(request.environ, made), mimetype=mimetype, direct_passthrough=True,
+        headers={"Content-Length": str(size),
+                 "Content-Disposition": 'attachment; filename="%s"'
+                 % export_mod.filename(dataset, fmt)})
 
 
 def _utc_clock(ts) -> str:
     """A time of day in UTC, for saying when a list's prices were read."""
     return time.strftime("%H:%M UTC", time.gmtime(float(ts)))
+
+
+# A scan is minutes of work, one runs at a time, and one under settings of one's
+# own answers nobody else: an account changing its settings between scans kept
+# every place in the queue, and everybody else was told to come back later.
+# Opening a scan already made, or still running, is never counted.
+SCANS_PER_HOUR = 12
 
 
 @app.route("/ideas")
@@ -5351,7 +5555,9 @@ def ideas():
             # it has got.
             result = (_demo_shortlist(market, horizon, risk) if g.demo else
                       ideas_mod.find(market, horizon, cfg, risk,
-                                     wait=ideas_mod.PAGE_WAIT, join_wait=0))
+                                     wait=ideas_mod.PAGE_WAIT, join_wait=0,
+                                     may_start=lambda: not _rate_limited(
+                                         "scan", SCANS_PER_HOUR)))
         except ideas_mod.Busy as exc:
             # Said on the Find page itself, with the form, so asking again is
             # one press away.
@@ -5762,8 +5968,15 @@ def alert_action(action):
     return redirect(url_for("monitor"))
 
 
+# Every alert and open position is priced again, and a call alert may need an
+# analysis, all while the page waits.
+CHECKS_PER_HOUR = 60
+
+
 @app.route("/monitor/alerts/check", methods=["POST"])
 def check_alerts():
+    if _rate_limited("alert_check", CHECKS_PER_HOUR):
+        return _too_often("checked alerts")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = _check_and_tell(conn, user=uid())

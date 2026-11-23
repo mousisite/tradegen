@@ -158,7 +158,9 @@ def clean_phone(raw: str) -> str:
     digits = re.sub(r"[\s().-]", "", raw or "")
     if digits.startswith("00"):
         digits = "+" + digits[2:]
-    if not re.match(r"^\+[1-9]\d{7,14}$", digits):
+    # The ten digits themselves: \d also takes every other script's, and the
+    # same number typed in those was a different number to the limits here.
+    if not re.fullmatch(r"\+[1-9][0-9]{7,14}", digits):
         raise CodeError("Type the number with its country code, for example "
                         "+1 555 123 4567.")
     allowed = [p.strip() for p in
@@ -179,9 +181,18 @@ def _recent(conn, column: str, value: str, window: int) -> int:
         (value, since)).fetchone()[0]
 
 
-def _check_limits(conn, target: str, ip: str) -> None:
+def _check_limits(conn, channel: str, target: str, ip: str) -> None:
     count, window = PER_TARGET
-    if _recent(conn, "target", target, window) >= count:
+    if channel == "email":
+        # By the inbox it reaches: counted by the address as typed, me+1@,
+        # me+2@ and so on were each allowed their own, all to one person.
+        inbox = inbox_of(target)
+        asked = sum(1 for row in conn.execute(
+            "SELECT target FROM login_codes WHERE channel='email' AND created_ts>=?",
+            (int(time.time()) - window,)) if inbox_of(row[0]) == inbox)
+    else:
+        asked = _recent(conn, "target", target, window)
+    if asked >= count:
         raise CodeError("Several codes were asked for just now. Wait a few "
                         "minutes, then try again.")
     count, window = PER_IP
@@ -243,6 +254,35 @@ def _use_up(conn, row_id: int, channel: str, target: str) -> None:
     conn.commit()
 
 
+def _ask(conn, channel: str, target: str, ip: str, code_hash: str = "") -> None:
+    """Write down one code request, if the limits allow it. Raises CodeError.
+
+    The look at the limits and the row they count are one transaction, so
+    requests sent at the same moment cannot all be let through by the same
+    count.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _check_limits(conn, channel, target, ip)
+        _check_guesses(conn, channel, target)
+        if channel == "phone" and _recent(conn, "channel", "phone",
+                                          60 * 60) >= PHONE_PER_HOUR:
+            raise CodeError("Sign-in by text is busy right now. Sign in another "
+                            "way, or try again later.")
+        _forget_old(conn)
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO login_codes (channel, target, code_hash, ip, created_ts, "
+            "expires_ts) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel, target, code_hash, ip, now, now + CODE_TTL))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def _forget_old(conn) -> None:
     """Delete code requests once no limit needs them any more."""
     conn.execute("DELETE FROM login_codes WHERE created_ts < ?",
@@ -260,16 +300,8 @@ def send_email_code(conn, email: str, ip: str, secret: bytes,
                     sender=None) -> None:
     """Make a code, store its hash, and email it. Raises CodeError."""
     ensure_schema(conn)
-    _check_limits(conn, email, ip)
-    _check_guesses(conn, "email", email)
-    _forget_old(conn)
     code = "%06d" % secrets.randbelow(10 ** 6)
-    now = int(time.time())
-    conn.execute(
-        "INSERT INTO login_codes (channel, target, code_hash, ip, created_ts, "
-        "expires_ts) VALUES ('email', ?, ?, ?, ?, ?)",
-        (email, _hash(secret, email, code), ip, now, now + CODE_TTL))
-    conn.commit()
+    _ask(conn, "email", email, ip, _hash(secret, email, code))
     (sender or _smtp_send)(email, code)
 
 
@@ -351,18 +383,8 @@ def _twilio(path: str, data: dict) -> dict:
 
 def send_phone_code(conn, phone: str, ip: str, poster=None) -> None:
     ensure_schema(conn)
-    _check_limits(conn, phone, ip)
-    _check_guesses(conn, "phone", phone)
-    _forget_old(conn)
-    if _recent(conn, "channel", "phone", 60 * 60) >= PHONE_PER_HOUR:
-        raise CodeError("Sign-in by text is busy right now. Sign in another "
-                        "way, or try again later.")
-    now = int(time.time())
-    # A row with no code, only so the limits above can count the request.
-    conn.execute(
-        "INSERT INTO login_codes (channel, target, ip, created_ts, expires_ts) "
-        "VALUES ('phone', ?, ?, ?, ?)", (phone, ip, now, now + CODE_TTL))
-    conn.commit()
+    # A row with no code, only so the limits can count the request.
+    _ask(conn, "phone", phone, ip)
     (poster or _twilio)("Verifications", {"To": phone, "Channel": "sms"})
 
 

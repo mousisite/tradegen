@@ -251,6 +251,15 @@ class Busy(RuntimeError):
             "people's questions. Try again in a few minutes.")
 
 
+class TooMany(Busy):
+    """This person has started as many scans as they may for now."""
+
+    def __init__(self):
+        RuntimeError.__init__(
+            self, "You have started a lot of new scans in the last hour. Wait a "
+                  "while, then try again. A scan already made still opens.")
+
+
 def _clock(ts: float) -> str:
     """A time of day in UTC, for saying when something was read."""
     return time.strftime("%H:%M UTC", time.gmtime(ts))
@@ -602,12 +611,14 @@ _SLOTS = threading.BoundedSemaphore(RUNNING_SCANS)
 
 
 def _job(key: str, market: str, interval: str, cfg: Dict, limit: int,
-         ttl: float) -> Tuple[Dict, bool]:
+         ttl: float, may_start=None) -> Tuple[Dict, bool]:
     """The job for this question, and whether this call started it.
 
     Fresh and finished, running, recently refused (whose answer stands until
     it may be tried again), or new. Raises Busy when every slot is taken and
-    there is nothing at all to show for this question.
+    there is nothing at all to show for this question. may_start, when given,
+    is asked before a new one starts: told no, the last answer stands, and
+    with none there is TooMany.
     """
     now = time.time()
     with _JOBS_LOCK:
@@ -626,6 +637,10 @@ def _job(key: str, market: str, interval: str, cfg: Dict, limit: int,
             if job is not None:
                 return job, False           # what there is, with its age
             raise Busy()
+        if may_start is not None and not may_start():
+            if job is not None:
+                return job, False
+            raise TooMany()
         previous = None
         if job is not None:
             previous = job["scan"] or job["previous"]
@@ -668,7 +683,8 @@ def _run(job: Dict, market: str, interval: str, cfg: Dict, limit: int) -> None:
 def find(market: str = "stocks", horizon: str = "medium",
          cfg: Optional[Dict] = None, risk: str = "balanced",
          limit: int = MAX_SCANNED, progress=None, wait: float = SCAN_WAIT,
-         ttl: float = CACHE_TTL, join_wait: Optional[float] = None) -> Dict:
+         ttl: float = CACHE_TTL, join_wait: Optional[float] = None,
+         may_start=None) -> Dict:
     """What cleared the bar, for this market, holding period and appetite.
 
     The slow part, analysing every instrument, depends only on the market and
@@ -702,7 +718,7 @@ def find(market: str = "stocks", horizon: str = "medium",
         return dict(_shortlist(_scan(market, interval, cfg, limit, progress),
                                horizon, risk), running=False)
 
-    job, started_here = _job(key, market, interval, cfg, limit, ttl)
+    job, started_here = _job(key, market, interval, cfg, limit, ttl, may_start)
     if not started_here and join_wait is not None:
         wait = min(wait, join_wait)
     if wait and job["running"]:

@@ -712,6 +712,10 @@ def already_logged(conn: sqlite3.Connection, form_id: Optional[str], symbol: str
          target1, quantity, opened_ts, opened_ts, CLOCK_SLACK)).fetchone() is not None
 
 
+# The longest a trade's notes grow to, over every part it is closed in.
+MAX_TRADE_NOTES = 10000
+
+
 class TradeChanged(ValueError):
     """The trade is not as the page that asked to close it showed it.
 
@@ -841,8 +845,10 @@ def exit_trade(conn: sqlite3.Connection, trade_id: int, exit_price: float,
             out = {"r_multiple": parts["r"], "pnl": parts["pnl"],
                    "parts": parts["parts"], "average": parts["avg_exit"]}
         if notes:
-            conn.execute("UPDATE trades SET notes = COALESCE(notes,'') || ' ' || ? "
-                         "WHERE id=?", (notes, trade_id))
+            # Cut, not refused: a position can be closed in any number of parts,
+            # each adding its own note.
+            conn.execute("UPDATE trades SET notes = substr(COALESCE(notes,'') || ' ' "
+                         "|| ?, 1, ?) WHERE id=?", (notes, MAX_TRADE_NOTES, trade_id))
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1356,6 +1362,10 @@ def _symbol(symbol: str) -> str:
     sym = (symbol or "").strip().upper()
     if not sym:
         raise ValueError("No instrument given.")
+    if not sym.isprintable():
+        # A line break or another control character would be stored for good,
+        # and go into exports, notifications and an email's subject.
+        raise ValueError("That is not a ticker. Type the ticker, for example AAPL.")
     if len(sym) > MAX_SYMBOL:
         raise ValueError("That is too long for a ticker. Type the ticker, for example AAPL.")
     return sym

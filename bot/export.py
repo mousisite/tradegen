@@ -492,9 +492,8 @@ def write_csv(conn: sqlite3.Connection, dataset: str, fh,
     return _write(fh, spec["rows"](conn, user=user), _columns(spec, user))
 
 
-def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
-          user: Optional[int] = None) -> Dict:
-    """One dataset in one format, ready to be sent as a file."""
+def _asked(dataset: str, fmt: str) -> Dict:
+    """The dataset's spec, or ValueError in words."""
     spec = DATASETS.get(dataset)
     if spec is None:
         # Both are said on the page, so neither repeats what was typed: the
@@ -502,10 +501,41 @@ def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
         raise ValueError("There is no export by that name.")
     if fmt not in ("csv", "json"):
         raise ValueError("Exports are CSV or JSON.")
+    return spec
 
+
+def filename(dataset: str, fmt: str) -> str:
+    return "orenth-%s-%s.%s" % (dataset.replace("_", "-"),
+                                time.strftime("%Y-%m-%d", time.gmtime()), fmt)
+
+
+def write(conn: sqlite3.Connection, dataset: str, fmt: str, fh,
+          user: Optional[int] = None) -> str:
+    """build(), a row at a time into an open text file; returns its mimetype.
+
+    For the web page. The measured record is everybody's and grows with every
+    instrument anyone opens: built whole as JSON it took more memory than the
+    server has.
+    """
+    spec = _asked(dataset, fmt)
+    if fmt == "csv":
+        write_csv(conn, dataset, fh, user=user)
+        return "text/csv"
+    fh.write(json.dumps({"dataset": dataset, "exported": datetime.now(
+        timezone.utc).isoformat(timespec="seconds")})[:-1] + ', "rows": [')
+    count = 0
+    for row in spec["rows"](conn, user=user):
+        fh.write("%s\n  %s" % ("," if count else "", json.dumps(row, default=str)))
+        count += 1
+    fh.write('\n], "count": %d}\n' % count)
+    return "application/json"
+
+
+def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
+          user: Optional[int] = None) -> Dict:
+    """One dataset in one format, ready to be sent as a file."""
+    spec = _asked(dataset, fmt)
     rows = list(spec["rows"](conn, user=user))
-    stamp = time.strftime("%Y-%m-%d", time.gmtime())
-    name = "orenth-%s-%s.%s" % (dataset.replace("_", "-"), stamp, fmt)
 
     if fmt == "csv":
         body = _rows_to_csv(rows, _columns(spec, user))
@@ -520,7 +550,7 @@ def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
         }, indent=2, default=str)
         mime = "application/json"
 
-    return {"filename": name, "body": body, "mimetype": mime,
+    return {"filename": filename(dataset, fmt), "body": body, "mimetype": mime,
             "count": len(rows), "label": spec["label"]}
 
 
