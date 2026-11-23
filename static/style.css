@@ -241,6 +241,9 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 .feature .say { color: var(--ink-2); font-size: var(--t-sm); line-height: 1.5; }
 .closing { text-align: center; padding: var(--s4) 0 var(--s2); }
 .closing .lead { margin-bottom: var(--s2); }
+/* Centred like the rest of the box: held to 68ch at the left, its words sat
+   to one side of it, against the buttons. */
+.closing .prose { margin: 0 auto var(--s2); }
 .ways { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
         max-width: 360px; margin: 0 auto; }
 .ways .way { display: flex; align-items: center; justify-content: center; gap: 10px;
@@ -256,7 +259,6 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
   .feature .say { font-size: var(--t-xs); }
   /* An odd card out spans the row instead of sitting alone on it. */
   .feature:last-child:nth-child(odd) { grid-column: 1 / -1; }
-  .demobar .inner { padding: 10px var(--s2); }
 }
 
 /* Pricing. */
@@ -272,7 +274,6 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 .sharebar { display: flex; flex-wrap: wrap; align-items: center;
             gap: var(--s1); margin-top: var(--s3); }
 .sharebar .field { flex: 1 1 220px; min-width: 0; }
-.sharebar [data-said]:empty { display: none; }
 .card.closing { padding: var(--s4) var(--s3); }
 .closing .cta { display: flex; flex-wrap: wrap; gap: var(--s1);
                 justify-content: center; }
@@ -325,7 +326,9 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 .iap .btn { width: 100%; }
 .iap .notice .btn { margin-top: var(--s1); }
 .iapsaid { margin: 0; font-size: var(--t-sm); color: var(--ink); }
-.iapsaid:empty { display: none; }
+/* Empty, it takes no row, and stays on the page: a screen reader speaks a
+   region whose words change, not one that appears with them. */
+.iapsaid:empty { margin-top: calc(-1 * var(--s2)); }
 .iaplinks a { white-space: nowrap; }
 
 /* The phone menu. Hidden on wide screens, where the row of links fits. */
@@ -344,6 +347,11 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 8px;
   background: var(--paper); border: 1px solid var(--rule);
   border-radius: var(--r-md); box-shadow: 0 14px 34px rgba(0, 0, 0, .14);
+  /* On a phone held sideways the links can be taller than the screen, and the
+     bar the panel hangs from does not scroll, so the panel does. */
+  max-height: calc(100vh - 84px - env(safe-area-inset-top, 0px));
+  max-height: calc(100dvh - 84px - env(safe-area-inset-top, 0px));
+  overflow-y: auto; overscroll-behavior: contain;
 }
 .menu-panel a {
   display: flex; align-items: center; min-height: 46px; padding: 0 14px;
@@ -375,6 +383,9 @@ section + section { margin-top: var(--s5); }
 /* The journal's figures, then "Log a trade by hand": a section straight
    after a card sat on it with no space between. */
 .card + section { margin-top: var(--s5); }
+/* So did one straight after a line of words: "Tap one to see it" on the
+   front page, and the journal's "Open". */
+.prose + section { margin-top: var(--s4); }
 
 .sechead {
   display: flex; align-items: baseline; gap: var(--s2);
@@ -582,6 +593,10 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
    five trades in it. */
 .tablewrap { overflow-x: auto; position: relative; }
 table { width: 100%; border-collapse: collapse; }
+/* .stack alone is a column of boxes. On a table it set the head and the body
+   each to a width of its own, so the headings stood out of line with the
+   figures under them. On a phone the rules below make it cards. */
+table.stack { display: table; }
 thead th {
   text-align: left; white-space: nowrap;
   font-size: var(--t-xs); font-weight: 500; letter-spacing: .06em;
@@ -941,7 +956,7 @@ ul.list.ok li::marker { color: var(--gain); }
 
 /* ---------- section jump bar ---------- */
 
-.jump { position: sticky; top: 60px; z-index: 38; display: flex; gap: 6px;
+.jump { position: sticky; z-index: 38; display: flex; gap: 6px;
         overflow-x: auto; padding: 10px 0; margin: 0 0 var(--s3);
         background: var(--paper); border-bottom: 1px solid var(--rule);
         scrollbar-width: none; }
@@ -950,18 +965,13 @@ ul.list.ok li::marker { color: var(--gain); }
           border: 1px solid var(--line-strong); border-radius: 999px;
           color: var(--ink-2); text-decoration: none; }
 .jump a:hover, .jump a[aria-current] { border-color: var(--accent); color: var(--accent-text); }
-/* A heading jumped to lands under the two sticky bars, not behind them. */
-[id^="s-"] { scroll-margin-top: 120px; }
-/* Placed after the base rule on purpose: the phone layout block above it
-   would lose to the base rule otherwise, same specificity, earlier in the file. */
-@media (max-width: 760px) { .jump { top: 56px; } }
 
 /* ---------- fired alert bar ---------- */
 
 /* An alert that fired while you were reading another page. It sits under the
    nav rather than over the content, because it is news, not an interruption. */
 .firebar {
-  position: sticky; top: 60px; z-index: 39;
+  position: sticky; z-index: 39;
   background: var(--hold-wash);
   border-bottom: 1px solid var(--hold);
 }
@@ -982,17 +992,21 @@ ul.list.ok li::marker { color: var(--gain); }
 .firebar button:hover { background: var(--hold); color: var(--paper); }
 
 @media (max-width: 760px) {
-  .firebar { top: 56px; }
   .firebar .inner { padding: 10px var(--s2); }
 }
 
 /* Under a notch the top bar is taller by the notch, and the bars pinned
-   beneath it move down with it. Here, after their own rules, to win. */
+   beneath it move down with it. */
 .firebar, .jump { top: calc(60px + env(safe-area-inset-top, 0px)); }
 .firebar .inner {
   padding-left: max(var(--s3), env(safe-area-inset-left, 0px));
   padding-right: max(var(--s3), env(safe-area-inset-right, 0px));
 }
+/* Whatever a link jumps to ("how the strategies are tested" on the front
+   page, Skip to content) lands under the top bar, not behind it. No weight of
+   its own, so a place that needs more room says so. */
+:where([id]) { scroll-margin-top: calc(76px + env(safe-area-inset-top, 0px)); }
+/* The research page's headings land under the two sticky bars. */
 [id^="s-"] { scroll-margin-top: calc(120px + env(safe-area-inset-top, 0px)); }
 /* The section bar is taller on a touch screen, by its 44 pixel links. */
 @media (pointer: coarse) {
@@ -1123,6 +1137,13 @@ body:has(#firebar:not([hidden])) .jump { position: static; }
   .chart .clab { font-size: 11px; }
 }
 
+/* The line a box opens with. Once styled only in the plain-words box, which
+   left it the size of the words under it everywhere else. */
+p.lead {
+  font-family: var(--serif); font-size: var(--t-md);
+  color: var(--ink); margin: var(--s1) 0 var(--s2); line-height: 1.35;
+}
+
 /* A note that has to be read before anything else here: an invitation, a
    limit reached, an unchecked claim. Once scoped to the sign-in page and to
    cards, which left the same note elsewhere as plain body text. */
@@ -1149,11 +1170,8 @@ body:has(#firebar:not([hidden])) .jump { position: static; }
   margin-bottom: var(--s3);
 }
 .call + .plainbox { margin-top: var(--s2); }
-.plainbox .lead {
-  font-family: var(--serif); font-size: var(--t-md);
-  color: var(--ink); margin: var(--s1) 0 var(--s2); line-height: 1.35;
-}
 .plainbox ul.list { margin-bottom: var(--s2); }
+.plainbox .prose + ul.list { margin-top: var(--s1); }
 .plainbox ul.list li { color: var(--ink); font-size: var(--t-base); }
 .plainbox .prose { color: var(--ink-2); }
 .plainbox .prose + .prose { margin-top: var(--s1); }
@@ -1195,6 +1213,10 @@ img { max-width: 100%; height: auto; }
   top: auto; bottom: calc(100% + 8px);
   right: max(8px, env(safe-area-inset-right, 0px));
   box-shadow: 0 -10px 30px rgba(0, 0, 0, .14);
+  max-height: calc(100vh - 73px - env(safe-area-inset-top, 0px)
+                   - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - 73px - env(safe-area-inset-top, 0px)
+                   - env(safe-area-inset-bottom, 0px));
 }
 .tabbar .menu-panel .fine {
   grid-column: 1 / -1; display: flex; gap: var(--s1); margin: 4px 0 0;
@@ -1226,4 +1248,19 @@ img { max-width: 100%; height: auto; }
   body:has(:is(input:not([type=hidden]):not([type=file]), textarea):focus) .tabbar {
     visibility: hidden; transition-delay: 0s;
   }
+}
+
+/* ---------- on paper ---------- */
+
+/* A printed page is for reading: the bars, the menus and the buttons that
+   share or save do nothing there, and a bar pinned to the screen prints on
+   every sheet, over the words. */
+@media print {
+  .topbar { position: static; }
+  .topbar .nav, .topbar .tools, .tabbar, .skip, .demobar, .firebar, .jump,
+  .sharebar, .overlay { display: none !important; }
+  .wrap { padding-bottom: 0; }
+  /* Paper has no button colour behind a white label. */
+  .btn, .btn.danger { background: none; color: var(--ink); }
+  tr { break-inside: avoid; }
 }
