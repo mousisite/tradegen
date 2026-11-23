@@ -43,7 +43,6 @@ BLOCK = "█" if _FANCY else "#"
 DOT = "·" if _FANCY else "."
 PIPE = "│" if _FANCY else "|"
 TICK = "▇" if _FANCY else "="
-SEP = "   ·   " if _FANCY else "   |   "
 
 
 def _fmt(value, digits=4):

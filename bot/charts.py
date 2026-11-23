@@ -42,12 +42,29 @@ def _money(value: float) -> str:
     return "%.2f" % value
 
 
-def _price(value: float) -> str:
-    if abs(value) >= 1000:
-        return "%,.0f".replace(",", ",") % value if False else format(value, ",.0f")
-    if abs(value) >= 1:
-        return "%.2f" % value
-    return "%.4f" % value
+def _price(value: float, decimals: int = 0) -> str:
+    """A price with the decimals its size usually needs, or decimals if more."""
+    usual = 0 if abs(value) >= 1000 else 2 if abs(value) >= 1 else 4
+    return format(value, ",.%df" % max(usual, decimals))
+
+
+def _tick_decimals(step: float) -> int:
+    """The decimals that write every tick of an axis exactly: 2 for 0.25."""
+    for d in range(12):
+        if abs(round(step, d) - step) < step * 1e-6:
+            return d
+    return 12
+
+
+def _level_decimals(step: float, value: float) -> int:
+    """The decimals that keep prices on this axis apart: to a tenth of a tick
+    when the usual ones are coarser than a fifth of one, as on a currency
+    pair, where an entry and a stop could both read 1.08, and never to one
+    decimal, which nobody quotes a price in; else 0, the usual."""
+    usual = 0 if abs(value) >= 1000 else 2 if abs(value) >= 1 else 4
+    if 10.0 ** -usual <= step / 5 * 1.0001:
+        return 0
+    return max(2, int(math.ceil(-math.log10(step) - 1e-9)) + 1)
 
 
 def _escape(text: str) -> str:
@@ -74,7 +91,6 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
         return ""
 
     pad_left, pad_right, pad_top, pad_bottom = 56, 14, 16, 26
-    plot_w = width - pad_left - pad_right
     plot_h = height - pad_top - pad_bottom
 
     low, high = min(values), max(values)
@@ -84,6 +100,9 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
     axis_low = math.floor(low / step) * step
     axis_high = math.ceil(high / step) * step
     span = axis_high - axis_low or 1.0
+    decimals = _tick_decimals(step)
+    pad_left += 7 * (len(_price(axis_high, decimals)) - len(_price(axis_high)))
+    plot_w = width - pad_left - pad_right
 
     def x_at(i):
         return pad_left + plot_w * (i / max(len(values) - 1, 1))
@@ -116,7 +135,7 @@ def price_chart(closes: Sequence[float], labels: Sequence[str] = (),
                      % (pad_left, y, width - pad_right, y))
         parts.append('<text x="%d" y="%.1f" text-anchor="end" '
                      'class="clab">%s</text>'
-                     % (pad_left - 8, y + 4, _escape(_price(tick))))
+                     % (pad_left - 8, y + 4, _escape(_price(tick, decimals))))
 
     parts.append('<polygon points="%s" fill="%s" opacity="0.65"/>' % (area, fill))
     parts.append('<polyline points="%s" fill="none" stroke="%s" '
@@ -249,13 +268,21 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
     vol_h = 44 if any(r[5] > 0 for r in rows) else 0
     gap = 10 if vol_h else 0
     pad_bottom = 24
-    plot_w = width - pad_left - pad_right
     price_h = height - pad_top - pad_bottom - vol_h - gap
 
     step = _nice_step(high - low)
     axis_low = math.floor(low / step) * step
     axis_high = math.ceil(high / step) * step
     span = axis_high - axis_low or 1.0
+    decimals = _tick_decimals(step)
+
+    def said(v):
+        return _price(v, _level_decimals(step, v))
+
+    # Room at the edges for the decimals close prices need.
+    pad_left += 7 * (len(_price(axis_high, decimals)) - len(_price(axis_high)))
+    pad_right += 7 * max([len(said(v)) - len(_price(v)) for v in levels.values()] or [0])
+    plot_w = width - pad_left - pad_right
     slot = plot_w / len(rows)
     body = max(1.0, slot * 0.62)
 
@@ -276,7 +303,7 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
         parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="var(--hairline)" '
                      'stroke-width="1"/>' % (pad_left, y, width - pad_right, y))
         parts.append('<text x="%d" y="%.1f" text-anchor="end" class="clab">%s</text>'
-                     % (pad_left - 8, y + 4, _escape(_price(tick))))
+                     % (pad_left - 8, y + 4, _escape(_price(tick, decimals))))
         tick += step
 
     starts = [r[0] for r in rows]
@@ -333,7 +360,7 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
         x = x_at(i)
         top, bottom = y_at(max(o, c)), y_at(min(o, c))
         tip = "%s%s  open %s  high %s  low %s  close %s" % (
-            day(ts), zone, _price(o), _price(h), _price(l), _price(c))
+            day(ts), zone, said(o), said(h), said(l), said(c))
         parts.append('<g><title>%s</title>' % _escape(tip.strip()))
         parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1"/>'
                      % (x, y_at(h), x, y_at(l), colour))
@@ -385,17 +412,17 @@ def trade_chart(times: Sequence[int], opens: Sequence[float], highs: Sequence[fl
             parts.append('<g><title>%s %s</title><line x1="%d" y1="%.1f" x2="%d" y2="%.1f" '
                          'stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="1 3"/>'
                          '<text x="%d" y="%.1f" class="clab lvl">%s</text></g>'
-                         % (_escape(name), _escape(_price(price)), pad_left, y,
+                         % (_escape(name), _escape(said(price)), pad_left, y,
                             width - pad_right, y, width - pad_right + 6, label_y,
                             _escape(name)))
             continue
         parts.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s" stroke-width="1.5" '
                      'stroke-dasharray="%s"/>' % (pad_left, y, width - pad_right, y, colour, dash))
         parts.append('<text x="%d" y="%.1f" class="clab lvl" style="fill:%s">%s %s</text>'
-                     % (width - pad_right + 6, label_y, colour, _escape(name), _escape(_price(price))))
+                     % (width - pad_right + 6, label_y, colour, _escape(name), _escape(said(price))))
 
     if last is not None and math.isfinite(last):
-        now = "Now %s%s" % (_price(last), ", as of " + as_of if as_of else "")
+        now = "Now %s%s" % (said(last), ", as of " + as_of if as_of else "")
         parts.append('<circle cx="%.1f" cy="%.1f" r="3.5" fill="var(--ink)"><title>%s</title></circle>'
                      % (x_at(len(rows) - 1), y_at(last), _escape(now)))
 

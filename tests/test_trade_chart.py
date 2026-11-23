@@ -54,6 +54,38 @@ check("the bottom labels are the first and last candles' dates",
       ">%s</text>" % day(times[30]) in svg and ">%s</text>" % day(times[-1]) in svg
       and "price as of" not in svg)
 check("volume is drawn underneath", svg.count('opacity="0.35"') == 90)
+
+
+def drawn_at(base, size, levels):
+    """The same candles around another price, a unit of theirs being size."""
+    def at(xs):
+        return [base + (x - 100) * size for x in xs]
+    return charts.trade_chart(times, at(opens), at(highs), at(lows), at(closes),
+                              levels=levels, last=base)
+
+
+def ticks(drawing):
+    return re.findall(r'text-anchor="end" class="clab">([\d.,]+)</text>', drawing)
+
+
+fx = drawn_at(1.085, 0.0004, {"Buy at": 1.0850, "Stop": 1.0843, "Target": 1.0866})
+check("on a currency pair the entry, the stop and the target read apart",
+      "Buy at 1.0850<" in fx and "Stop 1.0843<" in fx and "Target 1.0866<" in fx,
+      re.findall(r'class="clab lvl"[^>]*>([^<]*)<', fx))
+check("and so does each tick", len(ticks(fx)) >= 3 and len(set(ticks(fx))) == len(ticks(fx)),
+      ticks(fx))
+tiny = drawn_at(0.0000085, 0.00000005, {"Stop": 0.0000083, "Target": 0.0000090})
+check("as on a coin worth a fraction of a cent",
+      "Stop 0.00000830<" in tiny and len(set(ticks(tiny))) == len(ticks(tiny))
+      and "0.0000<" not in tiny, (ticks(tiny), re.findall(r'lvl"[^>]*>([^<]*)<', tiny)))
+half = drawn_at(5000.0, 0.15, {"Stop": 4999.25})
+check("and on an index in a narrow range", "Stop 4,999.25<" in half
+      and len(set(ticks(half))) == len(ticks(half)), ticks(half))
+check("while the usual range keeps the usual decimals",
+      {len(t.partition(".")[2]) for t in ticks(svg)} == {2}, ticks(svg))
+year = charts.price_chart([1.0000, 0.9995, 1.0001, 0.9998, 1.0003])
+check("a dollar coin's year has no two ticks alike",
+      len(set(ticks(year))) == len(ticks(year)) >= 3, ticks(year))
 check("the label for the screen reader says what it is",
       'aria-label="Daily price, as of 11 Nov 21:00 UTC"' in svg)
 
