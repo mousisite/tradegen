@@ -22,7 +22,7 @@ SUITES = [
     ("test_sentiment.py",    False, "the news lexicon scores phrases the right way"),
     ("test_upstream.py",     True,  "caching, single-flight and backing off a throttled source"),
     ("test_indicators.py",   True,  "indicator maths against known values"),
-    ("test_pivots.py",       True,  "pivot levels sit in the right units"),
+    ("test_pivots.py",       False, "pivot levels sit in the right units"),
     ("test_structure.py",    False, "swings, breaks, sweeps, gaps and the liquidity chain, no peeking"),
     ("test_clock.py",        False, "New York time, trading days, sessions, day levels and gaps"),
     ("test_bias.py",         False, "the daily lean from hourly bars, rule by rule, read as of a time"),
