@@ -5705,7 +5705,7 @@ def alert_action(action):
         return render_template("error.html", message="Unknown action.", symbol=""), 404
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        alert_id = int(request.form["alert_id"])
+        alert_id = _row_id(request.form.get("alert_id"))
         if action == "delete":
             db_mod.alert_delete(conn, alert_id, user=uid())
         elif action == "pause":
@@ -5730,7 +5730,7 @@ def alert_action(action):
             if refused is not None:
                 return refused
             db_mod.alert_reset(conn, alert_id, user=uid())
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
         message = str(exc)
         if "could not convert" in message:
             message = "The alert value must be a number."
@@ -5984,7 +5984,7 @@ def push_remove():
     if g.demo:
         abort(404)
     try:
-        device = int(request.form.get("device_id") or "")
+        device = _row_id(request.form.get("device_id"))
     except ValueError:
         return render_template("error.html", symbol="",
                                message="No device was named."), 400
