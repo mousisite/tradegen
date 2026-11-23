@@ -1381,6 +1381,46 @@ try:
         web.engine.analyse = real_analyse
     check("and every place is given back", not web._SLOW, web._SLOW)
 
+    # How long each kept analysis stays, and how much they may come to.
+    def kept(symbol, interval, age, result=None):
+        web._CACHE[(symbol, False, interval, True, "house")] = (
+            time.time() - age, result or SimpleNamespace(run_id=None), {})
+
+    def another_kept():
+        web.engine.analyse = lambda *a, **k: SimpleNamespace(run_id=None)
+        try:
+            with web.app.test_request_context("/analyse"):
+                web.g.user, web.g.demo = guest, False
+                web.cached_analysis("FRESH", "1d", dict(web.config_mod.DEFAULTS), False)
+        finally:
+            web.engine.analyse = real_analyse
+        return {(k[0], k[2]) for k in web._CACHE}
+
+    web._CACHE.clear()
+    kept("NVDA", "1d", web.DEMO_TTL + 1)
+    kept("AAPL", "1d", web.DEMO_TTL - 60)
+    kept("AAPL", "5m", web.DEMO_TTL - 60)
+    kept("OWNS", "1d", web._CACHE_TTL + 1)
+    kept("SOON", "1d", web._CACHE_TTL - 30)
+    left = another_kept()
+    check("a kept analysis goes once its minute and a half is up, the example's once its "
+          "quarter hour is, and not before",
+          left == {("AAPL", "1d"), ("SOON", "1d"), ("FRESH", "1d")}, left)
+
+    # Sixty days of a coin's five-minute bars is sixteen megabytes of series,
+    # and a person can open one every few seconds.
+    web._CACHE.clear()
+    for n in range(20):
+        kept("C%d-USD" % n, "5m", 60 - n, SimpleNamespace(
+            run_id=None, bars=SimpleNamespace(close=range(17000)),
+            context=SimpleNamespace(s=dict.fromkeys(range(110)))))
+    left = another_kept()
+    held = sum(web._size_of(v[1]) for v in web._CACHE.values())
+    check("and the kept ones never come to more than the server has room for",
+          held <= web.CACHE_MOST and ("C19-USD", "5m") in left
+          and ("C0-USD", "5m") not in left and ("FRESH", "1d") in left, (held, left))
+    web._CACHE.clear()
+
     def stopped(job, *a):
         job.update(running=False, error="no source", retry_at=time.time() + 60)
         job["finished"].set()

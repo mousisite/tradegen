@@ -1170,14 +1170,18 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
             now = time.time()
-            # One past every time limit is never served again, and an intraday
-            # coin's takes some 16 MB: forty left lying fill the server.
-            for old in [k for k, v in _CACHE.items() if now - v[0] >= DEMO_TTL]:
+            # One past its time limit is never served again, and an intraday
+            # coin's takes some 16 MB: forty left lying fill the server. Only
+            # the example's are opened for longer than a minute and a half.
+            for old in [k for k, v in _CACHE.items()
+                        if now - v[0] >= (DEMO_TTL if k[0] in demo_mod.SYMBOLS
+                                          and k[2] == "1d" else _CACHE_TTL)]:
                 _CACHE.pop(old)
             _CACHE[key] = (now, result,
                            {me: result.run_id} if result.run_id else {})
             # Keep the cache from growing without bound in a long session.
-            if len(_CACHE) > 40:
+            while len(_CACHE) > 1 and (len(_CACHE) > 40 or sum(
+                    _size_of(v[1]) for v in _CACHE.values()) > CACHE_MOST):
                 oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
                 _CACHE.pop(oldest, None)
         return result
@@ -1194,6 +1198,19 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
                 if _RUNNING.get(key) is owned:
                     _RUNNING.pop(key, None)
             owned["done"].set()
+
+
+# The most the kept analyses may come to, in bytes: the server has half a
+# gigabyte for everything.
+CACHE_MOST = 100 * 1024 * 1024
+
+
+def _size_of(result) -> int:
+    """About how much an analysis holds: its bars, and every series on them."""
+    try:
+        return 8 * len(result.bars.close) * (len(result.context.s) + 8)
+    except (AttributeError, TypeError):
+        return 0
 
 
 def _record_cached_run(result: engine.Analysis, user: int) -> Optional[int]:
