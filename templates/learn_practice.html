@@ -2,9 +2,16 @@
 {% set active = 'stocks' %}
 {% block title %}Practice: call the next move · Orenth{% endblock %}
 {% block og_title %}Practice: call the next move · Orenth{% endblock %}
+{# Drawn twice: a phone gets the narrow chart, with labels it can show. #}
 {% block head_extra %}<meta name="robots" content="noindex">
 <style>
-  .learn-figure svg { width: 100%; height: auto; display: block; }
+  .learn-figure .chart { max-height: 380px; }
+  .learn-figure .narrow { display: none; }
+  @media (max-width: 600px) {
+    .learn-figure .wide { display: none; }
+    .learn-figure .narrow { display: block; }
+    .learn-figure .chart { max-height: none; }
+  }
   .learn-picks { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
   .learn-picks .btn { flex: 1 1 96px; }
 </style>
@@ -27,13 +34,14 @@
   </div>
 {% else %}
   <div class="card learn-figure">
-    {{ chart|safe }}
+    <div class="wide">{{ chart.wide|safe }}</div>
+    <div class="narrow">{{ chart.narrow|safe }}</div>
     {% if reveal %}
       {% set right = reveal.pick == reveal.answer %}
       <p class="lead" style="margin-top:var(--s2)">{{ 'Right.' if right else 'Not this time.' }}
         You said {{ reveal.pick }}; the price went {{ reveal.answer if reveal.answer != 'unclear' else 'nowhere much' }}.</p>
-      <p class="prose">This was {{ name }}, {{ interval_words }} bars, at a
-        {{ setup_label }} setup. Times are New York time.</p>
+      <p class="prose">This was {{ name }}, {{ interval_words }} bars.{% if setup_label %}
+        The setup: {{ setup_label }}.{% endif %} Times are New York time.</p>
       <div class="learn-picks">
         <a class="btn" href="{{ url_for('learn_practice', n=next_k) }}">Next chart</a>
         {% if setup_topic %}<a class="btn quiet" href="{{ url_for('learn_topic', slug=setup_topic) }}">About this setup</a>{% endif %}

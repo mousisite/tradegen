@@ -92,6 +92,8 @@ r = copy.deepcopy(base); r["setups"]["liquidity_model"]["rules"]["2r"]["control"
 cases.append((r, "result.setups.liquidity_model.rules.2r.control.sum_r"))
 r = copy.deepcopy(base); r["setups"]["liquidity_model"]["example"]["c"] = [1.0]
 cases.append((r, "result.setups.liquidity_model.example.c"))
+r = copy.deepcopy(base); r["setups"]["liquidity_model"]["rules"]["2r"]["by_day"][0][1] += 1
+cases.append((r, "result.setups.liquidity_model.rules.2r.by_day"))
 r = copy.deepcopy(base); r["setups"]["liquidity_model"]["rules"]["2r"]["stable"] = "yes"
 cases.append((r, "result.setups.liquidity_model.rules.2r.stable"))
 bad = [key for data, key in cases if not refuses(labstore.validate_result, data, key)]
@@ -107,6 +109,7 @@ c = copy.deepcopy(claim); c["verdict"] = True; ccases.append((c, "claim.verdict"
 c = copy.deepcopy(claim); c["by_symbol"]["ES=F"]["trials"] = -1
 ccases.append((c, "claim.by_symbol.ES=F.trials"))
 c = copy.deepcopy(claim); c["notes"] = "one note"; ccases.append((c, "claim.notes"))
+c = copy.deepcopy(claim); c["pooled"]["hit_1h"] = 500; ccases.append((c, "claim.pooled.hit_1h"))
 bad = [key for data, key in ccases if not refuses(labstore.validate_claim, data, key)]
 check("each of %d broken claims is refused naming its key" % len(ccases), not bad, bad)
 
@@ -145,6 +148,18 @@ check("a broken record is never written", not saved_broken
 labstore.save_claim(conn, labstore.sample_claim(), now=1795000300)
 check("a claim round-trips", labstore.claim(conn, "london_takes_asia")["pooled"]["hits"] == 54
       and list(labstore.claims(conn)) == ["london_takes_asia"])
+old = dict(labstore.sample_claim("ndog_fills"), verdict=1)
+conn.execute("INSERT INTO lab_claims (claim, data, updated) VALUES (?, ?, ?)",
+             ("ndog_fills", labstore._dumps(old), 1795000300))
+check("a claim stored by an earlier way of measuring it is not read under the new words",
+      labstore.claim(conn, "ndog_fills") is None and "ndog_fills" not in labstore.claims(conn))
+labstore.save_claim(conn, labstore.sample_claim("ndog_fills"), now=1795000400)
+check("and is there again once measured the new way",
+      labstore.claim(conn, "ndog_fills")["verdict"] == 0)
+labstore.save_result(conn, dict(labstore.sample_result("ES=F", "5m"), symbol="TSLA"))
+check("a symbol measured on its own is kept, but is no part of the lab's results",
+      labstore.result(conn, "TSLA", "5m") is not None
+      and "TSLA" not in [r["symbol"] for r in labstore.results(conn)])
 labstore.save_bias(conn, "ES=F", labstore.sample_bias())
 labstore.save_bias(conn, labstore.POOL_ALL, labstore.sample_bias())
 check("a bias record round-trips, per instrument and pooled",
@@ -155,6 +170,9 @@ second = labstore.save_run(conn, 1795086400, None, {"symbols": 8, "failed": ["NV
 run = labstore.last_run(conn)
 check("the newest run is the one returned", run["id"] == second and run["finished"] is None
       and run["summary"]["failed"] == ["NVDA"] and first != second)
+third = labstore.save_run(conn, 1795090000, 1795090010, {"checked": 1, "full": False})
+check("a run over one instrument is the newest, but not the newest full one",
+      labstore.last_run(conn)["id"] == third and labstore.last_run(conn, full=True)["id"] == second)
 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 check("its four tables, none of them anyone's personal data",
       {"lab_results", "lab_claims", "bias_record", "lab_runs"} <= tables
@@ -179,13 +197,23 @@ check("or without a margin", labstore.verdict(0.5, None, 100) is None
 check("or when the trades came on fewer than 10 separate days",
       labstore.verdict(1.0, 0.01, 50, days=9) is None
       and labstore.verdict(1.0, 0.01, 50, days=10) == 1)
+check("the fewer the days, the wider the margin: Student's t for one day fewer",
+      labstore.reach(None) == 2.0 and abs(labstore.reach(10) - 2.262 * (10 / 9.0) ** 0.5) < 0.002
+      and abs(labstore.reach(20) - 2.093 * (20 / 19.0) ** 0.5) < 0.002
+      and abs(labstore.reach(60) - 2.001 * (60 / 59.0) ** 0.5) < 0.002
+      and labstore.reach(1000) == 2.0,
+      [labstore.reach(d) for d in (10, 20, 60, 1000)])
+check("so a result two errors clear of nothing is called on 60 days but not on 10",
+      labstore.verdict(0.22, 0.1, 50, days=60) == 1 and labstore.verdict(0.22, 0.1, 50, days=10) == 0)
 check("its words", labstore.words(1) == "kept money by more than its margin of error"
       and labstore.words(-1) == "lost money by more than its margin of error"
       and labstore.words(0) == "cannot be told apart from luck"
       and labstore.words(None) == "too few to say")
-check("the claims' words compare with what usually happens",
-      labstore.claim_words(1) == "happens more often than usual"
-      and labstore.claim_words(0).startswith("cannot be told apart"))
+check("the claims' words say which way it came out, whatever it was compared with",
+      labstore.claim_words(1) == "held, by more than its margin of error"
+      and labstore.claim_words(-1) == "went the other way, by more than its margin of error"
+      and labstore.claim_words(0) == "cannot be told either way"
+      and labstore.claim_words(None) == "has too few cases to say")
 said = " ".join([labstore.words(v) for v in (1, -1, 0, None)]
                 + [labstore.claim_words(v) for v in (1, -1, 0, None)]).lower()
 check("with no jargon in them", not [w for w in JARGON if w in said])
@@ -196,10 +224,52 @@ check("a rate against its control by two margins",
       and labstore.rate_verdict(9, 20, 5, 20) is None)
 pool = labstore.pooled([labstore.sample_result("ES=F"), labstore.sample_result("NQ=F")],
                        "liquidity_model", "2r")
-check("pooling adds trades and days, and keeps a margin",
-      pool["n"] == 82 and pool["days"] == 60 and abs(pool["sum_r"] + 6.4) < 1e-9
+check("pooling adds trades, counts a date once, and keeps a margin",
+      pool["n"] == 82 and pool["days"] == 30 and abs(pool["sum_r"] + 6.4) < 1e-9
       and pool["se"] is not None and pool["verdict"] in (1, 0, -1)
       and pool["symbols"] == ["ES=F", "NQ=F"])
+# One instrument's margin is its own; two that had the same days are no more
+# evidence than one; two whose days went opposite ways cancel.
+alone = labstore.pooled([labstore.sample_result("ES=F")], "liquidity_model", "2r")
+check("one instrument's pooled margin is its own", abs(alone["se"] - 0.14) < 1e-4
+      and abs(alone["diff_se"] - 0.18) < 1e-4, (alone["se"], alone["diff_se"]))
+check("two that won and lost on the same days have one's margin, not a narrower one",
+      abs(pool["se"] - alone["se"]) < 1e-4 and abs(pool["diff_se"] - alone["diff_se"]) < 1e-4,
+      (pool["se"], alone["se"]))
+other = labstore.sample_result("NQ=F")
+rule_ = other["setups"]["liquidity_model"]["rules"]["2r"]
+mean_ = rule_["sum_r"] / rule_["n"]
+for row in rule_["by_day"]:
+    row[0] += 100                       # other dates altogether
+apart = labstore.pooled([labstore.sample_result("ES=F"), other], "liquidity_model", "2r")
+check("two on different dates are separate evidence, as if independent",
+      apart["days"] == 60 and abs(apart["se"] - 0.14 / 2 ** 0.5) < 1e-4, apart)
+for row in rule_["by_day"]:
+    row[0] -= 100
+    row[2] = 2 * row[1] * mean_ - row[2]
+cancel = labstore.pooled([labstore.sample_result("ES=F"), other], "liquidity_model", "2r")
+check("two that went opposite ways every day cancel", cancel["se"] < 1e-4, cancel["se"])
+del rule_["by_day"]
+before = labstore.pooled([labstore.sample_result("ES=F"), other], "liquidity_model", "2r")
+check("a record from before the days were kept is added in full, and no day twice",
+      abs(before["se"] - 0.14) < 1e-4 and before["days"] == 30, before)
+few = [labstore.sample_result(sym) for sym in ("ES=F", "NQ=F")]
+for res in few:
+    res["setups"]["liquidity_model"]["rules"]["2r"] = labstore._sample_rule(16, 15, 24.0, 0.01, 6)
+check("the same few dates in two instruments are still too few",
+      labstore.pooled(few, "liquidity_model", "2r")["days"] == 6
+      and labstore.pooled(few, "liquidity_model", "2r")["verdict"] is None)
+# Trades with no random entries are no part of the comparison, or of its count.
+part = labstore.sample_result("ES=F")
+rule_ = part["setups"]["liquidity_model"]["rules"]["2r"]
+rule_["control"]["n"] = 33
+rule_["diff"], rule_["diff_se"] = 0.5, 0.01
+for k, row in enumerate(rule_["by_day"]):
+    if k >= 6:
+        row[3], row[4] = 0, 0.0
+paired = labstore.pooled([part], "liquidity_model", "2r")
+check("the comparison with random entries is judged on the days that have them",
+      paired["days"] == 30 and paired["diff_days"] == 6 and paired["diff_verdict"] is None, paired)
 check("and a group with nothing in it is None",
       labstore.pooled([labstore.sample_result()], "liquidity_model", "2r", group="coin") is None)
 
@@ -268,8 +338,8 @@ check("eight lab instruments, two bar sizes, three pairs",
       len(setups.LAB_SYMBOLS) == 8 and setups.LAB_INTERVALS == ("5m", "15m")
       and all(a in dict((s, n) for s, n, _ in setups.LAB_SYMBOLS) for pair in setups.PAIRS
               for a in pair))
-check("the video is credited with a link to the second",
-      setups.video_link("1:36:14-1:44:37") == "https://youtu.be/yiuFUp0kFz8?t=5774")
+check("every claim to measure first says what it is compared with, but for the description",
+      [c.id for c in setups.CLAIMS if c.must and not c.versus] == ["not_every_day_green"])
 
 # ---------------------------------------------------------------------------
 head("FUTURES ARE CHARGED THEIR OWN COST")

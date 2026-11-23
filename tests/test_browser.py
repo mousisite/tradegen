@@ -245,6 +245,15 @@ def build():
                                            "name": "Free Person",
                                            "email_verified": True})
         _seed(db, conn, free.id, now)
+        # The Setup lab's own fixtures, so the Learn pages show figures and
+        # charts rather than "Being tested".
+        from bot import labstore, setups
+        labstore.save_result(conn, labstore.sample_result("ES=F", "5m"))
+        labstore.save_result(conn, labstore.sample_result("SPY", "15m"))
+        for claim in setups.CLAIMS:
+            if claim.must:
+                labstore.save_claim(conn, labstore.sample_claim(claim.id))
+        labstore.save_bias(conn, labstore.POOL_ALL, labstore.sample_bias())
         # Built now, so every page of the example account is ready.
         from bot import demo
         demo.user(conn)
@@ -756,6 +765,7 @@ PAGES = [
     ("/learn", "all", None),
     ("/learn/sweep-break-retest", "all", None),
     ("/learn/practice", "all", None),
+    ("/learn/opening-gaps", "all", None),
     ("/stocks", "all", None),
     ("/stock/nvda", "all", None),
     ("{share}", "all", None),

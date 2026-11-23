@@ -20,7 +20,8 @@ setups.LAB_INTERVALS:
 - the trade ends at the stop, the target, or the next 16:00 New York time, at
   that bar's close, by the rules calibrate.simulate_trade uses (the stop is
   checked first on a bar that reaches both, and a bar opening past the stop
-  fills at its open);
+  fills at its open); one whose 16:00 is not in the prices yet is counted as
+  still open, whatever it has done so far, and joins on a later run;
 - the round-trip cost is charged in units of risk, at the house cost for the
   instrument (config.cost_bps_for_symbol);
 - each trade gets a matched random control: up to five bars on other trading
@@ -29,7 +30,8 @@ setups.LAB_INTERVALS:
   and costs. The control's result is their average.
 
 The margin of error clusters trades by trading day (trades on one day share
-its news and win or lose together); the last third of the days is kept apart
+its news and win or lose together), and is wider when the days are few
+(labstore.reach); the last third of the days is kept apart
 as a check that the first two thirds' sign holds. A cell needs 30 trades on
 10 separate days before it gets a verdict (labstore.verdict).
 
@@ -70,7 +72,9 @@ CONTROLS = 5
 # inside the bar-to-bar noise: no one could hold it, so the trade is counted
 # as skipped rather than scored as a huge win or loss in units of risk.
 MIN_STOP_ATR = 0.1
-TARGET_R = 2.0                     # video 6:24:12-6:30:28: at least twice the risk
+# app choice: the course aims for old highs and lows (video 6:24:12-6:30:28) and
+# gives no multiple of the risk. Twice is the plainest target to measure beside them.
+TARGET_R = 2.0
 EXIT_MINUTE = 16 * 60              # video 4:33:23: done by the New York afternoon
 # The job runs once a day after the futures' 17:00 pause has begun, so the
 # day's bars are all in.
@@ -83,25 +87,9 @@ EXAMPLE_BARS = 70
 SENSITIVITY_K = 3                  # the swing width the four-step model is also tried with
 
 SETUP_NAMES: Tuple[str, ...] = tuple(s.name for s in setups.SETUPS)
-_SWEEPS = ("sweep_reclaim", "prior_day_sweep", "equal_levels_sweep", "session_sweep")
-
-METHOD = {
-    "entry": "the close of the bar the setup appears on",
-    "stop": "where the course puts it for that setup, past the high or low that was taken "
-            "(trades whose stop sits closer than a tenth of a usual bar's range are left out)",
-    "exit": "the stop, the target, or the next 16:00 New York time, at that bar's close; "
-            "the stop counts first when one bar reaches both, and a bar opening past "
-            "the stop fills at its open",
-    "targets": ["twice the risk", "the nearest old high or low not yet traded through, "
-                "at least the risk away (twice the risk when there is none)"],
-    "control": "for each trade, up to five random entries on other trading days in the "
-               "same New York half hour, the same side, with a stop and target the same "
-               "size against that bar's usual range, the same exit and the same costs",
-    "costs": "the house round-trip cost for the instrument, in units of the trade's risk",
-    "wins": "a trade counts as a win when it kept money after costs",
-    "margin": "two standard errors, with trades on the same trading day counted together",
-    "holdout": "the last third of the trading days, checked apart from the first two thirds",
-}
+# The price-structure series bot/claims.py reads, handed over so that it does
+# not work them out again.
+CLAIM_SERIES = ("st_atr", "st_fvg_new", "st_sweep", "st_sweep_back")
 
 
 # --- trades ---------------------------------------------------------------------
@@ -146,7 +134,7 @@ class Prep:
     atr: np.ndarray
     day: np.ndarray            # trading day ordinal per bar
     minute: np.ndarray         # New York minute per bar
-    exit_i: np.ndarray         # the bar each entry would leave on, -1 for none
+    exit_i: np.ndarray         # the bar each entry would leave on, -1 when that is not in yet
     good: np.ndarray           # the bar's trading day is whole and not a roll day
     roll_cum: np.ndarray       # running count of roll bars, for window checks
     window: np.ndarray         # index into clock.LAB_WINDOWS per bar
@@ -170,8 +158,9 @@ def _window_index(minute: np.ndarray) -> np.ndarray:
 
 def _exit_index(ts: np.ndarray, step: int) -> np.ndarray:
     """For each bar, the last bar ending by the next 16:00 New York time after
-    it closes (-1 for none). A bar closing at 16:00 exactly exits on itself:
-    no time is left to trade, so trades on it are skipped."""
+    it closes, or -1 when the bars end before that moment, so what would
+    happen by then is not known yet. A bar closing at 16:00 exactly exits on
+    itself: no time is left to trade, so trades on it are skipped."""
     end = ts + step
     local = end + clock.offsets(end)
     lday = local // DAY
@@ -182,7 +171,8 @@ def _exit_index(ts: np.ndarray, step: int) -> np.ndarray:
         dt = date.fromordinal(clock.EPOCH + int(d))
         moments[d] = clock.ny(dt.year, dt.month, dt.day, 16, 0)
     x = np.array([moments[d] for d in exit_day.tolist()], dtype=np.int64)
-    return np.searchsorted(end, x, side="right").astype(np.int64) - 1
+    out = np.searchsorted(end, x, side="right").astype(np.int64) - 1
+    return np.where(x > end[-1], -1, out)
 
 
 def _running_untaken(h, l, s, days, key: str, high: bool) -> np.ndarray:
@@ -436,18 +426,31 @@ def _seed(*parts) -> int:
     return zlib.crc32("|".join(str(x) for x in parts).encode("utf-8")) & 0x7FFFFFFF
 
 
+def shuffled(ts: np.ndarray, seed: int) -> np.ndarray:
+    """A random number for each bar, from the bar's own time and a seed. Choosing
+    the bars with the smallest is choosing at random, and the choice does not
+    change when other bars join or leave: the 60 days of prices slide on every
+    night, so a choice by position in them would be a new one each time."""
+    z = np.asarray(ts).astype(np.uint64)
+    z = z + np.uint64((int(seed) * 0x9E3779B97F4A7C15 + 0x9E3779B97F4A7C15) & (2 ** 64 - 1))
+    z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
 def controls(p: Prep, setup: str, i: int, count: int = CONTROLS) -> List[int]:
     """Up to `count` random bars on other trading days in the same New York half
-    hour as bar i, the same on every run (seeded by symbol, interval, setup and i)."""
+    hour as bar i, the same on every run (seeded by symbol, interval, setup and
+    the time of bar i) while the prices still hold them."""
     pool = p.buckets.get(int(p.minute[i]) // 30)
     if pool is None or not pool.size:
         return []
     pool = pool[p.day[pool] != p.day[i]]
     if not pool.size:
         return []
-    rng = np.random.RandomState(_seed(p.symbol, p.interval, setup, i))
+    z = shuffled(p.ts[pool], _seed(p.symbol, p.interval, setup, int(p.ts[i])))
     k = min(count, int(pool.size))
-    return sorted(int(j) for j in rng.choice(pool, size=k, replace=False))
+    return sorted(int(j) for j in pool[np.argpartition(z, k - 1)[:k]])
 
 
 def _control_r(p: Prep, js: List[int], i: int, d: int, risk: float,
@@ -488,7 +491,8 @@ def trades_for(bars, s: Dict[str, np.ndarray], setup: str, rule: Optional[str] =
         prep = prepare(bars, s, cost_bps)
     p = prep
     counts = skipped if skipped is not None else {}
-    for key in ("tight_stop", "no_control", "at_close", "left_out_day", "warmup"):
+    for key in ("tight_stop", "no_control", "at_close", "left_out_day", "warmup",
+                "still_open"):
         counts.setdefault(key, 0)
     out: Dict[str, List[Trade]] = {r: [] for r in labstore.RULES}
     idx, dirs = events(setup, s, bars)
@@ -498,6 +502,9 @@ def trades_for(bars, s: Dict[str, np.ndarray], setup: str, rule: Optional[str] =
             counts["left_out_day"] += 1
             continue
         last = int(p.exit_i[i])
+        if last < 0:
+            counts["still_open"] += 1
+            continue
         if last <= i:
             counts["at_close"] += 1
             continue
@@ -560,7 +567,7 @@ def aggregate(trades: List[Trade], days_used: Sequence[int], level: bool = False
     rec: Dict = {"n": n, "wins": 0, "sum_r": 0.0, "sum_r_gross": 0.0, "se": None, "days": 0,
                  "longs": 0, "avg_bars": None, "control": {"n": 0, "sum_r": 0.0},
                  "diff": None, "diff_se": None, "holdout": {"n": 0, "mean_r": None},
-                 "stable": None, "by_window": {}, "green_days": [0, 0]}
+                 "stable": None, "by_window": {}, "green_days": [0, 0], "by_day": []}
     if level:
         rec["avg_target_r"] = None
         rec["fallback_2r"] = 0
@@ -582,6 +589,17 @@ def aggregate(trades: List[Trade], days_used: Sequence[int], level: bool = False
         diff = np.array([t.r - t.control_r for t in paired], dtype=float)
         rec["diff"] = _r(diff.mean())
         rec["diff_se"] = _r(clustered_se(diff, [t.day for t in paired]))
+    # Each date's results, for adding instruments up (labstore.pooled).
+    dates: Dict[int, List] = {}
+    for t in trades:
+        row = dates.setdefault(t.day, [t.day, 0, 0.0, 0, 0.0])
+        row[1] += 1
+        row[2] += t.r
+        if t.control_r is not None:
+            row[3] += 1
+            row[4] += t.r - t.control_r
+    rec["by_day"] = [[d, k, _r(total, 4), m, _r(gap, 4)]
+                     for d, k, total, m, gap in (dates[d] for d in sorted(dates))]
     # The last third of the trading days, kept apart.
     used = sorted(days_used)
     if used:
@@ -632,20 +650,24 @@ def _group_of(symbol: str, bars) -> str:
 
 
 def measure(bars, symbol: Optional[str] = None, interval: Optional[str] = None,
-            cfg: Optional[Dict] = None, group: Optional[str] = None):
-    """Every setup on one series: (labstore record, {setup: {rule: [Trade]}})."""
+            cfg: Optional[Dict] = None, group: Optional[str] = None,
+            keep: Optional[Dict[str, np.ndarray]] = None):
+    """Every setup on one series: (labstore record, {setup: {rule: [Trade]}}).
+    keep, when given, gets CLAIM_SERIES of it, for the claims."""
     cfg = cfg if cfg is not None else config_mod.DEFAULTS
     symbol = symbol or bars.symbol
     interval = interval or bars.interval
     bps = config_mod.cost_bps_for_symbol(symbol, getattr(bars, "asset_class", ""), cfg)
     s = liquidity.series(bars)
+    if keep is not None:
+        keep.update({key: s[key] for key in CLAIM_SERIES})
     p = prepare(bars, s, bps, symbol, interval)
     instrument = p.instrument
     result: Dict = {
         "symbol": symbol, "interval": interval, "group": group or _group_of(symbol, bars),
         "from": int(p.ts[0]) if len(p.ts) else 0, "to": int(p.ts[-1]) if len(p.ts) else 0,
         "days": len(p.days_used), "bars": int(len(p.c)), "cost_bps": float(bps),
-        "k": structure.K, "skipped_days": dict(p.skipped_days), "method": dict(METHOD),
+        "k": structure.K, "skipped_days": dict(p.skipped_days),
         "setups": {}}
     all_trades: Dict[str, Dict[str, List[Trade]]] = {}
     not_tested = {}
@@ -671,8 +693,9 @@ def measure(bars, symbol: Optional[str] = None, interval: Optional[str] = None,
     s3 = liquidity.series(bars, k=SENSITIVITY_K)
     p3 = prepare(bars, s3, bps, symbol, interval)
     k3 = trades_for(bars, s3, "liquidity_model", prep=p3, with_controls=False)
+    wider = {rule: aggregate(k3[rule], p3.days_used) for rule in labstore.RULES}
     result["setups"]["liquidity_model"]["k3"] = {
-        rule: {key: aggregate(k3[rule], p3.days_used)[key] for key in ("n", "wins", "sum_r", "se")}
+        rule: {key: wider[rule][key] for key in ("n", "wins", "sum_r", "se", "days")}
         for rule in labstore.RULES}
     labstore.validate_result(result)
     return result, all_trades
@@ -711,6 +734,8 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
     cfg = cfg if cfg is not None else dict(config_mod.DEFAULTS)
     pairs = _symbols(symbols)
     intervals = list(intervals)
+    full = (set(sym for sym, _ in pairs) >= set(s[0] for s in setups.LAB_SYMBOLS)
+            and set(intervals) >= set(setups.LAB_INTERVALS))
     if with_claims is None:
         with_claims = (set(sym for sym, _ in pairs) == set(s[0] for s in setups.LAB_SYMBOLS)
                        and set(intervals) == set(setups.LAB_INTERVALS))
@@ -718,6 +743,7 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
     errors: List[str] = []
     results: List[Dict] = []
     bars_by_key: Dict[Tuple[str, str], object] = {}
+    series_by_key: Dict[Tuple[str, str], Dict] = {}
     trades_5m: Dict[str, Dict] = {}
     throttled = False
     first = True
@@ -731,7 +757,8 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
             first = False
             try:
                 bars = fetch(sym, interval)
-                res, trades = measure(bars, sym, interval, cfg, group or None)
+                kept: Dict[str, np.ndarray] = {}
+                res, trades = measure(bars, sym, interval, cfg, group or None, keep=kept)
                 labstore.save_result(conn, res, now=now)
             except market.DataThrottled as exc:
                 throttled = True
@@ -746,6 +773,7 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
                           "trades": sum(c["rules"]["2r"]["n"] for c in res["setups"].values())})
             if with_claims:
                 bars_by_key[(sym, interval)] = bars
+                series_by_key[(sym, interval)] = kept
                 if interval == "5m":
                     trades_5m[sym] = trades
     claimed: Dict = {"claims": [], "bias": [], "errors": []}
@@ -756,13 +784,14 @@ def run(conn, fetch: Callable = market.fetch_bars, cfg: Optional[Dict] = None,
     elif with_claims and bars_by_key:
         try:
             claimed = claims_mod.run(conn, bars_by_key, fetch=fetch, trades=trades_5m,
-                                     pause=pause, sleep=sleep, now=now)
+                                     pause=pause, sleep=sleep, now=now,
+                                     series=series_by_key)
         except Exception as exc:
             log.exception("Setup lab: the claims failed")
             claimed = {"claims": [], "bias": [], "errors": ["claims: %s" % exc]}
         errors.extend(claimed.get("errors") or [])
     finished = int(time.time()) if now is None else started
-    summary = {"cells": cells, "errors": errors, "checked": len(cells),
+    summary = {"cells": cells, "errors": errors, "checked": len(cells), "full": full,
                "claims": list(claimed.get("claims") or []),
                "bias": list(claimed.get("bias") or [])}
     try:
@@ -780,9 +809,11 @@ def due(conn, now: Optional[float] = None) -> bool:
     Yes when it never ran; else when the last run is over 20 hours old and it
     is 17:05 or later in New York (the day's bars are in by then). A run that
     stored nothing (every download refused) is tried again after two hours.
+    Only runs over every instrument and bar size count: one instrument measured
+    by hand does not stand for the night's run.
     """
     now = int(now if now is not None else time.time())
-    last = labstore.last_run(conn)
+    last = labstore.last_run(conn, full=True)
     if last is None:
         return True
     age = now - int(last["started"])
@@ -812,7 +843,8 @@ def table(results: Sequence[Dict]) -> str:
                 n = rec["n"]
                 mean = rec["sum_r"] / n if n else None
                 se = rec["se"]
-                kept = ("%+.3f +/- %.3f" % (mean, 2 * se) if mean is not None and se is not None
+                kept = ("%+.3f +/- %.3f" % (mean, labstore.reach(rec["days"]) * se)
+                        if mean is not None and se is not None
                         else ("%+.3f" % mean if mean is not None else "-"))
                 ctrl = rec["control"]
                 rand = "%+.3f" % (ctrl["sum_r"] / ctrl["n"]) if ctrl["n"] else "-"

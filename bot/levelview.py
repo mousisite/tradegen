@@ -810,7 +810,7 @@ def _measured_window(bars, now: float, conn) -> List[str]:
                        % (count, where, when))
         else:
             out.append("In the Setup lab, %d sweep, break and retest trades on %s were "
-                       "entered %s New York time. %d reached their target, and on average "
+                       "entered %s New York time. %d kept money after costs, and on average "
                        "each kept %+.2f times its risk after costs. That is a count, not a "
                        "test: no margin of error is worked out for one window."
                        % (count, where, when, wins, sum_r / count))
