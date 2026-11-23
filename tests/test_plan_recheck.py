@@ -219,6 +219,34 @@ conn.close()
 check("when an account goes, so does the note of when its plan was read",
       gone is not None and kept == 0, kept)
 
+# Deleted while Stripe was being asked about it: its row is refused, as it
+# should be, and the plans after it in the queue are read all the same.
+conn = db.connect(DB)
+going = A.upsert_email_user(conn, "going@example.com")
+billing.set_plan(conn, going.id, "pro", "active", "cus_going", int(NOW - 3600))
+after = A.upsert_email_user(conn, "after@example.com")
+billing.set_plan(conn, after.id, "pro", "active", "cus_after", int(NOW - 60))
+read = []
+
+
+def stripe_going(method, path, data=None):
+    read.append(path.rsplit("customer=", 1)[-1])
+    if read[-1] == "cus_going":
+        A.delete_user(conn, going.id)
+    return {"data": []}
+
+
+try:
+    billing.recheck(conn, NOW, call=stripe_going, limit=2)
+    broke = ""
+except sqlite3.Error as exc:
+    broke = repr(exc)
+check("an account deleted while its plan is read does not end the run",
+      not broke and read == ["cus_going", "cus_after"], (broke, read))
+conn.rollback()
+billing.set_plan(conn, after.id, "free", "")
+conn.close()
+
 head("A PLAN WITH NO RECORDED END IS READ TOO")
 # A paid checkout says nothing of when its period ends. If the subscription's
 # own messages never come, nothing else would ever read the plan again.

@@ -743,9 +743,12 @@ def recheck(conn: sqlite3.Connection, now: Optional[float] = None,
         except Exception as exc:          # one customer must not stop the rest
             errors.append("user %d: %s" % (int(row["id"]), exc))
         finally:
-            conn.execute("INSERT INTO plan_checks (user_id, checked_ts) VALUES (?, ?) "
+            # Only for an account still here: one deleted while Stripe was being
+            # asked would refuse the row, and end the run for everyone after it.
+            conn.execute("INSERT INTO plan_checks (user_id, checked_ts) "
+                         "SELECT id, ? FROM users WHERE id=? "
                          "ON CONFLICT(user_id) DO UPDATE SET "
-                         "checked_ts=excluded.checked_ts", (int(row["id"]), int(now)))
+                         "checked_ts=excluded.checked_ts", (int(now), int(row["id"])))
             conn.commit()
     return {"checked": checked, "errors": errors}
 
