@@ -222,8 +222,17 @@ try:
           web._signed(-0.004) == "0.00" and web._signed(0.3) == "+0.30")
 
     page = c.get("/stocks").data.decode()
+    check("a copy with no public address counts no visits",
+          "tracker.metricool.com" not in page)
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://www.Orenth.example/"
+    try:
+        page = c.get("/stocks").data.decode()
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
     check("visitors are counted, by page path only",
           "tracker.metricool.com" in page and "location.pathname" in page)
+    check("and only where the browser is at the public address",
+          'if (location.hostname.replace(/^www\\./, "") === "orenth.example")' in page)
 
     print()
     print("=" * 72)
@@ -481,8 +490,12 @@ try:
         check("a visitor cannot make a share",
               r.status_code in (302, 303) and "/signin" in r.headers["Location"])
         sign_in(sharer)
-        check("signed-in pages are never counted",
-              "tracker.metricool.com" not in c.get("/stocks").data.decode())
+        _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.example"
+        try:
+            check("signed-in pages are never counted",
+                  "tracker.metricool.com" not in c.get("/stocks").data.decode())
+        finally:
+            del _os.environ["STOCKBOT_PUBLIC_URL"]
         r = c.post("/share", data={"symbol": "TSLA", "interval": "1d"})
         where = r.headers.get("Location", "")
         check("sharing makes a page and goes to it",

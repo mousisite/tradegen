@@ -731,7 +731,21 @@ def _note_app():
 
 @app.context_processor
 def _app_mode():
-    return {"in_app": _in_app()}
+    return {"in_app": _in_app(), "visit_host": _visit_host()}
+
+
+def _visit_host() -> str:
+    """The public site's host, the one place visits are counted.
+
+    Empty on a copy with no public address, such as one being worked on, and
+    the page then counts nothing.
+    """
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()).hostname
+    except ValueError:
+        host = None
+    return (host or "").removeprefix("www.")
 
 
 def uid() -> int:
