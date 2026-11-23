@@ -389,6 +389,18 @@ check("the Monitor form lists the kinds in groups",
 
 morning = clock.head(ES, at(1, "07:00"))
 morning = live(morning, 100.0, int(TS[at(1, "07:00")]))
+# Read once for a set of bars, whoever opens the page, and nobody's to change.
+readings, real_series = [], alerts.liquidity.series
+alerts.liquidity.series = lambda *a, **k: readings.append(1) or real_series(*a, **k)
+try:
+    first = alerts.suggest_for("ES=F", None, morning)
+    first[-1]["kind"] = "spoilt"
+    again = alerts.suggest_for("ES=F", None, morning)
+finally:
+    alerts.liquidity.series = real_series
+check("the levels behind suggested alerts are read once for a kept analysis",
+      len(readings) == 1 and "spoilt" not in str(again)
+      and [s["kind"] for s in again][:-1] == [s["kind"] for s in first][:-1], readings)
 sug = {s["kind"]: s for s in alerts.suggest_for("ES=F", None, morning)}
 check("an analysis suggests the sweep of the nearer of yesterday's levels, and a break",
       "sweeps_prior_low" in sug and "sweeps_prior_high" not in sug

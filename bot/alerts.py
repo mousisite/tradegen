@@ -1591,7 +1591,21 @@ def _price_action_suggestions(bars) -> List[Dict]:
     """The course's levels worth being told about, for the bars an analysis
     is on: a take of the nearer of yesterday's high and low, a break of the
     last swing the other way, and today's opening gap filling while it is
-    open. Nothing when the bars cannot be read that way."""
+    open. Nothing when the bars cannot be read that way.
+
+    Worked out once for a set of bars: a kept analysis is drawn again for
+    everybody who opens it, and this was two thirds of drawing the page."""
+    kept = getattr(bars, "price_action_suggestions", None)
+    if kept is None:
+        kept = _read_price_action(bars)
+        try:
+            bars.price_action_suggestions = kept
+        except AttributeError:          # a stand-in that takes no more
+            pass
+    return [dict(item) for item in kept]
+
+
+def _read_price_action(bars) -> List[Dict]:
     try:
         n = len(bars.close)
         if n < 30:
