@@ -761,6 +761,43 @@ try:
                  "asset_class) VALUES (?, 'ZZYES', '1d', 'BUY', 100, 90, 120, 1, 'equity')",
                  (int(time.time()),))
     conn.commit()
+    put_run = ("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, "
+               "user_id, asset_class) VALUES (?,?,'1d',?,?,?,?,1,?)")
+
+    def of(symbol):
+        return conn.execute("SELECT * FROM trades WHERE symbol=? ORDER BY id",
+                            (symbol,)).fetchall()
+
+    at = int(time.time())
+    conn.execute(put_run, (at - 1800, "ZZOLD", "BUY", 100, 90, 120, "equity"))
+    conn.execute(put_run, (at - 300, "ZZOLD", "AVOID", None, None, None, "equity"))
+    conn.execute(put_run, (at, "ZZDN", "WAIT", 100, 105, 90, "equity"))
+    conn.execute(put_run, (at, "BTC-USD", "BUY", 50000, 49000, 52000, "crypto"))
+    conn.commit()
+    code, said = cli("take", "ZZOLD")
+    check("an older plan is not taken once a newer analysis said AVOID", code == 1
+          and "said AVOID" in said and not of("ZZOLD"), said)
+    code, said = cli("take", "ZZDN", "--force", "--qty", 7)
+    check("the side is read off where the stop sits, and the money at risk is kept",
+          code == 0 and len(of("ZZDN")) == 1 and of("ZZDN")[0]["direction"] == -1
+          and close(of("ZZDN")[0]["risk_amount"], 35.0) and "risking 35" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000)
+    check("btc finds the analysis of BTC-USD", code == 0 and len(of("BTC-USD")) == 1
+          and "from analysis" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000)
+    check("one plan is not opened twice", code == 1 and len(of("BTC-USD")) == 1
+          and "already in the journal" in said, said)
+    code, said = cli("take", "btc", "--account-size", 100000, "--force")
+    check("unless told to", code == 0 and len(of("BTC-USD")) == 2, said)
+    for row in of("BTC-USD") + of("ZZDN"):
+        db.delete_trade(conn, row["id"])
+    code, said = cli("open", "ZZDAY", "--entry", 100, "--stop", 90)
+    check("a trade typed in is on daily bars, as everywhere else", code == 0
+          and of("ZZDAY")[0]["interval"] == "1d", said)
+    db.delete_trade(conn, of("ZZDAY")[0]["id"])
+    code, said = cli("--db", DB + ".second.db", "db")
+    check("the database named is the one --db opened", code == 0
+          and _os.path.basename(DB) + ".second.db" in said, said)
     code, said = cli("take", "ZZNO")
     check("a call that is no trade names a command that exists here", code == 1
           and "`paper.bat open`" in said and "python paper.py" not in said, said)
@@ -816,6 +853,14 @@ try:
     code, said = cli("stats")
     check("its statistics keep the cash taken from an open position apart",
           "taken by closing part of" in said, said)
+    cfg_ = web.config_mod.load(harness.CFG_PATH)
+    costs_ = {"equity": cfg_["cost_bps_equity"] / 1e4, "crypto": cfg_["cost_bps_crypto"] / 1e4,
+              "futures": cfg_["cost_bps_futures"] / 1e4, "other": cfg_["cost_bps_other"] / 1e4}
+    after, before = (db.journal_summary(conn, costs=costs_), db.journal_summary(conn))
+    check("and are after costs, as the website's are, and say so",
+          "%+.3f" % after["expectancy_r"] != "%+.3f" % before["expectancy_r"]
+          and "%+.3fR per trade, after costs" % after["expectancy_r"] in said
+          and "P&L %.2f" % after["pnl"] in said, (said, after, before))
 
     tz = db.open_trade(conn, "ZZQ2", "1d", 1, 1000.0, 950.0, quantity=2)
     conn.execute("UPDATE trades SET ts_opened=? WHERE id=?", (NOW - 30 * DAY, tz))
@@ -891,9 +936,12 @@ try:
     r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "108", "quantity": "20",
                                       "reason": "target", "left": "60.0"})
     check("pressing Close twice closes one part, and says why nothing more was",
-          "changed=%d" % tt["id"] in r.headers.get("Location", "")
+          r.headers.get("Location", "").endswith("/trades")
           and len(db.exits_for(conn, [tt["id"]])[tt["id"]]) == 1
           and "had changed since the page was drawn" in flat(text(c.get(r.headers["Location"]))))
+    check("once, and a link cannot say it", "had changed since the page" not in flat(text(
+        c.get("/trades?changed=1&logged=1&reviewed=1")))
+        and "Logged as a paper trade" not in text(c.get("/trades?logged=1")))
     r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "abc", "left": "40.0"})
     page = text(r)
     check("a price that is not a number is refused in words",
@@ -939,7 +987,7 @@ try:
     cell = flat(body[body.index("<b>ZZS</b>"):])
     cell = cell[:cell.index("</tr>")]
     check("after a split the close form is filled in today's shares, and says so",
-          'name="price" step="any" required placeholder="price" value="101.0"' in cell
+          'name="price" step="any" required placeholder="price" value="101"' in cell
           and '<option value="today" selected>today\'s shares</option>' in cell
           and '<option value="opened">shares opened with</option>' in cell, cell[:1500])
     check("with the split shown beside the price", "quoted 101 today, after a 10-for-1 split"
