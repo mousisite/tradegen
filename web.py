@@ -731,7 +731,26 @@ def _note_app():
 
 @app.context_processor
 def _app_mode():
-    return {"in_app": _in_app()}
+    return {"in_app": _in_app(), "embedded_browser": _embedded_browser()}
+
+
+# What the browsers built into other apps put in their User-Agent: TikTok's
+# (under three names), Instagram's, Facebook's and Messenger's, Snapchat's,
+# LinkedIn's and Pinterest's, and the mark Android gives any such browser.
+EMBEDDED_BROWSERS = ("musical_ly", "BytedanceWebview", "trill_", "Instagram",
+                     "FBAN", "FBAV", "FB_IAB", "Snapchat/", "LinkedInApp",
+                     "[Pinterest/", "; wv)")
+
+
+def _embedded_browser() -> bool:
+    """Whether this page is open in the browser built into another app.
+
+    Google refuses to sign anyone in there, so the sign-in page says how to
+    get out of it. Like _in_app, it only ever chooses what to show. Orenth's
+    own app signs in through the system browser and is told nothing.
+    """
+    agent = request.headers.get("User-Agent") or ""
+    return not _in_app() and any(mark in agent for mark in EMBEDDED_BROWSERS)
 
 
 def uid() -> int:

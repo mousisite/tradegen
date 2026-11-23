@@ -30,6 +30,16 @@
   {% if reason %}
     <div class="notice">{{ reason }}</div>
   {% endif %}
+  {# Opened from a link inside TikTok, Instagram or another app, where Google
+     answers with a page of its own that says only that access is blocked. #}
+  {% if embedded_browser and google_ready %}
+    <div class="notice" data-embedded>This page is open inside another app, and
+      Google does not allow signing in there. Tap the three dots or the share
+      button at the edge of the screen, choose to open the page in your
+      browser, and sign in there.{% if email_ready or phone_ready %} Or use
+      {{ 'email or phone' if email_ready and phone_ready else ('email' if
+      email_ready else 'phone') }} here.{% endif %}</div>
+  {% endif %}
 
   {% if google_ready or email_ready or phone_ready or apple_button %}
     {% if app_signin %}

@@ -145,6 +145,32 @@ try:
     for tag in ('name="description"', 'property="og:title"',
                 'property="og:image"', 'name="twitter:card"'):
         check("the page carries %s" % tag, tag in card)
+    # Google answers "access blocked" inside another app's own browser, and
+    # nearly every visitor comes from a link in one.
+    def signin_for(agent):
+        return web.app.test_client().get("/signin", headers={"User-Agent": agent}) \
+            .data.decode("utf-8", "replace")
+
+    iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) " \
+             "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    for where, agent in (
+            ("TikTok on an iPhone", iphone + "Mobile/15E148 musical_ly_37.1.0 JsSdk/2.0 "
+                                             "BytedanceWebview/d8a21c6"),
+            ("TikTok on Android", "Mozilla/5.0 (Linux; Android 14; SM-S911U Build/UP1A; wv) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+                                  "Chrome/130.0.0.0 Mobile Safari/537.36 trill_370104"),
+            ("Instagram", iphone + "Mobile/22B83 Instagram 356.0.0.29 (iPhone14,7)"),
+            ("Facebook", iphone + "Mobile/22B83 [FBAN/FBIOS;FBAV/489.0.0]")):
+        check("%s is told how to get out to sign in" % where,
+              "open the page in your" in signin_for(agent))
+    for where, agent in (
+            ("Safari", iphone + "Version/18.1 Mobile/15E148 Safari/604.1"),
+            ("Chrome on Android", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+            ("the Orenth app", iphone + "Mobile/15E148 OrenthApp/1.0"),
+            ("no browser named", "")):
+        check("%s is not" % where, "data-embedded" not in signin_for(agent))
+
     # X and several chat clients drop a card whose image is not https, and
     # behind a TLS terminator the app sees a plain http request, so these must
     # be built from the public address rather than the observed one.
