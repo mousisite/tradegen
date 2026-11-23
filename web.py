@@ -83,7 +83,6 @@ from bot.strategies import FAMILIES
 from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart, upright
 
 app = Flask(__name__)
-app.config["JSON_SORT_KEYS"] = False
 # Chart screenshots are small. This cap stops a huge upload from tying up the
 # single-process dev server.
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
@@ -694,16 +693,6 @@ def _expose_user():
             # website is set up, and in the app as soon as the app's half is.
             "apple_button": apple_mod.web_ready()
                             or (apple_mod.native_ready() and _in_app())}
-
-
-def _in_app() -> bool:
-    """Whether this page is drawn inside the Orenth iPhone app.
-
-    The app's web view adds OrenthApp/<version> to its User-Agent. It only
-    ever chooses what to show, never what is allowed: anyone can send any
-    User-Agent.
-    """
-    return "OrenthApp/" in request.headers.get("User-Agent", "")
 
 
 # The iPhone app is this same site inside a native shell, and it says so by
@@ -2234,7 +2223,6 @@ def _trade_picture(trade) -> Dict:
     bars are in today's, so after a split its prices are turned into
     today's to sit on them, and the page says so.
     """
-    import inspect
     from bot import clock as clock_mod
     from bot import journal as journal_mod
     symbol, own = trade["symbol"], trade["interval"] or "1d"
@@ -2295,12 +2283,11 @@ def _trade_picture(trade) -> Dict:
              "last": float(bars.last_price) if not closed else None}
     if intraday:
         drawn["day_label"] = clock_mod.label_ny
-    # Where the person went in and out, on charts that can mark a point.
-    if "marks" in inspect.signature(charts_mod.trade_chart).parameters:
-        marks = [(ts[first], levels["Entry"], direction, "Entry")]
-        if exit_price is not None:
-            marks.append((ts[last], exit_price, -direction, "Exit"))
-        drawn["marks"] = marks
+    # Where the person went in and out.
+    marks = [(ts[first], levels["Entry"], direction, "Entry")]
+    if exit_price is not None:
+        marks.append((ts[last], exit_price, -direction, "Exit"))
+    drawn["marks"] = marks
 
     def draw(before, after, most, **size):
         start, end = journal_mod.picture_window(n, first, last, before, after, most)
