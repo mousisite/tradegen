@@ -329,7 +329,10 @@ try:
     check("it says what else the cookie holds while something is under way",
           "the invite you arrived with, the email address or phone number a "
           "sign-in code was sent to" in page
-          and "a note of an exit the journal just recorded" in page)
+          and "a note of what the journal just recorded" in page)
+    check("and the practice charts answered, which it keeps until they are cleared",
+          "which ones and how many you got right, until you start over or sign out"
+          in page)
     check("and that it is signed, not encrypted",
           "signed so that it cannot be changed, but it is not encrypted" in page)
     check("with Apple off the website, no second cookie is spoken of",
