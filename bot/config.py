@@ -118,18 +118,30 @@ def horizon_for(interval: str, cfg: Dict[str, Any]) -> int:
     return _HORIZON.get((interval or "").lower(), 20)
 
 
-def describe_horizon(interval: str, bars: int) -> str:
-    """Say what a horizon means in wall-clock terms, for the report."""
+def describe_horizon(interval: str, bars: int, asset_class: str = "",
+                     symbol: str = "") -> str:
+    """Say what a horizon means in wall-clock terms, for the report.
+
+    How long a day of trading is depends on the instrument: a coin trades
+    round the clock every day, a future 23 hours and a currency pair 24, and
+    anything else is counted in the 6.5 hours of a stock's session.
+    """
     minutes = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30,
                "60m": 60, "1h": 60}.get((interval or "").lower())
+    ticker = (symbol or "").strip().upper()
+    coin = asset_class == "crypto"
+    day = "day" if coin else "trading day"
     if minutes is None:
-        return "%d trading days" % bars
+        return "%d %s%s" % (bars, day, "" if bars == 1 else "s")
+    hours = (24.0 if coin or ticker.endswith("=X")
+             else 23.0 if ticker.endswith("=F") else 6.5)
     total = bars * minutes
     if total < 60:
-        return "%d minutes" % total
-    if total < 60 * 7:
+        return "%d minute%s" % (total, "" if total == 1 else "s")
+    # Seven hours of a stock is still said in hours.
+    if total < 60 * max(hours, 7.0):
         return "%.1f hours" % (total / 60.0)
-    return "%.1f trading days" % (total / (60 * 6.5))
+    return "%.1f %ss" % (total / (60 * hours), day)
 
 
 def cost_bps_for(asset_class: str, cfg: Dict[str, Any]) -> float:

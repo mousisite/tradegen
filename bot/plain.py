@@ -229,7 +229,7 @@ def _trim(value) -> str:
 # One or two sentences on each figure of the analysis page that a first-time
 # investor may not know, said the way this code works the figure out rather
 # than the way a textbook would. The page shows each behind a "?" beside its
-# figure (templates/_help.html). name finishes "What ... means"; text is the
+# figure (templates/_help.html). name finishes "About ..."; text is the
 # answer. A word in braces is a setting, filled in by help_for, so the words
 # match the numbers on the page.
 HELP: Dict[str, Dict[str, str]] = {
@@ -524,8 +524,10 @@ HELP: Dict[str, Dict[str, str]] = {
 }
 
 
-def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
-    """HELP with the settings' own numbers in it, for one bar interval."""
+def help_for(cfg: Dict, interval: str = "1d", asset_class: str = "",
+             symbol: str = "") -> Dict[str, Dict[str, str]]:
+    """HELP with the settings' own numbers in it, for one bar interval of one
+    instrument (a coin's day is not a stock's)."""
     from .config import DEFAULTS, describe_horizon, horizon_for
 
     def setting(key):
@@ -541,7 +543,7 @@ def help_for(cfg: Dict, interval: str = "1d") -> Dict[str, Dict[str, str]]:
         "cap": "%g" % float(setting("max_position_pct")),
         "account": "{:,.0f}".format(float(setting("account_size"))),
         "bars": bars,
-        "window": describe_horizon(interval, bars),
+        "window": describe_horizon(interval, bars, asset_class, symbol),
         "minimum": int(setting("min_bucket_samples")),
         "equity": "%g" % (float(setting("cost_bps_equity")) / 100.0),
         "crypto": "%g" % (float(setting("cost_bps_crypto")) / 100.0),

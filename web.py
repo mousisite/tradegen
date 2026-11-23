@@ -1394,9 +1394,13 @@ def analyse():
         app.logger.exception("Could not read the levels for %s", result.bars.symbol)
         extras = {}
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
-    # "10 bars" means nothing without the interval attached to it.
-    hold_text = config_mod.describe_horizon(
-        result.bars.interval, int(result.calibration.avg_bars_held or 0))
+    # "10 bars" means nothing without the interval attached to it, nor without
+    # how long the instrument trades in a day. Rounded as the page rounds it,
+    # and nothing at all when no past trade was measured.
+    held = int(round(result.calibration.avg_bars_held or 0))
+    hold_text = (config_mod.describe_horizon(result.bars.interval, held,
+                                             result.bars.asset_class, result.bars.symbol)
+                 if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
     suggestions = []
@@ -1433,7 +1437,9 @@ def analyse():
                            chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
-                           help_text=plain_mod.help_for(cfg, result.bars.interval),
+                           help_text=plain_mod.help_for(cfg, result.bars.interval,
+                                                        result.bars.asset_class,
+                                                        result.bars.symbol),
                            # A visitor cannot make a share, but every example
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
