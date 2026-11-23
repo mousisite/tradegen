@@ -175,7 +175,7 @@
 <section>
   <div class="sechead">
     <h2>The case, both ways</h2>
-    <span class="tail">{{ t.evidence_count }} pieces of evidence</span>
+    <span class="tail">{{ t.evidence_count }} piece{{ '' if t.evidence_count == 1 else 's' }} of evidence</span>
   </div>
 
   <div class="card" style="margin-bottom:var(--s3)">
@@ -243,7 +243,13 @@
       {% if t.unknowns %}
         <ul class="list warn">{% for x in t.unknowns %}<li>{{ x }}</li>{% endfor %}</ul>
       {% else %}
-        <p class="prose">Every input was available for this instrument.</p>
+        {% set no_accounts = r.sec_history and not r.sec_history.available %}
+        <p class="prose">{% if no_accounts %}Accounts filed with the SEC, because
+          there were none here to read.{% endif %}
+          {% if r.unavailable %}What is listed at the top of this page as not
+          available.{% endif %}
+          {% if not no_accounts and not r.unavailable %}Every input was available
+          for this instrument.{% endif %}</p>
       {% endif %}
     </div>
   </div>
