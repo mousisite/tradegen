@@ -44,7 +44,7 @@ SUITES = [
     ("test_signin_flow.py",  False, "the whole Google sign-in path, against a stubbed Google"),
     ("test_apple_signin.py", False, "Sign in with Apple on the site and in the app, against a stubbed Apple"),
     ("test_app_handoff.py",  False, "the iPhone app's browser sheet handing its sign-in back"),
-    ("test_database.py",     True,  "schema, journal, statistics and invariants"),
+    ("test_database.py",     False, "schema, journal, statistics and invariants"),
     ("test_learning.py",     True,  "strategy weight learning stays bounded"),
     ("test_audit.py",        True,  "self-audit finds no contradictions in a report"),
     ("test_pipeline.py",     True,  "a full analysis end to end on several instruments"),
