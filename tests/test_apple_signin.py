@@ -455,7 +455,7 @@ try:
     check("the session works on the next page", "robin@example.com" in account)
     check("with the name Apple sent the first time", "Robin Vale" in account)
     check("and the account page says how they signed in",
-          "Signed in with Apple" in account)
+          re.search(r"You can sign in with\s+Apple\.", account))
 
     exchange = [p for p in FAKE.posts if p["url"] == apple_mod.TOKEN_URL][-1]["data"]
     print("      what the server sent Apple:")

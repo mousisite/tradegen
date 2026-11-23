@@ -507,6 +507,24 @@ try:
         elif hasattr(serve, "RELEASE_COPY_DAYS"):
             del serve.RELEASE_COPY_DAYS
 
+    # The timed backups: how many are kept, times the hours between them.
+    for said, env in (("it is replaced by newer ones, which takes about a week.", {}),
+                      ("it is replaced by newer ones, which takes about 15 days.",
+                       {"STOCKBOT_BACKUP_KEEP": "30"}),
+                      ("it is replaced by newer ones, which takes about 8 days.",
+                       {"STOCKBOT_BACKUP_HOURS": "24"}),
+                      ("it is deleted by hand.", {"STOCKBOT_BACKUP_KEEP": "0"}),
+                      ("it is deleted by hand.", {"STOCKBOT_BACKUP_HOURS": "0"})):
+        _os.environ.update(env)
+        try:
+            page = flat(text(visitor.get("/privacy")))
+        finally:
+            for _k in env:
+                _os.environ.pop(_k, None)
+        check("backups %s: the page says how long one lasts" % (env or "as usual"),
+              "still holds a copy until " + said in page,
+              page[page.find("A backup made before"):][:200])
+
     # Copies kept off the server are pruned only as each new one is sent, so
     # once the settings are removed nothing ever deletes those already there.
     from bot import offsite as offsite_mod  # noqa: E402

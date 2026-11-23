@@ -4189,12 +4189,11 @@ def account():
             if not g.user.is_local:
                 invite = {"url": _public_base() + url_for(
                               "join", code=invites_mod.code_for(conn, uid())),
-                          "joined": invites_mod.joined(conn, uid())}
+                          "joined": invites_mod.joined(conn, uid()),
+                          "left": invites_mod.rewards_left(conn, uid())}
         finally:
             conn.close()
         plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
-        plan["bonus_until"] = (g.user.bonus_until
-                               if g.user.bonus_until > time.time() else 0)
     weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
               "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,
@@ -4202,6 +4201,7 @@ def account():
                            datasets=export_mod.DATASETS, plan=plan,
                            invite=invite, weekly=weekly,
                            invite_days=invites_mod.BONUS_DAYS,
+                           invite_max=invites_mod.MAX_REWARDS,
                            apple=_apple_plan())
 
 
@@ -4579,6 +4579,10 @@ def privacy():
     # two cannot drift apart.
     release = {"keep": serve.KEEP_RELEASE_COPIES,
                "days": getattr(serve, "RELEASE_COPY_DAYS", 0)}
+    # The timed backups are kept by count, so one lasts that many times the
+    # hours between them. 0 is none ever replaced: every one kept, or no
+    # more being made.
+    backup_days = math.ceil(_backups_kept() * offsite_mod.backup_hours() / 24)
     # Who carries and runs this copy, named where it can be told: Cloudflare
     # adds CF-Connecting-IP to every request it carries (_client_ip reads
     # it), Render sets RENDER and RENDER_SERVICE_ID on its machines, and Fly
@@ -4591,8 +4595,20 @@ def privacy():
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
                            contact=_contact(), offsite=offsite, hosting=hosting,
-                           release=release,
+                           release=release, backup_days=backup_days,
                            sampled=_sampled_words(monitoring.status()["sampled"]))
+
+
+def _backups_kept() -> int:
+    """How many timed backups serve.py keeps; 0 when it deletes none."""
+    import serve
+    read = getattr(serve, "_backups_to_keep", None)
+    if read is not None:
+        return max(0, read())
+    try:
+        return max(0, int(os.environ.get("STOCKBOT_BACKUP_KEEP", "8")))
+    except ValueError:
+        return 0                # nothing is pruned while it cannot be read
 
 
 def _sampled_words(share: float) -> str:

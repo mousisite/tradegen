@@ -541,6 +541,9 @@ try:
           remembered == code and r.headers["Location"].endswith("/"))
     page = c.get("/").data.decode("utf-8", "replace")
     check("which says a friend invited them", "A friend invited you" in page)
+    check("and what they get, without speaking for the friend, who may have had theirs",
+          "you both get" not in page
+          and "you both get" not in c.get("/signin").data.decode("utf-8", "replace"))
     c.get("/join/notacode")
     with c.session_transaction() as sess:
         check("a made-up code is not remembered", sess.get("ref") == code)
@@ -612,10 +615,26 @@ try:
     check("someone paying for Pro is not promised a week that adds nothing",
           "add nothing while you are paying for Pro" in page
           and "<b>both</b> get" not in page and "we both get" not in page)
+    # They cancel later, and then a friend joins.
+    conn = db.connect(DB)
+    billing.set_plan(conn, payer.id, "free", "canceled", "cus_payer", 0)
+    invites.accept(conn, A.upsert_email_user(conn, "payers-friend@example.com").id,
+                   invites.code_for(conn, payer.id))
+    conn.close()
+    page = c.get("/account").data.decode("utf-8", "replace")
+    check("someone who used to pay is told when their free days end",
+          "Free from invites until" in page)
     sign_in(host)
     page = c.get("/account").data.decode("utf-8", "replace")
     check("everyone else still reads that both get it",
           "<b>both</b> get" in page and "we both get a free week" in page)
+    check("and for how many friends", "for your first %d" % cap in page)
+    invites.MAX_REWARDS = 2
+    page = c.get("/account").data.decode("utf-8", "replace")
+    invites.MAX_REWARDS = cap
+    check("someone who has had them all is promised no more",
+          "as many as" in page and "<b>both</b> get" not in page
+          and "we both get" not in page)
     check("the account page has the invite link", "/join/" + code in page)
     check("and says how many joined", "3 joined so far" in page)
     check("and until when Pro is free", "Free from invites until" in page)

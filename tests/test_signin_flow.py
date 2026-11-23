@@ -430,6 +430,8 @@ try:
     check("the account page shows the signed-in address",
           "trader@example.com" in account_page)
     check("and offers a way out", "Sign out" in account_page)
+    check("and says how it can be signed in to, not how this sign-in began",
+          re.search(r"You can sign in with\s+Google\.", account_page))
 
     with visitor.session_transaction() as sess:
         check("the one-time state was consumed", "oauth_state" not in sess)

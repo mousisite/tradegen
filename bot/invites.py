@@ -61,6 +61,14 @@ def joined(conn: sqlite3.Connection, user_id: int) -> int:
                         (user_id,)).fetchone()[0]
 
 
+def rewards_left(conn: sqlite3.Connection, user_id: int) -> int:
+    """How many more friends will earn this person a week, as accept() counts."""
+    row = conn.execute("SELECT invite_rewards FROM users WHERE id=?",
+                       (user_id,)).fetchone()
+    had = max(int(row[0]) if row else 0, joined(conn, user_id))
+    return max(0, MAX_REWARDS - had)
+
+
 def _add_week(conn: sqlite3.Connection, user_id: int, now: int) -> None:
     conn.execute("UPDATE users SET bonus_until=MAX(bonus_until, ?) + ? "
                  "WHERE id=?", (now, BONUS_DAYS * 86400, user_id))
