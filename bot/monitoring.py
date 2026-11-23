@@ -103,6 +103,8 @@ def _scrub(event: Dict, _hint: Optional[Dict] = None) -> Optional[Dict]:
         if isinstance(crumbs, dict):
             crumbs = crumbs.get("values")
         for crumb in crumbs or []:
+            if not isinstance(crumb, dict):
+                continue
             data = crumb.get("data")
             if isinstance(data, dict):
                 _cut_to_site(data)

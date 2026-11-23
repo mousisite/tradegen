@@ -487,6 +487,10 @@ import http.client, json, os, socket, sys, threading
 sys.path[:0] = [%r, %r]
 import harness
 harness.isolate("serve-child")
+import types
+keys = []
+sys.modules["dotenv"] = types.ModuleType("dotenv")
+sys.modules["dotenv"].load_dotenv = keys.append
 import serve, web
 from flask import jsonify, request
 from waitress.server import create_server
@@ -515,7 +519,7 @@ out = {"one": ask(X_Forwarded_For="203.0.113.7", X_Forwarded_Proto="https"),
        "spoofed": ask(X_Forwarded_For="198.51.100.9, 203.0.113.7",
                       X_Forwarded_Proto="https", X_Forwarded_Host="evil.example",
                       X_Forwarded_Prefix="/evil"),
-       "plain": ask()}
+       "plain": ask(), "dotenv": len(keys)}
 
 raw = socket.create_connection(("127.0.0.1", port), timeout=20)
 raw.sendall(b"POST /trades/open HTTP/1.1\r\nHost: orenth.example\r\n"
@@ -543,7 +547,7 @@ def through_waitress(**settings):
     for line in ran.stdout.splitlines():
         if line.startswith("ANSWER "):
             return json.loads(line[len("ANSWER "):])
-    return {"one": {}, "spoofed": {}, "plain": {}, "huge": ran.stderr[-500:]}
+    return {"one": {}, "spoofed": {}, "plain": {}, "dotenv": None, "huge": ran.stderr[-500:]}
 
 
 on = through_waitress(STOCKBOT_BEHIND_PROXY="1")
@@ -563,6 +567,7 @@ for label, settings in (("with no proxy", {}),
           off["one"] == off["spoofed"] == off["plain"]
           and off["plain"].get("address") == "127.0.0.1"
           and off["plain"].get("scheme") == "http", off)
+check("and a test run never reads the keys in a .env file", on["dotenv"] == 0, on["dotenv"])
 check("a body of 300 MB is refused before it is sent",
       on["huge"].startswith("HTTP/1.") and " 413 " in on["huge"], on["huge"])
 
