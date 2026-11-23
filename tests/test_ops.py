@@ -147,6 +147,31 @@ check("a password local variable is masked", frame["password"] == "[removed]")
 check("a harmless local variable is kept", frame["symbol"] == "AAPL")
 
 
+# The calls made just before the fault travel with the report. Their paths and
+# queries can hold a phone's push address, a customer's number or a key.
+crumbed = monitoring._before_send({"request": {}, "breadcrumbs": {"values": [
+    {"category": "httplib", "data": {
+        "http.method": "POST", "url": "https://push.example.com/send/DEVICE-abc",
+        "http.query": "", "http.fragment": "", "status_code": 201}},
+    {"category": "httplib", "data": {
+        "http.method": "GET", "url": "https://prices.example.com/v8/AAPL",
+        "http.query": "interval=1d&crumb=CRUMB-xyz", "http.fragment": "frag"}},
+    {"category": "bot.push", "message":
+        "gone: https://push.example.com/send/DEVICE-abc?k=CRUMB-xyz after 2"},
+    {"category": "query", "message": "SELECT 1", "data": None}]}}, None)
+shown = repr(crumbed)
+check("a report's list of calls keeps no path or query of any of them",
+      not any(s in shown for s in ("DEVICE-abc", "CRUMB-xyz", "AAPL", "frag'")), shown)
+first_crumb = crumbed["breadcrumbs"]["values"][0]["data"]
+check("but still says which site was called, how, and what it answered",
+      first_crumb["url"] == "https://push.example.com" and
+      first_crumb["http.method"] == "POST" and first_crumb["status_code"] == 201,
+      first_crumb)
+check("a call named in a log line is cut to its site too",
+      crumbed["breadcrumbs"]["values"][2]["message"]
+      == "gone: https://push.example.com after 2", shown)
+
+
 class Expected(Exception):
     pass
 
@@ -187,6 +212,44 @@ check("a backup file is written", _os.path.exists(path))
 check("it verifies", backup_mod.verify(path))
 check("the csv exports are written alongside",
       any(f.endswith(".csv") for f in _os.listdir(folder)))
+
+# The exports hold everybody's rows. Without whose each row is, they could not
+# be handed back to anyone.
+import csv as _csv  # noqa: E402
+from bot import export as export_mod  # noqa: E402
+
+conn = db.connect(DB)
+other = A.upsert_email_user(conn, "second@example.com")
+theirs = db.open_trade(conn, "MSFT", "1d", 1, entry=50, stop=45, target1=60,
+                       quantity=1, user=other.id)
+db.close_trade(conn, theirs, exit_price=55, exit_reason="target")
+owned = tempfile.mkdtemp(prefix="stockbot-backup-owners-")
+backup_mod.take(owned, with_csv=True)
+
+
+def _table(dataset):
+    name = [f for f in _os.listdir(owned) if f.startswith("stockbot-%s-" % dataset)][0]
+    with open(_os.path.join(owned, name), encoding="utf-8", newline="") as fh:
+        return list(_csv.reader(fh))
+
+
+books = {name: _table(name) for name in export_mod.DATASETS}
+check("every backup export but the shared record says whose each row is",
+      all((rows[0][0] == "user_id") == (name != "strategies")
+          for name, rows in books.items()), {k: v[0][:2] for k, v in books.items()})
+trade_rows = books["trades"]
+at = trade_rows[0].index("symbol")
+check("with that person's own account number",
+      {r[at]: r[0] for r in trade_rows[1:]} == {"AAPL": "1", "MSFT": str(other.id)},
+      trade_rows)
+check("on the exits as well",
+      [r[0] for r in books["exits"][1:]] == [str(other.id)], books["exits"])
+for fmt in ("csv", "json"):
+    body = export_mod.build(conn, "trades", fmt, user=other.id)["body"]
+    check("a person's own %s download has no such column" % fmt,
+          "MSFT" in body and "user_id" not in body, body[:200])
+A.delete_user(conn, other.id)
+conn.close()
 
 restored = db.connect(path)
 try:
@@ -265,6 +328,77 @@ except OSError as exc:
     check("and writes nothing", sorted(_os.listdir(sets)) == before)
 finally:
     backup_mod._free_bytes = real_free
+
+print()
+print("=" * 72)
+print("THE RUNNER OF THESE SUITES")
+print("=" * 72)
+
+import subprocess as _subprocess  # noqa: E402
+import run_all  # noqa: E402
+
+real_run = _subprocess.run
+
+
+def _ran(code, out):
+    return lambda *a, **kw: _subprocess.CompletedProcess(a, code, out, "")
+
+
+def _stalled(*a, **kw):
+    raise _subprocess.TimeoutExpired(a, 900, output=b"so far", stderr=None)
+
+
+got = {}
+try:
+    for label, stand_in in (("pass", _ran(0, "all fine\n")), ("fail", _ran(1, "SKIP\n")),
+                            ("skip", _ran(0, "SKIP  no browser here\n")),
+                            ("stalled", _stalled)):
+        run_all.subprocess.run = stand_in
+        got[label] = run_all.run_suite("test_templates.py")
+finally:
+    run_all.subprocess.run = real_run
+check("a suite that passes or fails is listed so",
+      got["pass"][0] == "PASS" and got["fail"][0] == "FAIL", got)
+check("one that could not run is listed as skipped, not as passed",
+      got["skip"][0] == "SKIP", got["skip"])
+check("one that never ends fails, with why, and the rest still run",
+      got["stalled"][0] == "FAIL" and "so far" in got["stalled"][1]
+      and "timed out" in got["stalled"][2], got["stalled"])
+
+print()
+print("=" * 72)
+print("THE CHECK OF A DEPLOYMENT READS THE HAND-OFF TO GOOGLE")
+print("=" * 72)
+
+import preflight  # noqa: E402
+
+real_fetch = preflight.fetch
+
+
+def _hand_off(status, location):
+    """The verdicts preflight gives when /auth/google answers this."""
+    preflight.fetch = lambda url, **kw: {"status": status, "body": b"", "seconds": 0.0,
+                                         "headers": {"location": location}, "url": url}
+    report = preflight.Report()
+    try:
+        preflight.google_hand_off("https://example.com", report)
+    finally:
+        preflight.fetch = real_fetch
+    return [v for v, _, _ in report.rows]
+
+
+GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?client_id=x"
+check("PKCE, a state and no secret pass",
+      _hand_off(302, GOOGLE + "&code_challenge=abc&state=s") == ["PASS", "PASS"])
+check("a missing challenge fails",
+      _hand_off(302, GOOGLE + "&state=s") == ["FAIL", "PASS"])
+check("a missing state fails",
+      _hand_off(302, GOOGLE + "&code_challenge=abc") == ["FAIL", "PASS"])
+check("the secret in the address fails",
+      _hand_off(302, GOOGLE + "&code_challenge=abc&state=s&client_secret=y")
+      == ["PASS", "FAIL"])
+check("with Google sign-in off nothing is claimed to have been checked",
+      _hand_off(503, "") == ["WARN"])
 
 print()
 print("=" * 72)

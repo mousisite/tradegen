@@ -121,7 +121,8 @@ def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> 
         conn.row_factory = sqlite3.Row
         try:
             for name in export_mod.DATASETS:
-                built = export_mod.build(conn, name, "csv")
+                # Everybody's rows are in one file, so each says whose it is.
+                built = export_mod.build(conn, name, "csv", with_owner=True)
                 path = os.path.join(out_dir, "stockbot-%s-%s.csv" % (name, taken))
                 with open(path, "w", encoding="utf-8", newline="") as fh:
                     fh.write(built["body"])

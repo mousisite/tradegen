@@ -110,6 +110,31 @@ def header(result: Dict, name: str) -> str:
     return ""
 
 
+def google_hand_off(base: str, report: Report) -> None:
+    """Where the Google button sends a browser, read without following it."""
+    from urllib.parse import parse_qs, urlsplit
+
+    start = fetch(base + "/auth/google")
+    going = urlsplit(header(start, "Location"))
+    if start["status"] not in (301, 302, 303, 307, 308) \
+            or going.hostname != "accounts.google.com":
+        report.warn("the Google button goes to Google",
+                    "got %d, so the hand-off could not be checked; Google "
+                    "sign-in may not be set up" % start["status"])
+        return
+    sent = parse_qs(going.query)
+    if sent.get("code_challenge") and sent.get("state"):
+        report.ok("sign-in reaches Google with PKCE and a state")
+    else:
+        report.bad("sign-in reaches Google with PKCE and a state",
+                   "missing %s" % " and ".join(
+                       k for k in ("code_challenge", "state") if not sent.get(k)))
+    if "client_secret" in going.query or "client_secret" in going.fragment:
+        report.bad("the client secret is not in that address", "it is there")
+    else:
+        report.ok("the client secret is not in that address")
+
+
 def run(base: str, report: Report) -> None:
     base = base.rstrip("/")
 
@@ -242,6 +267,7 @@ def run(base: str, report: Report) -> None:
         else:
             report.bad("a stranger sees the example account, labelled as one",
                        "got %d without the example banner" % journal["status"])
+        google_hand_off(base, report)
 
     print()
     print("=" * 74)

@@ -46,7 +46,7 @@ SUITES = [
     ("test_app_handoff.py",  False, "the iPhone app's browser sheet handing its sign-in back"),
     ("test_database.py",     True,  "schema, journal, statistics and invariants"),
     ("test_learning.py",     True,  "strategy weight learning stays bounded"),
-    ("test_audit.py",        True,  "self-audit finds no contradictions in a report"),
+    ("test_audit.py",        True,  "what has no meaning on daily bars has no say there"),
     ("test_pipeline.py",     True,  "a full analysis end to end on several instruments"),
     ("test_web_forms.py",    True,  "settings, journal and analysis form handling"),
     ("test_web.py",          True,  "research, screener, portfolio, monitor and links"),
@@ -75,7 +75,7 @@ SUITES = [
     ("test_journal_exits.py", False, "trailing stops, closing in parts, and closing after a split"),
     ("test_journal_tags.py", False, "journal tags, review, breakdown, daily rules, export, trade picture"),
     ("test_risk_tools.py",   False, "the size calculator and the survival check, sums and pages"),
-    ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; a copy before each release"),
+    ("test_plan_recheck.py", False, "a lapsing paid plan read from Stripe; how the server starts, listens and stops"),
     ("test_lock.py",         False, "the lock file the server installs from agrees with requirements.txt"),
     ("test_ai_consent.py",   False, "a screenshot goes to Anthropic only after the person says yes"),
     ("test_app_mode.py",     False, "the iPhone app: no Stripe, counting, website links or downloads inside it; the review sign-in"),
@@ -83,6 +83,25 @@ SUITES = [
 ]
 
 TIMEOUT = 900
+
+
+def run_suite(name):
+    """Run one suite. Returns (verdict, its output, its errors), never raises."""
+    def words(said):
+        return said.decode("utf-8", "replace") if isinstance(said, bytes) else said or ""
+
+    try:
+        proc = subprocess.run([sys.executable, os.path.join(HERE, name)],
+                              capture_output=True, text=True, timeout=TIMEOUT,
+                              cwd=ROOT)
+    except subprocess.TimeoutExpired as exc:
+        return ("FAIL", words(exc.stdout),
+                words(exc.stderr) + "\ntimed out after %d s" % TIMEOUT)
+    out, err = words(proc.stdout), words(proc.stderr)
+    if proc.returncode != 0:
+        return "FAIL", out, err
+    # A suite that could not run here says so first, and has proved nothing.
+    return ("SKIP" if out.lstrip().startswith("SKIP") else "PASS"), out, err
 
 
 def main() -> int:
@@ -120,30 +139,32 @@ def main() -> int:
             sys.stdout.write(pending)
             sys.stdout.flush()
         started = time.time()
-        proc = subprocess.run([sys.executable, os.path.join(HERE, name)],
-                              capture_output=True, text=True, timeout=TIMEOUT,
-                              cwd=ROOT)
+        verdict, out, err = run_suite(name)
         took = time.time() - started
-        ok = proc.returncode == 0
-        done = "  %-*s  %-4s  %5.1fs  %s" % (width, name, "PASS" if ok else "FAIL",
-                                             took, why)
+        done = "  %-*s  %-4s  %5.1fs  %s" % (width, name, verdict, took, why)
         print(("\r" + done + " " * max(0, len(pending) - len(done))) if live else done)
-        if not ok:
-            tail = (proc.stdout or "").strip().splitlines()[-25:]
-            for line in tail:
+        if verdict == "SKIP":
+            print("      | %s" % out.strip().splitlines()[0])
+        if verdict == "FAIL":
+            for line in out.strip().splitlines()[-25:]:
                 print("      | %s" % line)
-            err = (proc.stderr or "").strip().splitlines()[-12:]
-            for line in err:
+            for line in err.strip().splitlines()[-12:]:
                 print("      ! %s" % line)
-        results.append((name, ok, took, why))
+        results.append((name, verdict, took, why))
 
-    passed = sum(1 for _, ok, _, _ in results if ok)
+    passed = sum(1 for _, v, _, _ in results if v == "PASS")
+    skipped = [n for n, v, _, _ in results if v == "SKIP"]
+    failed = [n for n, v, _, _ in results if v == "FAIL"]
     total_time = sum(t for _, _, t, _ in results)
     print()
-    print("%d of %d suites passed in %.0fs" % (passed, len(results), total_time))
-    if passed != len(results):
-        print("failed: %s" % ", ".join(n for n, ok, _, _ in results if not ok))
-    return 0 if passed == len(results) else 1
+    print("%d of %d suites passed%s in %.0fs"
+          % (passed, len(results),
+             ", %d skipped" % len(skipped) if skipped else "", total_time))
+    if skipped:
+        print("skipped, so not checked: %s" % ", ".join(skipped))
+    if failed:
+        print("failed: %s" % ", ".join(failed))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

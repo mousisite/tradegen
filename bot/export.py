@@ -43,6 +43,12 @@ def _rows_to_csv(rows: Iterable[Dict], columns: List[str]) -> str:
     return buf.getvalue()
 
 
+# Whose row it is: the number their account has in the users table. Only the
+# backups write it, because they hold everybody's rows; a person's own
+# download is all theirs and has no such column.
+OWNER = "user_id"
+
+
 # --- trades -----------------------------------------------------------------
 
 TRADE_COLUMNS = [
@@ -84,6 +90,7 @@ def trades(conn: sqlite3.Connection, status: Optional[str] = None,
         parts = db.trade_parts(row, exits.get(row["id"], []))
         ticked = journal.checklist_of(row)
         out.append({
+            OWNER: db._column(row, OWNER),
             "id": row["id"],
             "symbol": row["symbol"],
             "interval": row["interval"],
@@ -147,6 +154,7 @@ def exits(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
         for part in db.trade_parts(row, held.get(row["id"], []))["exits"]:
             split = part["split"]
             out.append({
+                OWNER: db._column(row, OWNER),
                 "trade_id": row["id"],
                 "symbol": row["symbol"],
                 "side": "long" if row["direction"] > 0 else "short",
@@ -187,6 +195,7 @@ def theses(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
         then, close = row["price"], row["closed_price"]
         move = ((close - then) / then * 100.0) if (then and close) else None
         out.append({
+            OWNER: db._column(row, OWNER),
             "id": row["id"],
             "symbol": row["symbol"],
             "saved": _when(row["created_ts"]),
@@ -260,6 +269,7 @@ def runs(conn: sqlite3.Connection, limit: int = 5000,
     for row in conn.execute(sql, args):
         keys = row.keys()
         out.append({
+            OWNER: db._column(row, OWNER),
             "id": row["id"],
             "when": _when(row["ts"]),
             "symbol": row["symbol"],
@@ -322,8 +332,12 @@ DATASETS = {
 
 
 def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
-          user: Optional[int] = None) -> Dict:
-    """One dataset in one format, ready to be sent as a file."""
+          user: Optional[int] = None, with_owner: bool = False) -> Dict:
+    """One dataset in one format, ready to be sent as a file.
+
+    with_owner puts whose each row is in the first column, for the backups.
+    The strategy record is nobody's, so it has none either way.
+    """
     spec = DATASETS.get(dataset)
     if spec is None:
         raise ValueError("There is nothing called %r to export." % dataset)
@@ -331,11 +345,17 @@ def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
         raise ValueError("Exports are CSV or JSON, not %r." % fmt)
 
     rows = spec["rows"](conn, user=user)
+    columns = list(spec["columns"])
+    if with_owner and spec["rows"] is not strategies:
+        columns.insert(0, OWNER)
+    else:
+        for row in rows:
+            row.pop(OWNER, None)
     stamp = time.strftime("%Y-%m-%d")
     name = "stockbot-%s-%s.%s" % (dataset, stamp, fmt)
 
     if fmt == "csv":
-        body = _rows_to_csv(rows, spec["columns"])
+        body = _rows_to_csv(rows, columns)
         mime = "text/csv; charset=utf-8"
     else:
         body = json.dumps({
