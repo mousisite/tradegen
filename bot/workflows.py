@@ -22,7 +22,7 @@ from . import database as db
 from . import engine
 from . import portfolio as portfolio_mod
 from . import screener as screener_mod
-from .market import DataError, fetch_bars, format_price, needs_exact
+from .market import DataError, fetch_bars, format_price, needs_exact, normalise_symbol
 
 
 # A routine answers inside one page request, which Cloudflare drops after 100
@@ -238,7 +238,8 @@ def _check_alerts(conn, report: RunReport, step, user=1, check_alerts=None) -> N
 def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     step("Marking positions to market")
     # What is held: a position closed in part counts only what is left.
-    rows = db.open_positions(conn, user=user)
+    # All of them: SQLite reads a limit below zero as none.
+    rows = db.open_positions(conn, limit=-1, user=user)
     if not rows:
         report.steps.append(Step("Positions", "Nothing open.", "ok"))
         return
@@ -246,7 +247,8 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     from . import config as config_mod
     view = portfolio_mod.build(rows, cfg["account_size"], with_correlation=True,
                                cost_bps={kind: config_mod.cost_bps_for(kind, cfg)
-                                         for kind in ("equity", "crypto", "other")})
+                                         for kind in ("equity", "crypto", "other")}
+                               | {"futures": float(cfg.get("cost_bps_futures", 1.0))})
     # What the prices just read saw is kept, as the journal keeps it.
     portfolio_mod.keep_reads(conn, view)
     for p in view.positions:
@@ -305,7 +307,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
     rows = sorted(rows, key=lambda r: (r["last_run"] or 0, r["symbol"]))
     started, done = time.time(), 0
     left: List[str] = []
-    changed = 0
+    changed = failed = 0
     looks = _Looks(conn, user)
     for row in rows:
         symbol, interval = row["symbol"], row["interval"] or cfg["interval"]
@@ -329,6 +331,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
             looks.give_back(symbol, interval, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
                                      str(exc)[:140], "failed"))
+            failed += 1
             continue
 
         done += 1
@@ -366,14 +369,21 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
             "Not analysed this time: %s. One run takes up to %d instruments, or "
             "about a minute. Run it again and these come first."
             % (shown, WATCH_MOST), "attention"))
-    looked = len(rows) - len(looks.refused) - len(left)
-    if not looked:
+    if not done and not failed:
         report.headline = ("Nothing on the watchlist was analysed: today's free "
                            "looks are used up.")
         return
-    report.headline = ("%d of %d watched instruments changed their call."
-                       % (changed, looked) if changed
-                       else "None of the %d watched instruments changed." % looked)
+    if not done:
+        report.headline = "Nothing on the watchlist could be analysed this time."
+    elif done == 1:
+        report.headline = ("The one watched instrument analysed %s."
+                           % ("changed its call" if changed else "did not change"))
+    else:
+        report.headline = ("%d of %d watched instruments changed their call."
+                           % (changed, done) if changed
+                           else "None of the %d watched instruments changed." % done)
+    if failed and done:
+        report.headline += " %d more could not be analysed." % failed
     if looks.refused:
         report.headline += (" %d more %s not analysed, for want of a free look."
                             % (len(looks.refused),
@@ -401,7 +411,11 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
         # morning check take minutes, so the deeper pass is its own routine.
         def grab(row):
             try:
-                return row, fetch_bars(row["symbol"], row["interval"] or "1d")
+                # What the rest of the app opens the entry as: a bare BTC
+                # saved as typed is the coin, not the fund of that ticker.
+                return row, fetch_bars(normalise_symbol(row["symbol"],
+                                                        exact=bool(row["exact"])),
+                                       row["interval"] or "1d")
             except Exception:
                 return row, None
 
@@ -423,8 +437,12 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
     counts = db.stats(conn, user=user)
     report.steps.append(Step(
         "Summary",
-        "%d analyses recorded, %d trades logged, %d alerts set, %d instruments watched."
-        % (counts["runs"], counts["trades"], counts["alerts"], counts["watchlist"]),
+        "%d %s recorded, %d %s logged, %d %s set, %d %s watched."
+        % (counts["runs"], "analysis" if counts["runs"] == 1 else "analyses",
+           counts["trades"], "trade" if counts["trades"] == 1 else "trades",
+           counts["alerts"], "alert" if counts["alerts"] == 1 else "alerts",
+           counts["watchlist"],
+           "instrument" if counts["watchlist"] == 1 else "instruments"),
         "ok"))
 
 
@@ -449,6 +467,7 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
 
     looks = _Looks(conn, user)
     best = found.passed[:4]
+    done = 0
     for candidate in best:
         # The screen lists Yahoo's own symbols, all of them companies: LINK
         # there is Interlink Electronics, never the coin.
@@ -466,6 +485,7 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
                                      str(exc)[:140], "failed"))
             continue
+        done += 1
         status = "attention" if result.plan.action in ("BUY", "WAIT") else "ok"
         report.steps.append(Step(
             "Candidate: %s" % candidate.symbol,
@@ -474,9 +494,14 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
              "exact": exact}))
 
     looks.report(report)
+    count = len(found.passed)
+    passed = "%d candidate%s passed the screen" % (count, "" if count == 1 else "s")
     if len(looks.refused) == len(best):
-        report.headline = ("%d candidates passed the screen, but today's free looks "
-                           "are used up, so none was analysed." % len(found.passed))
-        return
-    report.headline = "%d candidates passed the screen; the best few were analysed." \
-                      % len(found.passed)
+        report.headline = ("%s, but today's free looks are used up, so none was "
+                           "analysed." % passed)
+    elif not done:
+        report.headline = "%s, but none could be analysed just now." % passed
+    elif count == 1:
+        report.headline = "%s and was analysed." % passed
+    else:
+        report.headline = "%s; the best few were analysed." % passed

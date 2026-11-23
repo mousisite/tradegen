@@ -115,6 +115,20 @@ class Candidate:
     def value(self, field_name: str):
         return getattr(self, field_name, None)
 
+    @property
+    def size(self) -> str:
+        """The market cap at the scale a person would say it: 52M, 3.40T."""
+        cap = self.market_cap
+        if not cap:
+            return ""
+        # Where each takes over from the one below is where that would round
+        # up to it: 999.96 billion is 1.00T, not 1000.0B.
+        for least, scale, shown in ((999.95e9, 1e12, "%.2fT"), (999.5e6, 1e9, "%.1fB"),
+                                    (950e3, 1e6, "%.0fM")):
+            if cap >= least:
+                return shown % (cap / scale)
+        return "under 1M"
+
 
 @dataclass
 class ScreenResult:
@@ -401,6 +415,13 @@ def _load_deep(candidates: List[Candidate], deadline: Optional[float] = None) ->
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _figure(value: float) -> str:
+    """A number as typed: 1,000,000, never 1e+06."""
+    if float(value).is_integer():
+        return "{:,.0f}".format(value)
+    return "{:,.10g}".format(value)
+
+
 def _describe(filters: Dict[str, float]) -> List[Dict]:
     """Human-readable statement of what was asked for."""
     out = []
@@ -412,11 +433,11 @@ def _describe(filters: Dict[str, float]) -> List[Dict]:
         elif unit == "usd":
             shown = "{:,.0f}".format(value)
         elif unit == "points":
-            shown = "%.4g%%" % value
+            shown = "%s%%" % _figure(value)
         elif unit == "x":
             shown = "%.1fx" % value
         else:
-            shown = "{:,.4g}".format(value)
+            shown = _figure(value)
         out.append({"key": key, "label": spec["label"], "value": shown,
                     "deep": bool(spec.get("deep"))})
     return out

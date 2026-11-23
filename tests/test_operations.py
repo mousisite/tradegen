@@ -474,6 +474,17 @@ for dataset in export_mod.DATASETS:
               "attachment" in disposition, disposition)
 check("a made-up dataset 404s", c.get("/export/nope.csv").status_code == 404)
 check("a made-up format 404s", c.get("/export/trades.xml").status_code == 404)
+for odd, answer in (
+        ("/export/Your account is suspended.csv", b"There is no export by that name."),
+        ("/export/trades.Your account is suspended", b"Exports are CSV or JSON.")):
+    r = c.get(odd)
+    check("and its page never repeats what the address said (%s)" % odd[8:14],
+          r.status_code == 404 and answer in r.data
+          and b"suspended" not in r.data[r.data.index(b"<main"):], r.status_code)
+r = c.post("/workflow/Your account is suspended")
+check("nor does a made-up routine's",
+      r.status_code == 404 and b"suspended" not in r.data[r.data.index(b"<main"):],
+      r.status_code)
 
 settings_page = c.get("/settings").data.decode("utf-8", "replace")
 check("the settings page offers the downloads",

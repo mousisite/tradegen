@@ -157,17 +157,19 @@ check("an unpriced holding's cost stays out of cash",
       close(v.cash, max(0.0, 10000 - 10000 - 500)), v.cash)
 
 
-def whole(prices, rows, betas=None, account=10000):
+def whole(prices, rows, betas=None, account=10000, asset="equity", cost_bps=None,
+          with_correlation=False):
     """A portfolio of rows at the given prices and betas, nothing fetched."""
     def enrich(positions, view):
         for q in positions:
-            q.price, q.asset_class = prices[q.symbol], "equity"
+            q.price, q.asset_class = prices[q.symbol], asset
             q.beta = (betas or {}).get(q.symbol)
             if q.price is None:
                 view.failed.append(q.symbol)
     real, P._enrich = P._enrich, enrich
     try:
-        return P.build(rows, account=account, with_correlation=False)
+        return P.build(rows, account=account, with_correlation=with_correlation,
+                       cost_bps=cost_bps)
     finally:
         P._enrich = real
 
@@ -199,6 +201,39 @@ check("a portfolio short on balance is said to move against the market",
 v = whole({"AAA": 100.0}, [held(1, "AAA")], {"AAA": 0.6})
 check("and one that is long is not",
       any(o.endswith("60% as much as the market.") for o in v.observations), v.observations)
+
+CFG_COSTS = {"equity": 2.0, "crypto": 20.0, "other": 5.0, "futures": 1.0}
+v = whole({"AAA": 250.0}, [held(1, "AAA", direction=-1, entry=250, stop=260)],
+          cost_bps=CFG_COSTS)
+said = next(o for o in v.observations if o.startswith("If every stop"))
+check("trading costs that round to nothing are not mentioned, and a short is not above its stop",
+      said == "If every stop still ahead were hit from here, the positions not yet at "
+              "their stops would lose a further 100, or 1.0% of the account.", said)
+v = whole({"AAA": 250.0}, [held(1, "AAA", qty=4000, entry=250, stop=240)], cost_bps=CFG_COSTS)
+check("and costs that do not are",
+      any(o.endswith("of the account, including about 100 in trading costs to get out.")
+          for o in v.observations), v.observations)
+fut = [held(1, "ES=F", qty=50, entry=6000, stop=5900)]
+check("a futures contract pays the futures cost to get out, as in the journal",
+      close(whole({"ES=F": 6000.0}, fut, asset="other", cost_bps=CFG_COSTS).exit_costs, 15.0))
+check("anything else the source files under other pays that rate",
+      close(whole({"EURUSD=X": 1.0}, [held(1, "EURUSD=X", qty=100, entry=1, stop=0.9)],
+                  asset="other", cost_bps=CFG_COSTS).exit_costs, 0.025))
+
+compared = []
+real_matrix = P.risk_mod.correlation_matrix
+P.risk_mod.correlation_matrix = lambda names, interval: compared.append(list(names)) or {
+    "usable": True, "symbols": names, "average": 0.5, "notes": []}
+try:
+    many = ["S%03d" % n for n in range(P.COMPARE_MOST + 5)]
+    v = whole({s: 10.0 for s in many},
+              [held(n, s, qty=n + 1, entry=10, stop=9) for n, s in enumerate(many)],
+              with_correlation=True)
+finally:
+    P.risk_mod.correlation_matrix = real_matrix
+check("only the largest holdings are compared with each other, and the page says so",
+      compared == [many[5:]] and v.correlation["notes"]
+      == ["Compared between your 40 largest holdings, of 45."], (compared, v.correlation))
 
 print()
 print("=" * 72)
@@ -399,6 +434,51 @@ check("the red box says the size was not logged, not that it lost -0.00",
       "stop of 95: size not logged (-2.00R)." in breach
       and "0.00 (" not in breach, breach)
 check("and so does the figure beside it", "0.00 open" not in html)
+holdings = html[html.index("<h2>Holdings</h2>"):]
+holdings = holdings[:holdings.index("</table>")]
+check("on a phone each holding is a card, every figure under its column's name",
+      '<table class="stack">' in holdings
+      and _re.findall(r'data-label="([^"]+)"', cells("KNOWN")[1])
+      == [h for h in _re.findall(r"<th[^>]*>(.*?)</th>", holdings) if h != "Instrument"],
+      _re.findall(r'data-label="([^"]+)"', cells("KNOWN")[1]))
+check("the shock table says what it leaves out",
+      "so a genuine crash would hurt more than this straight-line estimate." in html)
+
+# A long journal is read whole: nothing past the newest hundred went unsaid.
+conn = db.connect(DB)
+conn.execute("DELETE FROM trades")
+conn.commit()
+for n in range(105):
+    db.open_trade(conn, "L%03d" % n, "1d", 1, entry=100, stop=95, target1=None, quantity=1)
+conn.close()
+
+
+def long_prices(positions, view):
+    for q in positions:
+        q.price, q.asset_class = 100.0, "equity"
+
+
+asked = []
+P._enrich = long_prices
+P.risk_mod.correlation_matrix = offline
+W = __import__("bot.workflows", fromlist=["workflows"])
+real_build = P.build
+P.build = lambda rows, *a, **k: asked.append((len(rows), k.get("cost_bps"))) or real_build(
+    rows, *a, **k)
+try:
+    html = client.get("/portfolio").data.decode("utf-8")
+    conn = db.connect(DB)
+    W._check_positions(conn, __import__("web").config_mod.load(harness.CFG_PATH),
+                       W.RunReport(name="positions", started=0, finished=0),
+                       lambda _label: None, user=1)
+    conn.close()
+finally:
+    P._enrich, P.risk_mod.correlation_matrix, P.build = real[0], real[1], real_build
+check("every open position is on the page and in the routine, not the newest hundred",
+      [n for n, _c in asked] == [105, 105] and "<b>L000</b>" in html and "<b>L104</b>" in html,
+      [n for n, _c in asked])
+check("and both charge a future its own cost",
+      all(c and c.get("futures") == 1.0 for _n, c in asked), asked)
 
 print()
 print("%d failure(s)" % len(fails))

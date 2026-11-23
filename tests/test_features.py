@@ -959,6 +959,67 @@ try:
     check("out of time, it starts no more and says so",
           len(analysed) == 1 and "39 more were left" in report.headline, report.headline)
 
+    # One of anything is said as one, and a failure is not an answer.
+    conn = db.connect(DB)
+    sol = A.upsert_email_user(conn, "sol@example.com")
+    db.watch_add(conn, "ZZO1", "1d", user=sol.id)
+    db.open_trade(conn, "ZZO1", "1d", 1, 100.0, 95.0, 110.0, quantity=10, user=sol.id)
+    db.watch_add(conn, "LINK", "1d", user=sol.id, exact=True)
+    db.watch_add(conn, "BTC", "1d", user=sol.id)
+    # Saved as typed, before tickers were tidied on the way in.
+    conn.execute("UPDATE watchlist SET symbol='BTC', exact=0 WHERE user_id=? AND "
+                 "symbol LIKE 'BTC%'", (sol.id,))
+    conn.commit()
+    conn.close()
+    priced, real_bars = [], workflows.fetch_bars
+    real_check = workflows._check_positions
+    workflows.fetch_bars = lambda symbol, interval="1d", *a, **k: priced.append(symbol) or NS(
+        last_price=110.0, prev_close=100.0)
+    workflows._check_positions = lambda *a, **k: None
+    try:
+        report = run_routine("morning", sol)
+    finally:
+        workflows.fetch_bars, workflows._check_positions = real_bars, real_check
+    check("the morning review prices an entry as the instrument it opens",
+          sorted(priced) == ["BTC-USD", "LINK", "ZZO1"], priced)
+    check("and one trade is said as one",
+          "0 analyses recorded, 1 trade logged, 0 alerts set, 3 instruments watched."
+          in [s.detail for s in report.steps], [s.detail for s in report.steps])
+    conn = db.connect(DB)
+    for sym in ("LINK", "BTC"):
+        conn.execute("DELETE FROM watchlist WHERE user_id=? AND symbol=?", (sol.id, sym))
+    conn.commit()
+    conn.close()
+    report = run_routine("watchlist", sol)
+    check("one watched instrument is said as one",
+          report.headline == "The one watched instrument analysed did not change.",
+          report.headline)
+    conn = db.connect(DB)
+    for sym in ("ZZO2", "ZZO3"):
+        db.watch_add(conn, sym, "1d", user=sol.id)
+    conn.close()
+    refuse.add("ZZO2")
+    report = run_routine("watchlist", sol)
+    check("an analysis that failed is not counted as looked at",
+          report.headline == "None of the 2 watched instruments changed. "
+                             "1 more could not be analysed.", report.headline)
+    refuse.update(("ZZO1", "ZZO3"))
+    report = run_routine("watchlist", sol)
+    check("and when all of them fail it says so",
+          report.headline == "Nothing on the watchlist could be analysed this time.",
+          report.headline)
+    workflows.screener_mod.run = lambda **_k: NS(
+        passed=[NS(symbol="ZZO9")], scanned=12, notes=[])
+    report = run_routine("hunt", sol)
+    check("one candidate is said as one",
+          report.headline == "1 candidate passed the screen and was analysed.", report.headline)
+    refuse.add("ZZO9")
+    report = run_routine("hunt", sol)
+    check("and not as analysed when it was not",
+          report.headline == "1 candidate passed the screen, but none could be analysed "
+                             "just now.", report.headline)
+    refuse.clear()
+
     # The button on the page.
     sign_in(c, rae)
     web._RATE.clear()
@@ -988,7 +1049,7 @@ try:
         web._CACHE.pop(("kept",), None)
         web._RATE.clear()
 finally:
-    workflows.engine.analyse = real_routine[0]
+    workflows.engine.analyse, workflows.screener_mod.run = real_routine
 
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)

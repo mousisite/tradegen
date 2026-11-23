@@ -497,9 +497,11 @@ def build(conn: sqlite3.Connection, dataset: str, fmt: str = "csv",
     """One dataset in one format, ready to be sent as a file."""
     spec = DATASETS.get(dataset)
     if spec is None:
-        raise ValueError("There is nothing called %r to export." % dataset)
+        # Both are said on the page, so neither repeats what was typed: the
+        # address of a link is somebody else's words.
+        raise ValueError("There is no export by that name.")
     if fmt not in ("csv", "json"):
-        raise ValueError("Exports are CSV or JSON, not %r." % fmt)
+        raise ValueError("Exports are CSV or JSON.")
 
     rows = list(spec["rows"](conn, user=user))
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
