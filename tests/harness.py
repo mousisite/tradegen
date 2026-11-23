@@ -13,6 +13,10 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# web.py and serve.py read .env as they are imported. A suite that has removed
+# the real keys must not be given them back: it would call Claude or Stripe.
+os.environ["STOCKBOT_NO_DOTENV"] = "1"
+
 # Set by isolate(), so a suite can read the paths it was given.
 DB_PATH = ""
 CFG_PATH = ""
@@ -66,7 +70,13 @@ def isolated_web(label: str = "web"):
     Returns (test_client, db_path). Use db.connect(db_path) for direct checks so
     the test and the server are certain to be looking at the same file.
     """
-    import web
     db_path, cfg_path = isolate(label)
+    import web
     _point_web_at(db_path, cfg_path)
     return web.app.test_client(), db_path
+
+
+# Once as this is imported, before any suite imports web: web.py reads or makes
+# the cookie key beside the database as it loads, and code under test may load
+# the settings file. Both would otherwise be the real ones.
+isolate("start")

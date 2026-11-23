@@ -30,6 +30,26 @@ print("nearest level:", nearest)
 sig = S.pivot_levels(ctx, i)
 print("signal:", sig.score, sig.reason)
 
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("   %s %s%s" % ("OK  " if ok else "FAIL", name,
+                          ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+
+# The furthest the classic formulas reach is four thirds of the day's range
+# past it, when the close sits on the day's own high or low.
+reach = (ph - pl) * 4.0 / 3.0 + 1e-6 * price
+check("every level is in the instrument's own prices, near that day's range",
+      all(pl - reach <= v <= ph + reach for v in p.values()), p)
+order = [p[k] for k in ("s3", "s2", "s1", "pivot", "r1", "r2", "r3")]
+check("supports, pivot and resistances are in order", order == sorted(order), order)
+check("the pivot is inside the day's range", pl <= p["pivot"] <= ph, p["pivot"])
+check("the vote is between -1 and 1", -1.0 <= sig.score <= 1.0, sig.score)
+
 
 # --- exit code so a runner can tell pass from fail -------------------------
 import sys as _exit_sys

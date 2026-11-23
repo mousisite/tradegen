@@ -1,7 +1,13 @@
 """Exercise the database: schema, runs, signals, stats, journal, invariants."""
-import sys, os, tempfile
+import sys, os
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness
+
+# A private database and settings, so two runs at once do not share a file.
+tmp = harness.isolate("database")[0]
+
 from bot import config as config_mod, database as db
 from bot.market import fetch_bars
 from bot.strategies import build_context, evaluate
@@ -11,10 +17,15 @@ from bot.learning import measure_strategies
 from bot.sentiment import Sentiment
 from bot.decision import decide
 
-tmp = os.path.join(tempfile.gettempdir(), "t_stockbot.db")
-for suffix in ("", "-wal", "-shm"):
-    if os.path.exists(tmp + suffix):
-        os.remove(tmp + suffix)
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
 
 conn = db.connect(tmp)
 print("connected, schema created ->", tmp)
@@ -47,7 +58,7 @@ print("\nafter runs:", db.stats(conn))
 before = db.stats(conn)["strategy_stats"]
 db.save_strategy_stats(conn, "AAPL", "5m", rep)
 after = db.stats(conn)["strategy_stats"]
-print("re-saving stats changed row count by %d (expect 0 growth for same keys)" % (after - before))
+print("re-saving stats changed row count by %d" % (after - before))
 
 print("\n--- journal ---")
 t1 = db.open_trade(conn, "AAPL", "5m", 1, entry=315.00, stop=313.50, target1=317.25,
@@ -60,10 +71,19 @@ print("opened trades:", t1, t2, t3, " open count:", db.count_open(conn))
 
 r = db.close_trade(conn, t1, exit_price=317.25, exit_reason="target")
 print("closed long at target -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a long closed at a target 1.5 times the risk away made 1.5R and its cash",
+      abs(r["r_multiple"] - 1.5) < 1e-9 and abs(r["pnl"] - 2.25 * 60) < 1e-6,
+      (r["r_multiple"], r["pnl"]))
 r = db.close_trade(conn, t2, exit_price=78400, exit_reason="stop")
 print("closed short at stop  -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a short closed at its stop lost 1R and its cash",
+      abs(r["r_multiple"] + 1.0) < 1e-9 and abs(r["pnl"] + 400 * 0.05) < 1e-6,
+      (r["r_multiple"], r["pnl"]))
 r = db.close_trade(conn, t3, exit_price=219.0, exit_reason="manual")
 print("closed long partial   -> R=%+.2f pnl=%+.2f" % (r["r_multiple"], r["pnl"]))
+check("a long closed half way to its stop lost 0.5R and its cash",
+      abs(r["r_multiple"] + 0.5) < 1e-9 and abs(r["pnl"] + 40) < 1e-6,
+      (r["r_multiple"], r["pnl"]))
 
 print("\nsummary:", {k: (round(v, 4) if isinstance(v, float) else v)
                      for k, v in db.journal_summary(conn).items()})
@@ -78,9 +98,10 @@ for desc, fn in [
 ]:
     try:
         fn()
-        print("  BAD  %s was accepted" % desc)
+        check("%s is rejected" % desc, False, "it was accepted")
     except ValueError as e:
-        print("  OK   %s rejected: %s" % (desc, str(e)[:52]))
+        check("%s is rejected" % desc, True)
+        print("       %s" % str(e)[:52])
 
 print("\n--- leaderboard across instruments ---")
 for row in db.strategy_leaderboard(conn, minimum=100, limit=8):
@@ -101,16 +122,6 @@ print("\n--- opening a connection, and migrating ---")
 import sqlite3
 import threading
 import time
-
-fails = []
-
-
-def check(name, ok, detail=""):
-    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
-                         ("  " + str(detail)) if detail and not ok else ""))
-    if not ok:
-        fails.append(name)
-
 
 # Every request opens a connection. Doing the migrations each time needed the
 # write lock, so a long write made every page, and the health check, wait.
@@ -152,7 +163,7 @@ def columns(path, table):
         raw.close()
 
 
-old = os.path.join(tempfile.gettempdir(), "t_stockbot_old.db")
+old = os.path.join(os.path.dirname(tmp), "older.db")
 old_file(old)
 db.migrate(old)
 check("migrating an older file adds what it lacks",
