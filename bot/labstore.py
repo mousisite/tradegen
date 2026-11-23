@@ -163,15 +163,20 @@ def day_error(parts: Sequence, other: Sequence = ()) -> Optional[float]:
     taken out is added over the instruments before it is squared, so
     instruments that move together on a day count as one day's evidence, and
     unrelated ones cancel. For one instrument it is setuplab.clustered_se.
+    An instrument with trades on one date only has no spread of its own to
+    read, so its date is set against the average of them all: two trades in
+    one corner of the lab must not cost a thousand their margin.
     other holds (trades, standard error) of instruments whose dates are not
     known: theirs are added in full, as if they moved with all the rest.
-    None when an instrument's error cannot be worked out.
+    None when there are no two dates, or one of those has no error.
     """
     total = 0
     left: Dict[int, float] = {}
+    known = sum(n for n, _, _ in parts)
+    overall = sum(n * mean for n, mean, _ in parts) / known if known else 0.0
     for n, mean, days in parts:
-        if n >= 2 and len(days) < 2:
-            return None
+        if len(days) < 2:
+            mean = overall
         total += n
         for day, (k, s) in days.items():
             left[day] = left.get(day, 0.0) + (s - k * mean)
