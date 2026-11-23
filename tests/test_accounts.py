@@ -6,6 +6,7 @@ other's trades. Adding a login without that would be worse than having no login
 at all, because it looks like a boundary while not being one.
 """
 import os as _os
+import re
 import sys as _sys
 import time
 
@@ -374,6 +375,52 @@ sign_in_as(c, alice)
 r = c.post("/settings", data={"account_size": "123456", "risk_per_trade_pct": "2"})
 check("Alice can save her settings", r.status_code == 302, r.status_code)
 check("and sees them", "123456" in visible(c, "/settings"))
+
+# Only the four journal rules used to be checked: the rest went straight into
+# every size and plan, and a NaN broke that account's pages.
+kept = A.settings_for(db.connect(DB), alice.id)
+for form, why in (({"account_size": "-5000"}, "a negative account"),
+                  ({"account_size": "nan"}, "an account that is not a number"),
+                  ({"cost_bps_equity": "inf"}, "an endless cost"),
+                  ({"risk_per_trade_pct": "5000"}, "a risk of 5,000%"),
+                  ({"stop_atr_multiple": "0"}, "no stop"),
+                  ({"min_conviction": "9"}, "a conviction of 9"),
+                  ({"horizon_bars": "1e999"}, "an endless window"),
+                  ({"horizon_bars": "-7"}, "a window of minus seven bars"),
+                  ({"interval": "banana"}, "a bar size that is not one")):
+    r = c.post("/settings", data=form)
+    check("%s is refused in words, and nothing is saved" % why,
+          r.status_code == 200 and 'class="saved" style=' in r.data.decode("utf-8", "replace")
+          and A.settings_for(db.connect(DB), alice.id) == kept, r.status_code)
+check("a higher least conviction saves, with no second field to trip on",
+      c.post("/settings", data={"min_conviction": "0.6"}).status_code == 302
+      and A.settings_for(db.connect(DB), alice.id)["min_conviction"] == 0.6)
+conn = db.connect(DB)
+A.save_settings(conn, alice.id, dict(kept, account_size=float("nan"), horizon_bars=-7))
+conn.close()
+check("one saved before they were checked no longer breaks the pages",
+      "nan" not in visible(c, "/settings").lower().split() and c.get("/portfolio").status_code == 200)
+conn = db.connect(DB)
+A.save_settings(conn, alice.id, kept)
+conn.close()
+# A browser sends the form only when every field fits its own limits, and the
+# first target's 2.25 did not fit steps of 0.1.
+page = c.get("/settings").data.decode("utf-8", "replace")
+unfit = []
+for tag in re.findall(r"<input[^>]*>", page):
+    at = dict(re.findall(r'([a-z]+)="([^"]*)"', tag))
+    if at.get("type") != "number":
+        continue
+    value, low = float(at["value"]), float(at.get("min", "0"))
+    step = at.get("step", "1")
+    if value < low or value > float(at.get("max", "inf")) or (
+            step != "any" and abs((value - low) / float(step)
+                                  - round((value - low) / float(step))) > 1e-9):
+        unfit.append((at["name"], at["value"], step))
+check("every number the Settings page fills in fits that field's own limits", not unfit, unfit)
+digits = [name for name in ("horizon_bars", "last_entry_time")
+          if 'inputmode="numeric"' in re.search(r'<input[^>]*name="%s"[^>]*>' % name, page).group(0)]
+check("a phone's keyboard can type 'auto' and '10:30'", not digits, digits)
 
 sign_in_as(c, bob)
 check("Bob does not get Alice's account size",

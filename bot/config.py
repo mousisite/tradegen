@@ -33,7 +33,7 @@ DEFAULTS: Dict[str, Any] = {
 
     # --- decision thresholds ---------------------------------------------
     "min_conviction": 0.20,         # below this, no trade is proposed
-    "strong_conviction": 0.45,      # above this, a market entry is allowed
+    "strong_conviction": 0.45,      # from here a wait's reason calls it strong
     "max_extension_atr": 2.0,       # ATR above VWAP before entries must wait
     "allow_shorts": False,
     "require_positive_expectancy": True,
@@ -161,11 +161,14 @@ def load(path: str | None = None) -> Dict[str, Any]:
         try:
             with open(cfg_path, "r", encoding="utf-8") as fh:
                 user = json.load(fh)
+            if not isinstance(user, dict):
+                raise RuntimeError("could not read %s: it must hold settings by name, "
+                                   "between { and }." % cfg_path)
             weights = user.pop("strategy_weights", None)
             cfg.update(user)
             if isinstance(weights, dict):
                 cfg["strategy_weights"].update(weights)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             raise RuntimeError("could not read %s: %s" % (cfg_path, exc))
 
     for env_key, (cfg_key, cast) in _ENV_MAP.items():
@@ -180,8 +183,36 @@ def load(path: str | None = None) -> Dict[str, Any]:
     return cfg
 
 
+# The settings that must be ordinary numbers, and what each is called. One
+# kept as text, or as NaN or infinity, passes a comparison or breaks it.
+_NUMBERS = {
+    "account_size": "Account size", "risk_per_trade_pct": "Risk per trade",
+    "max_position_pct": "Largest position", "stop_atr_multiple": "Stop distance",
+    "target_atr_multiple": "First target", "min_conviction": "Minimum conviction",
+    # Not on the Settings page: only the file sets them.
+    "runner_atr_multiple": "Second target", "strong_conviction": "Strong conviction",
+    "max_extension_atr": "Furthest from VWAP before a wait",
+    "sentiment_weight": "Share of conviction from news",
+    "calibration_stride": "Bars between calibration samples",
+    "min_bucket_samples": "Fewest past setups to measure from",
+}
+
+
 def validate(cfg: Dict[str, Any]) -> None:
-    """Raise if any setting would produce nonsense downstream."""
+    """Raise RuntimeError if any setting would produce nonsense downstream."""
+    for key, label in _NUMBERS.items():
+        if not _is_number(cfg.get(key, DEFAULTS[key])):
+            raise RuntimeError("%s must be an ordinary number." % label)
+    if not isinstance(cfg.get("interval", "1d"), str) \
+            or cfg.get("interval", "1d").lower() not in _HORIZON:
+        raise RuntimeError("The default interval must be one of: %s." % ", ".join(_HORIZON))
+    if cfg.get("max_extension_atr", 2.0) <= 0:
+        raise RuntimeError("%s must be more than zero." % _NUMBERS["max_extension_atr"])
+    if not (0 <= cfg.get("sentiment_weight", 0.25) <= 1):
+        raise RuntimeError("%s must be between 0 and 1." % _NUMBERS["sentiment_weight"])
+    for key in ("calibration_stride", "min_bucket_samples"):
+        if cfg.get(key, 1) < 1:
+            raise RuntimeError("%s must be 1 or more." % _NUMBERS[key])
     if not (0 < cfg["risk_per_trade_pct"] <= 10):
         raise RuntimeError("Risk per trade must be between 0 and 10 percent.")
     if not (0 < cfg["max_position_pct"] <= 100):
@@ -204,15 +235,14 @@ def validate(cfg: Dict[str, Any]) -> None:
         try:
             if not (3 <= int(horizon) <= 400):
                 raise ValueError
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise RuntimeError("Holding window must be a number between 3 and "
                                "400 bars, or the word auto.")
     for key in ("min_conviction", "strong_conviction"):
         if not (0 <= cfg[key] <= 1):
             raise RuntimeError("Conviction thresholds must be between 0 and 1.")
     if cfg["min_conviction"] > cfg["strong_conviction"]:
-        raise RuntimeError("The market-entry threshold cannot be below the "
-                           "minimum conviction threshold.")
+        raise RuntimeError("Strong conviction cannot be below the minimum conviction.")
     for key in ("cost_bps_equity", "cost_bps_crypto", "cost_bps_other", "cost_bps_futures"):
         value = cfg.get(key, 0)
         if not _is_number(value):
@@ -234,6 +264,51 @@ def validate(cfg: Dict[str, Any]) -> None:
                            "time like 10:30, or left empty to switch it off.")
     if not isinstance(cfg.get("calm_candles", False), bool):
         raise RuntimeError("Calm candle colours must be either on or off.")
+
+
+def lift_strong(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep "strong" at or above the least conviction a call is made at.
+
+    The Settings page no longer asks for it, so it must never be why a
+    minimum typed there is refused.
+    """
+    least, strong = cfg.get("min_conviction"), cfg.get("strong_conviction")
+    if _is_number(least) and _is_number(strong) and least > strong:
+        cfg["strong_conviction"] = least
+    return cfg
+
+
+def with_personal(base: Dict[str, Any], own: Dict[str, Any]) -> Dict[str, Any]:
+    """Settings with one person's saved ones on top, leaving out any that
+    cannot work.
+
+    They are checked when saved, but some were saved before they were, and a
+    negative account or a NaN went straight into position sizes and broke
+    that person's pages.
+    """
+    merged = lift_strong(dict(base, **own))
+    try:
+        validate(merged)
+        return merged
+    except RuntimeError:
+        pass
+    out, waiting = dict(base), dict(own)
+    while waiting:
+        # Again for those left over: a stop and a target can each need the other.
+        kept = []
+        for key, value in waiting.items():
+            trial = lift_strong(dict(out, **{key: value}))
+            try:
+                validate(trial)
+            except RuntimeError:
+                continue
+            out = trial
+            kept.append(key)
+        if not kept:
+            break
+        for key in kept:
+            del waiting[key]
+    return out
 
 
 def _is_number(value: Any) -> bool:
@@ -268,7 +343,9 @@ def save(cfg: Dict[str, Any], path: str | None = None) -> str:
         try:
             with open(cfg_path, "r", encoding="utf-8") as fh:
                 existing = json.load(fh)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
+            existing = {}
+        if not isinstance(existing, dict):
             existing = {}
 
     existing.update({k: v for k, v in cfg.items() if not k.startswith("_")})

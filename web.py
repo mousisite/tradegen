@@ -777,9 +777,10 @@ def _cfg() -> Dict:
     if user is not None and not user.is_local:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            cfg.update(accounts_mod.settings_for(conn, user.id))
+            own = accounts_mod.settings_for(conn, user.id)
         finally:
             conn.close()
+        cfg = config_mod.with_personal(cfg, own)
     return cfg
 
 
@@ -1347,16 +1348,16 @@ def analyse():
                            "can look at any timeframe.")
 
     cfg = _cfg()
-    if request.args.get("account"):
-        try:
-            cfg["account_size"] = float(request.args["account"])
-        except ValueError:
-            pass
-    if request.args.get("risk"):
-        try:
-            cfg["risk_per_trade_pct"] = float(request.args["risk"])
-        except ValueError:
-            pass
+    for name, key in (("account", "account_size"), ("risk", "risk_per_trade_pct")):
+        if request.args.get(name):
+            # Checked as a saved setting is: nan or a negative account in the
+            # address sized every plan by it.
+            try:
+                tried = dict(cfg, **{key: float(request.args[name])})
+                config_mod.validate(tried)
+            except (ValueError, RuntimeError):
+                continue
+            cfg = tried
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
@@ -5335,22 +5336,16 @@ def settings():
         cfg = _cfg()
         numbers = ("account_size", "risk_per_trade_pct", "max_position_pct",
                    "cost_bps_equity", "cost_bps_crypto", "stop_atr_multiple",
-                   "target_atr_multiple", "min_conviction", "strong_conviction",
+                   "target_atr_multiple", "min_conviction",
                    "alert_check_minutes", "cost_bps_futures", "daily_loss_limit_r",
                    "max_trades_per_day")
         try:
             for key in numbers:
                 if request.form.get(key) not in (None, ""):
                     cfg[key] = float(request.form[key])
-            # The journal's daily rules: an empty time switches that rule off,
-            # and the three are checked here, since a person's own settings
-            # are not otherwise checked before they are saved.
+            # The journal's daily rules: an empty time switches that rule off.
             if request.form.get("last_entry_time") is not None:
                 cfg["last_entry_time"] = request.form["last_entry_time"].strip()
-            rules = ("cost_bps_futures", "daily_loss_limit_r", "max_trades_per_day",
-                     "last_entry_time")
-            config_mod.validate(dict(config_mod.DEFAULTS, **{k: cfg[k] for k in rules}))
-            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
             raw_horizon = (request.form.get("horizon_bars") or "").strip()
             if raw_horizon:
                 cfg["horizon_bars"] = ("auto" if raw_horizon.lower() == "auto"
@@ -5361,6 +5356,10 @@ def settings():
                          "use_llm_sentiment", "calm_candles"):
                 if request.form.get(flag) is not None:
                     cfg[flag] = request.form[flag] == "1"
+            # Every setting, a person's own too: those went unchecked into
+            # every size and plan made from them.
+            config_mod.validate(config_mod.lift_strong(cfg))
+            cfg["max_trades_per_day"] = int(cfg["max_trades_per_day"])
 
             if personal:
                 conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -5396,7 +5395,7 @@ def settings():
                 if not ALERTS.running:
                     ALERTS.start()
             return redirect(url_for("settings", saved="1"))
-        except ValueError:
+        except (ValueError, OverflowError):
             error = "Every numeric field needs a number."
         except RuntimeError as exc:
             error = str(exc)

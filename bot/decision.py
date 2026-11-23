@@ -454,10 +454,8 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     else:
         mode = "WAIT"
         if strong:
-            why = ("Conviction %.2f clears the %.2f market-entry threshold, but "
-                   "%s, so this waits for a better price."
-                   % (abs(conviction), cfg["strong_conviction"],
-                      _no_edge_reason(calib, matched)))
+            why = ("Conviction %.2f is strong, but %s, so this waits for a better "
+                   "price." % (abs(conviction), _no_edge_reason(calib, matched)))
         else:
             why = ("Conviction %.2f is directional, but %s, so this waits for a "
                    "better price rather than entering now."
