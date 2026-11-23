@@ -80,7 +80,7 @@ from bot import webapp as webapp_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
-from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart
+from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart, upright
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -2574,6 +2574,10 @@ def analyse_image():
             # Shrunk to what the vision model uses, before anything else, so
             # no full-size copy is ever made or passed on.
             img.thumbnail((MAX_EDGE, MAX_EDGE))
+            # A phone stores a photo as its sensor lay and notes which way up
+            # it was held. Saved as PNG the note is lost, and an upright chart
+            # was read lying on its side.
+            img = upright(img)
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
             png = io.BytesIO()

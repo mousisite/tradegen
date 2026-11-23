@@ -41,10 +41,22 @@ class ChartRead:
     raw: str = ""
 
 
+def upright(img):
+    """The picture turned the way it was taken, for a photo that says it lies
+    on its side. One whose note cannot be read is left as it is."""
+    from PIL import ImageOps
+    try:
+        return ImageOps.exif_transpose(img)
+    except Exception:
+        return img
+
+
 def _load_image_bytes(path):
     """Load and downscale an image, returning (bytes, media_type).
 
-    path is a file path, or an open binary file such as io.BytesIO.
+    path is a file path, or an open binary file such as io.BytesIO. A picture
+    held in memory that is already the PNG wanted is passed on as it is: the
+    web upload has just made it, and making it again only costs time.
     """
     from PIL import Image
 
@@ -59,14 +71,18 @@ def _load_image_bytes(path):
     if w * h > MAX_PIXELS:
         raise VisionError("That image is too large to read. Crop it to just "
                           "the chart and try again.")
+    if (isinstance(path, io.BytesIO) and img.format == "PNG"
+            and img.mode in ("RGB", "L") and max(w, h) <= MAX_EDGE):
+        return path.getvalue(), "image/png"
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     if max(w, h) > MAX_EDGE:
         scale = MAX_EDGE / float(max(w, h))
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
                          Image.LANCZOS)
+    img = upright(img)
     buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
+    img.save(buf, format="PNG")
     return buf.getvalue(), "image/png"
 
 
@@ -133,10 +149,17 @@ def read_chart(image_path, model: Optional[str] = None,
     # Bounded, because this runs inside the upload's request: the SDK's own
     # default is ten minutes, three times.
     client = anthropic.Anthropic(api_key=key, timeout=30.0, max_retries=1)
+    chosen = model or os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
+    # The default model thinks before it answers, and its thinking counts
+    # toward max_tokens: at 700 a picture it thought about could be cut off
+    # before the answer. Low effort keeps that short. Another model chosen by
+    # the owner may not take the setting, so it is sent to the default only.
+    quick = {"output_config": {"effort": "low"}} if chosen == DEFAULT_MODEL else {}
     try:
         resp = client.messages.create(
-            model=model or os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL),
-            max_tokens=700,
+            model=chosen,
+            max_tokens=4000,
+            **quick,
             messages=[{
                 "role": "user",
                 "content": [
@@ -150,6 +173,11 @@ def read_chart(image_path, model: Optional[str] = None,
     except Exception as exc:
         raise VisionError("vision request failed: %s" % exc)
 
+    stopped = getattr(resp, "stop_reason", "")
+    if stopped == "max_tokens":
+        raise VisionError("the reply was cut off before it was finished")
+    if stopped == "refusal":
+        raise VisionError("the model declined to read that picture")
     text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
     return _parse(text)
 

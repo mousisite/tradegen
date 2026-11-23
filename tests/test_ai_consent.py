@@ -160,6 +160,82 @@ try:
     check("and read once the box is ticked", r.status_code == 302
           and len(sent) == before + 1, (r.status_code, sent))
 
+    head("WHAT THE READER IS GIVEN")
+    # A phone stores a photo as its sensor lay, with a note saying which way
+    # up it was held. The note was dropped, so an upright chart was read lying
+    # on its side.
+    from types import SimpleNamespace as NS
+    import base64
+    from PIL import Image
+    from bot import vision
+
+    def photo(note=6):
+        exif = Image.Exif()
+        exif[0x0112] = note
+        buf = io.BytesIO()
+        Image.new("RGB", (400, 200), (200, 200, 200)).save(buf, "JPEG", exif=exif)
+        return io.BytesIO(buf.getvalue())
+
+    shapes = []
+
+    def shape(png):
+        shapes.append(Image.open(png).size)
+        return ChartRead(symbol="AAPL")
+
+    web.read_chart = shape
+    for note in (6, 1):
+        c.post("/analyse/image", data={"chart": (photo(note), "photo.jpg")},
+               content_type="multipart/form-data", headers=APP)
+    check("a photo held upright reaches the reader upright, and any other as it is",
+          shapes == [(200, 400), (400, 200)], shapes)
+    data, _kind = vision._load_image_bytes(photo())
+    check("from the command line too", Image.open(io.BytesIO(data)).size == (200, 400))
+    ready = png_bytes()
+    check("a picture already made ready is not made a second time",
+          vision._load_image_bytes(ready)[0] == ready.getvalue())
+
+    # No call is made: the package is replaced by a stand-in that keeps what
+    # it was asked and answers as told.
+    asked, answer = [], {}
+
+    def create(**kw):
+        asked.append(kw)
+        return NS(stop_reason=answer["stop"], content=[NS(type="text", text=answer["text"])])
+
+    real_package = _sys.modules.get("anthropic")
+    _sys.modules["anthropic"] = NS(Anthropic=lambda **kw: NS(messages=NS(create=create)))
+    had_model = _os.environ.pop("CLAUDE_MODEL", None)
+    try:
+        answer.update(stop="end_turn", text='{"symbol": "AAPL", "confidence": 0.9}')
+        read = vision.read_chart(png_bytes())
+        check("the reader leaves room for the model's thinking and the answer",
+              read.symbol == "AAPL" and asked[0]["max_tokens"] >= 4000
+              and asked[0]["output_config"] == {"effort": "low"}, asked[0].get("max_tokens"))
+        check("and sends the picture once, as PNG",
+              base64.b64decode(asked[0]["messages"][0]["content"][0]["source"]["data"])
+              == png_bytes().getvalue())
+        _os.environ["CLAUDE_MODEL"] = "another-model"
+        vision.read_chart(png_bytes())
+        check("a model the owner chose is not sent a setting it may not take",
+              asked[1]["model"] == "another-model" and "output_config" not in asked[1])
+        for stop, words in (("max_tokens", "cut off"), ("refusal", "declined")):
+            answer.update(stop=stop, text='{"symbol": "AAP')
+            try:
+                vision.read_chart(png_bytes())
+                said = ""
+            except vision.VisionError as exc:
+                said = str(exc)
+            check("an answer that stopped with %s is said to be that" % stop,
+                  words in said, said)
+    finally:
+        _os.environ.pop("CLAUDE_MODEL", None)
+        if had_model is not None:
+            _os.environ["CLAUDE_MODEL"] = had_model
+        _sys.modules.pop("anthropic", None)
+        if real_package is not None:
+            _sys.modules["anthropic"] = real_package
+    web.read_chart = reader
+
     head("THE PRIVACY PAGE")
     page = c.get("/privacy").data.decode("utf-8", "replace")
     check("says nothing is sent until the box is ticked",
