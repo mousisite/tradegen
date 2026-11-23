@@ -390,9 +390,11 @@ def upsert_google_user(conn: sqlite3.Connection, profile: Dict) -> User:
     else:
         user_id = int(row["id"])
         conn.execute(
-            "UPDATE users SET email=?, name=?, picture=?, provider='google', "
+            "UPDATE users SET email=CASE WHEN EXISTS (SELECT 1 FROM users o WHERE "
+            "o.email=? AND o.id<>users.id) THEN email ELSE ? END, "
+            "name=?, picture=?, provider='google', "
             "provider_id=?, last_seen_ts=? WHERE id=?",
-            (email, name or row["name"], picture or row["picture"], sub or
+            (email, email, name or row["name"], picture or row["picture"], sub or
              row["provider_id"], now, user_id))
         conn.commit()
 
