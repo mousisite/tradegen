@@ -61,6 +61,7 @@
   /* What a phone flashes behind a tapped link or button: the accent, faint,
      instead of the browser's own grey-blue. */
   --tap:         rgba(201, 100, 66, .14);
+  --shade:       rgba(25, 24, 23, .13);
 
   /* Type: serif display, humanist sans body, mono for every figure. */
   --serif: 'Source Serif 4', 'Iowan Old Style', Georgia, 'Times New Roman', serif;
@@ -114,6 +115,7 @@
     --hold-wash:   #2d2519;
     --focus:       #e89268;
     --tap:         rgba(232, 146, 104, .2);
+    --shade:       rgba(0, 0, 0, .6);
   }
 }
 
@@ -265,6 +267,8 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 .plans { display: grid; gap: var(--s3); max-width: 760px; margin: 0 auto;
          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .plan { display: flex; flex-direction: column; gap: var(--s2); }
+/* The gap spaces the plan's name too; its own margin on top doubled it. */
+.plan > .eyebrow { margin-bottom: 0; }
 /* In a grid the gap spaces the cards. A card's own margin on top of it put
    48 pixels between the routines on a phone and set the second card of each
    row lower than the first on a wide screen. */
@@ -390,6 +394,9 @@ section + section { margin-top: var(--s5); }
    line of text, a form or a tinted box. */
 .card + section, p + section, form + section,
 .plainbox + section, section + .plainbox { margin-top: var(--s5); }
+/* A notice, or the page's own script, before one: "Fixed contracts" sat on
+   the notice above it, and "Your record" on the search box's card. */
+script + section, .notice + section:not(.hero) { margin-top: var(--s5); }
 
 .sechead {
   display: flex; align-items: baseline; gap: var(--s2);
@@ -408,6 +415,9 @@ section + section { margin-top: var(--s5); }
 }
 .card.pad0 { padding: 0; overflow: hidden; }
 .card.pad0 > .cardhead { padding: var(--s3) var(--s3) var(--s2); }
+/* As a label straight in a card has: a label with help beside it is in a
+   .cardhead, and its words began right under it. */
+.card:not(.pad0) > .cardhead { margin-bottom: var(--s2); }
 .card > .eyebrow { display: block; margin-bottom: var(--s2); }
 .card + .card { margin-top: var(--s3); }
 
@@ -423,6 +433,8 @@ section + section { margin-top: var(--s5); }
 .field:hover { border-color: var(--ink-3); }
 input.field { flex: 1 1 260px; min-width: 0; }
 input.field::placeholder { color: var(--ink-3); }
+/* Words too long for their box end in dots, not in half a letter. */
+.field:placeholder-shown, .field[readonly] { text-overflow: ellipsis; }
 select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
                text-overflow: ellipsis;
                appearance: none;
@@ -532,7 +544,10 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
 
 /* ---------- label / value list ---------- */
 
-.pairs { display: grid; grid-template-columns: auto 1fr; gap: 0; }
+/* No margin of its own, a list's 15 pixels: it left a card with one taller at
+   the bottom than the card beside it. */
+.pairs { display: grid; grid-template-columns: auto 1fr; gap: 0; margin: 0; }
+.pairs + :is(p, div) { margin-top: var(--s2); }
 .pairs dt, .pairs dd {
   padding: 10px 0; margin: 0; border-bottom: 1px solid var(--hairline);
   font-size: var(--t-sm);
@@ -617,7 +632,7 @@ th.r, td.r { text-align: right; }
 .card.pad0 thead th:first-child, .card.pad0 tbody td:first-child { padding-left: var(--s3); }
 .card.pad0 thead th:last-child,  .card.pad0 tbody td:last-child  { padding-right: var(--s3); }
 /* A row's buttons, side by side at the end of the row. */
-.acts { display: flex; gap: 5px; justify-content: flex-end; align-items: center;
+.acts { display: flex; gap: var(--s1); justify-content: flex-end; align-items: center;
         flex-wrap: wrap; }
 /* Beside wide columns a row's button and its label were squeezed until their
    two words broke in two, the close form fell to one field a line and cut off
@@ -720,7 +735,31 @@ th.r, td.r { text-align: right; }
 /* A long sentence in a table that still scrolls sideways: wide enough to
    read in a few lines, not one word to a line down a narrow column. */
 @media (max-width: 760px) {
-  .tablewrap td.say { min-width: 15em; }
+  table:not(.stack) td.say { min-width: 15em; }
+}
+/* A table wider than its card shades the edge there is more past, so a figure
+   cut through its last digit is not read as a shorter one. The first two
+   layers scroll with the table and cover the shade where the table ends. */
+@media (max-width: 760px) {
+  .card .tablewrap {
+    background:
+      linear-gradient(to right, var(--surface) 50%, transparent) left / 28px 100% no-repeat local,
+      linear-gradient(to left, var(--surface) 50%, transparent) right / 28px 100% no-repeat local,
+      linear-gradient(to right, var(--shade), transparent) left / 14px calc(100% - 4px) no-repeat scroll,
+      linear-gradient(to left, var(--shade), transparent) right / 14px calc(100% - 4px) no-repeat scroll;
+  }
+}
+/* On a phone the column that draws a percentage again as a bar is left out:
+   there was room for four pixels of it, a speck after the figure. And the
+   columns sit a little closer, so a short table fits without scrolling. */
+@media (max-width: 420px) {
+  table:has(td > .meter) :is(th, td):last-child, .tablewrap .asbar { display: none; }
+  .card.pad0 table:has(td > .meter) :is(th, td):nth-last-child(2) { padding-right: var(--s3); }
+  td .lean { min-width: 72px; }
+  .card:not(.pad0) table:not(.stack) :is(th, td):first-child { padding-left: 0; }
+  .card:not(.pad0) table:not(.stack) :is(th, td):last-child { padding-right: 0; }
+  table:not(.stack) thead th, table:not(.stack) tbody td { padding-left: 10px; padding-right: 10px; }
+  table:not(.stack) thead th { white-space: normal; vertical-align: bottom; }
 }
 
 /* ---------- meters ---------- */
@@ -755,7 +794,7 @@ th.r, td.r { text-align: right; }
 .prose + .prose { margin-top: var(--s1); }
 .prose b { color: var(--ink); font-weight: 600; }
 /* Text, a list and a row of figures keep clear of each other. */
-.prose + .figs, ul.list + .prose, ul.list + .eyebrow,
+.prose + .figs, ul.list + .prose, ul.list + .fine, ul.list + .eyebrow,
 .prose + .eyebrow { margin-top: var(--s2); }
 ul.list + .eyebrow, .prose + .eyebrow { display: block; }
 .prose + ul.list, .prose + .tablewrap, summary + .tablewrap,
@@ -818,7 +857,10 @@ ul.list.ok li::marker { color: var(--gain); }
 
 /* ---------- screenshot drop zone ---------- */
 
+/* A block of its own: it is a label, and an inline one drew its dashed border
+   round each line of its words, over the sentence above and the box below. */
 .drop {
+  display: block;
   position: relative;
   margin-top: var(--s2);
   border: 1px dashed var(--line-strong); border-radius: var(--r-md);
@@ -830,6 +872,7 @@ ul.list.ok li::marker { color: var(--gain); }
 .drop.over { border-style: solid; }
 .drop .icon { color: var(--ink-3); display: block; margin: 0 auto 10px; }
 .drop:hover .icon, .drop.over .icon { color: var(--accent); }
+.drop .head, .drop .sub { display: block; }
 .drop .head { font-size: var(--t-sm); font-weight: 500; color: var(--ink); }
 .drop .sub { font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
 /* Hidden the way .sr hides things rather than with display:none, which took
@@ -901,6 +944,11 @@ ul.list.ok li::marker { color: var(--gain); }
   td a:not(.btn), .tail a, .firebar a, ul.list li > a:only-child,
   .prose > a:only-child, .fine > a:only-child { padding: 14px 9px; margin: 0 -9px; }
   a.tail { padding-block: 14px; margin-block: -14px; }
+  /* Two side by side ("CSV · JSON"), or one beside a button: the padding of
+     each ends where the next begins, so a tap between them has one meaning. */
+  td a:not(.btn):has(+ a:not(.btn)) { margin-right: -6px; }
+  td a:not(.btn) + a:not(.btn) { margin-left: -6px; }
+  .acts > a:not(.btn) { margin-right: 0; }
 }
 
 /* Only where there is a pointer to hover with. A tap counts as a hover on
@@ -957,6 +1005,7 @@ ul.list.ok li::marker { color: var(--gain); }
      trade / by hand" among them. */
   .sechead { flex-wrap: wrap; row-gap: 2px; }
   .sechead .tail { flex-basis: 100%; margin-left: 0; }
+  .sechead .tail:has(.btn) { margin-top: var(--s1); }
   .instrument .price { margin-left: 0; text-align: left; width: 100%; }
   .instrument .sym { font-size: var(--t-xl); }
   .call .word { font-size: var(--t-lg); }
@@ -966,7 +1015,10 @@ ul.list.ok li::marker { color: var(--gain); }
   /* Two to a row, each column as wide as its figures need where they fit:
      two equal halves of a 360 pixel phone hold ten characters of a figure,
      and -100,000.00 is eleven. */
-  .figs { grid-template-columns: repeat(2, minmax(0, auto)); }
+  .figs { grid-template-columns: repeat(2, minmax(0, auto)); column-gap: var(--s2); }
+  /* And a little smaller, so that a figure in the millions, 2,047,604.67, fits
+     its half of the card instead of dropping its last digit to a second line. */
+  .figs .f .v { font-size: min(var(--t-md), 5.1vw); }
   .pairs { grid-template-columns: 1fr; }
   .pairs dt { border-bottom: 0; padding-bottom: 0; }
   .pairs dd { text-align: left; padding-top: 2px; }
