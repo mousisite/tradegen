@@ -189,7 +189,8 @@ def _harden(response):
     h = response.headers
     h.setdefault("X-Content-Type-Options", "nosniff")
     h.setdefault("X-Frame-Options", "DENY")
-    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    h.setdefault("Content-Security-Policy",
+                 "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
     h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if app.config.get("SESSION_COOKIE_SECURE"):
@@ -1579,6 +1580,11 @@ def _safe_back(raw, fallback):
     return raw
 
 
+# Longer than any company's name. The address can hold a quarter of a megabyte,
+# and all of it went to the data source and back onto the page.
+SYMBOL_MOST = 100
+
+
 def _symbol_from(values) -> Tuple[str, bool]:
     """The ticker a request names, and whether it names Yahoo's symbol exactly.
 
@@ -1588,7 +1594,7 @@ def _symbol_from(values) -> Tuple[str, bool]:
     only where it changes the answer, so AAPL with or without it is one
     analysis, one cache entry and one free look.
     """
-    symbol = (values.get("symbol") or "").strip()
+    symbol = (values.get("symbol") or "").strip()[:SYMBOL_MOST]
     return symbol, values.get("exact") == "1" and market_mod.needs_exact(symbol)
 
 
@@ -2201,7 +2207,7 @@ def close_trade():
             if quantity is not None:
                 quantity /= split
         done = db_mod.exit_trade(conn, trade_id, price, quantity, reason,
-                                 request.form.get("notes", ""), user=uid(),
+                                 request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
                                  expect_left=expect_left, expect_open=bool(seen),
                                  split=split if shares == "today" else _exit_split(row))
         session[EXIT_SAID] = _exit_words(row["symbol"], done, typed, typed_qty, shares,
@@ -2559,7 +2565,7 @@ def open_trade_manual():
             target1=target, quantity=qty,
             risk_amount=(abs(entry - stop) * qty) if qty else None,
             account="paper", strategy_note="entered by hand",
-            notes=request.form.get("notes", ""), user=uid(),
+            notes=request.form.get("notes", "")[:NOTE_LIMIT], user=uid(),
             setup=tags["setup"], emotion=tags["emotion"], checklist=tags["checklist"],
             broke_rule=broke, opened_ts=tags["opened_ts"], cap=_trade_cap(),
             form_id=form_id, **trail)
@@ -3417,7 +3423,8 @@ def save_thesis():
     except Exception:
         # The text of an unexpected error can carry file paths or SQL, which
         # are for the log, not the page.
-        app.logger.exception("Saving a thesis for %s failed", symbol)
+        app.logger.exception("Saving a thesis for %s failed",
+                             "".join(ch for ch in symbol if ch.isprintable()))
         return render_template("error.html", symbol=symbol,
                                message="That thesis could not be saved just now. "
                                        "Try again in a minute."), 500
@@ -4605,6 +4612,10 @@ def _refusals(kind: str) -> int:
     return tries + 1
 
 
+# Stripe's messages are a few kilobytes.
+STRIPE_NOTICE_LIMIT = 512 * 1024
+
+
 @app.route("/billing/webhook", methods=["POST"])
 def billing_webhook():
     """Stripe telling the server a plan changed. Signed, so it can be believed.
@@ -4615,6 +4626,9 @@ def billing_webhook():
     secret = (os.environ.get("STRIPE_WEBHOOK_SECRET") or "").strip()
     if not secret:
         abort(404)
+    # Anyone can post here, and the site's own limit, for screenshots, would be
+    # read into memory before the signature could be looked at.
+    request.max_content_length = STRIPE_NOTICE_LIMIT
     payload = request.get_data()
     if not billing_mod.verify(payload, request.headers.get("Stripe-Signature", ""),
                               secret):
