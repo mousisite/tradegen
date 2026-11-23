@@ -207,18 +207,20 @@
     <label class="sr" for="interval">Bar interval</label>
     <select class="field" id="interval" name="interval">
       {% for code, label in intervals %}
-        <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+        <option value="{{ code }}" {{ 'selected' if code == default_interval }}>{{ label }}</option>
       {% endfor %}
     </select>
     <button class="btn" type="submit">Analyse</button>
   </form>
   <div class="pills">
     {% for s in ['AAPL','NVDA','TSLA','MSFT','SPY','BTC-USD','ETH-USD'] %}
-      <a data-working href="{{ url_for('analyse', symbol=s, interval='1d') }}">{{ s }}</a>
+      <a data-working href="{{ url_for('analyse', symbol=s, interval=default_interval) }}">{{ s }}</a>
     {% endfor %}
   </div>
   <p class="prose" style="margin-top:var(--s2)">
-    Daily bars are preselected because they are the only interval where this
+    {% if default_interval == '1d' %}Daily bars are preselected because they are
+    the only interval where this{% else %}The bar size you chose in Settings is
+    preselected. Daily bars are the only interval where this{% endif %}
     bot has measured positive expectancy. Shorter intervals lose to trading
     costs before the strategy gets a say. That is an unhelpful thing for a
     trading tool to admit, and it is what the back-tests found.
@@ -232,7 +234,7 @@
   {% if has_key or (current_user and current_user.is_local) %}
   <form id="shotform" action="{{ url_for('analyse_image') }}" method="post"
         enctype="multipart/form-data">
-    <input type="hidden" name="interval" id="shotinterval" value="1d">
+    <input type="hidden" name="interval" id="shotinterval" value="{{ default_interval }}">
     <label class="drop {{ '' if has_key else 'locked' }}" id="drop"
            for="chart" {{ '' if has_key else 'aria-disabled=true' }}>
       <img id="thumb" class="thumb" alt="" hidden>

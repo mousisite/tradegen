@@ -1106,7 +1106,10 @@ def index():
     finally:
         conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # The bar size the box starts on is the one chosen in Settings.
+    chosen = _cfg().get("interval")
     return render_template("index.html", runs=runs,
+                           default_interval=chosen if chosen in dict(INTERVALS) else "1d",
                            open_trades=_held(open_trades, attention["marks"]),
                            summary=summary, counts=counts, attention=attention,
                            has_key=has_key,

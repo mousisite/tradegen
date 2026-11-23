@@ -260,6 +260,21 @@ from bot import config as cfgmod
 # Read back from the isolated config the server was told to write, not the real
 # one: asserting against the real file also meant overwriting the real file.
 check("value persisted", cfgmod.load(harness.CFG_PATH)["account_size"] == 5000.0)
+# The default interval did nothing on the Analyse box, which said daily always.
+body = c.get("/").data.decode("utf-8", "replace")
+check("daily is preselected on the Analyse box", '<option value="1d" selected>' in body
+      and "Daily bars are preselected because" in body)
+c.post("/settings", data={"interval": "1h"})
+body = c.get("/").data.decode("utf-8", "replace")
+check("the default interval chosen in Settings is the one preselected there",
+      '<option value="1h" selected>' in body and '<option value="1d" selected>' not in body
+      and "The bar size you chose in Settings" in body)
+check("and the one the quick picks and the screenshot box use",
+      "symbol=AAPL&amp;interval=1h" in body and "Daily bars are preselected because" not in body)
+c.post("/settings", data={"interval": "1wk"})
+body = c.get("/").data.decode("utf-8", "replace")
+check("one the box does not offer leaves daily preselected",
+      '<option value="1d" selected>' in body)
 # Restoring defaults used to be a plain link, /settings?reset=1, so anyone
 # who opened it, or any crawler that followed it, wiped the settings.
 c.get("/settings?reset=1")
