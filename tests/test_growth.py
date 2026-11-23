@@ -530,6 +530,58 @@ try:
     r = c.get("/api/no-such-call")
     check("a wrong API address says so in JSON",
           r.status_code == 404 and r.get_json() == {"error": "No such address."})
+    # An unexpected failure is JSON too, for whatever reads the API, and so is
+    # an answer whose readings could not all be measured.
+    looker = user("looker@example.com")
+    sign_in(looker)
+    was_analysis = web.cached_analysis
+    was_propagate = web.app.config.get("PROPAGATE_EXCEPTIONS")
+
+    def broken_analysis(*a, **k):
+        raise RuntimeError("secret")
+
+    web.cached_analysis = broken_analysis
+    web.app.config["PROPAGATE_EXCEPTIONS"] = False
+    web.app.logger.disabled = True
+    _os.environ.update(STRIPE)
+    try:
+        r = c.get("/api/analyse?symbol=NVDA")
+        check("an API call that breaks says so in JSON", r.status_code == 500
+              and "broke on our side" in (r.get_json(silent=True) or {}).get("error", "")
+              and b"secret" not in r.data, (r.status_code, r.mimetype))
+        # Signed in a while ago: a link on another site costs no look.
+        conn = db.connect(DB)
+        conn.execute("UPDATE sessions SET created_ts=created_ts-3600 WHERE user_id=?",
+                     (looker.id,))
+        conn.commit()
+        conn.close()
+        r = c.get("/api/analyse?symbol=NVDA", headers={"Sec-Fetch-Site": "cross-site"})
+        check("one asked for from another site is told that, not that its looks are used up",
+              r.status_code == 402 and "another site" in r.get_json()["error"]
+              and "used up" not in r.get_json()["error"], r.data[:200])
+    finally:
+        web.cached_analysis = was_analysis
+        web.app.config["PROPAGATE_EXCEPTIONS"] = was_propagate
+        web.app.logger.disabled = False
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+        sign_out()
+    import json as json_mod
+    from bot import report as report_mod
+
+    def refuse(word):
+        raise ValueError(word)
+
+    class Anything(SimpleNamespace):
+        def __getattr__(self, name):
+            return float("nan") if name in ("adx", "reward_risk") else None
+
+    blank = Anything(samples=0, curve=[(1, float("inf"))], items=[], label=lambda: "neutral")
+    strict = json_mod.loads(report_mod.to_json(blank, blank, [], float("nan"), blank, blank,
+                                               blank), parse_constant=refuse)
+    check("a reading that could not be measured is null, never the bare word NaN",
+          strict["regime"]["adx"] is None and strict["call"]["reward_risk"] is None
+          and strict["odds"]["curve"] == [[1, None]], strict["regime"])
     r = c.get("/account")
     loc = r.headers.get("Location", "")
     check("a real page still asks them to sign in, with a clean return address",

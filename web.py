@@ -5469,6 +5469,10 @@ def api_analyse():
         return answer
     # The same allowance as the pages, or the API is a way round it.
     if not _allowance_left(symbol, interval, exact):
+        if g.get("allowance_refused") == "elsewhere":
+            return jsonify({"error": "This was asked for from another site, so it was "
+                                     "not opened: that would have used one of today's "
+                                     "free looks. Open it from the Analyse page."}), 402
         return jsonify({"error": "The free daily allowance is used up."}), 402
     cfg = _cfg()
     try:
@@ -6230,6 +6234,9 @@ def server_error(_exc):
     # Flask has already written the exception to the server log by the time
     # this runs. The visitor gets a plain sentence instead: an exception's text
     # can carry paths, queries and internal names, and helps nobody reading it.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Something broke on our side. Try again "
+                                 "in a minute."}), 500
     return render_template("error.html", symbol="",
                            message="Something broke on our side. Try again "
                                    "in a minute."), 500
