@@ -21,7 +21,9 @@ from typing import Dict, List, Optional
 def _money(value: Optional[float], currency: str = "") -> str:
     if value is None:
         return "?"
-    symbol = "$" if currency in ("", "USD") else ""
+    # Any other currency is named, as format_price names it: a bare number
+    # beside dollar prices reads as dollars.
+    symbol = "$" if not currency or currency == "USD" else currency + " "
     if abs(value) >= 1000:
         return "%s%s" % (symbol, format(value, ",.0f"))
     if abs(value) >= 1:

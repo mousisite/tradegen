@@ -1,6 +1,7 @@
 """Popular pages, sharing, invites and the weekly email."""
 import calendar
 import os as _os
+import re
 import sys as _sys
 import time
 from types import SimpleNamespace
@@ -229,6 +230,26 @@ try:
           and ("%d strategies decide Orenth's calls; %d" % (_all, _trial)) in page
           and "price-action setups are measured on trial" in page, (_all, _trial))
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    # Its colours say what the tests can: a gain or a loss beyond the margin.
+    # Without a margin, stored before one was measured, the sign is all there is.
+    conn = db.connect(DB)
+    s = public.verdict(conn, "NVDA")
+    s["tests"] = {"rsi_reversion": [50, 30, 25.0], "macd_momentum": [50, 20, 2.0],
+                  "pin_bar": [50, 20, -2.0], "cci_reversion": [50, 10, -25.0],
+                  "aroon_trend": [50, 20, 0.1], "obv_divergence": [50, 20, -5.0]}
+    s["spread"] = {name: [100.0, 50.0] for name in s["tests"]
+                   if name not in ("aroon_trend", "obv_divergence")}
+    kept_before = public.verdict(conn, "NVDA")
+    public.save_verdict(conn, s)
+    coloured = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    public.save_verdict(conn, kept_before)
+    conn.close()
+    shown = dict(re.findall(r'/backtest/([a-z-]+)">[^<]*</a>:.*?<span class="(fig[^"]*)">',
+                            coloured, re.S))
+    check("a result inside its margin, or of nothing, is neither green nor red",
+          shown == {"rsi-reversion": "fig gain", "macd-momentum": "fig", "pin-bar": "fig",
+                    "cci-reversion": "fig loss", "aroon-trend": "fig",
+                    "obv-divergence": "fig loss"}, shown)
     check("a stock page says which strategies worked there",
           "Which strategies worked on NVDA" in page and "/backtest/rsi-reversion" in page)
     check("and answers its question for AI search", '"FAQPage"' in page
@@ -551,6 +572,51 @@ try:
         r = c.get("/s/%s.png" % sid)
         check("and has its own card", r.status_code == 200 and r.data[:4] == b"\x89PNG")
         check("an unknown share is not found", c.get("/s/nope").status_code == 404)
+
+        # Priced in rupees: a bare 912.4 reads as dollars.
+        rupees = fake_result("TATAMOTORS.NS", "BUY")
+        rupees.bars.currency = "INR"
+        rupees.plan.entry = 912.4
+        told = public.snapshot(rupees, plain_words.explain_plan(rupees.plan, rupees.bars))
+        conn = db.connect(DB)
+        there = public.create_share(conn, sharer.id, told)
+        conn.close()
+        page = " ".join(c.get("/s/" + there).data.decode("utf-8", "replace").split())
+        check("a share of a stock not priced in dollars names its currency",
+              "Price INR 228.38 ·" in page and "buy price is INR 912.40." in page,
+              told["points"])
+
+        from PIL import Image
+        import io as io_mod
+        for sym, name in (("TATAMOTORS.NS", "Tata Motors Limited"),
+                          ("AAPL261218C00200000", "AAPL Dec 2026 200.000 call"),
+                          ("DRIP", "Direxion Daily S&P Oil & Gas Exp. & Prod. Bear 2X Shares "
+                                   "And More Words")):
+            card = Image.open(io_mod.BytesIO(public.render_card(
+                dict(told, symbol=sym, name=name, action="AVOID"))))
+            edge = card.crop((public.WIDTH - public.MARGIN + 1, 130, public.WIDTH, 330))
+            check("the card of %s keeps its call and its price inside the margin" % sym,
+                  edge.getcolors() == [(edge.width * edge.height, public.PAPER)])
+
+        class Emptied(type(public._CARDS)):
+            """A cache whose entry goes while it is being looked up, unless held."""
+            def __contains__(self, key):
+                held = super().__contains__(key)
+                if not public._CARDS_LOCK.locked():
+                    self.pop(key, None)
+                return held
+
+            def move_to_end(self, key, last=True):
+                assert public._CARDS_LOCK.locked()
+                super().move_to_end(key, last)
+
+        was_cards, public._CARDS = public._CARDS, Emptied()
+        try:
+            first = public.render_card(told)
+            check("a card is drawn once and kept, whoever else is asking",
+                  public.render_card(told) is first and len(public._CARDS) == 1)
+        finally:
+            public._CARDS = was_cards
 
         sign_in(sharer)
         old_limit = public.SHARES_PER_DAY

@@ -53,7 +53,7 @@
       <ul class="list">{% for x in snap.points %}<li>{{ x }}</li>{% endfor %}</ul>
     {% endif %}
     <p class="prose faint" style="font-size:var(--t-xs)">
-      Price {{ '$' if snap.currency == 'USD' }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
+      Price {{ '$' if snap.currency == 'USD' else snap.currency ~ ' ' if snap.currency }}{{ snap.price|price }} · {{ 'daily' if snap.interval == '1d' else snap.interval }} bars ·
       {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}{% endif %}
     </p>
   </div>
@@ -80,7 +80,7 @@
       {% for t in part %}
         <li><a href="{{ url_for('backtest_page', name=strategy_slug(t.strategy)) }}">{{ label_of(t.strategy) }}</a>:
           worked {{ t.wins }} of {{ t.n }} times, kept
-          <span class="fig {{ 'gain' if t.kept > 0 else 'loss' }}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
+          <span class="fig{% if t.verdict == 1 %} gain{% elif t.verdict == -1 %} loss{% elif t.verdict is none %}{{ ' gain' if t.kept|round(2) > 0 else ' loss' if t.kept|round(2) < 0 }}{% endif %}">{{ t.kept|signed(2) }}R</span> a trade{% if t.se is not none %}
           <span class="faint">&plusmn;&thinsp;{{ '%.2f'|format(2 * t.se) }}R{% if t.verdict == 0 %}, within its margin{% endif %}</span>{% endif %}</li>
       {% endfor %}
     </ul>
