@@ -85,10 +85,20 @@
   <div class="sechead"><h2>Invite friends</h2>
     <span class="tail">{{ invite.joined }} joined so far</span></div>
   <div class="card">
+    {# The free days are a date on the account, so they run out alongside a
+       plan that is being paid for. #}
+    {% set paying = apple.pro or apple.via == 'web' %}
+    {% if paying %}
+    <p class="prose">When a friend joins through your link, they get
+      {{ invite_days }} days of Pro free, no card needed. You get
+      {{ invite_days }} days too, but they start when your friend joins, so
+      they add nothing while you are paying for Pro.</p>
+    {% else %}
     <p class="prose">When a friend joins through your link, you <b>both</b> get
       {{ invite_days }} days of Pro free. No card needed.</p>
+    {% endif %}
     <div class="sharebar" data-url="{{ invite.url }}"
-         data-text="I use Orenth to check stocks before I buy. Join with my link and we both get a free week of Pro.">
+         data-text="I use Orenth to check stocks before I buy. Join with my link and {{ 'get' if paying else 'we both get' }} a free week of Pro.">
       <input class="field" type="text" value="{{ invite.url }}" readonly
              aria-label="Your invite link" onclick="this.select()">
       <button class="btn" type="button" data-act="share">Share link</button>

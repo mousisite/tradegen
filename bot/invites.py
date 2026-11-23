@@ -7,8 +7,9 @@ asked for a card and nothing renews. Weeks stack: two friends, two weeks.
 The reward is paid when the friend's account is created through the link,
 so it could be farmed with throwaway accounts. Each of those needs its own
 Google account or inbox, since aliases of one inbox (me+1@, m.e@ on Gmail)
-earn nothing, and an inviter's reward stops after MAX_REWARDS, so the most
-that farming can win is a few free weeks.
+earn nothing, and an inviter is rewarded MAX_REWARDS times in all. Rewards are
+counted on the inviter's own account as they are given (users.invite_rewards),
+so a friend who deletes their account and joins again uses up another one.
 """
 from __future__ import annotations
 
@@ -90,9 +91,17 @@ def accept(conn: sqlite3.Connection, user_id: int, code: str,
             or now - int(row["created_ts"]) > FRESH \
             or _inbox_taken(conn, user_id, row["email"]):
         return False
-    conn.execute("UPDATE users SET invited_by=? WHERE id=?", (who, user_id))
+    cur = conn.execute("UPDATE users SET invited_by=? WHERE id=? AND invited_by=0",
+                       (who, user_id))
+    if cur.rowcount != 1:           # credited already, by a sign-in at the same moment
+        conn.commit()
+        return False
     _add_week(conn, user_id, now)
-    if joined(conn, who) <= MAX_REWARDS:
-        _add_week(conn, who, now)
+    # Friends who joined before rewards were counted were each rewarded.
+    before = joined(conn, who) - 1
+    conn.execute("UPDATE users SET invite_rewards=MAX(invite_rewards, ?) + 1, "
+                 "bonus_until=MAX(bonus_until, ?) + ? "
+                 "WHERE id=? AND MAX(invite_rewards, ?) < ?",
+                 (before, now, BONUS_DAYS * 86400, who, before, MAX_REWARDS))
     conn.commit()
     return True

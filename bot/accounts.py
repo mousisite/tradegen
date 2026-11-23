@@ -219,6 +219,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE users ADD COLUMN %s %s" % (column, ddl))
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite ON "
                  "users(invite_code) WHERE invite_code <> ''")
+                        # Free weeks given for inviting friends, counted as
+                        # they are given (bot/invites.py).
+                        ("invite_rewards", "INTEGER NOT NULL DEFAULT 0"),
 
     local = _ensure_local(conn)
 
