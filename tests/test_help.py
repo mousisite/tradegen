@@ -27,7 +27,8 @@ import numpy as np  # noqa: E402
 
 import web  # noqa: E402
 from bot import accounts as A  # noqa: E402
-from bot import calibrate, catalysts, config, engine, indicators, learning, plain  # noqa: E402
+from bot import calibrate, catalysts, config, decision, engine, indicators, learning  # noqa: E402
+from bot import plain  # noqa: E402
 from bot import database as db  # noqa: E402
 from bot import reasoning as reasoning_mod  # noqa: E402
 from bot import sentiment as sentiment_mod  # noqa: E402
@@ -115,6 +116,25 @@ check("the holding window, in the bars' own time",
       "within 10 trading days" in plain.help_for(config.DEFAULTS)["hit_rate"]["text"]
       and "within 2.0 hours" in plain.help_for(config.DEFAULTS, "5m")["hit_rate"]["text"]
       and "10-bar limit" in plain.help_for(config.DEFAULTS)["hold"]["text"])
+# Twelve hourly bars of a coin are half a day. Counted in a stock's session
+# they read "about 1.8 trading days", nearly four times too long.
+check("a hold is counted in the instrument's own day", [
+    config.describe_horizon("1h", 12), config.describe_horizon("1h", 12, "crypto", "BTC-USD"),
+    config.describe_horizon("1h", 36, "crypto", "BTC-USD"),
+    config.describe_horizon("1h", 12, "other", "ES=F"),
+    config.describe_horizon("1h", 46, "other", "ES=F"),
+    config.describe_horizon("1h", 12, "other", "EURUSD=X"),
+    config.describe_horizon("1d", 10, "crypto", "BTC-USD"),
+    config.describe_horizon("1d", 10, "other", "ES=F"),
+    config.describe_horizon("30m", 13, "equity", "AAPL")] == [
+    "1.8 trading days", "12.0 hours", "1.5 days", "12.0 hours", "2.0 trading days",
+    "12.0 hours", "10 days", "10 trading days", "6.5 hours"])
+check("one of them is said as one", config.describe_horizon("1d", 1) == "1 trading day"
+      and config.describe_horizon("1d", 1, "crypto") == "1 day"
+      and config.describe_horizon("1m", 1) == "1 minute")
+check("and the help says a coin's window in days",
+      "within 10 days" in plain.help_for(config.DEFAULTS, "1d", "crypto",
+                                         "BTC-USD")["hit_rate"]["text"])
 
 head("THE WORDS SAY WHAT THIS CODE DOES")
 # Each fact the help states, checked against the code that sets it, so a
@@ -253,16 +273,19 @@ try:
         r'<span class="(sr|lbl)">[^<]+</span></summary>', t)]
     check("each a summary, which is a button to a keyboard and a screen reader, "
           "with a name", len(named) == len(toggles), len(toggles) - len(named))
-    check("named as a question about the figure",
-          '<span class="sr">What expectancy means</span>' in page
-          and '<span class="sr">What the stop means</span>' in page
-          and '<span class="sr">What the call means</span>' in page)
+    # "What ... means" was not a sentence for the plural ones: "What the
+    # sessions means", "What green days means".
+    check("named for the figure, in words that fit one thing or several",
+          '<span class="sr">About expectancy</span>' in page
+          and '<span class="sr">About the stop</span>' in page
+          and '<span class="sr">About the call</span>' in page
+          and not re.search(r'<span class="sr">What [^<]+ means</span>', page))
     check("and no script needed to open one",
           not any("<script" in t or "onclick" in t for t in toggles))
 
     def near(label, key, width=400):
         at = page.find(label)
-        return at >= 0 and ('<span class="sr">What %s means</span>'
+        return at >= 0 and ('<span class="sr">About %s</span>'
                             % plain.HELP[key]["name"]) in page[at:at + width]
 
     check("beside the call", near('<div class="line">', "call", 200))
@@ -277,6 +300,28 @@ try:
     check("and under the tables, with every column",
           "What the columns and words mean" in page and "What the columns mean" in page
           and "<dt>RSI</dt>" in page and "<dt>Weight given</dt>" in page)
+    size = re.search(r'<dt>Size</dt>\s*<dd><span class="fig">([^<]*)</span> (units?)', page)
+    check("a size in whole shares is said in whole shares",
+          size is not None and re.fullmatch(r"[\d,]+", size.group(1)) is not None,
+          size and size.groups())
+    check("and the seconds the analysis took are said to be that",
+          re.search(r"<span>analysed in \d+\.\ds</span>", page) is not None)
+    drawn = web._CACHE and next(iter(web._CACHE.values()))
+    drawn = drawn[1] if isinstance(drawn, tuple) else drawn
+    with web.app.test_request_context("/analyse?symbol=TEST&interval=1d"):
+        web.app.preprocess_request()
+        for qty, words in ((1234.0, "1,234</span> units"), (1.0, "1</span> unit\n"),
+                           (0.0125, "0.0125</span> units"), (2.5, "2.5</span> units")):
+            drawn.plan.position.update(quantity=qty,
+                                       **decision.size_words(qty, qty != int(qty)))
+            got = web.render_template(
+                "analysis.html", r=drawn, cfg=mine, families=[], ranked=[], hold_text="",
+                plan=drawn.plan, calib=drawn.calibration, suggestions=[], calendar_rows=[],
+                overlap={"warnings": [], "pairs": []}, plain=None, popular_url="")
+            check("a size of %s reads %r" % (qty, words.strip()), words in got,
+                  got[got.find("<dt>Size</dt>"):][:200])
+    check("and with no past trades measured, no length of hold is made up",
+          "trading days" not in got[got.find(">Typical hold"):][:400])
     check("in the person's own numbers", "It is 2 ATR from the entry" in page
           and "target 3 ATR away" in page)
 

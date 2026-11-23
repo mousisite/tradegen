@@ -292,6 +292,14 @@ def size_futures(symbol: str, entry: float, stop: float, cfg: Dict) -> Dict:
             "capped_by_max_position": False}
 
 
+def size_words(qty: float, coins: bool) -> Dict:
+    """A size as a person writes it, and the word after it: 27 units, 1 unit,
+    0.0125 units of a coin."""
+    return {"quantity_text": ("{:,.6f}".format(qty).rstrip("0").rstrip(".") if coins
+                              else "{:,.0f}".format(qty)),
+            "unit_text": "unit" if qty == 1 else "units"}
+
+
 def size_position(entry: float, stop: float, bars: Bars, cfg: Dict) -> Dict:
     """Risk-based sizing: never risk more than the configured share of capital."""
     account = float(cfg["account_size"])
@@ -327,9 +335,7 @@ def size_position(entry: float, stop: float, bars: Bars, cfg: Dict) -> Dict:
 
     out = {
         "quantity": qty,
-        "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if bars.is_crypto
-                          else "{:,.0f}".format(qty)),
-        "unit_text": "units",
+        **size_words(qty, bars.is_crypto),
         "account_in": foreign,
         "notional": qty * entry,
         "risk_amount": qty * per_unit,

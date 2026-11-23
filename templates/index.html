@@ -207,19 +207,21 @@
     <label class="sr" for="interval">Bar interval</label>
     <select class="field" id="interval" name="interval">
       {% for code, label in intervals %}
-        <option value="{{ code }}" {{ 'selected' if code == '1d' }}>{{ label }}</option>
+        <option value="{{ code }}" {{ 'selected' if code == default_interval }}>{{ label }}</option>
       {% endfor %}
     </select>
     <button class="btn" type="submit">Analyse</button>
   </form>
   <div class="pills">
     {% for s in ['AAPL','NVDA','TSLA','MSFT','SPY','BTC-USD','ETH-USD'] %}
-      <a data-working href="{{ url_for('analyse', symbol=s, interval='1d') }}">{{ s }}</a>
+      <a data-working href="{{ url_for('analyse', symbol=s, interval=default_interval) }}">{{ s }}</a>
     {% endfor %}
   </div>
   <p class="prose" style="margin-top:var(--s2)">
-    Daily bars are preselected because they are the only interval where this
-    bot has measured positive expectancy. Shorter intervals lose to trading
+    {% if default_interval == '1d' %}Daily bars are preselected because they are
+    the only interval where{% else %}The bar size you chose in Settings is
+    preselected. Daily bars are the only interval where{% endif %}
+    Orenth has measured positive expectancy. Shorter intervals lose to trading
     costs before the strategy gets a say. That is an unhelpful thing for a
     trading tool to admit, and it is what the back-tests found.
   </p>
@@ -232,10 +234,9 @@
   {% if has_key or (current_user and current_user.is_local) %}
   <form id="shotform" action="{{ url_for('analyse_image') }}" method="post"
         enctype="multipart/form-data">
-    <input type="hidden" name="interval" id="shotinterval" value="1d">
+    <input type="hidden" name="interval" id="shotinterval" value="{{ default_interval }}">
     <label class="drop {{ '' if has_key else 'locked' }}" id="drop"
            for="chart" {{ '' if has_key else 'aria-disabled=true' }}>
-      <img id="thumb" class="thumb" alt="" hidden>
       <svg class="icon" width="26" height="26" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
            stroke-linejoin="round" aria-hidden="true">
@@ -247,11 +248,12 @@
         {# On an iPhone nothing is dropped, clicked or pasted with Ctrl+V. #}
         <span class="head" id="drophead">Or read a chart screenshot</span>
         <span class="sub">Tap to pick one, or take a photo of a chart. It reads
-          the ticker for you.</span>
+          the ticker for you; the bar size is the one chosen above.</span>
       {% elif has_key %}
         <span class="head" id="drophead">Or drop a chart screenshot here</span>
         <span class="sub">Click to browse, drag an image in, or paste with
-          Ctrl+V. It reads the ticker for you.</span>
+          Ctrl+V. It reads the ticker for you; the bar size is the one chosen
+          above.</span>
       {% else %}
         <span class="head">Screenshot reading needs an API key</span>
         <span class="sub">Add <b>ANTHROPIC_API_KEY</b> to the .env file in
@@ -286,7 +288,7 @@
     var input = document.getElementById('chart');
     var zone  = document.getElementById('drop');
     var head  = document.getElementById('drophead');
-    var thumb = document.getElementById('thumb');
+    var thumb = null;
     var busy  = document.getElementById('working');
     var ivSel = document.getElementById('interval');
     var ivOut = document.getElementById('shotinterval');
@@ -305,7 +307,16 @@
       }
       // Show the chart back to the user so it is obvious which image is going.
       var reader = new FileReader();
-      reader.onload = function (e) { thumb.src = e.target.result; thumb.hidden = false; };
+      reader.onload = function (e) {
+        // Made here: an image in the page with no picture yet is not valid.
+        if (!thumb) {
+          thumb = document.createElement('img');
+          thumb.className = 'thumb';
+          thumb.alt = '';
+          zone.insertBefore(thumb, zone.firstChild);
+        }
+        thumb.src = e.target.result;
+      };
       reader.readAsDataURL(file);
 
       var data = new DataTransfer();
@@ -377,7 +388,7 @@
     </div>
     {% if summary.trades < 30 %}
       <p class="prose" style="margin-top:var(--s3)">
-        {{ summary.trades }} closed trades cannot separate skill from luck.
+        {{ summary.trades }} closed trade{{ '' if summary.trades == 1 else 's' }} cannot separate skill from luck.
         Treat all of this as provisional until you pass about thirty.
       </p>
     {% endif %}
@@ -448,7 +459,7 @@
               {% set a = r['action'] %}
               <span class="chip {{ 'long' if a == 'BUY' else 'short' if a == 'SHORT'
                                    else 'hold' if a == 'WAIT' else 'mute' }}">
-                {{ a|capitalize }}</span>
+                {{ a }}</span>
             </td>
             <td class="r fig" data-label="Entry">{{ r['entry']|price }}</td>
             <td class="r fig {{ 'gain' if (r['expectancy_r'] or 0) > 0 else 'loss' if (r['expectancy_r'] or 0) < 0 }}" data-label="Expectancy">

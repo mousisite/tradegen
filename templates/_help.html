@@ -1,14 +1,14 @@
 {# Help beside a figure, in the words of plain.HELP, which the page passes as
    help_text with its own settings filled in. A details element, so it opens
    and closes with no script; its summary is a real button to a keyboard and
-   a screen reader, named "What ... means". Import it with context. A key with
+   a screen reader, named "About ...". Import it with context. A key with
    no words renders nothing rather than breaking the page; test_help.py checks
    that every key used has words. #}
 
 {% macro help(key) -%}
 {%- set h = help_text.get(key) if help_text else none -%}
 {%- if h -%}
-<details class="help"><summary><span class="q" aria-hidden="true">?</span><span class="sr">What {{ h.name }} means</span></summary><span class="say">{{ h.text }}</span></details>
+<details class="help"><summary><span class="q" aria-hidden="true">?</span><span class="sr">About {{ h.name }}</span></summary><span class="say">{{ h.text }}</span></details>
 {%- endif -%}
 {%- endmacro %}
 

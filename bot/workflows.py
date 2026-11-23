@@ -433,7 +433,7 @@ def _morning(conn, cfg, report: RunReport, step, db_path, user=1,
                             "attention", {"symbol": symbol,
                                           "exact": bool(row["exact"])}))
 
-    counts = db.stats(conn, user=user)
+    counts = db.stats(conn, user=user, tables=("runs", "trades", "alerts", "watchlist"))
     report.steps.append(Step(
         "Summary",
         "%d %s recorded, %d %s logged, %d %s set, %d %s watched."

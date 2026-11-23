@@ -396,7 +396,8 @@
   <p class="prose" style="margin-top:var(--s3)">
     Bars rather than a line, because each is a separate audited figure from one
     annual report. A line between two of them would imply values in between
-    that were never reported. Hover a bar for the exact number.
+    that were never reported.
+    {% if not in_app %}<span class="hover-only">Point at a bar for the exact number.</span>{% endif %}
   </p>
   {% if r.sec_history and r.sec_history.mixed_currency %}
     <div class="card" style="margin-top:var(--s3);border-color:var(--hold)">

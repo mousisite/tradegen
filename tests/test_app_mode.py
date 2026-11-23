@@ -186,8 +186,13 @@ try:
     print("=" * 72)
     print("NO THIRD-PARTY COUNTING INSIDE THE APP")
     print("=" * 72)
-    outside = text(c.get("/", headers=IN_SAFARI))
-    inside = text(c.get("/", headers=IN_APP))
+    # Visits are counted at the site's own address only, so it needs one here.
+    _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app"
+    try:
+        outside = text(c.get("/", headers=IN_SAFARI))
+        inside = text(c.get("/", headers=IN_APP))
+    finally:
+        del _os.environ["STOCKBOT_PUBLIC_URL"]
     check("a signed-out visit is counted in a browser", "metricool" in outside)
     check("but never inside the app", "metricool" not in inside.lower())
     check("the front page inside the app says nothing it must not",

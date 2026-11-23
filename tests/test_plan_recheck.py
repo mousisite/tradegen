@@ -5,8 +5,11 @@ webhook that stops arriving (a firewall answering Stripe with 403, a changed
 signing secret) would otherwise end Pro for people Stripe had just charged.
 This also covers the copy of the database taken before a new release.
 """
+import contextlib
+import io
 import os as _os
 import sqlite3
+import subprocess
 import sys as _sys
 import time
 
@@ -323,9 +326,20 @@ for key in [k for k in _os.environ if k.startswith("BACKUP_S3_")] + [
         "SENTRY_DSN", "STOCKBOT_BACKUP_DIR", "STOCKBOT_BACKUP_HOURS"]:
     _os.environ.pop(key, None)
 _os.environ["RENDER_GIT_COMMIT"] = "ffff6666"
+had_public = _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+said = {}
 try:
     started = serve.main([])
+    timed = len(jobs)
+    for address in ("orenth.example", "http://orenth.example", "HTTPS://orenth.example"):
+        _os.environ["STOCKBOT_PUBLIC_URL"] = address
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            serve.main([])
+        said[address] = "PUBLIC ADDRESS IS NOT HTTPS" in out.getvalue()
 finally:
+    _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+    if had_public is not None:
+        _os.environ["STOCKBOT_PUBLIC_URL"] = had_public
     (waitress.serve, web.start_alert_loop, web.start_background_jobs,
      scheduler_mod.Scheduler) = real
     web.app.config["DB_PATH"] = DB
@@ -333,7 +347,20 @@ new = sorted(set(held()) - set(before))
 check("serve.main takes the copy for a new release, and notes the release",
       started == 0 and len(new) == 1 and release_noted() == "ffff6666",
       (started, new, release_noted()))
-check("the timed backups are set up beside it", len(jobs) == 1, jobs)
+check("a public address that is not https is said loudly at the start, and only then",
+      said == {"orenth.example": True, "http://orenth.example": True,
+               "HTTPS://orenth.example": False}, said)
+# Read once, as web.py is imported, so in a process of its own.
+child = subprocess.run(
+    [_sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import web; "
+     "print(bool(web.app.config['SESSION_COOKIE_SECURE']), "
+     "type(web.app.wsgi_app).__name__)", harness.ROOT],
+    cwd=harness.ROOT, capture_output=True, text=True, timeout=120,
+    env=dict(_os.environ, STOCKBOT_PUBLIC_URL="HTTPS://orenth.example",
+             STOCKBOT_BEHIND_PROXY=""))
+check("an https address typed in capitals still makes the cookies secure",
+      child.stdout.split() == ["True", "ProxyFix"], (child.stdout, child.stderr[-300:]))
+check("the timed backups are set up beside it", timed == 1, timed)
 age_copies()
 jobs[0]()                               # a timed backup, every 12 hours
 check("each timed backup also deletes the copies a week old, so one goes "

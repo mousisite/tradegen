@@ -83,10 +83,9 @@ from bot import webapp as webapp_mod
 from bot import workflows as workflows_mod
 from bot.market import DataError, format_price
 from bot.strategies import FAMILIES
-from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart
+from bot.vision import MAX_EDGE, MAX_PIXELS, VisionError, read_chart, upright
 
 app = Flask(__name__)
-app.config["JSON_SORT_KEYS"] = False
 # Chart screenshots are small. This cap stops a huge upload from tying up the
 # single-process dev server.
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
@@ -133,14 +132,14 @@ _public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
 # An https public address is an operator saying there is a TLS terminator in
 # front, which is the only way these headers get set at all.
 if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
-        in ("1", "true", "yes")) or _public.startswith("https://"):
+        in ("1", "true", "yes")) or _public.lower().startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
 # is served over https; on localhost it stays off or the cookie never arrives.
-if _public.startswith("https://"):
+if _public.lower().startswith("https://"):
     app.config["SESSION_COOKIE_SECURE"] = True
 
 
@@ -724,7 +723,21 @@ def _note_app():
 
 @app.context_processor
 def _app_mode():
-    return {"in_app": _in_app()}
+    return {"in_app": _in_app(), "visit_host": _visit_host()}
+
+
+def _visit_host() -> str:
+    """The public site's host, the one place visits are counted.
+
+    Empty on a copy with no public address, such as one being worked on, and
+    the page then counts nothing.
+    """
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit((os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()).hostname
+    except ValueError:
+        host = None
+    return (host or "").removeprefix("www.")
 
 
 def uid() -> int:
@@ -859,7 +872,12 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
                                 user=me, record=record, exact=exact)
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
-            _CACHE[key] = (time.time(), result,
+            now = time.time()
+            # One past every time limit is never served again, and an intraday
+            # coin's takes some 16 MB: forty left lying fill the server.
+            for old in [k for k, v in _CACHE.items() if now - v[0] >= DEMO_TTL]:
+                _CACHE.pop(old)
+            _CACHE[key] = (now, result,
                            {me: result.run_id} if result.run_id else {})
             # Keep the cache from growing without bound in a long session.
             if len(_CACHE) > 40:
@@ -1054,7 +1072,10 @@ def inject_globals():
 # a real analysis, labelled with how old it is.
 EXAMPLE_SYMBOL = "NVDA"
 EXAMPLE_TTL = 15 * 60
-_example_state = {"at": 0.0, "data": None, "busy": False}
+# How long a failed try is left before another: without it, while the source is
+# down every visit started an analysis of its own.
+EXAMPLE_RETRY = 120
+_example_state = {"at": 0.0, "data": None, "busy": False, "failed": 0.0}
 _example_lock = threading.Lock()
 
 
@@ -1084,10 +1105,16 @@ def _refresh_example() -> None:
         with _example_lock:
             _example_state["data"] = data
             _example_state["at"] = data["at"]
-    except Exception:
+    except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
-        # visitor. The page simply renders without it.
-        pass
+        # visitor. The page simply renders without it, and the log says why: a
+        # source that is down in a line, anything else as an error.
+        with _example_lock:
+            _example_state["failed"] = time.time()
+        if isinstance(exc, DataError):
+            app.logger.warning("The front page example had no prices: %s", exc)
+        else:
+            app.logger.exception("The front page example could not be refreshed")
     finally:
         with _example_lock:
             _example_state["busy"] = False
@@ -1099,7 +1126,8 @@ def _example():
     with _example_lock:
         data = _example_state["data"]
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
-        if stale and not _example_state["busy"]:
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
+        if stale and rested and not _example_state["busy"]:
             _example_state["busy"] = True
             threading.Thread(target=_refresh_example, daemon=True).start()
     if data is None:
@@ -1128,7 +1156,9 @@ def index():
         # All of them, so a stop crossed on an old one is said too.
         open_trades = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
-        counts = db_mod.stats(conn, user=uid())
+        # Only what the page prints: counting every signal and headline of
+        # every run took most of the time and was shown nowhere.
+        counts = db_mod.stats(conn, user=uid(), tables=("runs", "strategy_stats"))
         stored = _attention_stored(conn, uid())
     finally:
         conn.close()
@@ -1142,7 +1172,10 @@ def index():
     finally:
         conn.close()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # The bar size the box starts on is the one chosen in Settings.
+    chosen = _cfg().get("interval")
     return render_template("index.html", runs=runs,
+                           default_interval=chosen if chosen in dict(INTERVALS) else "1d",
                            open_trades=_held(open_trades[:POSITIONS_SHOWN],
                                              attention["marks"]),
                            open_more=max(0, len(open_trades) - POSITIONS_SHOWN),
@@ -1364,6 +1397,17 @@ def _canonical(endpoint: str, bars) -> str:
                                     exact=exact_arg(bars.symbol))
 
 
+# The largest account an address may name: a trillion, past which a size has
+# more digits than it is worth printing.
+ACCOUNT_MOST = 1e12
+
+
+def _address_number(name: str, most: float) -> Optional[float]:
+    """A number the address gives, when it is above zero and at most `most`."""
+    number = _number(request.args.get(name))
+    return number if number is not None and 0 < number <= most else None
+
+
 @app.route("/analyse")
 def analyse():
     symbol, exact = _symbol_from(request.args)
@@ -1386,16 +1430,14 @@ def analyse():
                            "can look at any timeframe.")
 
     cfg = _cfg()
-    if request.args.get("account"):
-        try:
-            cfg["account_size"] = float(request.args["account"])
-        except ValueError:
-            pass
-    if request.args.get("risk"):
-        try:
-            cfg["risk_per_trade_pct"] = float(request.args["risk"])
-        except ValueError:
-            pass
+    # Within what Settings allows, or not at all: nan, a minus sign or a risk
+    # of 500 made sizes of nonsense, or no page.
+    account = _address_number("account", ACCOUNT_MOST)
+    if account is not None:
+        cfg["account_size"] = account
+    risk = _address_number("risk", 10.0)
+    if risk is not None:
+        cfg["risk_per_trade_pct"] = risk
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
@@ -1433,9 +1475,13 @@ def analyse():
         app.logger.exception("Could not read the levels for %s", result.bars.symbol)
         extras = {}
     ranked = sorted(result.signals, key=lambda s: -abs(s.contribution))
-    # "10 bars" means nothing without the interval attached to it.
-    hold_text = config_mod.describe_horizon(
-        result.bars.interval, int(result.calibration.avg_bars_held or 0))
+    # "10 bars" means nothing without the interval attached to it, nor without
+    # how long the instrument trades in a day. Rounded as the page rounds it,
+    # and nothing at all when no past trade was measured.
+    held = int(round(result.calibration.avg_bars_held or 0))
+    hold_text = (config_mod.describe_horizon(result.bars.interval, held,
+                                             result.bars.asset_class, result.bars.symbol)
+                 if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
     suggestions = []
@@ -1472,7 +1518,9 @@ def analyse():
                            chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
                            plain=plain_mod.explain_plan(result.plan, result.bars,
                                                         hold_text),
-                           help_text=plain_mod.help_for(cfg, result.bars.interval),
+                           help_text=plain_mod.help_for(cfg, result.bars.interval,
+                                                        result.bars.asset_class,
+                                                        result.bars.symbol),
                            # A visitor cannot make a share, but every example
                            # symbol has a public page to pass around instead.
                            popular_url=(url_for("stock_page", sym=public_mod.slug(
@@ -2379,7 +2427,6 @@ def _trade_picture(trade) -> Dict:
     bars are in today's, so after a split its prices are turned into
     today's to sit on them, and the page says so.
     """
-    import inspect
     from bot import clock as clock_mod
     from bot import journal as journal_mod
     symbol, own = trade["symbol"], trade["interval"] or "1d"
@@ -2440,12 +2487,11 @@ def _trade_picture(trade) -> Dict:
              "last": float(bars.last_price) if not closed else None}
     if intraday:
         drawn["day_label"] = clock_mod.label_ny
-    # Where the person went in and out, on charts that can mark a point.
-    if "marks" in inspect.signature(charts_mod.trade_chart).parameters:
-        marks = [(ts[first], levels["Entry"], direction, "Entry")]
-        if exit_price is not None:
-            marks.append((ts[last], exit_price, -direction, "Exit"))
-        drawn["marks"] = marks
+    # Where the person went in and out.
+    marks = [(ts[first], levels["Entry"], direction, "Entry")]
+    if exit_price is not None:
+        marks.append((ts[last], exit_price, -direction, "Exit"))
+    drawn["marks"] = marks
 
     def draw(before, after, most, **size):
         start, end = journal_mod.picture_window(n, first, last, before, after, most)
@@ -2756,6 +2802,10 @@ def analyse_image():
             # Shrunk to what the vision model uses, before anything else, so
             # no full-size copy is ever made or passed on.
             img.thumbnail((MAX_EDGE, MAX_EDGE))
+            # A phone stores a photo as its sensor lay and notes which way up
+            # it was held. Saved as PNG the note is lost, and an upright chart
+            # was read lying on its side.
+            img = upright(img)
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
             png = io.BytesIO()
@@ -2789,7 +2839,11 @@ def analyse_image():
                                        "image. Try a clearer screenshot, or just "
                                        "type the ticker."), 422
 
-    interval = request.form.get("interval") or _interval_from(read.timeframe)
+    # The bar size chosen on the page, which says so under the picture box. A
+    # request that names none there is has the picture's own.
+    interval = request.form.get("interval")
+    if interval not in dict(INTERVALS):
+        interval = _interval_from(read.timeframe)
     return redirect(url_for("analyse", symbol=read.symbol, interval=interval,
                             fromimage="1"))
 
@@ -2829,7 +2883,7 @@ def _interval_from(timeframe: Optional[str]) -> str:
     """Map whatever the chart said its timeframe was onto one we support."""
     if not timeframe:
         return "1d"
-    t = timeframe.strip().lower().replace(" ", "")
+    t = str(timeframe).strip().lower().replace(" ", "")
     known = {"1m": "5m", "2m": "5m", "3m": "5m", "5m": "5m", "10m": "15m",
              "15m": "15m", "30m": "30m", "45m": "30m", "1h": "1h", "60m": "1h",
              "2h": "1h", "4h": "1h", "1d": "1d", "d": "1d", "1day": "1d",
@@ -6419,8 +6473,16 @@ def _refresh_popular_job():
         except Exception as exc:
             app.logger.exception("Could not check the watched instruments")
             watch = {"checked": 0, "errors": ["watched instruments: %s" % exc]}
-        return {"checked": done["checked"] + watch["checked"],
-                "errors": list(done["errors"]) + list(watch["errors"])}
+        errors = list(done["errors"]) + list(watch["errors"])
+        # The example visitors look around, refilled here once a week rather
+        # than while one of them waits. Nobody is shown it without sign-in.
+        try:
+            if auth_required():
+                demo_mod.refresh(conn)
+        except Exception as exc:
+            app.logger.exception("Could not refill the example account")
+            errors.append("example account: %s" % exc)
+        return {"checked": done["checked"] + watch["checked"], "errors": errors}
     finally:
         conn.close()
 
