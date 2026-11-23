@@ -450,11 +450,19 @@
   (function () {
     var push = native();
     if (!push) { return; }
-    push.addListener('pushNotificationActionPerformed', function (action) {
-      var data = action && action.notification && action.notification.data;
-      var address = tappedPage(data && data.url);
-      if (address) { window.location.assign(address); }
-    });
+    function hear() {
+      push.addListener('pushNotificationActionPerformed', function (action) {
+        var data = action && action.notification && action.notification.data;
+        var address = tappedPage(data && data.url);
+        if (address) { window.location.assign(address); }
+      });
+    }
+    hear();
+    // A page swiped back to can return as it was left, without running this
+    // again, and the app forgot the listener when the next page loaded.
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('pageshow', function (e) { if (e.persisted) { hear(); } });
+    }
   })();
 
   // --- the cards on the Monitor and Settings pages -----------------------------

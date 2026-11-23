@@ -362,6 +362,7 @@ function page() {
                 assign: (to) => { went.push(String(to)); } },
     document: { readyState: 'complete', currentScript: { getAttribute: () => '' },
                 querySelectorAll: () => [], addEventListener() {} },
+    addEventListener: (type, fn) => { heard['window ' + type] = fn; },
   };
   ctx.window = ctx;
   vm.createContext(ctx);
@@ -376,6 +377,11 @@ for (const path of PATHS) {
   p.heard.pushNotificationActionPerformed({ notification: { data: { url: path } } });
   out[path] = p.went;
 }
+// Swiped back to and returned as it was left, once the app has forgotten it.
+const left = page();
+delete left.heard.pushNotificationActionPerformed;
+if (left.heard['window pageshow']) { left.heard['window pageshow']({ persisted: true }); }
+out.back = !!left.heard.pushNotificationActionPerformed;
 console.log(JSON.stringify(out));
 """
 
@@ -1646,6 +1652,8 @@ try:
         check("one for %r stays on orenth.app" % ODD_BUT_HERE,
               tapped[ODD_BUT_HERE] == ["https://orenth.app" + ODD_BUT_HERE],
               tapped[ODD_BUT_HERE])
+        check("a page swiped back to that returns as it was left hears a tap again",
+              tapped["back"] is True, tapped.get("back"))
 
     section("RETIRING THE WORKER AFTER A ROLLBACK")
     # A version from before the worker answers /sw.js with "not found", and a
