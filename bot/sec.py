@@ -62,6 +62,12 @@ _LAST_CALL = [0.0]
 _MIN_GAP = 0.12          # EDGAR asks for under ~10 requests a second
 
 _TICKER_CACHE: Optional[Dict[str, int]] = None
+# When the list in memory was downloaded, when a newer one was last asked for,
+# and who is asking: a server that runs for months still learns of listings.
+_TICKER_AT = [0.0]
+_TICKER_ASKED = [0.0]
+_TICKER_RETRY = 3600.0
+_TICKER_LOCK = threading.Lock()
 # Companies' parsed filings, most recently used last. Bounded, because each is
 # close to a megabyte and the server has half a gigabyte; and refreshed daily,
 # because a company files new figures without the server restarting.
@@ -139,11 +145,16 @@ FORM_MEANING = {
     "3": "Someone became an insider.",
     "144": "An insider gave notice of intent to sell.",
     "20-F": "Annual report from a foreign private issuer.",
+    "40-F": "Annual report from a Canadian company.",
     "6-K": "Interim report from a foreign private issuer.",
 }
 
 MATERIAL_FORMS = ("10-K", "10-Q", "8-K", "DEF 14A", "S-1", "424B5",
-                  "SC 13D", "SC 13G", "20-F", "6-K")
+                  "SC 13D", "SC 13G", "20-F", "40-F", "6-K")
+
+# The forms a year's accounts are filed on: a US company's, a foreign one's
+# and a Canadian one's.
+ANNUAL_FORMS = ("10-K", "20-F", "40-F")
 
 
 class SECError(RuntimeError):
@@ -246,23 +257,41 @@ def ticker_map(max_age_days: int = 14) -> Dict[str, int]:
     """Ticker to CIK for every SEC registrant, cached on disk.
 
     The file is about 800 KB and changes rarely, so re-downloading it on every
-    lookup would be wasteful and rude to a free public service.
+    lookup would be wasteful and rude to a free public service. Once the list
+    is older than `max_age_days` one caller asks for a newer one while the
+    others go on with the old, and when none comes the old one stays in use.
     """
-    global _TICKER_CACHE
-    if _TICKER_CACHE is not None:
-        return _TICKER_CACHE
-
     path = os.path.join(_cache_dir(), "sec_tickers.json")
-    fresh = (os.path.exists(path) and
-             (time.time() - os.path.getmtime(path)) < max_age_days * 86400)
-    if fresh:
+    if _TICKER_CACHE is None:
         try:
+            made = os.path.getmtime(path)
             with open(path, "r", encoding="utf-8") as fh:
-                _TICKER_CACHE = json.load(fh)
-                return _TICKER_CACHE
-        except (OSError, json.JSONDecodeError):
+                _keep_tickers(json.load(fh), made)
+        except (OSError, ValueError):
             pass
+    if _TICKER_CACHE is None:
+        return _download_tickers(path)
 
+    now = time.time()
+    if (now - _TICKER_AT[0] >= max_age_days * 86400
+            and now - _TICKER_ASKED[0] >= _TICKER_RETRY
+            and _TICKER_LOCK.acquire(blocking=False)):
+        try:
+            _TICKER_ASKED[0] = now
+            return _download_tickers(path)
+        except Exception:
+            pass                        # whatever came, the old list still serves
+        finally:
+            _TICKER_LOCK.release()
+    return _TICKER_CACHE
+
+
+def _keep_tickers(mapping: Dict[str, int], made: float) -> None:
+    global _TICKER_CACHE
+    _TICKER_CACHE, _TICKER_AT[0] = mapping, made
+
+
+def _download_tickers(path: str) -> Dict[str, int]:
     data = _get(_TICKERS_URL)
     if not isinstance(data, dict):
         raise SECError("Could not download the SEC ticker list.")
@@ -276,7 +305,7 @@ def ticker_map(max_age_days: int = 14) -> Dict[str, int]:
             json.dump(mapping, fh)
     except OSError:
         pass
-    _TICKER_CACHE = mapping
+    _keep_tickers(mapping, time.time())
     return mapping
 
 
@@ -337,6 +366,8 @@ class CompanyFacts:
     entity: str
     annual: Dict[str, List[Fact]] = field(default_factory=dict)
     quarterly: Dict[str, List[Fact]] = field(default_factory=dict)
+    # Whether it files figures under international rules, which are not read.
+    international: bool = False
 
     def latest(self, concept: str, annual_only: bool = True) -> Optional[Dict]:
         """Most recent reported value for a concept."""
@@ -455,6 +486,7 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
 
     facts = CompanyFacts(cik=cik, entity=data.get("entityName") or symbol.upper())
     us_gaap = (data.get("facts") or {}).get("us-gaap") or {}
+    facts.international = bool((data.get("facts") or {}).get("ifrs-full"))
 
     for concept, tags in _CONCEPTS.items():
         by_year, by_quarter = [], []       # one entry per tag that has data
@@ -501,7 +533,7 @@ def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
                              form=form, filed=row.get("filed", ""),
                              end=end, accession=row.get("accn", ""))
 
-                if form in ("10-K", "20-F") and is_annual_period:
+                if form in ANNUAL_FORMS and is_annual_period:
                     # Key by the period, so a later restatement of the same year
                     # replaces the original instead of appearing beside it.
                     prior = annual.get(period_year)
@@ -708,19 +740,26 @@ def financial_history(symbol: str, years: int = 6) -> Dict:
     # A company that re-registers gets a new CIK, and its whole filing history
     # stays under the old one. The new entity then has a couple of quarterly
     # filings and nothing else, which would otherwise render as a blank table
-    # with no explanation. Exxon Mobil did exactly this.
+    # with no explanation. Exxon Mobil did exactly this. A company that keeps
+    # its accounts under international rules has years of them, only not in
+    # the part that is read here, and is told that instead.
     if len(years_seen) < 2:
+        if facts.international:
+            reason = ("%s keeps its accounts under international rules (IFRS), "
+                      "which Orenth does not read yet. The filings themselves "
+                      "are on EDGAR, the SEC's public site." % facts.entity)
+        else:
+            reason = ("The SEC's records of %s hold %s of annual figures, too few "
+                      "to compare. That usually means it listed recently, or that "
+                      "it re-registered and its older filings are under another "
+                      "company number. The filings themselves are on EDGAR, the "
+                      "SEC's public site."
+                      % (facts.entity, {0: "no years", 1: "only one year"}[len(years_seen)]))
         return {
             "available": False,
             "entity": facts.entity,
             "cik": facts.cik,
-            "reason": (
-                "%s files under CIK %d, which holds only %d year%s of annual "
-                "figures. That usually means the company re-registered and its "
-                "history sits under a predecessor CIK. The filings are on "
-                "EDGAR; this table cannot assemble them automatically."
-                % (facts.entity, facts.cik, len(years_seen),
-                   "" if len(years_seen) == 1 else "s")),
+            "reason": reason,
             "source_url": ("https://www.sec.gov/cgi-bin/browse-edgar?action="
                            "getcompany&CIK=%010d" % facts.cik),
         }

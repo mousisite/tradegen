@@ -587,6 +587,11 @@ def explain_company(research) -> Dict:
                 "why": ("Its filed accounts could not be read just now, so there "
                         "are no company numbers to put into plain words here. "
                         "The price side of the app still works.")}
+    if not history.get("available") and history.get("entity"):
+        # It does file; why its figures could not be read is already known.
+        return {"available": False,
+                "why": "%s The price side of the app still works."
+                       % history.get("reason", "Its filed figures could not be read.")}
     if not history.get("available"):
         return {"available": False,
                 "why": ("This is not a company that files accounts with the US "
