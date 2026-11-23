@@ -1293,6 +1293,21 @@ def _exact(symbol: str, exact: bool) -> int:
     return 1 if exact and needs_exact(symbol) else 0
 
 
+# The most instruments one account can watch, whatever its plan: far past any
+# list a person reads, and short of one that fills the disk.
+MAX_WATCHED = 500
+
+
+def _bar_size(interval: Optional[str]) -> str:
+    """A bar size the data source serves, or ValueError. Stored as it came, it
+    could be any text at all, kept for good and never answered."""
+    from .alerts import LOOKBACK
+    size = (interval or "1d").strip().lower()
+    if size not in LOOKBACK:
+        raise ValueError("Choose one of the bar sizes in the list.")
+    return size
+
+
 def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
               note: str = "", user: int = 1, exact: bool = False) -> None:
     """Watch an instrument, or change the bar size and note of one watched.
@@ -1306,7 +1321,13 @@ def watch_add(conn: sqlite3.Connection, symbol: str, interval: str = "1d",
     """
     sym, uid, now = _symbol(symbol), int(user), int(time.time())
     note = (note or "")[:MAX_NOTE]
+    interval = _bar_size(interval)
     exact = _exact(sym, exact)
+    held = conn.execute("SELECT COUNT(*), COALESCE(SUM(symbol=?), 0) FROM watchlist "
+                        "WHERE user_id=?", (sym, uid)).fetchone()
+    if held[0] >= MAX_WATCHED and not held[1]:
+        raise ValueError("A watchlist holds up to %d instruments, and this one is "
+                         "full. Remove one first." % MAX_WATCHED)
     if exact:
         from .market import normalise_symbol
         conn.execute("UPDATE OR IGNORE watchlist SET symbol=? WHERE user_id=? "
@@ -1416,6 +1437,7 @@ def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
     if why:
         raise ValueError(why)
     sym = _symbol(symbol)
+    interval = _bar_size(interval)
     held = conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=?",
                         (int(user),)).fetchone()[0]
     if cap is not None and held >= cap:
@@ -1430,7 +1452,7 @@ def alert_add(conn: sqlite3.Connection, symbol: str, kind: str,
     cur = conn.execute(
         "INSERT INTO alerts (symbol, kind, threshold, interval, note, active, "
         "created_ts, repeat, user_id, exact) VALUES (?,?,?,?,?,1,?,?,?,?)",
-        (sym, kind, threshold, interval or "1d", (note or "")[:MAX_NOTE],
+        (sym, kind, threshold, interval, (note or "")[:MAX_NOTE],
          int(time.time()), 1 if repeat else 0, int(user), _exact(sym, exact)))
     conn.commit()
     return int(cur.lastrowid)
@@ -1482,23 +1504,33 @@ def alert_fire(conn: sqlite3.Connection, alert_id: int, value: float,
 
 
 def alert_checked(conn: sqlite3.Connection, alert_id: int,
-                  state: Optional[str] = None) -> None:
-    """A check that found nothing to say. Clears any earlier error."""
+                  state: Optional[str] = None, was: Optional[str] = None) -> None:
+    """A check that found nothing to say. Clears any earlier error.
+
+    The state is kept only while it is still the one the check read (was): a
+    fire told, or an alert edited or re-armed, while the check was running
+    is newer than what the check saw.
+    """
     if state is None:
         conn.execute("UPDATE alerts SET last_checked=?, last_error=NULL, "
                      "last_error_ts=NULL WHERE id=?", (int(time.time()), alert_id))
     else:
         conn.execute("UPDATE alerts SET last_checked=?, last_error=NULL, "
-                     "last_error_ts=NULL, state=? WHERE id=?",
-                     (int(time.time()), state, alert_id))
+                     "last_error_ts=NULL, state=CASE WHEN COALESCE(state, '') = ? "
+                     "THEN ? ELSE state END WHERE id=?",
+                     (int(time.time()), was or "", state, alert_id))
     conn.commit()
 
 
 def alert_failed(conn: sqlite3.Connection, alert_id: int, error: str) -> None:
-    """A check that could not be done, kept so the page can say why."""
-    conn.execute("UPDATE alerts SET last_checked=?, last_error=?, last_error_ts=? "
-                 "WHERE id=?", (int(time.time()), error[:200], int(time.time()),
-                                alert_id))
+    """A check that could not be done, kept so the page can say why.
+
+    When it last looked stays as it was: nothing was looked at, and an alert
+    with no bar kept yet looks from there, so what happened meanwhile is told
+    once a check works.
+    """
+    conn.execute("UPDATE alerts SET last_error=?, last_error_ts=? WHERE id=?",
+                 (error[:200], int(time.time()), alert_id))
     conn.commit()
 
 
@@ -1522,11 +1554,18 @@ def alert_set_active(conn: sqlite3.Connection, alert_id: int, active: bool,
 
     Resuming clears what the page kept from before the pause, a failed check
     or the note on an alert moved to a coin's own id: it asked to be resumed,
-    and the next check says again if anything is wrong.
+    and the next check says again if anything is wrong. One that looks at
+    finished bars looks from now on: what happened while it was paused is
+    not told.
     """
     if active:
+        now = int(time.time())
         sql, args = _own("UPDATE alerts SET active=1, last_error=NULL, "
-                         "last_error_ts=NULL WHERE id=?", [alert_id], user)
+                         "last_error_ts=NULL, state=CASE "
+                         "WHEN active=0 AND (state LIKE 'bar:%' OR state LIKE 'since:%') "
+                         "THEN ? WHEN active=0 AND state LIKE 'clear:%' THEN ? "
+                         "ELSE state END WHERE id=?",
+                         ["since:%d" % now, "clear:%d" % now, alert_id], user)
     else:
         sql, args = _own("UPDATE alerts SET active=0 WHERE id=?", [alert_id], user)
     if conn.execute(sql, args).rowcount == 0:
@@ -1657,16 +1696,20 @@ def alert_reset(conn: sqlite3.Connection, alert_id: int,
     """Re-arm a fired alert, as if it had just been set.
 
     A call alert keeps the call it last saw, so the next change from that
-    call fires. Any other forgets that its condition was met, so if it still
-    is, the next check says so again.
+    call fires. One about something a finished bar did looks at the bars that
+    finish from now on, so what it told is not told again. Any other forgets
+    that its condition was met, so if it still is, the next check says so
+    again.
     """
-    from .alerts import CALL_KINDS
+    from .alerts import CALL_KINDS, LOOKING_KINDS
     sql, args = _own("UPDATE alerts SET active=1, triggered_ts=NULL, "
                      "trigger_value=NULL, trigger_note=NULL, last_error=NULL, "
-                     "last_error_ts=NULL, state=CASE WHEN kind IN "
-                     "(%s) THEN state ELSE NULL END WHERE id=?"
-                     % ",".join("?" * len(CALL_KINDS)),
-                     list(CALL_KINDS) + [alert_id], user)
+                     "last_error_ts=NULL, state=CASE WHEN kind IN (%s) THEN state "
+                     "WHEN kind IN (%s) THEN ? ELSE NULL END WHERE id=?"
+                     % (",".join("?" * len(CALL_KINDS)),
+                        ",".join("?" * len(LOOKING_KINDS))),
+                     list(CALL_KINDS) + list(LOOKING_KINDS)
+                     + ["since:%d" % int(time.time()), alert_id], user)
     if conn.execute(sql, args).rowcount == 0:
         raise ValueError("No alert with id %d" % alert_id)
     conn.commit()

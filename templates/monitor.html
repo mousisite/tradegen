@@ -179,7 +179,7 @@
             <td class="soft" data-label="Last looked">{{ row['last_checked']|ago if row['last_checked'] else 'never' }}
               {# A paused alert is not checked, so what is kept there is a note
                  about why it was paused (an alert moved to a coin's right id). #}
-              {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">{{ 'Could not check: ' if row['active'] }}{{ row['last_error'] }}</div>{% endif %}</td>
+              {% if row['last_error'] %}<div style="font-size:var(--t-xs);color:var(--loss)">{% if row['active'] %}Could not check{{ ' ' ~ (row['last_error_ts']|ago) if row['last_error_ts'] }}: {% endif %}{{ row['last_error'] }}</div>{% endif %}</td>
             <td class="soft wide" data-label="What happened">
               {% if row['trigger_note'] %}
                 {{ row['trigger_note'] }}

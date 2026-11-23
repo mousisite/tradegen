@@ -6293,7 +6293,8 @@ def _check_and_tell(conn, user: Optional[int] = None, stops: bool = True,
         except Exception:
             app.logger.exception("Could not hand fired alerts to the notification sender")
     if fired and codes_mod.email_ready():
-        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn))
+        alerts_mod.deliver(conn, fired, codes_mod.send_mail, _alert_address(conn),
+                           site=_public_base_offline())
     return {"checked": result["checked"] + crossed["checked"], "fired": fired,
             "errors": result["errors"] + crossed["errors"], "when": result["when"],
             "skipped": result.get("skipped", 0) + crossed.get("skipped", 0)}

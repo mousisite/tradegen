@@ -53,6 +53,7 @@ class Scheduler:
 
         self.started_at: Optional[float] = None
         self.last_run: Optional[float] = None
+        self._last_started: Optional[float] = None
         self.last_error: str = ""
         self.runs = 0
         self.failures = 0
@@ -102,12 +103,20 @@ class Scheduler:
         # Wait one interval before the first run. Checking the instant the
         # server starts would fire alerts against a market the user has not
         # looked at yet, and the page checks on load anyway.
+        spent = 0.0
         while not self._stop.is_set():
-            woken = self._wake.wait(timeout=self._interval)
+            # The time a round took comes off the wait, so rounds start an
+            # interval apart. Waited in full after each, they drifted later
+            # every time, and a five-minute check let a five-minute bar pass
+            # now and then. A round as long as the interval still gets a pause.
+            woken = self._wake.wait(timeout=max(self._interval - spent,
+                                                min(30.0, self._interval / 2.0)))
             self._wake.clear()
             if self._stop.is_set():
                 return
+            began = time.monotonic()
             self._run_once(triggered="manual" if woken else "timer")
+            spent = time.monotonic() - began
 
     @staticmethod
     def _as_dict(item) -> Dict:
@@ -131,6 +140,7 @@ class Scheduler:
         recorded says it succeeded.
         """
         started = time.time()
+        self._last_started = started
         try:
             result = self._job() or {}
             fired = [self._as_dict(x) for x in (result.get("fired") or [])]
@@ -208,7 +218,7 @@ class Scheduler:
             "interval": self._interval,
             "started_at": self.started_at,
             "last_run": self.last_run,
-            "next_run": (self.last_run + self._interval) if self.last_run
+            "next_run": (self._last_started + self._interval) if self.last_run
                         else ((self.started_at + self._interval)
                               if self.started_at else None),
             "runs": self.runs,
