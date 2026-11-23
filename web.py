@@ -4329,6 +4329,10 @@ Allow: /privacy
 Allow: /terms
 Disallow: /analyse
 Disallow: /research
+Disallow: /ideas
+Disallow: /screener
+Disallow: /strategies
+Disallow: /settings
 Disallow: /trades
 Disallow: /portfolio
 Disallow: /monitor
@@ -4341,9 +4345,12 @@ Disallow: /api
 Sitemap: %s/sitemap.xml
 """
 
-# The pages a stranger can read without signing in. Everything else returns a
-# redirect to a crawler, which reads as a dead end and is worth saying plainly
-# rather than letting a robot discover one 302 at a time.
+# The pages a stranger can read without signing in, for the sitemap, which adds
+# the stock, strategy and Learn pages and the pricing page. The example
+# account's pages (DEMO_ENDPOINTS) are kept off it, and off limits above: they
+# are one person's made-up day, and every one a robot opens is work. Everything
+# else returns a redirect to a crawler, which reads as a dead end and is worth
+# saying plainly rather than letting a robot discover one 302 at a time.
 PUBLIC_PAGES = [("/", "weekly", "1.0"), ("/signin", "monthly", "0.6"),
                 ("/privacy", "yearly", "0.3"), ("/terms", "yearly", "0.3")]
 PUBLIC_PAGES.append(("/tools/size", "monthly", "0.5"))
@@ -4498,7 +4505,8 @@ def sitemap():
         conn.close()
     # A strategy built for intraday prices never fires on the daily ones these
     # tests use, and its page would stay empty: not one to send a robot to.
-    pages = PUBLIC_PAGES + [("/stocks", "daily", "0.8")] + [
+    plans = [("/pricing", "monthly", "0.6")] if billing_mod.ready() else []
+    pages = PUBLIC_PAGES + plans + [("/stocks", "daily", "0.8")] + [
         ("/stock/" + public_mod.slug(sym), "daily", "0.7")
         for sym, _ in public_mod.POPULAR] + [
         ("/backtests", "daily", "0.8"), ("/record", "daily", "0.8")] + [

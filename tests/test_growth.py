@@ -181,6 +181,61 @@ try:
           "/stocks</loc>" in sitemap and "/stock/nvda</loc>" in sitemap
           and "/stock/btc-usd</loc>" in sitemap)
 
+    # Checks that fail for days leave the last one standing. It was still
+    # listed as a call under "checked daily" and titled "Today's check".
+    conn = db.connect(DB)
+    public.save_verdict(conn, dict(snap_for("GME", "BUY", 40, 30),
+                                   at=int(time.time()) - 9 * 86400))
+    conn.close()
+    listed = [m for m in c.get("/stocks").data.decode().split("<li>") if "/stock/gme" in m][0]
+    check("a check days old is not listed as a call", "BUY" not in listed
+          and ">checking<" in listed, listed)
+    page = " ".join(c.get("/stock/gme").data.decode("utf-8", "replace").split())
+    when = time.strftime("%d %b %Y", time.gmtime(time.time() - 9 * 86400)).lstrip("0")
+    check("and its page says when it was made, not that it is today's",
+          "Last check " + when in page and "Last checked on " + when in page
+          and "Today's check" not in page and "Today&#39;s check" not in page)
+    check("and asks search engines to wait for the next one",
+          'name="robots" content="noindex"' in page and '"FAQPage"' not in page)
+    check("a check two days old at most is today's",
+          not public.stale({"at": 100}, now=100 + 2 * 86400)
+          and public.stale({"at": 100}, now=101 + 2 * 86400) and not public.stale({}))
+
+    conn = db.connect(DB)
+    ran = []
+    conn.set_trace_callback(ran.append)
+    for read in (lambda: public.verdict(conn, "NVDA"), lambda: public.verdicts(conn),
+                 lambda: public.symbol_record(conn, "NVDA"), lambda: public.record(conn),
+                 lambda: public.record_mark(conn), lambda: public.calls_csv(conn),
+                 lambda: public.fingerprints(conn), lambda: public.get_share(conn, "x")):
+        read()
+    conn.set_trace_callback(None)
+    conn.close()
+    check("reading a public page's data only reads", len(ran) == 8
+          and all(s.startswith("SELECT") for s in ran), ran)
+
+    for other, own in (("/stock/NVDA", "/stock/nvda"), ("/stock/Nvda?utm=x", "/stock/nvda?utm=x"),
+                       ("/stock/NVDA/card.png", "/stock/nvda/card.png"),
+                       ("/backtest/rsi_reversion", "/backtest/rsi-reversion"),
+                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion")):
+        r = c.get(other)
+        check("%s is sent to the page's one address" % other,
+              r.status_code == 301 and r.headers["Location"].endswith(own),
+              (r.status_code, r.headers.get("Location")))
+
+    robots = c.get("/robots.txt").data.decode().splitlines()
+    check("robots are kept off every page of the example account",
+          all("Disallow: " + p in robots for p in (
+              "/analyse", "/research", "/ideas", "/screener", "/strategies", "/settings",
+              "/trades", "/portfolio", "/monitor")), robots)
+    check("with no plans for sale the sitemap lists no pricing page", "/pricing<" not in sitemap)
+    _os.environ.update(STRIPE)
+    try:
+        check("and lists it once there are", "/pricing</loc>" in c.get("/sitemap.xml").data.decode())
+    finally:
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+
     print()
     print("=" * 72)
     print("STRATEGY TESTS")
