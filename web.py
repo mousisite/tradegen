@@ -201,6 +201,10 @@ def _harden(response):
             and request.endpoint != "static"
             and response.mimetype in ("text/html", "application/json", "text/csv")):
         h.setdefault("Cache-Control", "private, no-store")
+    # The address or number somebody is signing in with is on these, before
+    # there is an account to go by.
+    if request.endpoint in ("code_start", "code_verify", "review_signin"):
+        h.setdefault("Cache-Control", "private, no-store")
     # A file asked for by this release's fingerprint never changes under that
     # address, so a browser need not ask for it again on every page.
     if (request.endpoint == "static" and response.status_code in (200, 206, 304)
@@ -4023,10 +4027,23 @@ def _client_ip() -> str:
     Behind Cloudflare the connection comes from Cloudflare, shared by
     everyone, so its own header naming the visitor is preferred. It can be
     forged by going round Cloudflare to the host directly; that only weakens
-    the per-network limit, and the per-address limit still holds.
+    the per-network limit, and the per-address limit still holds. Anything
+    that is not an address is passed over: made-up words there were each a
+    network of their own. An IPv6 address counts as its /64, the least one
+    connection is given, or one home could ask from a new address every time.
     """
-    return (request.headers.get("CF-Connecting-IP")
-            or request.remote_addr or "")[:64]
+    import ipaddress
+    for said in (request.headers.get("CF-Connecting-IP"), request.remote_addr):
+        try:
+            address = ipaddress.ip_address((said or "").strip().partition("%")[0])
+        except ValueError:
+            continue
+        if address.version == 6:
+            address = address.ipv4_mapped or address
+        if address.version == 4:
+            return str(address)
+        return "%s/64" % ipaddress.IPv6Address(int(address) >> 64 << 64)
+    return ""
 
 
 _CHANNELS = {

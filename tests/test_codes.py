@@ -95,6 +95,12 @@ try:
 except codes.CodeError:
     check("a number with no country code is refused", True)
 
+try:
+    codes.clean_phone("+1555\u0661234567")
+    check("the same number in another script's digits is not a second number", False)
+except codes.CodeError:
+    check("the same number in another script's digits is not a second number", True)
+
 _os.environ["PHONE_ALLOWED_PREFIXES"] = "+1"
 try:
     codes.clean_phone("+447700900123")
@@ -296,6 +302,55 @@ check("while this month's are kept for the limits",
       conn.execute("SELECT COUNT(*) FROM login_codes WHERE target=?", (gus,))
       .fetchone()[0] > 0)
 
+# One inbox has as many addresses as it likes, and each had its own limit.
+let_through = 0
+for n in range(6):
+    try:
+        codes.send_email_code(conn, "hal+%d@gmail.com" % n, "8.8.%d.1" % n, SECRET, fake_send)
+        let_through += 1
+    except codes.CodeError:
+        pass
+check("one inbox's other addresses share its limit", let_through == codes.PER_TARGET[0],
+      let_through)
+
+# Asked for all at once, each was let through by the same count.
+import threading  # noqa: E402
+held = threading.Barrier(6)
+through = []
+
+
+def ask_at_once():
+    own = db.connect(DB)
+    try:
+        held.wait(10)
+        codes.send_email_code(own, "ivy@example.com", "8.9.9.1", SECRET, fake_send)
+        through.append(1)
+    except codes.CodeError:
+        pass
+    finally:
+        own.close()
+
+
+real_check = codes._check_limits
+
+
+def slow_check(*a):
+    real_check(*a)
+    time.sleep(0.2)          # long enough for the rest to be looking as well
+
+
+codes._check_limits = slow_check
+askers = [threading.Thread(target=ask_at_once) for _ in range(6)]
+try:
+    for t in askers:
+        t.start()
+    for t in askers:
+        t.join(30)
+finally:
+    codes._check_limits = real_check
+check("codes asked for at the same moment are counted one by one",
+      len(through) == codes.PER_TARGET[0], len(through))
+
 print()
 print("=" * 72)
 print("PHONE CODES, THROUGH A STAND-IN FOR TWILIO")
@@ -456,8 +511,11 @@ try:
         check("asking for a code moves on to the code page",
               r.status_code == 302 and "/signin/email/code" in r.headers["Location"],
               r.status_code)
-        page = c.get("/signin/email/code").data.decode("utf-8", "replace")
+        r = c.get("/signin/email/code")
+        page = r.data.decode("utf-8", "replace")
         check("which says where it was sent", "fay@example.com" in page)
+        check("and so is kept by no browser", r.headers.get("Cache-Control")
+              == "private, no-store", r.headers.get("Cache-Control"))
         r = c.post("/signin/email/code", data={"code": "999999"
                                                if outbox["fay@example.com"] != "999999" else "888888"})
         page = r.data.decode("utf-8", "replace")
