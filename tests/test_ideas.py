@@ -609,7 +609,36 @@ check("and one that keeps some counts the rest",
       _months["summary"])
 check("with no Markdown in what people read",
       "*" not in ideas._verdict(10, [], 0, 0, "medium", 0, "balanced", 0))
+check("what the risk filter set aside is said once, by the page",
+      "payoff shape" not in _steady["summary"], _steady["summary"])
+_only_wild = ideas._shortlist(dict(_wscan, rows=[
+    row(symbol="WILDX", gap_multiple=4.0, asset_class="equity")]), "medium", "steady")
+check("and with nothing left it is not called nothing that cleared the bar",
+      "Nothing matching steady out of 1 looked at." in _only_wild["summary"]
+      and "nothing managed both" not in _only_wild["summary"], _only_wild["summary"])
+_short = dict(_steady, running=False,
+              watch=[dict(r, price=50.0) for r in _steady["watch"]], passed=[
+                  dict(_steady["passed"][0], action="SHORT", price=100.0, entry=100.0,
+                       stop=106.0)])
+_seen = []
 _real_find = ideas.find
+for _shown in (_short, dict(_only_wild, running=False)):
+    ideas.find = lambda *_a, **_k: _shown
+    try:
+        _seen.append(" ".join(c.get("/ideas?market=stocks&horizon=medium&risk=steady"
+                                    ).data.decode("utf-8", "replace").split()))
+    finally:
+        ideas.find = _real_find
+check("the page says it beside how to see them, as more or as all there were",
+      "1 more cleared the bar but did not match the risk" in _seen[0]
+      and "1 cleared the bar but did not match the risk" in _seen[1])
+check("a short's entry is not headed as a price to buy at",
+      "Enter at" in _seen[0] and "Buy at" not in _seen[0])
+check("each choice carries its own explanation, for the hint under the box",
+      all('data-why="%s"' % spec["why"] in _seen[0].replace("&#39;", "'")
+          for group in (ideas.MARKETS, ideas.HORIZONS, ideas.RISKS) for spec in group.values()))
+check("and the watch list does not promise that routines run by themselves",
+      "keep checking it" not in _seen[0] and "checks it again when you run it" in _seen[0])
 ideas.find = lambda *_a, **_k: dict(_coins, running=False)
 try:
     _page_coins = " ".join(c.get("/ideas?market=crypto&horizon=long&risk=balanced"

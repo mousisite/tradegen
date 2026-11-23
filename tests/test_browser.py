@@ -981,11 +981,16 @@ def run(browser, site, base, check, head):
             page.set_viewport_size({"width": 360, "height": 800})
             page.goto(base + "/portfolio")
             longest = page.evaluate(LONG_FIGURE, 360)
+            page.goto(base + "/ideas")
+            page.select_option("#horizon", "long")
+            chosen_why = page.inner_text("#why-horizon")
         ctx.close()
     check("no page opens scrolled away from its top", not moved, moved[:5])
     check("no page is wider than the screen (%d page views)" % views, not wide, wide[:5])
     check("a figure as long as -2,551,934,343,331.83 wraps in its column instead "
           "of widening the page", longest <= 360, longest)
+    check("on Find, picking another choice explains that choice, before the form is sent",
+          chosen_why.startswith("Hold for months. "), chosen_why)
     check("no card of rows scrolls sideways, even with a note typed without a space",
           not cards, cards[:5])
     check("no button or link in a table is a sideways scroll away", not away, away[:5])

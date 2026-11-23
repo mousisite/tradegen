@@ -1042,13 +1042,10 @@ def _verdict(scanned: int, passed: List[Dict], avoided: int, thin: int,
                     "the bar on the chart but %s left out, listed below with the "
                     "reason." % (scanned, left_out,
                                  "was" if left_out == 1 else "were"))
-            if wrong_shape:
-                text += (" %d more cleared it, but not with the payoff shape you "
-                         "asked for." % wrong_shape)
         elif wrong_shape:
-            text = ("Nothing matching %s out of %d looked at. %d did clear the "
-                    "bar, but not with the payoff shape you asked for."
-                    % (RISKS[risk]["label"].lower(), scanned, wrong_shape))
+            # How many, and how to see them, is the page's next sentence.
+            text = ("Nothing matching %s out of %d looked at."
+                    % (RISKS[risk]["label"].lower(), scanned))
         if watching:
             text += (" %d of them have paid off historically, but today's "
                      "reading on them is to stand aside, so they are listed "
@@ -1061,9 +1058,6 @@ def _verdict(scanned: int, passed: List[Dict], avoided: int, thin: int,
     lead = ("%d of %d cleared the bar." % (len(passed), scanned))
     if len(passed) == 1:
         lead = "One of %d cleared the bar." % scanned
-    if wrong_shape:
-        lead += (" Another %d cleared it with a different payoff shape than "
-                 "you asked for." % wrong_shape)
     if left_out:
         lead += (" %d more did on the chart but %s left out of a months hold, "
                  "listed below with the reason."
