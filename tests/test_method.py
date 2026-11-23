@@ -2385,6 +2385,11 @@ paper = web._paper_size(es_row, rich)
 check("the review sizes the same contracts, each counted as its dollars a point",
       paper["quantity"] == 200.0 and paper["risk"] == 10000.0
       and paper["contract_words"] == "4 ES contracts" and paper["reward_risk"] == 2.0, paper)
+penny = web._paper_size(dict(es_row, symbol="TINY-USD", asset_class="crypto", entry=1.667e-6,
+                             stop=1.544e-6, target1=1.8e-6), dict(CFG, account_size=10000.0))
+check("a coin's size in the millions is written as the analysis page writes it",
+      penny["quantity_text"] == decision.size_words(penny["quantity"], True)["quantity_text"]
+      and "," in penny["quantity_text"], penny["quantity_text"])
 try:
     web._paper_size(es_row, CFG)
     check("and refuses what one contract is too big for", False)

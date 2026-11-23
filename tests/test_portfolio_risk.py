@@ -185,6 +185,10 @@ check("cash is what was not paid out, whatever the holding is worth now",
 check("and deployed is still today's value", close(up.invested, 2000) and close(down.invested, 500))
 part = whole({"AAA": 60.0, "GONE": None}, [held(1, "AAA"), held(2, "GONE", qty=5)])
 check("with a price missing too", close(part.cash, 10000 - 1000 - 500), part.cash)
+fut = whole({"MES=F": 6000.0}, [held(1, "MES=F", qty=10, entry=6000, stop=5990)])
+check("a futures contract is not bought out of cash, and the page says how it counts",
+      close(fut.cash, 10000) and close(fut.invested, 60000)
+      and any("contracts' full value" in o for o in fut.observations), (fut.cash, fut.observations))
 
 v = whole({"AAA": 100.0, "NEW": 100.0}, [held(1, "AAA"), held(2, "NEW")], {"AAA": 1.5})
 check("a holding with no beta counts as one that moves with the market, as in the shock table",

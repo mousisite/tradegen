@@ -2235,8 +2235,8 @@ def _paper_size(row, cfg: Dict, split: float = 1.0) -> Dict:
             "target": target, "per_unit": per_unit, "quantity": qty,
             "target2": float(second) / split if (second or 0) > 0 else None,
             "split_words": market_mod.split_words(split) if split != 1.0 else "",
-            "quantity_text": (("%.6f" % qty).rstrip("0").rstrip(".") if crypto
-                              else "{:,.0f}".format(qty)),
+            # Written as the analysis page writes it.
+            **decision_mod.size_words(qty, crypto),
             "notional": qty * entry, "risk": qty * per_unit,
             "risk_pct": (qty * per_unit / account * 100.0) if account else 0.0,
             "account": account, "capped": capped,
@@ -2263,6 +2263,7 @@ def _paper_contracts(row, symbol: str, direction: int, entry: float, stop: float
             "per_unit": per_unit, "quantity": units,
             "target2": float(second) / split if (second or 0) > 0 else None, "split_words": "",
             "quantity_text": "{:,.2f}".format(units).rstrip("0").rstrip("."),
+            "unit_text": "unit" if units == 1 else "units",
             "contract_words": "%s %s" % (sized["quantity_text"], sized["unit_text"]),
             "multiplier": sized["multiplier"], "notional": sized["notional"],
             "risk": sized["risk_amount"], "risk_pct": sized["risk_pct_of_account"],

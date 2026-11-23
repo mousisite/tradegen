@@ -197,7 +197,17 @@ def cmd_take(args, conn) -> int:
         risk_amount = account * cfg["risk_per_trade_pct"] / 100.0
         qty = (risk_amount / per_unit) if per_unit > 0 else 0
         cap = account * cfg["max_position_pct"] / 100.0
-        if qty * run["entry"] > cap:
+        if run["symbol"].upper().endswith("=F"):
+            # Whole contracts, each counted as its dollars a point, as the
+            # website's review page logs them.
+            from bot.decision import size_futures
+            sized = size_futures(run["symbol"], float(run["entry"]), float(run["stop"]),
+                                 dict(cfg, account_size=account))
+            if "error" in sized:
+                console.print("[red]%s[/]" % sized["error"])
+                return 2
+            qty = sized["quantity"] * sized["multiplier"]
+        elif qty * run["entry"] > cap:
             qty = cap / run["entry"]
         qty = round(qty, 6) if run["asset_class"] == "crypto" else float(int(qty))
         if qty <= 0:

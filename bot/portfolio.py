@@ -493,7 +493,9 @@ def build(rows, account: float, with_correlation: bool = True,
     # What is left of the account is what was not paid out: a holding that has
     # risen since was still bought at its entry, and one without a price still
     # holds its money. Counted at today's value, cash fell when a holding rose.
-    paid = sum(p.entry * p.quantity for p in positions if p.sized)
+    # A futures contract is held on a deposit, not bought at its full value.
+    paid = sum(p.entry * p.quantity for p in positions
+               if p.sized and not p.symbol.upper().endswith("=F"))
     view.cash = max(0.0, account - paid)
 
     for p in sized:
@@ -626,6 +628,11 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         "%.0f%% of the account is deployed across %d position%s, leaving %s in cash."
         % (exposure_pct, count, "" if count == 1 else "s",
            "{:,.0f}".format(view.cash)))
+    if any(p.symbol.upper().endswith("=F") for p in sized):
+        view.observations.append(
+            "A futures position counts here at its contracts' full value. It is held "
+            "on a deposit that is a small part of that, and the deposit is not taken "
+            "off the cash.")
 
     # Said first and loudest: a breached stop is the one thing on this page
     # that needs doing today, and "nothing at risk" would hide it.
