@@ -1562,6 +1562,8 @@ def _attention(stored: Dict, open_trades) -> Dict:
     positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
                  if (marks.get(t["id"]) or {}).get("status") in ("past stop",
                                                                  "past target")]
+    # Those past their stop first, so they are the ones listed when not all are.
+    positions.sort(key=lambda p: p["mark"]["status"] != "past stop")
     crossed = {p["trade"]["id"] for p in positions
                if p["mark"]["status"] == "past stop"}
     # The background check writes a crossed stop into the alert history as
@@ -1573,7 +1575,9 @@ def _attention(stored: Dict, open_trades) -> Dict:
     unchecked = sum(1 for t in open_trades
                     if (marks.get(t["id"]) or {}).get("status") == "no data")
     buys = stored["buys"]
-    return {"positions": positions, "late": late, "crossed": len(crossed),
+    return {"positions": positions[:POSITIONS_SHOWN],
+            "positions_more": max(0, len(positions) - POSITIONS_SHOWN),
+            "late": late, "crossed": len(crossed),
             "unchecked": unchecked, "marks": marks,
             "fired": fired[:ATTENTION_SHOWN],
             "fired_more": max(0, len(fired) - ATTENTION_SHOWN),
@@ -1650,9 +1654,8 @@ def _canonical(endpoint: str, bars) -> str:
                                     exact=exact_arg(bars.symbol))
 
 
-# The largest account an address may name: a trillion, past which a size has
-# more digits than it is worth printing.
-ACCOUNT_MOST = 1e12
+# The largest account an address may name.
+ACCOUNT_MOST = config_mod.ACCOUNT_MOST
 
 
 def _address_number(name: str, most: float) -> Optional[float]:
@@ -2785,10 +2788,18 @@ def trade_picture(trade_id: int):
         except ValueError:
             abort(404)
         parts = db_mod.trade_parts(row, db_mod.exits_for(conn, [trade_id]).get(trade_id, []))
+        # The page of the journal a closed one is on, for the way back to it.
+        page = 1
+        if row["status"] == "closed":
+            page += conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='closed' "
+                "AND account='paper' AND (ts_closed>? OR (ts_closed=? AND id>?))",
+                (uid(), row["ts_closed"], row["ts_closed"], trade_id)
+            ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
     from bot import journal as journal_mod
-    return render_template("trade_picture.html", t=row, parts=parts,
+    return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
                            broke=journal_mod.broke_rules_of(row),
                            followed=journal_mod.FOLLOWED_LABELS.get(
@@ -5977,7 +5988,7 @@ def alert_action(action):
             if refused is not None:
                 return refused
             db_mod.alert_reset(conn, alert_id, user=uid())
-    except (KeyError, ValueError) as exc:
+    except ValueError as exc:
         message = str(exc)
         if "could not convert" in message:
             message = "The alert value must be a number."

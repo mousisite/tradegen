@@ -461,6 +461,10 @@ bad_values += [{key: value} for key in ("account_size", "stop_atr_multiple", "ta
 bad_values += [{"horizon_bars": INF}, {"horizon_bars": -7}, {"interval": "banana"},
                {"interval": 5}, {"max_extension_atr": -4}, {"sentiment_weight": 9},
                {"calibration_stride": 0}, {"min_bucket_samples": 0}]
+# So large or small that a figure made with it is pages of digits, or none.
+bad_values += [{"account_size": 1e308}, {"cost_bps_equity": 1e308}, {"cost_bps_crypto": 10001},
+               {"cost_bps_futures": 1e308}, {"target_atr_multiple": 1e308},
+               {"stop_atr_multiple": 1e-300}]
 messages = {}
 let_through = []
 for change in bad_values:

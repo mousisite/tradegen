@@ -224,6 +224,13 @@ _NUMBERS = {
 }
 
 
+# The largest account, past which a size has more digits than it is worth
+# printing, and the largest cost of a round trip, in basis points. Numbers far
+# beyond them overflowed into pages of digits, or no page.
+ACCOUNT_MOST = 1e12
+COST_MOST = 10000
+
+
 def validate(cfg: Dict[str, Any]) -> None:
     """Raise RuntimeError if any setting would produce nonsense downstream."""
     for key, label in _NUMBERS.items():
@@ -245,8 +252,13 @@ def validate(cfg: Dict[str, Any]) -> None:
         raise RuntimeError("Largest position must be between 0 and 100 percent.")
     if cfg["account_size"] <= 0:
         raise RuntimeError("Account size must be greater than zero.")
+    if cfg["account_size"] > ACCOUNT_MOST:
+        raise RuntimeError("Account size must be at most a trillion.")
     if cfg["stop_atr_multiple"] <= 0 or cfg["target_atr_multiple"] <= 0:
         raise RuntimeError("Stop and target distances must be positive.")
+    if not all(0.01 <= cfg[key] <= 100
+               for key in ("stop_atr_multiple", "target_atr_multiple")):
+        raise RuntimeError("Stop and target distances must be between 0.01 and 100 ATR.")
     if cfg["target_atr_multiple"] <= cfg["stop_atr_multiple"] * 0.2:
         raise RuntimeError("The target is far too close to the stop to be tradable.")
     minutes = cfg.get("alert_check_minutes", 5)
@@ -275,6 +287,9 @@ def validate(cfg: Dict[str, Any]) -> None:
             raise RuntimeError("Trading costs must be numbers.")
         if value < 0:
             raise RuntimeError("Trading costs cannot be negative.")
+        if value > COST_MOST:
+            raise RuntimeError("A trading cost can be at most %d basis points, which "
+                               "is the whole price." % COST_MOST)
 
     limit = cfg.get("daily_loss_limit_r", 0.0)
     if not _is_number(limit) or not (0 <= limit <= 20):

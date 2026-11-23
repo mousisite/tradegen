@@ -983,6 +983,13 @@ try:
     check("a price that is not a number is refused in words",
           r.status_code == 400 and "The exit price must be a number." in page
           and "could not convert" not in page)
+    r = c.post("/trades/close", data={"trade_id": tt["id"], "price": "1e308", "left": "40.0"})
+    r2 = c.post("/trades/open", data={"symbol": "ZZT", "direction": "short", "entry": "1",
+                                      "stop": "1e300", "interval": "1d"})
+    check("and one of hundreds of digits, which would leave the breakdown unable to add up",
+          r.status_code == 400 and "too large a number" in text(r)
+          and r2.status_code == 400 and "the stop is too large a number" in text(r2)
+          and c.get("/trades/breakdown").status_code == 200)
 
     r = c.post("/trades/trail", data={"trade_id": tt["id"], "trail": "10", "trail_kind": "pct"})
     check("a wider trail is refused: the stop only tightens",

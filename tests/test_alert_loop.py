@@ -644,6 +644,15 @@ try:
     r = c.post("/monitor/alert/edit", data={"alert_id": level, "threshold": "1", "note": "x"})
     check("or edit it", r.status_code == 400)
     sign_in(alice)
+    strange = [c.post("/monitor/alert/%s" % what, data={"alert_id": asked})
+               for what in ("pause", "resume", "reset", "delete", "edit")
+               for asked in ("", "x", "1e309", "9" * 30)]
+    strange.append(c.post("/settings/notifications/remove", data={"device_id": "9" * 30}))
+    said = [r.data.decode("utf-8", "replace") for r in strange]
+    check("a number no alert or device can have is refused in words, not with an error",
+          all(r.status_code in (400, 302) for r in strange)
+          and not any("invalid literal" in s for s in said),
+          [r.status_code for r in strange])
     c.post("/monitor/alert/pause", data={"alert_id": level})
     conn = db.connect(DB)
     check("Alice can pause it",

@@ -1321,6 +1321,37 @@ def run(browser, site, base, check, head):
     ctx.close()
 
     # -----------------------------------------------------------------------
+    head("ON A COMPUTER'S SCREEN")
+    # -----------------------------------------------------------------------
+    ctx = context(1366, signed_in=True)
+    page = ctx.new_page()
+    adrift, stretched = [], []
+    for path in ("/", "/trades", "/monitor", "/learn", "/analyse?symbol=NVDA&interval=1d",
+                 "/research?symbol=NVDA&interval=1d"):
+        page.goto(base + path)
+        adrift += ["%s: %s" % (path, a) for a in page.evaluate(r"""() => {
+            const out = [];
+            for (const t of document.querySelectorAll('table.stack')) {
+              const heads = [...t.querySelectorAll(':scope > thead > tr > th')];
+              const row = t.querySelector(':scope > tbody > tr');
+              if (!row || row.children.length !== heads.length) { continue; }
+              heads.forEach((h, k) => {
+                const a = h.getBoundingClientRect(), b = row.children[k].getBoundingClientRect();
+                if (a.width && (Math.abs(a.left - b.left) > 1 || Math.abs(a.right - b.right) > 1)) {
+                  out.push(h.textContent.trim() + ' ' + Math.round(a.left) + ' over ' + Math.round(b.left));
+                }
+              });
+            }
+            return out; }""")]
+        stretched += ["%s: %s" % (path, s) for s in page.evaluate(r"""() =>
+            [...document.querySelectorAll('a.btn')].filter(e => e.getBoundingClientRect().height > 60)
+              .map(e => e.textContent.trim())""")]
+    check("each heading of a table is over its own column", not adrift, adrift[:4])
+    check("no button is stretched to the height of the form beside it", not stretched,
+          stretched[:4])
+    ctx.close()
+
+    # -----------------------------------------------------------------------
     head("A TICKER, TYPED")
     # -----------------------------------------------------------------------
     ctx = context(390, signed_in=True)

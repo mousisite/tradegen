@@ -262,7 +262,7 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
     for p in view.positions:
         if p.price is None:
             report.steps.append(Step("Position: %s" % p.symbol,
-                                     "No price available.", "failed"))
+                                     "%s: no price available." % p.symbol, "failed"))
             continue
         at_target = (p.target is not None and
                      ((p.price >= p.target) if p.direction > 0
@@ -338,7 +338,7 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         except (DataError, Exception) as exc:
             looks.give_back(symbol, taken, exact)
             report.steps.append(Step("Watchlist: %s" % symbol,
-                                     str(exc)[:140], "failed"))
+                                     "%s: %s" % (symbol, str(exc)[:140]), "failed"))
             failed += 1
             continue
         looks.shown(symbol, result.bars.symbol, exact)
@@ -366,7 +366,8 @@ def _watchlist(conn, cfg, report: RunReport, step, db_path, user=1,
         else:
             report.steps.append(Step(
                 "Watchlist: %s" % symbol,
-                "%s, unchanged. %s" % (now, result.plan.headline), "ok",
+                "%s: %s%s. %s" % (symbol, now, ", unchanged" if was else "",
+                                  result.plan.headline), "ok",
                 {"symbol": symbol, "interval": interval, "exact": exact}))
 
     looks.report(report)
@@ -492,14 +493,16 @@ def _hunt(conn, cfg, report: RunReport, step, db_path, user=1,
         except Exception as exc:
             looks.give_back(candidate.symbol, taken, exact)
             report.steps.append(Step("Candidate: %s" % candidate.symbol,
-                                     str(exc)[:140], "failed"))
+                                     "%s: %s" % (candidate.symbol, str(exc)[:140]),
+                                     "failed"))
             continue
         looks.shown(candidate.symbol, result.bars.symbol, exact)
         done += 1
         status = "attention" if result.plan.action in ("BUY", "WAIT") else "ok"
         report.steps.append(Step(
             "Candidate: %s" % candidate.symbol,
-            "%s. %s" % (result.plan.action, result.plan.headline), status,
+            "%s: %s. %s" % (candidate.symbol, result.plan.action,
+                            result.plan.headline), status,
             {"symbol": candidate.symbol, "interval": cfg["interval"],
              "exact": exact}))
 
