@@ -28,7 +28,8 @@
       <div class="v fig">{{ data.stats.instruments }}</div></div>
     <div class="f"><div class="k">Acted on</div>
       <div class="v fig">{{ data.stats.trades + data.stats.theses }}</div>
-      <div class="n">{{ data.stats.trades }} trades, {{ data.stats.theses }} theses</div></div>
+      <div class="n">{{ data.stats.trades }} trade{{ '' if data.stats.trades == 1 else 's' }},
+        {{ data.stats.theses }} {{ 'thesis' if data.stats.theses == 1 else 'theses' }}</div></div>
   </div>
 </div>
 
@@ -175,7 +176,7 @@
             {{ "%.0f"|format(state.open_for) }} seconds</span>
         {% else %}
           answering normally{% if state.times_opened %}, throttled
-          {{ state.times_opened }} time(s) since this server started{% endif %}
+          {{ state.times_opened }} time{{ '' if state.times_opened == 1 else 's' }} since this server started{% endif %}
         {% endif %}
       </p>
     {% endfor %}

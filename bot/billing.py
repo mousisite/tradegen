@@ -167,7 +167,8 @@ def _describe(coupon: Dict) -> tuple:
     months = coupon.get("duration_in_months")
     how_long = {"forever": "forever", "once": "on the first payment"}.get(
         coupon.get("duration"),
-        "for your first year" if months == 12 else "for %s months" % months)
+        "for your first year" if months == 12
+        else "for 1 month" if months == 1 else "for %s months" % months)
     return what, how_long
 
 

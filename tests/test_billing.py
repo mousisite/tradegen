@@ -693,6 +693,10 @@ try:
             return coupon
         return fake_stripe(method, path, data)
 
+    said = [billing._describe({"percent_off": 20, "duration": "repeating",
+                               "duration_in_months": m})[1] for m in (1, 3, 12)]
+    check("how long a code lasts is said in months, and one month is one",
+          said == ["for 1 month", "for 3 months", "for your first year"], said)
     billing._stripe = promo_stripe
     sign_in(newcomer)
     page = c.get("/pricing").data.decode("utf-8", "replace")
