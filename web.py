@@ -783,10 +783,17 @@ def _cfg() -> Dict:
     return cfg
 
 
+# Personal settings no analysis reads: the journal's daily rules, and how
+# candles are drawn, which is decided as each page is.
+_NOT_IN_ANALYSIS = ("daily_loss_limit_r", "max_trades_per_day", "last_entry_time",
+                    "calm_candles")
+
+
 def _settings_key(cfg: Dict) -> str:
     """A short fingerprint of everything that changes what an analysis says."""
     import hashlib
-    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS)
+    picked = sorted((k, repr(cfg.get(k))) for k in accounts_mod.PERSONAL_SETTINGS
+                    if k not in _NOT_IN_ANALYSIS)
     return hashlib.sha1(repr(picked).encode("utf-8")).hexdigest()[:12]
 
 

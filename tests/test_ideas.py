@@ -114,6 +114,9 @@ print("THE PAGE")
 print("=" * 72)
 
 check("the form loads with no scan", c.get("/ideas").status_code == 200)
+# Finished here, however long it takes, so what is checked below is a finished
+# page. The page of a scan still running has stubbed checks of its own.
+ideas.find("crypto", "medium", wait=ideas.SCAN_WAIT)
 body = c.get("/ideas?market=crypto&horizon=medium").data.decode("utf-8", "replace")
 check("a scan renders", "What should I look at" in body)
 check("it says plainly what it found", 'class="plainbox"' in body)
@@ -592,6 +595,32 @@ check("and holds only stand-asides with a measured edge",
 check("its count is the whole list, before anything is cut for display",
       _steady["watch_total"] == 2 and _steady["passed_total"] == len(_steady["passed"]))
 
+# Coins file no accounts, so a months hold leaves every one out: that is not
+# "nothing managed both", and not a fault in accounts they do not have.
+_coins = ideas._shortlist(dict(_wscan, market="crypto", asked_for=2, rows=[
+    row(symbol="AAA-USD", asset_class="crypto", gap_multiple=1.2),
+    row(symbol="BBB-USD", asset_class="crypto", gap_multiple=1.2)]), "long", "balanced")
+check("a months hold that leaves out all that cleared the bar says so",
+      "nothing managed both" not in _coins["summary"]
+      and "2 did clear the bar on the chart but were left out" in _coins["summary"],
+      _coins["summary"])
+check("and one that keeps some counts the rest",
+      "left out of a months hold" in _months["summary"] and _months["passed"],
+      _months["summary"])
+check("with no Markdown in what people read",
+      "*" not in ideas._verdict(10, [], 0, 0, "medium", 0, "balanced", 0))
+_real_find = ideas.find
+ideas.find = lambda *_a, **_k: dict(_coins, running=False)
+try:
+    _page_coins = " ".join(c.get("/ideas?market=crypto&horizon=long&risk=balanced"
+                                 ).data.decode("utf-8", "replace").split())
+finally:
+    ideas.find = _real_find
+check("and its page does not blame accounts a coin does not have",
+      "the accounts did not" not in _page_coins
+      and "there are no accounts to check" in _page_coins
+      and "Nothing worth buying today" not in _page_coins)
+
 print()
 print("=" * 72)
 print("FILINGS THAT COULD NOT BE READ ARE NOT 'NO FILINGS'")
@@ -704,9 +733,40 @@ try:
     _before_both = len(_analysed)
     _both_found = ideas.find("both", "medium", _cfg_rows, wait=30)
     _after_both = len(_analysed)
+    _same = ideas.find("stocks", "medium", dict(
+        _cfg_rows, account_size=500.0, risk_per_trade_pct=2.0, max_position_pct=50.0,
+        interval="1h", calm_candles=True, daily_loss_limit_r=2.0, max_trades_per_day=3,
+        last_entry_time="15:00", cost_bps_futures=4.0), wait=30)
+    _after_same = len(_analysed)
     _other = ideas.find("stocks", "medium", {"other-settings": 1}, wait=30)
+    _costly = [ideas._fingerprint(dict(config_mod.DEFAULTS, **{k: v})) for k, v in (
+        ("cost_bps_equity", 9.0), ("cost_bps_crypto", 90.0), ("stop_atr_multiple", 3.0),
+        ("target_atr_multiple", 5.0), ("min_conviction", 0.3), ("horizon_bars", 20),
+        ("allow_shorts", True), ("require_positive_expectancy", False))]
 finally:
     ideas._stock_list, ideas._analyse = _real_stock_list, _real_analyse
+check("settings that change nothing in a scan share the one already made",
+      _after_same == _after_both and _same["complete"], (_after_same, _after_both))
+check("while each setting that does change it gets its own",
+      len(set(_costly + [ideas._fingerprint(config_mod.DEFAULTS)])) == len(_costly) + 1)
+_sized = []
+from bot import engine as _engine_mod
+
+
+def _keep_size(symbol, cfg, **_kw):
+    _sized.append(cfg["account_size"])
+    raise RuntimeError("enough")
+
+
+_real_engine = _engine_mod.analyse
+_engine_mod.analyse = _keep_size
+try:
+    for _size in (50.0, 1e6):
+        ideas._analyse("ZZSIZE", "1d", dict(config_mod.DEFAULTS, account_size=_size))
+finally:
+    _engine_mod.analyse = _real_engine
+check("so a shared row never depends on whose account it was made for",
+      len(_sized) == 2 and _sized[0] == _sized[1], _sized)
 check("'Both' reuses the rows the stocks and crypto scans just read",
       _after_both == _before_both == 30 + len(ideas.CRYPTO)
       and _both_found["complete"]

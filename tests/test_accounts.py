@@ -412,6 +412,12 @@ check("different settings give different analysis cache keys",
 check("the same settings give the same key",
       web._settings_key({"account_size": 1000}) == web._settings_key({"account_size": 1000}))
 
+check("and so do settings no analysis reads",
+      web._settings_key({"account_size": 1000, "calm_candles": True,
+                         "last_entry_time": "15:00", "max_trades_per_day": 3,
+                         "daily_loss_limit_r": 2.0})
+      == web._settings_key({"account_size": 1000}))
+
 conn = db.connect(DB)
 A.save_settings(conn, bob.id, {"account_size": 777, "not_a_setting": 1})
 check("only personal settings are stored",

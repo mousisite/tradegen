@@ -51,7 +51,8 @@ HORIZONS = {
     },
     "long": {
         "label": "Months", "interval": "1d",
-        "why": "Hold for months. The company has to stand up, not just the chart.",
+        "why": "Hold for months. The company has to stand up, not just the chart. "
+               "Stocks only: a coin files no accounts to check.",
         "warning": "",
         # Over months the accounts matter more than the pattern, so this one
         # additionally requires the filings to look sound. Without that it
@@ -255,15 +256,33 @@ def _clock(ts: float) -> str:
     return time.strftime("%H:%M UTC", time.gmtime(ts))
 
 
+# Settings no row of a scan depends on: how big an account is and how its
+# positions are sized, the bars an analysis opens on (a scan names its own), the
+# journal's daily rules, how candles are drawn, futures (none is scanned), news
+# (none is read) and how often alerts are checked. Anyone who had changed one
+# of these used to get a scan of their own, minutes long, of the same answer.
+NOT_ASKED = frozenset((
+    "account_size", "risk_per_trade_pct", "max_position_pct", "interval",
+    "daily_loss_limit_r", "max_trades_per_day", "last_entry_time",
+    "calm_candles", "cost_bps_futures", "use_llm_sentiment",
+    "alert_check_minutes"))
+
+# What a scan sizes its plans for. The one figure a row takes from the size,
+# how much worse than the stop a gap would be, is the same for any account that
+# can hold one share; it is only missing for one that cannot.
+_SIZED_FOR = {"account_size": 1e9, "risk_per_trade_pct": 1.0, "max_position_pct": 25.0}
+
+
 def _fingerprint(cfg: Dict) -> str:
-    """The settings as a short key.
+    """The settings a scan's answer depends on, as a short key.
 
     Trading costs are a per-person figure and they decide what clears the bar,
     so a scan or a row made with one person's settings answers a different
-    question for anybody with others.
+    question for anybody with others. Settings in NOT_ASKED do not change the
+    answer, so they do not split it.
     """
     return hashlib.sha1(
-        repr(sorted((str(k), repr(v)) for k, v in cfg.items()))
+        repr(sorted((str(k), repr(v)) for k, v in cfg.items() if k not in NOT_ASKED))
         .encode("utf-8")).hexdigest()[:12]
 
 
@@ -361,8 +380,8 @@ def _analyse(symbol: str, interval: str, cfg: Dict) -> Optional[Dict]:
         # The ticker is used exactly as listed, and the earnings calendar is
         # not read because nothing here uses it: each would be one more request
         # per instrument to the source every scan shares.
-        result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
-                                with_learning=True, record=False,
+        result = engine.analyse(symbol, dict(cfg, **_SIZED_FOR), interval=interval,
+                                with_news=False, with_learning=True, record=False,
                                 resolve_symbol=False, with_calendar=False)
     except Exception:
         return None
@@ -967,7 +986,7 @@ def _shortlist(scan: Dict, horizon: str, risk: str, partial: bool = False,
                             len(watch), risk, wrong_shape,
                             scan["cut_short"], scan["asked_for"],
                             len(scan.get("failed") or []), partial,
-                            bool(scan.get("throttled")), complete),
+                            bool(scan.get("throttled")), complete, len(dropped)),
     }
 
 
@@ -975,13 +994,14 @@ def _summary(scanned: int, passed: List[Dict], avoided: int, thin: int,
              horizon: str, watching: int = 0, risk: str = "balanced",
              wrong_shape: int = 0, cut_short: bool = False,
              asked_for: int = 0, failed: int = 0, partial: bool = False,
-             throttled: bool = False, complete: bool = True) -> str:
+             throttled: bool = False, complete: bool = True,
+             left_out: int = 0) -> str:
     if partial:
         return ("Still checking: %d of %d looked at so far. What is below is "
                 "only those, not ranked, and will change as the rest come in."
                 % (scanned + failed, asked_for))
     text = _verdict(scanned, passed, avoided, thin, horizon, watching, risk,
-                    wrong_shape, complete)
+                    wrong_shape, complete, left_out)
     if failed and scanned:
         text += (" %d could not be read from the data source, out of %d on its "
                  "list, so they are not in any list." % (failed, asked_for))
@@ -1006,17 +1026,26 @@ def _summary(scanned: int, passed: List[Dict], avoided: int, thin: int,
 
 def _verdict(scanned: int, passed: List[Dict], avoided: int, thin: int,
              horizon: str, watching: int, risk: str, wrong_shape: int,
-             complete: bool = True) -> str:
+             complete: bool = True, left_out: int = 0) -> str:
     if not scanned:
         return ("Nothing could be read just now. The data source may be busy; "
                 "ask again in a couple of minutes.")
 
     if not passed:
         text = ("Nothing to act on today out of %d looked at. A setup has to be "
-                "firing now *and* have made money after costs on that "
+                "firing now and have made money after costs on that "
                 "instrument's own history, and nothing managed both."
                 % scanned)
-        if wrong_shape:
+        if left_out:
+            # These did clear the bar, so "nothing managed both" would be false.
+            text = ("Nothing to hold for months out of %d looked at. %d did clear "
+                    "the bar on the chart but %s left out, listed below with the "
+                    "reason." % (scanned, left_out,
+                                 "was" if left_out == 1 else "were"))
+            if wrong_shape:
+                text += (" %d more cleared it, but not with the payoff shape you "
+                         "asked for." % wrong_shape)
+        elif wrong_shape:
             text = ("Nothing matching %s out of %d looked at. %d did clear the "
                     "bar, but not with the payoff shape you asked for."
                     % (RISKS[risk]["label"].lower(), scanned, wrong_shape))
@@ -1035,6 +1064,10 @@ def _verdict(scanned: int, passed: List[Dict], avoided: int, thin: int,
     if wrong_shape:
         lead += (" Another %d cleared it with a different payoff shape than "
                  "you asked for." % wrong_shape)
+    if left_out:
+        lead += (" %d more did on the chart but %s left out of a months hold, "
+                 "listed below with the reason."
+                 % (left_out, "was" if left_out == 1 else "were"))
 
     if horizon == "short":
         lead += (" Short holds pay trading costs most often, so treat even "

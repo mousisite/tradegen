@@ -109,7 +109,7 @@
     {% elif result.passed %}
       {{ result.passed_total }} worth a look right now.
     {% else %}
-      Nothing worth buying today.
+      {% if result.dropped %}Nothing to hold for months today.{% else %}Nothing worth buying today.{% endif %}
     {% endif %}
   </p>
   {% if result.refresh_note %}
@@ -215,7 +215,7 @@
   <div class="sechead">
     <h2>Left out on purpose</h2>
     <span class="count">{{ result.dropped|length }}</span>
-    <span class="tail">the chart looked fine, the accounts did not</span>
+    <span class="tail">the chart looked fine, a months hold did not</span>
   </div>
   <div class="card pad0">
     <div class="tablewrap">
@@ -235,9 +235,9 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       You asked for something to hold for months, so the filings were checked
-      as well as the chart. These had a setup worth taking on a shorter view
-      and something in the accounts that makes holding them for months a
-      different bet.
+      as well as the chart. These had a setup worth taking on a shorter view.
+      Either something in the accounts makes holding them for months a
+      different bet, or, for a coin, there are no accounts to check.
     </p>
   </div>
 </section>
