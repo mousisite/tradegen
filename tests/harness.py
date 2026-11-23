@@ -114,11 +114,9 @@ def _point_web_at(db_path: str, cfg_path: str) -> None:
         if isinstance(cache, dict):
             cache.clear()
     if OFFLINE:
-        # Neither the front page's own analysis nor the example account's
-        # prices are asked for where they could not arrive.
-        from bot import demo
+        # The front page's own analysis is not asked for where its prices
+        # could not arrive.
         web._example_state["busy"] = True
-        demo._price = lambda symbol: demo._FALLBACK[symbol]
 
 
 def isolated_web(label: str = "web"):

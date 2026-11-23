@@ -203,29 +203,47 @@ def _log_trade(conn: sqlite3.Connection, user_id: int, symbol: str,
                             quantity=qty, risk_amount=round((entry - stop) * qty, 2),
                             notes=note, user=user_id, opened_ts=plan["opened"])
     if "exit" in plan:
-        db_mod.close_trade(conn, tid, round(plan["exit"], 2),
-                           exit_reason=plan["reason"], user=user_id)
-        conn.execute("UPDATE trades SET ts_closed=? WHERE id=? AND user_id=?",
-                     (plan["closed"], tid, user_id))
-        conn.commit()
+        # Not close_trade, which is a transaction of its own (see _Together).
+        row = conn.execute("SELECT * FROM trades WHERE id=?", (tid,)).fetchone()
+        db_mod._close_in_one(conn, row, tid, round(plan["exit"], 2), plan["reason"],
+                             plan["closed"])
 
 
-def _fill(conn: sqlite3.Connection, user_id: int, past: Dict[str, _History],
+class _Together:
+    """The connection, with the commit each write makes of its own left out.
+
+    The whole fill is then one change: a visitor sees the book there was or
+    the new one, never one with its trades and no watchlist yet, and a fill
+    that breaks off changes nothing.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def commit(self) -> None:
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def _fill(real: sqlite3.Connection, user_id: int, past: Dict[str, _History],
           live: bool) -> None:
-    """Replace what the example account holds. Only its own rows are touched.
+    """Replace what the example account holds, all at once. Only its own rows
+    are touched.
 
     Every entry and exit is at a price its day really had, on the day it had
-    it. The mark that says the example is filled goes first and comes back
-    last, so one stopped half-way is filled again by the next background run.
+    it. Filled with stand-ins it carries no mark of being filled, so the next
+    background run fills it again.
     """
-    conn.executescript(db_mod._EVENTS)
+    real.executescript(db_mod._EVENTS)
+    conn = _Together(real)
     try:
         conn.execute("DELETE FROM meta WHERE key=?", (_FILLED,))
         # The history of alerts goes too: it names positions and alerts of the
         # example before.
         for table in accounts_mod.OWNED_TABLES + ("alert_events",):
             conn.execute("DELETE FROM %s WHERE user_id=?" % table, (user_id,))
-        conn.commit()
 
         # Two positions still open, sized by the same rule the app applies to
         # everyone else's, and three closed: a target hit, a stop hit, and one
@@ -269,9 +287,9 @@ def _fill(conn: sqlite3.Connection, user_id: int, past: Dict[str, _History],
         if live:
             conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                          (_FILLED, str(int(time.time()))))
-        conn.commit()
+        real.commit()
     except BaseException:
-        conn.rollback()
+        real.rollback()
         raise
 
 
@@ -314,8 +332,8 @@ def user(conn: sqlite3.Connection) -> accounts_mod.User:
             try:
                 _fill(conn, found.id, {s: _stand_in(s) for s in _FALLBACK}, live=False)
             except Exception:
-                # An example with gaps is a worse example. A page that errors
-                # for everyone looking around is worse than that.
+                # An empty example is a worse example. A page that errors for
+                # everyone looking around is worse than that.
                 log.exception("The example account could not be filled")
         return found
 

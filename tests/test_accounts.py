@@ -1044,10 +1044,37 @@ try:
         check("the background job refills it",
               _demo.refresh(conn) is True and not _ids & {t["id"] for t in _rows()})
 
-        # A stop half-way: the next run fills it again, and a visitor before
-        # that still has a page.
+        # A visitor who comes while it is filled sees the book there was, whole.
         conn.execute("DELETE FROM meta WHERE key='demo_filled'")
         conn.commit()
+        _book, _seen, _real_save = _rows(), [], db.thesis_save
+
+        def _look_then_save(*a, **k):
+            other = db.connect(DB)
+            try:
+                who = _demo.user(other).id
+                _seen.append(([dict(r) for r in other.execute(
+                    "SELECT * FROM trades WHERE user_id=? ORDER BY 1", (who,))],
+                    [other.execute("SELECT COUNT(*) FROM %s WHERE user_id=?" % t,
+                                   (who,)).fetchone()[0]
+                     for t in ("watchlist", "alerts", "theses")]))
+            finally:
+                other.close()
+            return _real_save(*a, **k)
+
+        db.thesis_save = _look_then_save
+        try:
+            _demo.refresh(conn)
+        finally:
+            db.thesis_save = _real_save
+        check("a visitor during a refill sees the whole book there was, not part of a new one",
+              len(_seen) == 2 and all(s == (_book, [4, 1, 2]) for s in _seen),
+              [(len(s[0]), s[1]) for s in _seen])
+
+        # A stop half-way changes nothing, and the next run fills it.
+        conn.execute("DELETE FROM meta WHERE key='demo_filled'")
+        conn.commit()
+        _book = _rows()
         _real_add = db.watch_add
         db.watch_add = lambda conn, symbol, *a, **k: _refused(symbol)
         try:
@@ -1057,6 +1084,9 @@ try:
             check("a fill that breaks off is not passed off as finished", _demo._due(conn))
         finally:
             db.watch_add = _real_add
+        check("and leaves the book there was, all of it",
+              _rows() == _book
+              and [len(_rows(t)) for t in ("watchlist", "alerts", "theses")] == [4, 1, 2])
         check("and the next run fills all of it", _demo.refresh(conn) is True
               and [len(_rows(t)) for t in ("trades", "watchlist", "theses")] == [5, 4, 2])
 
