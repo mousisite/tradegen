@@ -490,9 +490,9 @@ try:
           and "  LINK   AVOID  Leave this one alone." in body
           and "  LINK-USD BUY    The app thinks this is worth buying now." in body,
           (subject, body))
-    check("in what changed since yesterday too",
-          "  LINK   Still AVOID; up 3.00% since the previous close." in body
-          and "  LINK-USD The daily call went from WAIT to BUY; up 3.00%" in body, body)
+    check("in what changed since the session before too, dated by it",
+          "  LINK   Sun 4 Oct: Still AVOID; up 3.00% since the previous close." in body
+          and "  LINK-USD Sun 4 Oct: The daily call went from WAIT to BUY; up 3.00%" in body, body)
     check("and a ticker that no other line shares keeps its short name",
           "  ETH    could not be checked this week." in body, body)
 finally:
