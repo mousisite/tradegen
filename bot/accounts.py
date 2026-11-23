@@ -738,12 +738,6 @@ def end_session(conn: sqlite3.Connection, token: str) -> None:
         conn.commit()
 
 
-def end_all_sessions(conn: sqlite3.Connection, user_id: int) -> int:
-    cur = conn.execute("DELETE FROM sessions WHERE user_id=?", (int(user_id),))
-    conn.commit()
-    return cur.rowcount
-
-
 def purge_expired(conn: sqlite3.Connection) -> int:
     cur = conn.execute("DELETE FROM sessions WHERE expires_ts <= ?",
                        (int(time.time()),))

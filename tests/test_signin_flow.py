@@ -424,7 +424,7 @@ try:
     check("the app opens without a redirect", home.status_code == 200,
           home.status_code)
     body = home.data.decode("utf-8", "replace")
-    check("the page knows who it is", "Dana" in body or "D" in body)
+    check("the page knows who it is", 'title="trader@example.com"' in body)
 
     account_page = visitor.get("/account").data.decode("utf-8", "replace")
     check("the account page shows the signed-in address",

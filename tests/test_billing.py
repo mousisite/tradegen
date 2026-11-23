@@ -176,6 +176,8 @@ try:
     check("an old captured request does not",
           not billing.verify(body, signed(body, ts=time.time() - 3600), "whsec_test"))
     check("a missing header does not", not billing.verify(body, "", "whsec_test"))
+    check("nor one with a letter outside ASCII", not billing.verify(
+        body, signed(body).split("v1=")[0] + "v1=\u00e9", "whsec_test"))
 
     r = c.post("/billing/webhook", data=body,
                headers={"Stripe-Signature": signed(body, "whsec_forged")})

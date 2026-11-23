@@ -309,8 +309,9 @@ def _moved_permanently():
 
 
 # Pages a visitor who is not signed in may open, as the example account. Only
-# ever for GET: nothing here can write, and every form on these pages posts to
-# an endpoint that is not on this list, so it sends them to sign up instead.
+# ever for GET (and HEAD, the same page without its body): nothing here can
+# write, and every form on these pages posts to an endpoint that is not on
+# this list, so it sends them to sign up instead.
 DEMO_ENDPOINTS = {"analyse", "research", "ideas", "screener", "portfolio",
                   "trades", "monitor", "strategies", "settings",
                   # The journal's breakdown and a trade's picture, of the
@@ -337,7 +338,7 @@ def _identify():
         return None
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
-    if request.method == "GET" and request.endpoint in DEMO_ENDPOINTS:
+    if request.method in ("GET", "HEAD") and request.endpoint in DEMO_ENDPOINTS:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             g.user = demo_mod.user(conn)
@@ -353,7 +354,7 @@ def _identify():
         return jsonify({"error": "Not signed in."}), 401
     # A visitor who tried to do something. A POST cannot be replayed as a GET
     # after signing in, so they are brought back to the page they were on.
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return redirect(url_for("signin", next=_referrer_path()))
     # full_path always ends in "?" when there is no query string.
     return redirect(url_for("signin", next=request.full_path.rstrip("?")))
@@ -694,16 +695,6 @@ def _expose_user():
             # website is set up, and in the app as soon as the app's half is.
             "apple_button": apple_mod.web_ready()
                             or (apple_mod.native_ready() and _in_app())}
-
-
-def _in_app() -> bool:
-    """Whether this page is drawn inside the Orenth iPhone app.
-
-    The app's web view adds OrenthApp/<version> to its User-Agent. It only
-    ever chooses what to show, never what is allowed: anyone can send any
-    User-Agent.
-    """
-    return "OrenthApp/" in request.headers.get("User-Agent", "")
 
 
 # The iPhone app is this same site inside a native shell, and it says so by
@@ -3007,8 +2998,10 @@ def google_callback():
             else "failed")
 
     state = request.args.get("state", "")
-    # Constant time, because this is a secret being compared.
-    if not expected or not hmac.compare_digest(str(expected), str(state)):
+    # Constant time, because this is a secret being compared, and as bytes:
+    # given text, compare_digest raises on a letter outside ASCII.
+    if not expected or not hmac.compare_digest(
+            str(expected).encode("utf-8"), state.encode("utf-8")):
         return _sign_in_failed(
             challenge, "That sign-in link did not match this browser session. "
                        "Start again from this page.", "expired")
@@ -6180,6 +6173,22 @@ def not_found(_exc):
     if request.path.startswith("/api/"):
         return jsonify({"error": "No such address."}), 404
     return render_template("notfound.html"), 404
+
+
+@app.errorhandler(405)
+def wrong_method(exc):
+    if request.path.startswith("/api/"):
+        page = jsonify({"error": "That address does not take this kind of "
+                                 "request."})
+    else:
+        page = app.make_response(render_template(
+            "error.html", symbol="",
+            message="There is nothing to open at this address: it is only used "
+                    "by a button on one of Orenth's pages. Go back and use the "
+                    "button there."))
+    page.status_code = 405
+    page.headers["Allow"] = ", ".join(sorted(exc.valid_methods or ()))
+    return page
 
 
 @app.errorhandler(413)

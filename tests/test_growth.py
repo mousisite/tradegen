@@ -748,6 +748,8 @@ try:
           "Stop the weekly email?" in page and fresh(reader.id).weekly_email)
     check("a forged stop link is refused",
           c.post("/email/stop?u=%d&t=%s" % (reader.id, "0" * 32)).status_code == 404)
+    check("nor one with a letter outside ASCII, which is no page here either",
+          c.get("/email/stop?u=%d&t=%%C3%%A9" % reader.id).status_code == 404)
     r = c.post(url, data={"List-Unsubscribe": "One-Click"})
     check("pressing it, or the inbox button, stops it",
           r.status_code == 200 and not fresh(reader.id).weekly_email)

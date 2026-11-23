@@ -504,13 +504,6 @@ conn.commit()
 check("an expired session is refused", A.user_for_session(conn, expired) is None)
 check("purging removes it", A.purge_expired(conn) >= 1)
 
-A.end_all_sessions(conn, alice.id)          # start from a known state
-t1 = A.start_session(conn, alice.id)
-t2 = A.start_session(conn, alice.id)
-check("signing out everywhere ends every one of them",
-      A.end_all_sessions(conn, alice.id) == 2)
-check("both are then dead",
-      A.user_for_session(conn, t1) is None and A.user_for_session(conn, t2) is None)
 conn.close()
 
 sign_in_as(c, bob)
@@ -685,16 +678,47 @@ try:
     check("the journal shows them the example account instead",
           r.status_code == 200
           and "looking around an example account" in r.data.decode("utf-8", "replace"))
+    # Link checkers and uptime monitors ask with HEAD.
+    for path in ("/trades", "/strategies", "/settings"):
+        r = anon.head(path)
+        check("HEAD %s answers as GET does" % path,
+              r.status_code == 200 == anon.get(path).status_code, r.status_code)
+    r = anon.head("/account")
+    check("and HEAD for a page behind the login still says to sign in",
+          r.status_code == 302 and "/signin" in r.headers.get("Location", ""))
+    check("while a visitor's POST is still an action that needs signing in",
+          anon.post("/settings").status_code == 302)
     r = anon.get("/api/alerts/status")
     check("the api answers 401 rather than redirecting", r.status_code == 401)
     check("the sign-in page is reachable", anon.get("/signin").status_code == 200)
     check("static files stay reachable",
           anon.get("/static/style.css").status_code == 200)
 
-    r = anon.get("/auth/google/callback?code=abc&state=forged")
-    check("a forged state is refused", r.status_code == 400)
-    r = anon.get("/auth/google/callback?state=x")
-    check("a callback with no code is refused", r.status_code == 400)
+    def mid_sign_in():
+        """A browser part-way through, and the state it holds."""
+        browser = web.app.test_client()
+        browser.get("/auth/google")
+        with browser.session_transaction() as sess:
+            return browser, sess["oauth_state"]
+
+    asked = []
+    real_sign_in = auth_mod.sign_in
+    auth_mod.sign_in = lambda *a: asked.append(a)
+    try:
+        for forged in ("forged", "", "%C3%A9"):
+            browser, _real = mid_sign_in()
+            r = browser.get("/auth/google/callback?code=abc&state=" + forged)
+            check("a forged state (%r) is refused" % forged, r.status_code == 400
+                  and "did not match" in r.data.decode("utf-8", "replace"), r.status_code)
+        browser, real = mid_sign_in()
+        r = browser.get("/auth/google/callback?state=" + real)
+        check("a callback with no code is refused", r.status_code == 400
+              and "no sign-in code" in r.data.decode("utf-8", "replace"), r.status_code)
+        r = anon.get("/auth/google/callback?code=abc&state=forged")
+        check("as is one where no sign-in was begun", r.status_code == 400)
+        check("and Google was asked about none of them", not asked, asked)
+    finally:
+        auth_mod.sign_in = real_sign_in
 
     _os.environ["GOOGLE_ALLOWED_DOMAINS"] = "example.com"
     check("a domain restriction is read", auth_mod.allowed_domains() == ("example.com",))
