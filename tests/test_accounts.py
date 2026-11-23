@@ -359,6 +359,7 @@ try:
     page = visible(c, "/monitor")
     check("run again, the call is unchanged rather than the same change twice",
           "BUY, unchanged" in page and "went from WAIT to BUY" not in page)
+    check("and the row says which instrument it is about", "ZZCAROL: BUY, unchanged" in page)
 finally:
     _alerts.fetch_bars, _workflows.fetch_bars, _workflows.engine.analyse = _real
 
