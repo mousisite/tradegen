@@ -149,6 +149,10 @@ LATE = 7 * 86400
 FACT = "A fact about price, not a forecast."
 
 
+# Said of a check that went wrong in a way the data source did not.
+CHECK_BROKE = "something went wrong on Orenth's side. It is tried again at the next check."
+
+
 class NotApplicable(Exception):
     """An alert that cannot mean anything on its instrument or bar size.
 
@@ -615,7 +619,7 @@ def _session_key(row, bars, series) -> Optional[Tuple[int, float]]:
         day = (live + int(getattr(bars, "gmt_offset", 0) or 0)) // 86400
     else:
         level = _yesterday(bars, series)[0 if row["kind"] == "takes_prior_high" else 1]
-        day = clock.trading_day(live, clock.kind_of(bars)).toordinal()
+        day = clock.trading_day(live, clock.kind_of(bars), bars).toordinal()
     return (int(day), float(level)) if _finite(level) else None
 
 
@@ -798,6 +802,9 @@ def _price_action(row, bars, series: Optional[Dict[str, np.ndarray]] = None
     instrument = clock.instrument_of(bars)
     daily = clock.kind_of(bars) == "daily"
     if kind == "takes_session_range":
+        if symbol.upper().endswith("=X"):
+            raise NotApplicable("London's range is read for futures and coins, not for "
+                                "currency pairs.")
         if instrument == "stock":
             raise NotApplicable("%s trades only in the day session, so it has no "
                                 "London session." % symbol)
@@ -1104,8 +1111,11 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             db.alert_failed(conn, int(row["id"]), str(exc)[:200])
             continue
         except Exception as exc:
-            errors.append({"symbol": row["symbol"], "error": str(exc)[:120]})
-            db.alert_failed(conn, int(row["id"]), str(exc)[:120])
+            # Nothing a person could act on: the detail is for the log, and
+            # they read that it did not work.
+            log.warning("alert %d could not be checked", int(row["id"]), exc_info=True)
+            errors.append({"symbol": row["symbol"], "error": CHECK_BROKE})
+            db.alert_failed(conn, int(row["id"]), CHECK_BROKE)
             continue
 
         was = _state(row)
@@ -1209,6 +1219,15 @@ _STOPS_LOCK = threading.Lock()
 _STOPS_MISSING: Dict[Tuple[str, str], Tuple[int, float]] = {}
 MISSING_TRIES = 2
 MISSING_WAIT = 3600.0
+
+
+def _crossed_day(interval: str, bars, when: int) -> str:
+    """The day a stop was traded through, the one the journal says
+    (web._touched_day): the New York date, or a daily bar's own day."""
+    times = getattr(bars, "timestamp", None)
+    if interval == "1d" and times is not None and int(when) in {int(t) for t in times}:
+        return _day(when)
+    return clock.label_ny(when, intraday=False)
 
 
 def check_stops(conn, user=None, skip_closed: bool = False,
@@ -1334,7 +1353,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                        "you are out." % (row["symbol"], said, kind,
                                          format_price(stop), side_word, moved))
         else:
-            when = time.strftime("%d %b", time.gmtime(read.touched_at)).lstrip("0")
+            when = _crossed_day(bar_size(row), bars, read.touched_at)
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it there once "

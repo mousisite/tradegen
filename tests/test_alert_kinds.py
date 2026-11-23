@@ -160,6 +160,10 @@ aid = add("ES=F", "sweeps_prior_high", since=TS[SWEEP1 - 3])
 FEED["ES=F"] = None                                   # nothing that can be read
 alerts.check(conn)
 check("a check that failed is said on the alert", row(aid)["last_error"] is not None)
+FEED["ES=F"] = object()                               # nor this, by the program itself
+alerts.check(conn)
+check("in words, not the program's own", row(aid)["last_error"] == alerts.CHECK_BROKE,
+      row(aid)["last_error"])
 FEED["ES=F"] = clock.head(ES, SWEEP1 + 4)
 said = told(aid)
 check("what happened while the first checks failed is told once one works",
@@ -287,6 +291,36 @@ FEED["ES=F"] = live(before, 99.8, moment)
 said = told(aid)
 check("and below yesterday's low", said is not None and "below yesterday's low of 99.9" in said,
       said)
+
+# A Tokyo session runs over a New York midnight: 14:00 to 15:30 there is the
+# same New York date as the next morning's first hours. Its days are its own.
+JST = 9 * 3600
+KTS = np.array([t for d in range(17, 21)                  # 17 to 20 November 2026
+                for start in (clock.ny(2026, 11, d - 1, 19, 0),)
+                for t in range(start, start + 6 * 3600 + 1800, 300)], dtype=np.int64)
+kn, day_bars = len(KTS), len(KTS) // 4
+kC = np.repeat([100.0, 102.0, 104.0, 106.0], day_bars)
+TYO = dataclasses.replace(
+    sc.make(kC, kC + 0.1, kC - 0.1, kC, KTS, symbol="7203.T"), gmt_offset=JST,
+    session_id=(KTS + JST) // 86400,
+    meta={"instrumentType": "EQUITY", "exchangeTimezoneName": "Asia/Tokyo"})
+aid = add("7203.T", "takes_prior_high")
+late = 3 * day_bars - 6                                     # 15:00 on the third day
+FEED["7203.T"] = live(clock.head(TYO, late), 104.0, int(KTS[late]) + 60)
+check("a Tokyo stock past yesterday's high in its afternoon is told", told(aid) is not None)
+FEED["7203.T"] = live(clock.head(TYO, 3 * day_bars + 2), 106.0, int(KTS[3 * day_bars + 2]) + 60)
+said = told(aid)
+check("and next morning there, past a new one, though New York's date is the same",
+      said is not None and "yesterday's high of 104.1" in said, (said, row(aid)["state"]))
+check("once, New York's midnight passing included", told(aid) is None)
+FEED["7203.T"] = live(clock.head(TYO, kn - 4), 106.0, int(KTS[kn - 4]) + 60)
+check("to the end of that session", told(aid) is None, row(aid)["state"])
+aid = add("EURUSD=X", "takes_session_range")
+FEED["EURUSD=X"] = dataclasses.replace(STOCK, symbol="EURUSD=X")
+alerts.check(conn)
+note = row(aid)["last_error"] or ""
+check("a currency pair is not said to trade only by day",
+      note == "London's range is read for futures and coins, not for currency pairs.", note)
 
 # ---------------------------------------------------------------------------
 head("BREAKS, GAPS AND FILLS ON A WALK")
