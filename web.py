@@ -1092,7 +1092,9 @@ def index():
         # As held now: a position closed in part counts only what is left.
         open_trades = db_mod.open_positions(conn, limit=20, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
-        counts = db_mod.stats(conn, user=uid())
+        # Only what the page prints: counting every signal and headline of
+        # every run took most of the time and was shown nowhere.
+        counts = db_mod.stats(conn, user=uid(), tables=("runs", "strategy_stats"))
         stored = _attention_stored(conn, uid())
     finally:
         conn.close()

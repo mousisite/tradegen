@@ -1241,8 +1241,13 @@ def recent_runs(conn: sqlite3.Connection, symbol: Optional[str] = None,
     return list(conn.execute(sql, args))
 
 
-def stats(conn: sqlite3.Connection, user: Optional[int] = None) -> Dict:
+def stats(conn: sqlite3.Connection, user: Optional[int] = None,
+          tables=("runs", "run_signals", "strategy_stats", "trades", "run_news",
+                  "watchlist", "alerts", "theses")) -> Dict:
     """Row counts, for a quick sense of how much the bot has recorded.
+
+    tables names the ones wanted, for a page that prints only some: counting
+    run_signals and run_news reads every analysis the account has made.
 
     The shared tables are counted whole even when a user is given: the strategy
     record describes instruments rather than people, and showing someone a
@@ -1250,8 +1255,7 @@ def stats(conn: sqlite3.Connection, user: Optional[int] = None) -> Dict:
     """
     shared = ("strategy_stats",)
     out = {}
-    for table in ("runs", "run_signals", "strategy_stats", "trades", "run_news",
-                  "watchlist", "alerts", "theses"):
+    for table in tables:
         if table in shared or user is None:
             sql, args = "SELECT COUNT(*) AS c FROM %s" % table, []
         elif table in ("run_signals", "run_news"):
