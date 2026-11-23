@@ -650,9 +650,12 @@
 {% endif %}
 {% endif %}
 {# Notifications on this device: the switch on the Monitor and Settings pages,
-   and, inside the iPhone app, what a tapped notification opens. #}
+   and, inside the iPhone app, what a tapped notification opens, signed in or
+   not. A visitor's browser has no use for it. #}
+{% if in_app or (current_user and not demo) %}
 <script src="{{ url_for('static', filename='notify.js', v=asset_version) }}" defer
         data-user="{{ current_user.id if current_user and not demo else '' }}"
         data-mark="{{ push_mark }}"></script>
+{% endif %}
 </body>
 </html>

@@ -289,6 +289,7 @@ check("pruning keeps only the newest few", kept_after == 2, kept_after)
 
 # The CSVs hold the same people's data as the copy. They used to be kept for
 # ever, slowly filling the disk the database is on.
+import sqlite3 as _sqlite3
 import time as _time
 
 sets = tempfile.mkdtemp(prefix="stockbot-backup-sets-")
@@ -315,6 +316,117 @@ check("with none, the first runs soon after start",
       backup_mod.first_run_in(tempfile.mkdtemp(), 3600.0) == 300.0)
 check("with only an old one, the first runs soon after start",
       backup_mod.first_run_in(sets, 30.0) == 300.0)
+
+# A copy cut off part-way used to be left as an empty file that counted as the
+# newest backup, so the next good one waited twelve hours.
+cut = tempfile.mkdtemp(prefix="stockbot-backup-cut-")
+real_replace = backup_mod.os.replace
+during = []
+
+
+def stopped_here(part, final):
+    during.append((backup_mod._copies(cut), _os.listdir(cut)))
+    raise KeyboardInterrupt()
+
+
+backup_mod.os.replace = stopped_here
+try:
+    backup_mod.take(cut)
+except KeyboardInterrupt:
+    pass
+finally:
+    backup_mod.os.replace = real_replace
+check("until a copy is whole it is not counted as one",
+      len(during) == 1 and during[0][0] == [] and len(during[0][1]) == 1, during)
+check("and a copy that could not be finished leaves nothing behind",
+      _os.listdir(cut) == [], _os.listdir(cut))
+broken_source = _os.path.join(folder, "broken-source.db")
+with open(broken_source, "wb") as fh:
+    fh.write(b"this is definitely not a database" * 400)
+try:
+    backup_mod.take(cut, source=broken_source)
+    check("a database that cannot be read is an error", False)
+except _sqlite3.DatabaseError:
+    check("a database that cannot be read is an error, and leaves nothing",
+          _os.listdir(cut) == [], _os.listdir(cut))
+whole = _os.path.basename(backup_mod.take(cut))
+old = _time.time() - 2 * 3600
+for name, when in (("stockbot-2026-01-02-030405.db.part", old),
+                   ("stockbot-2026-01-02-030405.db.part-journal", old),
+                   ("stockbot-2026-01-02-030406.db.part", _time.time()),
+                   ("stockbot-2026-01-02-030407.db-journal", old),
+                   ("notes.db.part", old)):
+    with open(_os.path.join(cut, name), "w") as fh:
+        fh.write("x")
+    _os.utime(_os.path.join(cut, name), (when, when))
+backup_mod.prune(cut, 5)
+check("what a killed server left behind is cleared away, but never a copy that "
+      "may still be being written", sorted(_os.listdir(cut)) == sorted([
+          whole, "stockbot-2026-01-02-030406.db.part", "notes.db.part"]),
+      _os.listdir(cut))
+
+# By hand on the server, a backup goes where the server keeps its own: beside
+# the code is inside the container, and gone at the next deploy.
+by_hand = {}
+real_take, real_verify = backup_mod.take, backup_mod.verify
+real_prune = backup_mod.prune
+kept_env = {k: _os.environ.get(k) for k in ("STOCKBOT_BACKUP_DIR", "STOCKBOT_DB",
+                                            "STOCKBOT_BACKUP_KEEP")}
+backup_mod.take = lambda out, with_csv=False: by_hand.update(out=out) or out
+backup_mod.verify = lambda path: True
+backup_mod.prune = lambda out, keep: by_hand.update(pruned=out, keep=keep)
+
+
+def _by_hand(*argv, **settings):
+    for key in kept_env:
+        _os.environ.pop(key, None)
+    _os.environ.update(settings)
+    by_hand.clear()
+    backup_mod.main(list(argv))
+    return dict(by_hand)
+
+
+try:
+    beside = _os.path.join(_os.path.dirname(_os.path.abspath(backup_mod.__file__)),
+                           "backups")
+    on_disk = _os.path.join(cut, "data")
+    got = _by_hand(STOCKBOT_DB=_os.path.join(on_disk, "stockbot.db"))
+    check("a backup by hand goes beside the server's database",
+          got["out"] == got["pruned"] == _os.path.join(on_disk, "backups"), got)
+    got = _by_hand(STOCKBOT_DB=_os.path.join(on_disk, "stockbot.db"),
+                   STOCKBOT_BACKUP_DIR=cut)
+    check("or in the folder the settings name", got["out"] == cut, got)
+    check("or, with nothing set, beside the code", _by_hand()["out"] == beside)
+    check("and where it is told to go, if it is told",
+          _by_hand("--out", on_disk, STOCKBOT_BACKUP_DIR=cut)["out"] == on_disk)
+    check("it never deletes a timed backup the server means to keep",
+          [_by_hand(STOCKBOT_BACKUP_KEEP=k)["keep"]
+           for k in ("30", "8", "0", "eight", "nan", "")] == [30, 14, 0, 14, 14, 14])
+finally:
+    backup_mod.take, backup_mod.verify, backup_mod.prune = (
+        real_take, real_verify, real_prune)
+    for key, value in kept_env.items():
+        if value is None:
+            _os.environ.pop(key, None)
+        else:
+            _os.environ[key] = value
+if _os.name == "posix":
+    was_mask = _os.umask(0o077)
+    try:
+        private = backup_mod.take(tempfile.mkdtemp(), with_csv=True)
+        check("only the server's own user can read a backup",
+              all(_os.stat(_os.path.join(_os.path.dirname(private), f)).st_mode & 0o077 == 0
+                  for f in _os.listdir(_os.path.dirname(private))))
+    finally:
+        _os.umask(was_mask)
+masks = []
+real_umask = _os.umask
+_os.umask = lambda m: masks.append(m) or 0o022
+try:
+    backup_mod.main(["--verify", _os.path.join(folder, "nope.db")])
+finally:
+    _os.umask = real_umask
+check("what the backup command writes is for its own user alone", masks == [0o077], masks)
 
 real_free = backup_mod._free_bytes
 backup_mod._free_bytes = lambda path: 1024
@@ -365,6 +477,38 @@ check("one that never ends fails, with why, and the rest still run",
       got["stalled"][0] == "FAIL" and "so far" in got["stalled"][1]
       and "timed out" in got["stalled"][2], got["stalled"])
 
+_AS_SUITE = '''
+import sys
+sys.argv[0] = %r
+sys.path.insert(0, %r)
+import harness, socket, tempfile
+said = []
+if harness.OFFLINE:
+    for host in ("stock-prices.invalid", "192.0.2.1"):
+        try:
+            socket.create_connection((host, 80), timeout=1)
+            said.append("reached")
+        except OSError as exc:
+            said.append("offline suite" in str(exc))
+    here = socket.create_server(("127.0.0.1", 0))
+    socket.create_connection(here.getsockname(), timeout=5).close()
+    said.append("itself")
+print([harness.OFFLINE, said])
+print(tempfile.mkdtemp(prefix="stockbot-test-left-"))
+'''
+said_as = {}
+for suite in ("test_lock.py", "test_web.py"):
+    ran = _subprocess.run([_sys.executable, "-c", _AS_SUITE % (
+        suite, _os.path.dirname(_os.path.abspath(__file__)))],
+        capture_output=True, text=True, timeout=60)
+    said_as[suite] = (ran.stdout.splitlines() + [ran.stderr, ""])[:2]
+check("a suite listed as needing no network is refused any other machine, not its own",
+      said_as["test_lock.py"][0] == "[True, [True, True, 'itself']]", said_as)
+check("one that needs it is not", said_as["test_web.py"][0] == "[False, []]", said_as)
+check("and a folder a suite makes goes when it ends",
+      all(s[1] and "stockbot-test-left-" in s[1] and not _os.path.exists(s[1])
+          for s in said_as.values()), said_as)
+
 print()
 print("=" * 72)
 print("THE CHECK OF A DEPLOYMENT READS THE HAND-OFF TO GOOGLE")
@@ -400,6 +544,30 @@ check("the secret in the address fails",
 check("with Google sign-in off nothing is claimed to have been checked",
       _hand_off(503, "") == ["WARN"])
 
+
+def _way_in(door):
+    """What preflight says of a site whose account page asks for sign-in."""
+    def answer(url, **kw):
+        path = url.split("example.com", 1)[1]
+        out = {"status": 302, "body": b"", "seconds": 0.0, "url": url,
+               "headers": {"Location": "/signin?next=%2Faccount"}}
+        if path == "/signin":
+            out.update(status=200, body=door.encode("utf-8"), headers={})
+        return out
+
+    preflight.fetch = answer
+    report = preflight.Report()
+    try:
+        preflight.run("https://example.com", report)
+    finally:
+        preflight.fetch = real_fetch
+    return [v for v, what, _ in report.rows if what == "there is a way to sign in"]
+
+
+check("a site nobody can sign in to fails the check",
+      _way_in("<span>Signing in is off for now</span>") == ["FAIL"])
+check("one that shows a way in passes it", _way_in("Continue with Google") == ["PASS"])
+
 print()
 print("=" * 72)
 print("THE HEALTH CHECK")
@@ -418,10 +586,9 @@ real_connect = web.db_mod.connect
 
 
 def unreadable(path=None):
-    # Only the health check's own read fails; signing the request in works.
-    if _sys._getframe(1).f_code.co_name == "healthcheck":
-        raise _sqlite3.OperationalError("database is locked: /data/stockbot.db")
-    return real_connect(path)
+    # Every read fails, as it does when the disk is gone. Finding out who is
+    # asking used to fail first, so the answer was a 500 and a page.
+    raise _sqlite3.OperationalError("database is locked: /data/stockbot.db")
 
 
 web.db_mod.connect = unreadable
@@ -449,6 +616,57 @@ check("without failing the check: a restart frees no space",
 
 print()
 print("=" * 72)
+print("FILES THAT ARE THE SAME FOR EVERYBODY")
+print("=" * 72)
+
+conn = db.connect(DB)
+reader = A.upsert_email_user(conn, "reader@example.com")
+reader_token = A.start_session(conn, reader.id)
+conn.close()
+signed_in = web.app.test_client()
+with signed_in.session_transaction() as sess:
+    sess.permanent = True
+    sess[web.SESSION_KEY] = reader_token
+opened = []
+
+
+def counted(path=None):
+    opened.append(path)
+    return real_connect(path)
+
+
+web.db_mod.connect = counted
+try:
+    plain_file = signed_in.get("/static/style.css")
+    stamped = signed_in.get("/static/style.css?v=" + web.ASSET_VERSION)
+    again = signed_in.get("/static/style.css?v=" + web.ASSET_VERSION,
+                          headers={"If-None-Match": stamped.headers["ETag"]})
+    other_release = signed_in.get("/static/style.css?v=0123456789ab")
+    missing = signed_in.get("/static/nothing.css?v=" + web.ASSET_VERSION)
+    from_files = list(opened)
+finally:
+    web.db_mod.connect = real_connect
+check("a file is sent without opening the database, whoever asks",
+      plain_file.status_code == stamped.status_code == 200 and from_files == [], from_files)
+FOR_GOOD = "public, max-age=31536000, immutable"
+check("one asked for by this release's version is kept for good, when asked again too",
+      again.status_code == 304
+      and stamped.headers["Cache-Control"] == again.headers["Cache-Control"] == FOR_GOOD,
+      (stamped.headers.get("Cache-Control"), again.status_code))
+check("asked for plain, by another release's, or not there, it is checked each time",
+      not any("immutable" in (r.headers.get("Cache-Control") or "")
+              for r in (plain_file, other_release, missing))
+      and missing.status_code == 404)
+for path in ("/static/style.css", "/favicon.ico", "/record.csv", "/account"):
+    response = signed_in.get(path)
+    check("%s does not send the sign-in cookie again" % path,
+          response.status_code == 200 and "Set-Cookie" not in response.headers,
+          (response.status_code, response.headers.get("Set-Cookie")))
+check("and the person is still signed in",
+      b"reader@example.com" in signed_in.get("/account").data)
+
+print()
+print("=" * 72)
 print("THE USAGE VIEW")
 print("=" * 72)
 
@@ -462,6 +680,43 @@ check("small numbers are called out",
 conn.close()
 
 check("the operator can see it", c.get("/usage").status_code == 200)
+
+# How the timed backups are going, which only the host's log said before.
+backups_here = tempfile.mkdtemp(prefix="stockbot-backup-usage-")
+_os.environ["STOCKBOT_BACKUP_DIR"] = backups_here
+
+
+def _backups_said(hours):
+    web.app.config["BACKUP_HOURS"] = hours
+    page = c.get("/usage").data.decode("utf-8", "replace")
+    return " ".join(page.split("Where the data lives", 1)[1]
+                    .split("Copies kept elsewhere", 1)[0].split())
+
+
+try:
+    said_off = _backups_said(0)
+    said_none = _backups_said(12.0)
+    backup_mod.take(backups_here)
+    said_fresh = _backups_said(12.0)
+    for f in _os.listdir(backups_here):
+        stale = _time.time() - 30 * 3600
+        _os.utime(_os.path.join(backups_here, f), (stale, stale))
+    said_late = _backups_said(12.0)
+    said_stopped = _backups_said(0)
+finally:
+    _os.environ.pop("STOCKBOT_BACKUP_DIR", None)
+    web.app.config.pop("BACKUP_HOURS", None)
+check("it says when no backups are taken",
+      "No backups are being taken" in said_off and "Last backup" not in said_off, said_off)
+check("when none has been taken yet", "No backup has been taken yet" in said_none, said_none)
+check("when the last one was, and how many are kept",
+      "Last backup: just now, 1 kept. One is taken every 12 hours." in said_fresh
+      and "overdue" not in said_fresh, said_fresh)
+check("and in red that one is overdue",
+      "Last backup: 1d ago" in said_late and "It is overdue." in said_late
+      and 'prose loss">Last backup' in said_late, said_late)
+check("with the timer off, what there is is still said",
+      "No backups are being taken" in said_stopped and "1 kept" in said_stopped, said_stopped)
 
 _os.environ["GOOGLE_CLIENT_ID"] = "x.apps.googleusercontent.com"
 _os.environ["GOOGLE_CLIENT_SECRET"] = "y"

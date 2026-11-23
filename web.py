@@ -120,6 +120,11 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(days=accounts_mod.SESSION_DAYS),
+    # The cookie is set at sign-in for as long as the server's own record of
+    # it lasts, and again only when it changes. Sent with every answer, it
+    # rode on files marked as the same for everybody, which no cache in front
+    # of the site may then keep.
+    SESSION_REFRESH_EACH_REQUEST=False,
 )
 
 # Behind a reverse proxy the app sees plain http on an internal hostname, so
@@ -178,6 +183,11 @@ def _harden(response):
             and request.endpoint != "static"
             and response.mimetype in ("text/html", "application/json", "text/csv")):
         h.setdefault("Cache-Control", "private, no-store")
+    # A file asked for by this release's fingerprint never changes under that
+    # address, so a browser need not ask for it again on every page.
+    if (request.endpoint == "static" and response.status_code in (200, 206, 304)
+            and request.args.get("v") == ASSET_VERSION):
+        h["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
 
 
@@ -335,6 +345,10 @@ def _identify():
     """Attach the signed-in person, or the local account, to this request."""
     g.user = None
     g.demo = False
+    # Neither depends on who asks. A style sheet needs no database, and the
+    # health check has to reach its own answer when there is none to open.
+    if request.endpoint in ("static", "healthcheck"):
+        return None
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         token = session.get(SESSION_KEY)
@@ -4334,9 +4348,23 @@ def usage():
         "on_disk": db_path.startswith("/data") or db_path.startswith("/var/data"),
     }
 
+    # The timed backups on this disk. serve.py says how often it takes them;
+    # started any other way, none are taken. A missing folder is no backups.
+    import backup as backup_mod
+    hours = app.config.get("BACKUP_HOURS") or 0
+    try:
+        age, kept = (backup_mod.newest_age(backup_mod.folder()),
+                     backup_mod.how_many(backup_mod.folder()))
+    except OSError:
+        age, kept = None, 0
+    backups = {"hours": hours, "kept": kept, "age": age,
+               "taken": None if age is None else time.time() - age,
+               "late": hours > 0 and (age is None or age > 2 * hours * 3600)}
+
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
                            storage=storage, counts=counts, offsite=offsite,
+                           backups=backups,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 

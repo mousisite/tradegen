@@ -246,13 +246,24 @@ def run(base: str, report: Report) -> None:
             "/signin" in header(guarded, "Location"):
         report.ok("sign-in is switched on", "the account page requires one")
         signed_in_mode = True
+        # The account page asks even where nobody can sign in, so the sign-in
+        # page is read for whether there is a way.
+        door = fetch(base + "/signin")
+        if door["status"] != 200:
+            report.bad("there is a way to sign in",
+                       "the sign-in page returned %d" % door["status"])
+        elif "Signing in is off for now" in text(door):
+            report.bad("there is a way to sign in",
+                       "none is set up; the server's start-up log says what is missing")
+        else:
+            report.ok("there is a way to sign in")
     elif guarded["status"] == 200:
         report.warn("sign-in is switched on",
                     "the account page served content to a stranger")
         print()
         print("  A page holding personal data loaded without an account, which")
-        print("  means GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not both")
-        print("  set. Correct for a private test, wrong for a public launch.")
+        print("  means this is a private copy on one machine, or auth_mode is off")
+        print("  in config.json. Wrong for a public launch.")
         signed_in_mode = False
     else:
         report.bad("sign-in is switched on",
