@@ -472,7 +472,7 @@ and refuses anything else.
 | `STOCKBOT_DB` | yes | `/data/stockbot.db`, on the mounted disk |
 | `STOCKBOT_CONFIG` | yes | `/data/config.json`, so settings survive a redeploy |
 | `STOCKBOT_BEHIND_PROXY` | yes | Trust the proxy's forwarded scheme and host. Already set in both host configs |
-| `STOCKBOT_CONTACT` | yes | Shown on the privacy and terms pages |
+| `STOCKBOT_CONTACT` | yes | Shown on the privacy and terms pages, and given to the SEC as the contact for this site's requests, which it asks every client for |
 | `GOOGLE_CLIENT_ID` | for sign-in | Turns sign-in on, together with the secret |
 | `GOOGLE_CLIENT_SECRET` | for sign-in | Never appears in a URL or a config file |
 | `GOOGLE_ALLOWED_DOMAINS` | no | Restrict who may sign in |

@@ -26,9 +26,29 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-_UA = {"User-Agent": "StockBot/1.0 (personal research tool; mousihleb@gmail.com)",
-       "Accept-Encoding": "gzip, deflate",
-       "Accept": "application/json,text/html,*/*"}
+from . import upstream
+
+# What the circuit breaker in upstream knows this source as.
+_HOST = "SEC EDGAR"
+
+
+def _headers() -> Dict[str, str]:
+    """Who is asking, as EDGAR wants it said.
+
+    The contact is the site's own, from STOCKBOT_CONTACT, read when a request
+    is made. Nobody's address belongs in the code: the repository is public
+    and every copy of it would send the same one. Without the setting the
+    site's address stands in.
+    """
+    contact = (os.environ.get("STOCKBOT_CONTACT") or "").strip()
+    # A header takes one line of plain characters; anything else in the
+    # setting would break every request rather than only the contact.
+    if not all(" " <= ch <= "~" for ch in contact):
+        contact = ""
+    who = "https://orenth.app" + ("; " + contact if contact else "")
+    return {"User-Agent": "Orenth/1.0 (%s)" % who,
+            "Accept-Encoding": "gzip, deflate",
+            "Accept": "application/json,text/html,*/*"}
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK%010d.json"
@@ -49,6 +69,12 @@ _FACTS_CACHE: "OrderedDict[int, Tuple[float, CompanyFacts]]" = OrderedDict()
 _FACTS_MAX = 64
 _FACTS_TTL = 24 * 3600.0
 _CACHE_LOCK = threading.Lock()
+# The companies whose figures are being downloaded right now, so that the two
+# halves of one research page, and two people opening it together, share the
+# one download. Several megabytes each, on half a processor.
+_FACTS_FLIGHTS: Dict[int, Dict] = {}
+# Longer than a download takes at its slowest, so nobody waiting starts another.
+_FACTS_WAIT = 45.0
 
 # The XBRL tag for a given idea changes between companies and over time, so
 # each concept lists the tags to try in order of preference.
@@ -172,17 +198,30 @@ def _throttle() -> None:
         _LAST_CALL[0] = time.time()
 
 
-def _get(url: str, params: Optional[Dict] = None, tries: int = 3):
+def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
+    """One EDGAR answer, inside about half a minute, or an SECError.
+
+    A page waits for this, and Cloudflare gives up on a page at 100 seconds:
+    three tries of thirty seconds each outlasted it. A refusal is not asked
+    again at once either. EDGAR answers a client that is over its limit with
+    403 or 429, and asking on keeps the door shut for everybody here.
+    """
     last = None
     for attempt in range(tries):
+        if attempt:
+            time.sleep(0.6)
+        try:
+            upstream.check(_HOST)
+        except upstream.Throttled as exc:
+            raise SECError("EDGAR has asked for a pause of %d seconds" % exc.seconds)
         _throttle()
         try:
-            r = requests.get(url, params=params, headers=_UA, timeout=30)
+            r = requests.get(url, params=params, headers=_headers(), timeout=(5, 10))
         except requests.RequestException as exc:
             last = str(exc)
-            time.sleep(0.6 * (attempt + 1))
             continue
         if r.status_code == 200:
+            upstream.note_ok(_HOST)
             try:
                 return r.json()
             except ValueError:
@@ -190,7 +229,9 @@ def _get(url: str, params: Optional[Dict] = None, tries: int = 3):
         if r.status_code == 404:
             return None
         last = "HTTP %s" % r.status_code
-        time.sleep(0.8 * (attempt + 1))
+        if r.status_code in (403, 429, 503):
+            upstream.note_throttled(_HOST, upstream.retry_after_seconds(r))
+            break
     raise SECError("EDGAR request failed: %s" % last)
 
 
@@ -348,6 +389,26 @@ class CompanyFacts:
         return (last / first) ** (1.0 / span) - 1.0
 
 
+def _joined(by_tag: List[Dict]) -> List["Fact"]:
+    """One history for a figure the company has filed under several tags.
+
+    by_tag holds each tag's rows by period, in order of preference. The tag
+    still in use, the one with the newest period, is taken whole, so two
+    neighbouring years are compared on the same definition; the other tags
+    only supply periods it lacks. Taking the first tag with any data instead
+    kept a company's 2019 revenue as its latest after it moved to another tag.
+    Only rows in one currency are joined.
+    """
+    used = max(by_tag, key=lambda rows: max(rows))      # the first of equals
+    unit = used[max(used)].unit
+    out = dict(used)
+    for rows in by_tag:
+        for period, fact in rows.items():
+            if fact.unit == unit:
+                out.setdefault(period, fact)
+    return [out[k] for k in sorted(out)]
+
+
 def company_facts(symbol: str) -> Optional[CompanyFacts]:
     """Every XBRL concept this company has filed, normalised and de-duplicated."""
     cik = cik_for(symbol)
@@ -359,7 +420,35 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
         if hit is not None and time.time() - hit[0] < _FACTS_TTL:
             _FACTS_CACHE.move_to_end(cik)
             return hit[1]
+        flight = _FACTS_FLIGHTS.get(cik)
+        mine = flight is None
+        if mine:
+            flight = {"done": threading.Event(), "facts": None, "error": None}
+            _FACTS_FLIGHTS[cik] = flight
 
+    if not mine:
+        if not flight["done"].wait(_FACTS_WAIT):
+            raise SECError("EDGAR request failed: no answer in time")
+        if flight["error"] is not None:
+            raise flight["error"]
+        return flight["facts"]
+
+    try:
+        flight["facts"] = _load_facts(cik, symbol)
+        return flight["facts"]
+    except Exception as exc:
+        flight["error"] = exc
+        raise
+    finally:
+        # Let go of in the same moment as it is over: whoever looks next finds
+        # the answer in the cache, or asks afresh.
+        with _CACHE_LOCK:
+            _FACTS_FLIGHTS.pop(cik, None)
+        flight["done"].set()
+
+
+def _load_facts(cik: int, symbol: str) -> Optional[CompanyFacts]:
+    """Download, read and keep one company's filed figures."""
     data = _get(_FACTS_URL % cik)
     if not isinstance(data, dict):
         return None
@@ -368,6 +457,7 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
     us_gaap = (data.get("facts") or {}).get("us-gaap") or {}
 
     for concept, tags in _CONCEPTS.items():
+        by_year, by_quarter = [], []       # one entry per tag that has data
         for tag in tags:
             node = us_gaap.get(tag)
             if not node:
@@ -423,11 +513,14 @@ def company_facts(symbol: str) -> Optional[CompanyFacts]:
                         quarterly[end] = entry
 
             if annual:
-                facts.annual[concept] = [annual[k] for k in sorted(annual)]
+                by_year.append(annual)
             if quarterly:
-                facts.quarterly[concept] = [quarterly[k] for k in sorted(quarterly)]
-            if annual or quarterly:
-                break        # first tag that produced data wins
+                by_quarter.append(quarterly)
+
+        if by_year:
+            facts.annual[concept] = _joined(by_year)
+        if by_quarter:
+            facts.quarterly[concept] = _joined(by_quarter)
 
     with _CACHE_LOCK:
         _FACTS_CACHE[cik] = (time.time(), facts)
