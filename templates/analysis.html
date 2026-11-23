@@ -86,7 +86,7 @@
     <span>{% if r.bars.market_open %}<b class="gain">market open</b>
           {% else %}market closed{% endif %}</span>
     <div><b>{{ r.regime.describe() }}</b>{{ help('regime') }}</div>
-    <span>{{ "%.1f"|format(r.elapsed) }}s</span>
+    <span>analysed in {{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
   {# A coin day the source left blank, rebuilt from the days either side
      (market.py): its open and close are known, its range and volume are not. #}
@@ -157,13 +157,15 @@
       {% set tested_rr = plan.tested_reward_risk %}
       <dd><span class="fig">{{ "%.2f"|format(plan.reward_risk or 0) }}&thinsp;:&thinsp;1</span>
           {% if tested_rr and plan.reward_risk and ((plan.reward_risk / tested_rr) - 1)|abs > 0.1 %}
-          <span class="faint">odds below measured at {{ "%.2f"|format(tested_rr) }}&thinsp;:&thinsp;1</span>
+          <span class="faint">the odds further down were measured at {{ "%.2f"|format(tested_rr) }}&thinsp;:&thinsp;1</span>
           {% else %}
           <span class="faint">needs {{ plan.breakeven_rate|pct }}</span>
           {% endif %}{{ help('reward_risk') }}</dd>
       {% if plan.position and not plan.position.error %}
       <dt>Size</dt>
-      <dd><span class="fig">{{ plan.position.quantity }}</span> units
+      {# Whole shares are kept as 27.0, a coin's size to six decimals. #}
+      {% set q = plan.position.quantity %}
+      <dd><span class="fig">{{ '{:,.0f}'.format(q) if q == q|int else ('{:,.6f}'.format(q)).rstrip('0') }}</span> unit{{ '' if q == 1 else 's' }}
           <span class="faint">{{ plan.position.notional|money }} {{ r.bars.currency }}</span>{{ help('size') }}</dd>
       <dt>You risk</dt>
       <dd><span class="fig">{{ plan.position.risk_amount|money }}</span>
@@ -400,9 +402,10 @@
         <div class="v fig">{{ plan.prob_samples }}</div>
         <div class="n">{{ 'similar setups' if plan.prob_reliable else 'too few to trust' }}</div></div>
       <div class="f"><div class="k">Typical hold{{ help('hold') }}</div>
-        <div class="v fig">{{ "%.0f"|format(calib.avg_bars_held or 0) }}</div>
-        <div class="n">bars, about
-          {{ hold_text }}</div></div>
+        {% set held = "%.0f"|format(calib.avg_bars_held or 0) %}
+        <div class="v fig">{{ held }}</div>
+        <div class="n">bar{{ '' if held == '1' else 's' }}{% if hold_text %}, about
+          {{ hold_text }}{% endif %}</div></div>
       {% if calib.holdout_hit_rate is not none %}
       <div class="f"><div class="k">Most recent third{{ help('holdout') }}</div>
         <div class="v fig {{ 'gain' if (calib.holdout_expectancy or 0) > 0 else 'loss' }}">
