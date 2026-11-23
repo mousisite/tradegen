@@ -1348,6 +1348,17 @@ def _canonical(endpoint: str, bars) -> str:
                                     exact=exact_arg(bars.symbol))
 
 
+# The largest account an address may name: a trillion, past which a size has
+# more digits than it is worth printing.
+ACCOUNT_MOST = 1e12
+
+
+def _address_number(name: str, most: float) -> Optional[float]:
+    """A number the address gives, when it is above zero and at most `most`."""
+    number = _number(request.args.get(name))
+    return number if number is not None and 0 < number <= most else None
+
+
 @app.route("/analyse")
 def analyse():
     symbol, exact = _symbol_from(request.args)
@@ -1370,16 +1381,14 @@ def analyse():
                            "can look at any timeframe.")
 
     cfg = _cfg()
-    if request.args.get("account"):
-        try:
-            cfg["account_size"] = float(request.args["account"])
-        except ValueError:
-            pass
-    if request.args.get("risk"):
-        try:
-            cfg["risk_per_trade_pct"] = float(request.args["risk"])
-        except ValueError:
-            pass
+    # Within what Settings allows, or not at all: nan, a minus sign or a risk
+    # of 500 made sizes of nonsense, or no page.
+    account = _address_number("account", ACCOUNT_MOST)
+    if account is not None:
+        cfg["account_size"] = account
+    risk = _address_number("risk", 10.0)
+    if risk is not None:
+        cfg["risk_per_trade_pct"] = risk
     if request.args.get("shorts") == "1":
         cfg["allow_shorts"] = True
 
@@ -2632,7 +2641,11 @@ def analyse_image():
                                        "image. Try a clearer screenshot, or just "
                                        "type the ticker."), 422
 
-    interval = request.form.get("interval") or _interval_from(read.timeframe)
+    # The bar size chosen on the page, which says so under the picture box. A
+    # request that names none there is has the picture's own.
+    interval = request.form.get("interval")
+    if interval not in dict(INTERVALS):
+        interval = _interval_from(read.timeframe)
     return redirect(url_for("analyse", symbol=read.symbol, interval=interval,
                             fromimage="1"))
 
@@ -2672,7 +2685,7 @@ def _interval_from(timeframe: Optional[str]) -> str:
     """Map whatever the chart said its timeframe was onto one we support."""
     if not timeframe:
         return "1d"
-    t = timeframe.strip().lower().replace(" ", "")
+    t = str(timeframe).strip().lower().replace(" ", "")
     known = {"1m": "5m", "2m": "5m", "3m": "5m", "5m": "5m", "10m": "15m",
              "15m": "15m", "30m": "30m", "45m": "30m", "1h": "1h", "60m": "1h",
              "2h": "1h", "4h": "1h", "1d": "1d", "d": "1d", "1day": "1d",

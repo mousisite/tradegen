@@ -830,6 +830,8 @@ ul.list.ok li::marker { color: var(--gain); }
    a phone, and the row stayed lit after its button was tapped. */
 @media (hover: none) {
   tbody tr:hover { background: transparent; }
+  /* Words about pointing at a chart, which a finger cannot do. */
+  .hover-only { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -130,6 +130,29 @@ try:
         check("a %s screenshot is read" % fmt, r.status_code == 302,
               "status %d" % r.status_code)
 
+    # The bar size chosen on the page counts; only a request that names none
+    # there is falls back on the picture's own, whatever kind of value that is.
+    for sent, seen, want in (("1d", "5m", "1d"), ("zzz", "5m", "5m"), (None, "1h", "1h"),
+                             (None, 5, "1d")):
+        web.read_chart = lambda png, seen=seen: ChartRead(symbol="AAPL", timeframe=seen)
+        shot = io.BytesIO()
+        Image.new("RGB", (400, 200), (200, 30, 30)).save(shot, format="PNG")
+        shot.seek(0)
+        fields = {"chart": (shot, "c.png")}
+        if sent:
+            fields["interval"] = sent
+        r = c.post("/analyse/image", data=fields, content_type="multipart/form-data")
+        check("bar size %s with a picture saying %r opens %s bars" % (sent, seen, want),
+              r.status_code == 302 and "interval=%s&" % want in r.headers.get("Location", "")
+              + "&", str(r.headers.get("Location")))
+    web.read_chart = fake_read
+    page = c.get("/").data.decode("utf-8", "replace")
+    check("the page says which bar size a picture is analysed on",
+          "bar size is the one chosen" in " ".join(page.split()))
+    check("and holds no image without a picture",
+          all(" src=" in tag for tag in re.findall(r"<img\b[^>]*>", page)),
+          str(re.findall(r"<img\b[^>]*>", page)))
+
     # Every upload used to go through one shared file, so two at once could
     # read, or delete, each other's picture.
     landed = {}
@@ -263,7 +286,8 @@ check("value persisted", cfgmod.load(harness.CFG_PATH)["account_size"] == 5000.0
 # The default interval did nothing on the Analyse box, which said daily always.
 body = c.get("/").data.decode("utf-8", "replace")
 check("daily is preselected on the Analyse box", '<option value="1d" selected>' in body
-      and "Daily bars are preselected because" in body)
+      and "Daily bars are preselected because" in body
+      and "the only interval where Orenth has measured" in " ".join(body.split()))
 c.post("/settings", data={"interval": "1h"})
 body = c.get("/").data.decode("utf-8", "replace")
 check("the default interval chosen in Settings is the one preselected there",
@@ -368,6 +392,16 @@ try:
           and "Daily candles" in body)
     check("drawn twice, so a phone gets the narrow one",
           body.count('class="chart trade"') == 2 and ".tradechart .narrow" in body)
+    # A finger cannot point at a candle: those words are for a mouse alone.
+    with open(os.path.join(harness.ROOT, "static", "style.css"), encoding="utf-8") as fh:
+        touch = fh.read().split("@media (hover: none) {", 1)[1].split("\n}", 1)[0]
+    check("the words about pointing at a candle are hidden from a touch screen",
+          '<span class="hover-only">Point at a candle' in body
+          and ".hover-only { display: none; }" in touch)
+    check("and are not in the iPhone app at all", "Point at a candle" not in c.get(
+        "/analyse?symbol=FAKE&interval=1d&news=0",
+        headers={"User-Agent": "Mozilla/5.0 (iPhone) OrenthApp/1"}).data.decode(
+            "utf-8", "replace"))
     fake.plan.action = "AVOID"
     body = c.get("/analyse?symbol=FAKE&interval=1d&news=0").data.decode("utf-8", "replace")
     check("an AVOID draws the prices with no plan across them",
@@ -404,6 +438,30 @@ try:
     check("a ticker that is not there gets the advice about tickers",
           r.status_code == 404 and "ticker does not exist" in body
           and "Try another ticker" in body)
+finally:
+    web.cached_analysis = _real[3]
+
+
+asked = []
+
+
+def keeps_settings(symbol, interval, cfg, *_a, **_k):
+    asked.append((cfg["account_size"], cfg["risk_per_trade_pct"]))
+    raise web.DataError("No instrument found for 'ZZQQ'.")
+
+
+# A number in the address that is none sized nonsense, or was an error page.
+web.cached_analysis = keeps_settings
+try:
+    own = (cfgmod.load(harness.CFG_PATH)["account_size"],
+           cfgmod.load(harness.CFG_PATH)["risk_per_trade_pct"])
+    for query in ("account=nan", "account=inf", "account=1e999", "account=-5", "account=0",
+                  "account=1e300", "risk=nan", "risk=-1", "risk=0", "risk=500", "risk=abc"):
+        c.get("/analyse?symbol=ZZQQ&interval=1d&" + query)
+        check("%s in the address is ignored" % query, asked and asked[-1] == own,
+              str(asked[-1:]))
+    c.get("/analyse?symbol=ZZQQ&interval=1d&account=25000&risk=2.5")
+    check("a proper one is used", asked[-1] == (25000.0, 2.5), str(asked[-1:]))
 finally:
     web.cached_analysis = _real[3]
 
@@ -517,6 +575,19 @@ check("it points to the daily strategy tests, and says whose record it is",
       and "you have analysed" in body)
 body = c.get("/").data.decode("utf-8", "replace")
 check("recent analyses give expectancy in R, like the record above them", "+0.123R" in body)
+_row = " ".join(body[body.index("ZZRUN"):].split())
+check("and write the call as the rest of the page does",
+      '<span class="chip hold"> WAIT</span>' in _row, _row[:600])
+conn = db.connect(DB)
+try:
+    for symbol in ("ONE", "TWO"):
+        db.close_trade(conn, db.open_trade(conn, symbol, "1d", 1, entry=100, stop=95,
+                                           target1=110, quantity=1, user=me), 110.0, "target")
+        body = " ".join(c.get("/").data.decode("utf-8", "replace").split())
+        want = "1 closed trade cannot" if symbol == "ONE" else "2 closed trades cannot"
+        check("the front page counts '%s'" % want, want in body)
+finally:
+    conn.close()
 body = c.get("/settings").data.decode("utf-8", "replace")
 check("on your own machine, settings say they stay on it",
       "never leaves this machine" in body and "config.json" in body)

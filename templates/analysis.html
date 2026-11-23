@@ -230,7 +230,7 @@
       {% elif chart.levels %}The dashed lines are this plan's entry, stop and
         target.{% else %}No plan is drawn: the call is to stand aside.{% endif %}
       {% if chart.intraday %}Times are New York time.{% endif %}
-      Point at a candle to see its prices.</p>
+      {% if not in_app %}<span class="hover-only">Point at a candle to see its prices.</span>{% endif %}</p>
   </div>
 </section>
 {% endif %}
@@ -553,7 +553,7 @@
 {% if best or worst %}
 <section>
   <div class="sechead">
-    <h2>What {{ r.bars.symbol }} taught the bot</h2>
+    <h2>What {{ r.bars.symbol }} taught Orenth</h2>
     <span class="tail">{{ r.strategy_report.samples }} setups tested</span>
   </div>
   <div class="card pad0">
