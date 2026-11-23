@@ -77,6 +77,7 @@ from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
 from bot import public as public_mod
 from bot import push as push_mod
+from bot import reasoning as reasoning_mod
 from bot import safejson
 from bot import scheduler as scheduler_mod
 from bot import screener as screener_mod
@@ -959,10 +960,68 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
             "futures": float(cfg.get("cost_bps_futures", 1.0)) / 10000.0}
 
 
+# How many analyses and pieces of research one account may have being worked
+# out, or waited for, at the same time. Each holds one of the server's eight
+# threads for seconds, or up to a minute of research, so one account asking for
+# eight at once (a different account size in each address is a different
+# analysis) kept every page from everybody. The example account is everybody
+# looking around, so it may have more.
+SLOW_AT_ONCE = 4
+DEMO_SLOW_AT_ONCE = 6
+SLOW_RETRY = 10
+_SLOW: Dict[int, int] = {}
+_SLOW_LOCK = threading.Lock()
+
+
+class _SlowSlot:
+    """One account's place among the slow work going on; taken at most once."""
+
+    def __init__(self):
+        self.mine = None
+
+    def take(self) -> None:
+        if self.mine is not None or g.user.is_local:
+            return
+        most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+        with _SLOW_LOCK:
+            if _SLOW.get(g.user.id, 0) >= most:
+                raise market_mod.DataThrottled(
+                    "Several pages are being worked out at once just now. Wait a few "
+                    "seconds for them to finish, then try again.", SLOW_RETRY)
+            _SLOW[g.user.id] = _SLOW.get(g.user.id, 0) + 1
+            self.mine = g.user.id
+
+    def free(self) -> None:
+        if self.mine is None:
+            return
+        with _SLOW_LOCK:
+            left = _SLOW.get(self.mine, 1) - 1
+            if left > 0:
+                _SLOW[self.mine] = left
+            else:
+                _SLOW.pop(self.mine, None)
+            self.mine = None
+
+
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
                     ttl: Optional[float] = None,
                     exact: bool = False) -> engine.Analysis:
+    """One analysis, worked out once for everyone asking for the same.
+
+    Raises DataThrottled when this account has too many going already.
+    """
+    slot = _SlowSlot()
+    try:
+        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
+                                exact)
+    finally:
+        slot.free()
+
+
+def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
+                     with_news: bool, record: bool, ttl: Optional[float],
+                     exact: bool) -> engine.Analysis:
     # The settings are part of the key. Position sizes, stops and the call
     # itself depend on them, and without this one person's ?shorts=1 or larger
     # account was served to the next person who asked for the same ticker.
@@ -978,6 +1037,7 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
             hit = None
+            slot.take()
             running = _RUNNING.get(key)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -3037,6 +3097,16 @@ def _interval_from(timeframe: Optional[str]) -> str:
     return known.get(t, "1d")
 
 
+# Each written reasoning is a paid request, asked for again whenever the
+# settings or the pieces left out differ, so one account could have the same
+# company reasoned over for ever. Per account and instrument, so it limits how
+# often, never how many instruments; past it the page comes without.
+REASONINGS_PER_HOUR = 10
+REASONED_ENOUGH = ("The written reasoning on this has been asked for many times in the "
+                   "last hour, so it was left out this time. Every measured figure on "
+                   "this page is unaffected.")
+
+
 def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
                   with_options: bool) -> Tuple:
     """What one piece of research is kept under.
@@ -3052,7 +3122,19 @@ def _research_key(symbol: str, interval: str, cfg: Dict, with_news: bool,
 
 def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
                      with_options: bool):
-    """The research for one analysis, built once for everyone asking at once."""
+    """The research for one analysis, built once for everyone asking at once.
+
+    Raises DataThrottled as cached_analysis does.
+    """
+    slot = _SlowSlot()
+    try:
+        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
+    finally:
+        slot.free()
+
+
+def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
+                   with_news: bool, with_options: bool):
     key = _research_key(analysis.bars.symbol, interval, cfg, with_news, with_options)
     ttl = DEMO_TTL if g.demo else _CACHE_TTL
     owned = None
@@ -3061,6 +3143,7 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
             hit = _RESEARCH_CACHE.get(key)
             if hit and (time.time() - hit[0]) < ttl:
                 return hit[1]
+            slot.take()
             running = _RESEARCH_RUNNING.get(key)
             if running is None:
                 owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -3072,9 +3155,18 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
     try:
         # The written reasoning is a paid request, and the example is open to
         # anyone, so it is not asked for there.
+        written = not g.demo
+        if written and reasoning_mod.available() and _rate_limited(
+                "reasoning:" + analysis.bars.symbol, REASONINGS_PER_HOUR):
+            written = False
         found = engine.research(analysis.bars.symbol, analysis.bars.last_price,
                                 cfg, analysis=analysis, with_options=with_options,
-                                with_reasoning=not g.demo)
+                                with_reasoning=written)
+        if not written and not g.demo:
+            # This account's alone: the next person to ask has their own.
+            found.reasoning = reasoning_mod.Reasoning(
+                False, reason_unavailable=REASONED_ENOUGH)
+            return found
         with _CACHE_LOCK:
             _RESEARCH_CACHE[key] = (time.time(), found)
             if len(_RESEARCH_CACHE) > 20:
@@ -3157,7 +3249,10 @@ def research():
         return _no_prices(exc, symbol, 404)
     _spend_view(symbol, exact, analysis)
 
-    found = _cached_research(analysis, interval, cfg, with_news, with_options)
+    try:
+        found = _cached_research(analysis, interval, cfg, with_news, with_options)
+    except market_mod.DataThrottled as exc:
+        return _no_prices(exc, symbol, 404)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
@@ -5385,6 +5480,13 @@ def _utc_clock(ts) -> str:
     return time.strftime("%H:%M UTC", time.gmtime(float(ts)))
 
 
+# A scan is minutes of work, one runs at a time, and one under settings of one's
+# own answers nobody else: an account changing its settings between scans kept
+# every place in the queue, and everybody else was told to come back later.
+# Opening a scan already made, or still running, is never counted.
+SCANS_PER_HOUR = 12
+
+
 @app.route("/ideas")
 def ideas():
     """What is worth looking at, given how you trade."""
@@ -5410,7 +5512,9 @@ def ideas():
             # it has got.
             result = (_demo_shortlist(market, horizon, risk) if g.demo else
                       ideas_mod.find(market, horizon, cfg, risk,
-                                     wait=ideas_mod.PAGE_WAIT, join_wait=0))
+                                     wait=ideas_mod.PAGE_WAIT, join_wait=0,
+                                     may_start=lambda: not _rate_limited(
+                                         "scan", SCANS_PER_HOUR)))
         except ideas_mod.Busy as exc:
             # Said on the Find page itself, with the form, so asking again is
             # one press away.
@@ -5820,8 +5924,15 @@ def alert_action(action):
     return redirect(url_for("monitor"))
 
 
+# Every alert and open position is priced again, and a call alert may need an
+# analysis, all while the page waits.
+CHECKS_PER_HOUR = 60
+
+
 @app.route("/monitor/alerts/check", methods=["POST"])
 def check_alerts():
+    if _rate_limited("alert_check", CHECKS_PER_HOUR):
+        return _too_often("checked alerts")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         result = _check_and_tell(conn, user=uid())
