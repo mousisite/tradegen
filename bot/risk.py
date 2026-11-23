@@ -22,6 +22,8 @@ from .market import Bars, DataError, fetch_bars
 TRADING_DAYS = 252
 COIN_DAYS = 365           # a coin trades every day, round the clock
 _STILL = 1e-12            # returns closer together than this are rounding, not moves
+_BAR_WORDS = {"1d": "daily", "1h": "hourly", "30m": "30-minute", "15m": "15-minute",
+              "5m": "5-minute"}
 
 
 @dataclass
@@ -112,7 +114,8 @@ def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskPr
     bars = fetch_bars(symbol, interval)
     rets = daily_returns(bars)
     out = RiskProfile(symbol=bars.symbol, samples=len(rets),
-                      period="%d %s bars" % (len(bars), interval))
+                      period="{:,} {} bars".format(
+                          len(bars), _BAR_WORDS.get(interval, interval)))
 
     if len(rets) < 30:
         out.notes.append("Only %d usable returns. Too few to measure risk."
@@ -217,6 +220,9 @@ def _add_notes(r: RiskProfile) -> None:
         if r.beta > 1.5:
             r.notes.append("Beta of %.2f means it tends to amplify market moves."
                            % r.beta)
+        elif r.beta < -0.5:
+            r.notes.append("Beta of %.2f means it tends to move against the market, "
+                           "falling when the market rises." % r.beta)
         elif r.beta < 0.5:
             r.notes.append("Beta of %.2f means it moves largely independently of "
                            "the market." % r.beta)

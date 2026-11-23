@@ -553,6 +553,50 @@ try:
         c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m", "options": "0"})
         check("a page without options saves without them", asked[-1]["with_options"] is False)
 
+        # A case that said it was too thin for a view is kept as none, and one
+        # saved before that was so is not judged or shown as a call either.
+        thin = ("Too little evidence was available to form a view. Do not read the "
+                "balance below as meaningful.")
+        too_thin = thesis_of(1.0, [])
+        too_thin.verdict = thin
+        web.engine.research = lambda symbol, price, cfg, **k: web.engine.Research(
+            symbol=symbol, price=price, thesis=too_thin)
+        web._RESEARCH_CACHE.clear()
+        conn = db.connect(DB)
+        conn.execute("DELETE FROM theses WHERE symbol='ZZRES'")
+        conn.commit()
+        c.post("/thesis/save", data={"symbol": "ZZRES", "interval": "15m"})
+        row = db.thesis_list(conn, "ZZRES", user=alice.id)[0]
+        check("a case too thin for a view is saved as taking no side",
+              row["balance"] == 0.0 and row["verdict"] == thin, dict(row))
+        conn.execute("UPDATE theses SET balance=1.0, price=200.0 WHERE id=?", (row["id"],))
+        conn.commit()
+        page = flat(text(c.get("/research?symbol=ZZRES&interval=15m")))
+        saved_part = page[page.index("Theses you saved"):]
+        check("one saved earlier with a side is not judged wrong for a fall",
+              "wrong so far" not in saved_part and "no call" in saved_part
+              and 'data-label="Called">No view</td>' in saved_part, saved_part[:1500])
+        market_mod.fetch_bars = fake_bars
+        body = flat(text(c.get("/monitor")))
+        check("nor called bullish on Monitor",
+              '<span class="chip mute"> No view </span>' in body,
+              body[body.index("<h2>Saved theses</h2>"):][:2500])
+        market_mod.fetch_bars = must_not_run("a request for prices")
+        conn.execute("DELETE FROM theses WHERE id=?", (row["id"],))
+        conn.commit()
+        conn.close()
+
+        # A stale button or a hand-made form gets a sentence, not the error's.
+        for route in ("delete", "close", "reopen"):
+            for sent in ({"thesis_id": "abc"}, {}, {"thesis_id": "999999"},
+                         {"thesis_id": "9" * 30}, {"thesis_id": "-1"}):
+                r = c.post("/thesis/" + route, data=dict(sent, outcome="right"))
+                said = text(r)
+                check("thesis %s with %s says it could not be found" % (route, sent),
+                      r.status_code == 400 and "That thesis could not be found" in said
+                      and "invalid literal" not in said and "Bad Request" not in said,
+                      r.status_code)
+
         # Two people opening one page, or one person twice, share the work.
         import threading
         together, done = threading.Barrier(2), []

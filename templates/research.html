@@ -62,7 +62,9 @@
         <button class="btn quiet sm" type="submit">Add to watchlist</button>
       </form>
     {% endif %}
-    <form method="post" action="{{ url_for('save_thesis') }}">
+    <form method="post" action="{{ url_for('save_thesis') }}" data-working
+          data-working-title="Saving this thesis"
+          data-working-note="Keeping the case as it stands today, so it can be judged later.">
       <input type="hidden" name="symbol" value="{{ r.symbol }}">
       {% if exact %}<input type="hidden" name="exact" value="1">{% endif %}
       <input type="hidden" name="interval" value="{{ a.bars.interval }}">
@@ -92,7 +94,7 @@
 
 {# Thirty phone screens of sections. The bar lists them and sticks under the
    top bar; it is filled in below from the headings that actually rendered. #}
-<nav class="jump" id="jump" aria-label="Sections" hidden></nav>
+<nav class="jump" id="jump" aria-label="On this page" hidden></nav>
 
 {# A step this copy does not have switched on is not shown to anyone who
    could not switch it on: it is not a fault of the page they are reading. #}
@@ -448,13 +450,19 @@
         {% if s.tests %}
           <div class="tablewrap" style="margin-top:var(--s2)">
             <table>
+              <thead><tr><th style="padding:0;border:0"><span class="sr">Result</span></th>
+                <th style="padding:0;border:0"><span class="sr">Test</span></th>
+                <th style="padding:0;border:0"><span class="sr">Detail</span></th></tr></thead>
               <tbody>
               {% for t in s.tests %}
                 <tr>
                   <td style="width:26px">
-                    {% if t.passed is none %}<span class="faint">?</span>
-                    {% elif t.passed %}<span class="gain">&check;</span>
-                    {% else %}<span class="loss">&times;</span>{% endif %}
+                    {% if t.passed is none %}<span class="faint" aria-hidden="true">?</span>
+                      <span class="sr">not reported</span>
+                    {% elif t.passed %}<span class="gain" aria-hidden="true">&check;</span>
+                      <span class="sr">passed</span>
+                    {% else %}<span class="loss" aria-hidden="true">&times;</span>
+                      <span class="sr">failed</span>{% endif %}
                   </td>
                   <td>{{ t.name }}</td>
                   <td class="soft" style="font-size:var(--t-xs)">{{ t.detail }}</td>
@@ -464,10 +472,15 @@
             </table>
           </div>
         {% elif s.inputs %}
+          {# The earnings score's inputs are amounts of money; the others' are
+             ratios. #}
+          {% set unit = (r.sec_history or {}).get('currency') or 'USD' %}
           <dl class="pairs" style="margin-top:var(--s2)">
             {% for label, value in s.inputs.items() %}
               <dt style="font-size:var(--t-xs)">{{ label }}</dt>
-              <dd class="fig" style="font-size:var(--t-xs)">{{ "%.2f"|format(value) }}</dd>
+              <dd class="fig" style="font-size:var(--t-xs)">{{ "%.2f"|format(value)
+                if key != 'accruals' else value|big if unit == 'USD'
+                else value|big ~ ' ' ~ unit }}</dd>
             {% endfor %}
           </dl>
         {% endif %}
@@ -497,7 +510,7 @@
         <thead><tr>
           <th>Fiscal year</th>
           {% for y in h.years %}<th class="r">{{ y }}</th>{% endfor %}
-          <th class="r">5y growth</th>
+          <th class="r">Growth a year</th>
         </tr></thead>
         <tbody>
         {% for key, label in [('revenue','Revenue'),('gross_profit','Gross profit'),
@@ -517,14 +530,15 @@
                   {% if byyear.get(y) %}
                     {% set v = byyear[y].value %}
                     {% if key == 'eps_diluted' %}{{ "%.2f"|format(v) }}
-                    {% elif v|abs >= 1000000000 %}{{ "%.1fB"|format(v/1000000000) }}
-                    {% elif v|abs >= 1000000 %}{{ "%.0fM"|format(v/1000000) }}
-                    {% else %}{{ "{:,.0f}".format(v) }}{% endif %}
+                    {% else %}{{ v|big }}{% endif %}
                   {% else %}—{% endif %}
                 </td>
               {% endfor %}
               <td class="r fig {{ 'gain' if (h.cagr.get(key) or 0) > 0 else 'loss' if h.cagr.get(key) else '' }}">
                 {{ h.cagr.get(key)|pct(1) if h.cagr.get(key) is not none else '—' }}
+                {% set span = h.get('cagr_years', {}).get(key) %}
+                {% if span %}<div class="faint" style="font-size:var(--t-xs)">{{ span[0] }}
+                  to {{ span[1] }}</div>{% endif %}
               </td>
             </tr>
           {% endif %}
@@ -545,7 +559,7 @@
             <td>Free cash flow{% if unit != 'USD' %} <span class="faint">in {{ unit }}</span>{% endif %}</td>
             {% for y in h.years %}
               {% set fcf = h.derived.get(y, {}).get('free_cashflow') %}
-              <td class="r fig">{{ "%.1fB"|format(fcf/1000000000) if fcf else '—' }}</td>
+              <td class="r fig">{{ fcf|big if fcf is not none else '—' }}</td>
             {% endfor %}
             <td></td>
           </tr>
@@ -555,7 +569,8 @@
     </div>
     <p class="prose" style="padding:var(--s2) var(--s3) var(--s3)">
       These are the numbers the company filed, not a data vendor's version of
-      them. Growth is compounded annually across the filed years.
+      them. Growth is the steady yearly rate between the two years named
+      under it.
     </p>
   </div>
 </section>
@@ -569,8 +584,7 @@
   <div class="sechead">
     <h2>What it might be worth</h2>
     <span class="tail">{{ 'no value could be worked out' if not v.usable
-      else 'from one model' if v.agreement == 'single'
-      else v.agreement ~ ' agreement between models' }}</span>
+      else v.agreement_words }}</span>
   </div>
   {% if not v.usable %}
   <div class="card">
@@ -626,8 +640,8 @@
                     {% if a_.key in ['growth','terminal_growth','discount','implied_growth',
                                      'implied_average'] %}
                       {{ a_.value|pct(1) }}
-                    {% elif a_.value|abs >= 1000000 %}{{ "%.2fB"|format(a_.value/1000000000) }}
-                    {% else %}{{ "%.4g"|format(a_.value) }}{% endif %}
+                    {% elif a_.key == 'price' %}{{ a_.value|price }}
+                    {% else %}{{ a_.value|big(2) }}{% endif %}
                   </td>
                   <td class="faint">{{ a_.source }}</td>
                 </tr>
@@ -722,10 +736,11 @@
         <div class="v fig loss">{{ k.var_99|pct(1) }}</div>
         <div class="n">worst 1 in 100</div></div>
       <div class="f"><div class="k">Beta</div>
-        <div class="v fig">{{ "%.2f"|format(k.beta) if k.beta is not none else '—' }}</div>
+        {# Adding nothing turns a rounded -0.00 into 0.00. #}
+        <div class="v fig">{{ "%.2f"|format(k.beta|round(2) + 0) if k.beta is not none else '—' }}</div>
         <div class="n">versus the market</div></div>
       <div class="f"><div class="k">Sharpe</div>
-        <div class="v fig">{{ "%.2f"|format(k.sharpe) if k.sharpe is not none else '—' }}</div>
+        <div class="v fig">{{ "%.2f"|format(k.sharpe|round(2) + 0) if k.sharpe is not none else '—' }}</div>
         <div class="n">return per unit of risk</div></div>
     </div>
     {% if k.notes %}
@@ -757,7 +772,7 @@
         <div class="v fig">{{ "%.2f"|format(o.put_call_oi) if o.put_call_oi else '—' }}</div>
         <div class="n">open interest</div></div>
       <div class="f"><div class="k">Skew</div>
-        <div class="v fig">{{ "%+.3f"|format(o.skew) if o.skew is not none else '—' }}</div>
+        <div class="v fig">{{ o.skew|signed(3) if o.skew is not none else '—' }}</div>
         <div class="n">put minus call IV</div></div>
       <div class="f"><div class="k">Tradable now</div>
         <div class="v fig">{{ o.tradable_count }}</div>
@@ -851,9 +866,9 @@
                 it was closed</div>{% endif %}
               {% if rev.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ rev.quoted|price }} today, after a {{ rev.split_words }} split</div>{% endif %}</td>
-            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' }}" data-label="Move">
+            <td class="r fig {{ 'gain' if (rev.move or 0) > 0 else 'loss' if (rev.move or 0) < 0 else '' }}" data-label="Move">
               {{ rev.move|pct(1) if rev.usable else '—' }}</td>
-            <td class="fig" data-label="Called">{{ row['balance']|signed }}</td>
+            <td class="{{ 'soft' if rev.no_view else 'fig' }}" data-label="Called">{{ 'No view' if rev.no_view else row['balance']|signed }}</td>
             <td data-label="Outcome">{% if row['outcome'] %}<span class="chip {{
                  'long' if row['outcome'] == 'right' else 'short' if row['outcome'] == 'wrong'
                  else 'hold' if row['outcome'] == 'luck' else 'mute' }}">{{

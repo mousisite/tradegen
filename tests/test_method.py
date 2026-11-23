@@ -632,6 +632,13 @@ def loaded(**kw):
         yahoo.quote_summary = real_summary
 
 
+def yahoo_like(price):
+    """The same company, priced at this much a share."""
+    f = loaded(cap=price * 1e9)
+    f.metrics["price"].value = price
+    return f
+
+
 def valued(f):
     return [V.discounted_cash_flow(f, 100.0), V.reverse_dcf(f, 100.0),
             V.multiples(f, 100.0)]
@@ -696,6 +703,24 @@ check("filed cash flow in the same one does",
       "filed" in V.normalised_fcf(home)["source"])
 home.sec_facts = None
 
+# Worked by hand. 6bn of free cash flow that grows 2.5% a year for ever, at a
+# discount rate of 4.2% + 1.0 x 5% = 9.2%, is worth 6 x 1.025 / 0.067 = 91.79bn;
+# with 10bn of cash and 5bn of debt, 96.79 for each of a billion shares.
+steady = V.discounted_cash_flow(home, 100.0, growth=0.025)
+check("a cash flow that grows steadily is worth what the sum says",
+      abs(steady.fair_value - (6 * 1.025 / 0.067 + 5)) < 1e-6
+      and abs(steady.upside - (steady.fair_value / 100.0 - 1)) < 1e-9, steady.fair_value)
+check("and the growth in that price is the growth that was put in",
+      abs(V.reverse_dcf(yahoo_like(steady.fair_value), steady.fair_value).implied_growth
+          - 0.025) < 1e-6)
+check("a price of 20 times earnings of 5 is 20 times earnings of 5",
+      h_mult.fair_value == 100.0 and h_mult.upside == 0.0, h_mult.fair_value)
+both = V.combine([steady, h_rev, h_mult], 100.0)
+check("two values are put together as their middle, and the price is not a third",
+      abs(both["midpoint"] - (steady.fair_value + 100.0) / 2) < 1e-9
+      and both["low"] == steady.fair_value and both["high"] == 100.0
+      and both["agreement"] == "tight", both)
+
 # Yahoo's share count is the listed class alone; the cash flow covers all.
 classes = loaded(shares=5e8)
 check("every share class counts, in both models",
@@ -729,6 +754,10 @@ check("debt above the whole value is a reason, not a fair value below nothing",
 alone = V.combine([o_dcf, o_rev, o_mult], 100.0)
 check("20 times earnings is never the value on its own",
       o_mult.usable and not alone["usable"] and "debt is larger" in alone["reason"], alone)
+check("models far apart are never said to agree",
+      V.combine([h_dcf, V.Valuation("Other", fair_value=h_dcf.fair_value * 5, usable=True)],
+                100.0)["agreement_words"] == "the models disagree widely"
+      and V.combine(valued(home), 100.0)["agreement_words"].startswith("the models"))
 said_alone = thesis.build("TEST", 100.0, fundamentals=owing, valuation=alone)
 check("nor a point in the case, which says why there is no value",
       not any("on the model" in p.headline
@@ -786,6 +815,17 @@ bargain = V.reverse_dcf(yahoo_says(summaryDetail__marketCap=1e10,
 check("a price below the search says it is the limit",
       bargain.usable and bargain.implied_at_limit and "lowest it tries" in bargain.notes[0],
       (bargain.implied_growth, bargain.notes))
+small = yahoo_says(financialData__freeCashflow=5.1e6)
+small.sec_facts = Filed("USD", 3.4e6 / 6e9)
+check("a small company's cash flow is not written in billions",
+      "trailing figure of 5.1M" in V.normalised_fcf(small)["note"]
+      and "average of 3.4M" in V.normalised_fcf(small)["note"]
+      and "B" not in V.normalised_fcf(small)["note"], V.normalised_fcf(small)["note"])
+check("amounts are written on the scale they need",
+      [F.big_number(v) for v in (1.2e12, 3.4e9, 999.96e6, 28e6, 5100, 999.96, 12, 0, -2.4e6)]
+      == ["1.2T", "3.4B", "1.0B", "28.0M", "5.1K", "1.0K", "12.00", "0.00", "-2.4M"]
+      and F.big_number(48e6, 2) == "48.00M",
+      [F.big_number(v) for v in (1.2e12, 3.4e9, 999.96e6, 28e6, 5100, 999.96, 12, 0, -2.4e6)])
 brief_ = reasoning_mod = __import__("bot.reasoning", fromlist=["x"]).build_payload(
     "TEST", 100.0, valuation=only)
 check("the reasoning step is told the same",
@@ -1063,6 +1103,30 @@ grew = risk_of(make_bars(np.linspace(100.0, 150.0, 60)))
 check("and a price that only rose has none", grew.max_drawdown == 0.0, grew.max_drawdown)
 
 
+check("the period is said in words", grew.period == "60 daily bars"
+      and risk_of(make_bars(np.linspace(100.0, 150.0, 1250))).period == "1,250 daily bars",
+      grew.period)
+
+
+def beta_words(beta):
+    """What the risk notes and the case say of this beta."""
+    p = R.RiskProfile(symbol="T", samples=500, period="", beta=beta, reliable=True)
+    R._add_notes(p)
+    for_, against = thesis.Case("bull"), thesis.Case("bear")
+    thesis._risk_points(p, against, for_, "today")
+    return " ".join(p.notes), [q.headline for q in for_.points]
+
+
+for beta, word, counted in ((-2.9, "against the market", False), (-0.6, "against the", False),
+                            (-0.2, "independently", True), (0.2, "independently", True),
+                            (1.0, "", False), (2.0, "amplify", False)):
+    words, points = beta_words(beta)
+    check("a beta of %+.1f is %s" % (beta, word or "not remarked on"),
+          (word in words if word else words == "")
+          and ("independently" in words) == (word == "independently")
+          and (points == ["Moves independently"]) == counted, (words, points))
+
+
 def matched(**series):
     real_fetch = R.fetch_bars
     R.fetch_bars = lambda symbol, interval: make_bars(series[symbol])
@@ -1211,6 +1275,14 @@ check("a company that moved to another tag keeps its recent years",
       and moved.latest("revenue")["value"] == 2e9 + 2025, series)
 check("and neighbouring years come from the tag in use",
       series[1]["value"] == 2e9 + 2019 and series[0]["value"] == 0.9e9, series[:2])
+check("growth says which years it runs between, five of them at most",
+      moved.cagr_years("revenue") == (2020, 2025))
+three = facts_from(980006, {LATER: annual({2023: 100.0, 2024: 110.0, 2025: 121.0})})
+check("or the two it has", three.cagr_years("revenue") == (2023, 2025)
+      and abs(three.cagr("revenue") - 0.10) < 0.001, three.cagr_years("revenue"))
+check("and none where there is no growth to give",
+      facts_from(980007, {LATER: annual({2024: 1.0, 2025: 2.0})})
+      .cagr_years("revenue") is None)
 both_tags = facts_from(980002, {FIRST: annual({2024: 1.0, 2025: 2.0}),
                                 LATER: annual({2023: 7.0, 2024: 8.0, 2025: 9.0})})
 check("with both in use the preferred one still wins",
@@ -1427,6 +1499,39 @@ check("and no mailbox is written into the code",
 head("THE CASE FOR AND AGAINST COUNTS ONLY WHAT ARGUES")
 # ---------------------------------------------------------------------------
 
+grown = history_from(980014, {"us-gaap": {LATER: annual(
+    {2023: 100.0, 2024: 150.0, 2025: 225.0})}})
+said_grown = thesis.build("TEST", 100.0, sec_history=grown)
+check("the case names the years its growth is over, and the years it read",
+      any("a year from 2023 to 2025" in p.detail for p in said_grown.bull.points)
+      and any("fiscal years 2023 to 2025" in s["detail"] for s in said_grown.all_sources),
+      ([p.detail for p in said_grown.bull.points], said_grown.all_sources))
+check("so does the brief given to the reasoning step",
+      "Revenue growth a year, FY2023 to FY2025" in str(
+          __import__("bot.reasoning", fromlist=["x"]).build_payload(
+              "TEST", 100.0, sec_history=grown)))
+said_few = thesis.build("TEST", 100.0, fundamentals=home)
+check("several points support or argue; one supports or argues",
+      "%d points support owning this" % len(said_few.bull.points) in said_few.bull.summary
+      and said_grown.bull.summary.startswith("1 point supports owning this, on strong")
+      and said_grown.bear.summary == "Nothing in the available evidence argues against it."
+      and thesis._summarise(said_few.bull, "argues", "argue", "against it")
+      .startswith("%d points argue against it" % len(said_few.bull.points)),
+      (said_few.bull.summary, said_grown.bull.summary))
+check("a case too thin for a view is not judged right or wrong later",
+      thesis.no_view(said_grown.verdict)
+      and not thesis.no_view("The evidence leans bullish.") and not thesis.no_view(None)
+      and all(thesis.review({"price": 100.0, "balance": 1.0, "created": 0,
+                             "verdict": said_grown.verdict}, now_)["outcome"] == "no call"
+              and thesis.suggested_outcome(
+                  {"price": 100.0, "balance": 1.0, "created": 0,
+                   "verdict": said_grown.verdict}, now_) == "undecided"
+              for now_ in (80.0, 130.0)), said_grown.verdict)
+check("while one with a view still is",
+      thesis.review({"price": 100.0, "balance": 1.0, "created": 0,
+                     "verdict": "The evidence leans bullish."}, 80.0)["outcome"]
+      == "wrong so far")
+
 report = types.SimpleNamespace(form="10-K", filed="2026-02-15", index_url="https://sec.gov/x")
 straddle = {"expected_move": {"percent": 0.05}, "expiry_date": "2026-12-18",
             "atm_iv": 0.3, "put_call_oi": 1.0}
@@ -1621,6 +1726,9 @@ abroad = engine.Research(
                  "table": {"revenue": rows_of("TWD", y2024=9e11, y2025=9.6e11),
                            "operating_cashflow": rows_of("TWD", y2024=2e11, y2025=2.1e11)},
                  "derived": {2025: {"free_cashflow": 1.9e11}}, "cagr": {}},
+    risk=types.SimpleNamespace(
+        period="1,250 daily bars", reliable=True, volatility=0.2, max_drawdown=-0.1,
+        var_95=-0.02, var_99=-0.03, beta=-0.001, sharpe=-0.004, notes=[]),
     thesis=full_case, options=dict(O.analyse(chain), days=1))
 with web.app.test_request_context("/research?symbol=TEST&interval=1d"):
     web.app.preprocess_request()
@@ -1640,6 +1748,8 @@ check("what argues for neither side is shown apart",
 check("a bank's scores say why there are none",
       "Not applicable to a financial services company" in page)
 check("one day is not 'days'", "1 day out" in page)
+check("and filed amounts in another currency are scaled and named",
+      "960.0B" in page and "900.0B" in page)
 check("the plain words name the currency", "Taiwan dollars" in page)
 check("and nothing unfinished is on it",
       not any(w in page for w in (">None<", "None%", ">nan<", "currency_problem")))
@@ -1653,6 +1763,36 @@ def drawn(r, **kw):
             price_svg="", price_svg_narrow="", filed_charts={}, plain=None, **kw).split())
 
 
+check("a Sharpe or beta that rounds to nothing is not 'minus nothing'",
+      "-0.00" not in page and "1,250 daily bars" in page)
+little = yahoo_says(financialData__freeCashflow=3.4e6, summaryDetail__marketCap=4.8e9,
+                    defaultKeyStatistics__sharesOutstanding=4.8e7,
+                    financialData__totalCash=0.0, financialData__totalDebt=0.0)
+tiny = filings(net_income={2024: 2.1e6, 2025: 2.5e6}, assets={2024: 3e7, 2025: 3.2e7},
+               operating_cashflow={2024: 2.6e6, 2025: 3.1e6},
+               revenue={2024: 2.8e7, 2025: 3e7})
+few_dear = V.combine([V.discounted_cash_flow(little, 100.0), V.reverse_dcf(
+    yahoo_says(summaryDetail__marketCap=7.05e13, financialData__currentPrice=705000.0,
+               financialData__freeCashflow=3e12,
+               defaultKeyStatistics__sharesOutstanding=1e8), 705000.0)], 100.0)
+page = drawn(engine.Research(
+    symbol="TEST", price=100.0, fundamentals=little, quality=F.quality_score(little),
+    valuation=few_dear, scores=Q.assess(tiny), thesis=said_few,
+    sec_history=dict(tiny, entity="Test Co", source_url="https://sec.gov/x",
+                     derived={2024: {"free_cashflow": 3.1e6}, 2025: {"free_cashflow": -2.4e6}},
+                     cagr={"revenue": 0.071}, cagr_years={"revenue": (2024, 2025)})))
+check("a small company's figures are in the scale they need, not 0.0B",
+      not __import__("re").search(r"(?<![0-9])0[.]0+B", page)
+      and "3.1M" in page and "-2.4M" in page
+      and "28.0M" in page and "3.40M" in page and "48.00M" in page)
+check("the earnings score's amounts are readable", "31.0M" in page and "31000000" not in page)
+check("the price in the model's table is written as prices are",
+      "705,000" in page and "e+05" not in page)
+check("growth is headed by what it is, with its years under it",
+      "Growth a year" in page and "5y growth" not in page
+      and "2024 to 2025</div>" in page)
+check("a test's mark is said in words as well",
+      '<span class="sr">passed</span>' in page and '<span class="sr">not reported</span>' in page)
 page = drawn(engine.Research(symbol="TEST", price=100.0, fundamentals=owing,
                              quality=F.quality_score(owing), valuation=alone,
                              thesis=said_alone))

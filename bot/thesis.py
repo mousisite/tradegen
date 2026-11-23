@@ -151,11 +151,13 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
 
     if sec_history and sec_history.get("available"):
         _filed_points(sec_history, bull, bear, stamp)
+        filed = sec_history.get("years") or []
         sources.append({"name": "SEC EDGAR filed financials",
                         "url": sec_history.get("source_url", ""),
-                        "detail": "%s, fiscal years %s" % (
+                        "detail": "%s%s" % (
                             sec_history.get("entity", ""),
-                            ", ".join(str(y) for y in sec_history.get("years", [])[-4:]))})
+                            ", fiscal years %s to %s" % (filed[0], filed[-1])
+                            if filed else "")})
 
     if risk_profile is not None and risk_profile.reliable:
         _risk_points(risk_profile, bear, bull, stamp)
@@ -183,8 +185,8 @@ def build(symbol: str, price: float, fundamentals=None, quality=None,
     total = bull.strength + bear.strength
     balance = ((bull.strength - bear.strength) / total) if total else 0.0
 
-    bull.summary = _summarise(bull, "supports owning this")
-    bear.summary = _summarise(bear, "argues against it")
+    bull.summary = _summarise(bull, "supports", "support", "owning this")
+    bear.summary = _summarise(bear, "argues", "argue", "against it")
 
     thesis = Thesis(symbol=symbol.upper(), price=price, created=now,
                     bull=bull, bear=bear, balance=balance,
@@ -370,20 +372,22 @@ def _filed_points(h: Dict, bull: Case, bear: Case, stamp: str) -> None:
     cagr = h.get("cagr") or {}
 
     rev_cagr = cagr.get("revenue")
+    span = (h.get("cagr_years") or {}).get("revenue")
+    over = "from %d to %d" % tuple(span) if span else "over the filed years"
     if rev_cagr is not None:
         if rev_cagr > 0.12:
             bull.points.append(Point(
                 "Long record of growth",
-                "Revenue has compounded at %s a year over the filed history. "
-                "That is delivery, not a forecast." % _pct(rev_cagr),
-                [Evidence("Revenue CAGR from filings", _pct(rev_cagr),
+                "Revenue has compounded at %s a year %s. "
+                "That is delivery, not a forecast." % (_pct(rev_cagr), over),
+                [Evidence("Revenue growth a year from filings", _pct(rev_cagr),
                           "SEC EDGAR", url, stamp, "strong")], 1.4))
         elif rev_cagr < 0:
             bear.points.append(Point(
                 "Long-term decline",
-                "Revenue has shrunk at %s a year across the filed history."
-                % _pct(abs(rev_cagr)),
-                [Evidence("Revenue CAGR from filings", _pct(rev_cagr),
+                "Revenue has shrunk at %s a year %s."
+                % (_pct(abs(rev_cagr)), over),
+                [Evidence("Revenue growth a year from filings", _pct(rev_cagr),
                           "SEC EDGAR", url, stamp, "strong")], 1.5))
 
     derived = h.get("derived") or {}
@@ -436,7 +440,9 @@ def _risk_points(r, bear: Case, bull: Case, stamp: str) -> None:
             "more than compensated for volatility." % r.sharpe,
             [Evidence("Sharpe ratio", "%.2f" % r.sharpe,
                       "computed from %d returns" % r.samples, "", stamp)], 0.9))
-    if r.beta is not None and r.beta < 0.4:
+    # Near zero either way. An inverse fund's -3 is the market turned round,
+    # three times over, not something that goes its own way.
+    if r.beta is not None and abs(r.beta) < 0.4:
         bull.points.append(Point(
             "Moves independently",
             "Beta of %.2f against the market, so it can diversify a portfolio "
@@ -624,24 +630,36 @@ def _options_points(stats: Dict, bull: Case, bear: Case, stamp: str,
                       stamp, "weak")], 0.5))
 
 
-def _summarise(case: Case, phrase: str) -> str:
+def _summarise(case: Case, one: str, several: str, what: str) -> str:
     if not case.points:
-        return "Nothing in the available evidence %s." % phrase
+        return "Nothing in the available evidence %s %s." % (one, what)
     strong = [p for p in case.points if any(e.strength == "strong" for e in p.evidence)]
     # Headlines are phrases of every shape ("Highly profitable", "A catalyst
     # just landed"), so the lead follows a colon rather than being fitted
     # into a sentence: "the clearest is that it coverage is positive" was on
     # the page.
     lead = case.points[0].headline
-    return "%d point%s %s, %d of them on strong evidence. The clearest: %s." % (
-        len(case.points), "" if len(case.points) == 1 else "s", phrase,
-        len(strong), lead[:1].lower() + lead[1:])
+    if len(case.points) == 1:
+        return "1 point %s %s, on %s evidence: %s." % (
+            one, what, "strong" if strong else "less than strong",
+            lead[:1].lower() + lead[1:])
+    return "%d points %s %s, %d of them on strong evidence. The clearest: %s." % (
+        len(case.points), several, what, len(strong), lead[:1].lower() + lead[1:])
+
+
+# How the verdict of a case too thin to mean anything begins. It is also how
+# such a thesis is known again once saved, so these words must not change.
+_TOO_THIN = "Too little evidence was available to form a view."
+
+
+def no_view(verdict: Optional[str]) -> bool:
+    """Whether a saved thesis said that it came to no view."""
+    return (verdict or "").startswith(_TOO_THIN)
 
 
 def _verdict(balance: float, bull: Case, bear: Case, evidence_count: int) -> str:
     if evidence_count < 4:
-        return ("Too little evidence was available to form a view. Do not read "
-                "the balance below as meaningful.")
+        return _TOO_THIN + " Do not read the balance as meaningful."
     if balance > 0.45:
         return ("The evidence leans clearly bullish. The bear case is thin, which "
                 "is itself worth suspicion: look for what is missing rather than "
@@ -724,7 +742,11 @@ def review(stored: Dict, current_price: float) -> Dict:
     balance = stored.get("balance", 0)
     days = max(0, (int(time.time()) - int(stored.get("created", 0))) // 86400)
 
-    if abs(balance) < 0.15:
+    if no_view(stored.get("verdict")):
+        outcome = "no call"
+        note = ("There was too little evidence for a view when this was saved, so "
+                "the price move neither confirms nor refutes it.")
+    elif abs(balance) < 0.15:
         outcome = "no call"
         note = ("The thesis was balanced, so the price move neither confirms nor "
                 "refutes it.")

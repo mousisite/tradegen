@@ -22,7 +22,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .fundamentals import Fundamentals
+from .fundamentals import Fundamentals, big_number
 
 
 def normalised_fcf(f: Fundamentals) -> Dict:
@@ -71,11 +71,11 @@ def normalised_fcf(f: Fundamentals) -> Dict:
         gap = (trailing - average) / average
         if abs(gap) > 0.25:
             out["note"] = (
-                "The trailing figure of %.1fB is %.0f%% %s the three-year filed "
-                "average of %.1fB. The average is used here, because one unusual "
+                "The trailing figure of %s is %.0f%% %s the three-year filed "
+                "average of %s. The average is used here, because one unusual "
                 "year should not set a ten-year forecast."
-                % (trailing / 1e9, abs(gap) * 100,
-                   "above" if gap > 0 else "below", average / 1e9))
+                % (big_number(trailing), abs(gap) * 100,
+                   "above" if gap > 0 else "below", big_number(average)))
     return out
 
 
@@ -466,6 +466,13 @@ def multiples(f: Fundamentals, price: float) -> Valuation:
     return v
 
 
+# How far apart the models came out, as a person would say it.
+AGREEMENT_WORDS = {"tight": "the models broadly agree",
+                   "loose": "the models agree only loosely",
+                   "wide": "the models disagree widely",
+                   "single": "from one model"}
+
+
 def combine(models: List[Valuation], price: float) -> Dict:
     """Pull the models together without pretending they agree.
 
@@ -525,5 +532,6 @@ def combine(models: List[Valuation], price: float) -> Dict:
                          % price)
 
     return {"usable": True, "low": lo, "high": hi, "midpoint": midpoint,
-            "upside": upside, "agreement": agreement, "models": models,
+            "upside": upside, "agreement": agreement,
+            "agreement_words": AGREEMENT_WORDS[agreement], "models": models,
             "commentary": lines}

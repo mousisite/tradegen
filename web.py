@@ -64,6 +64,7 @@ from bot import events as events_mod
 from bot import ideas as ideas_mod
 from bot import invites as invites_mod
 from bot import export as export_mod
+from bot import fundamentals as fundamentals_mod
 from bot import market as market_mod
 from bot import plain as plain_mod
 from bot import portfolio as portfolio_mod
@@ -932,6 +933,13 @@ def _money(value):
 def _pct(value, digits=0):
     number = _number(value)
     return "%.*f%%" % (digits, number * 100) if number is not None else "-"
+
+
+@app.template_filter("big")
+def _big(value, digits=1):
+    """A large amount on the scale it needs: 3.4M, not 0.0B."""
+    number = _number(value)
+    return fundamentals_mod.big_number(number, digits) if number is not None else "-"
 
 
 @app.template_filter("signed")
@@ -2800,18 +2808,17 @@ def research():
             # Closed: the outcome recorded then stands, at the price it was
             # closed at, whatever the price has done since.
             at_close = row["closed_price"]
-            look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
-                                       "created": row["created_ts"]}, at_close)
+            look = (thesis_mod.review(_stored_thesis(row), at_close)
                     if at_close else {"usable": False, "reason": ""})
-            reviews.append((row, dict(look, now=at_close, quoted=None, split_words="")))
+            reviews.append((row, dict(look, now=at_close, quoted=None, split_words="",
+                                      no_view=thesis_mod.no_view(row["verdict"]))))
             continue
         now_price, split = _thesis_price(row, analysis.bars)
-        look = (thesis_mod.review({"price": row["price"], "balance": row["balance"],
-                                   "created": row["created_ts"]}, now_price)
+        look = (thesis_mod.review(_stored_thesis(row), now_price)
                 if now_price else
                 {"usable": False, "reason": "Could not price %s today." % row["symbol"]})
         reviews.append((row, dict(
-            look, now=now_price,
+            look, now=now_price, no_view=thesis_mod.no_view(row["verdict"]),
             quoted=analysis.bars.last_price if split != 1.0 else None,
             split_words=market_mod.split_words(split) if split != 1.0 else "")))
 
@@ -2832,6 +2839,31 @@ THESES_PER_HOUR = 30
 SAVE_TTL = 15 * 60.0
 # A note is a reminder to yourself, not an essay, and it is stored for good.
 NOTE_LIMIT = 1000
+
+
+# Said for a thesis number that is not one, or is nobody's here: an old page's
+# button, or a form that was not this site's.
+THESIS_NOT_FOUND = "That thesis could not be found. Open Monitor and try again."
+
+
+def _thesis_id() -> Optional[int]:
+    """The thesis a form is about, or None when what it sent is not a number."""
+    try:
+        number = int(request.form.get("thesis_id") or "")
+    except ValueError:
+        return None
+    # SQLite holds no larger a number, and asking for one is an error there.
+    return number if 0 < number < 2 ** 63 else None
+
+
+def _thesis_not_found():
+    return render_template("error.html", symbol="", message=THESIS_NOT_FOUND), 400
+
+
+def _stored_thesis(row) -> Dict:
+    """A saved thesis as thesis.review reads it."""
+    return {"price": row["price"], "balance": row["balance"],
+            "created": row["created_ts"], "verdict": row["verdict"]}
 
 
 def _thesis_price(row, bars):
@@ -2892,7 +2924,10 @@ def save_thesis():
                                 with_options=with_options,
                                 with_reasoning=False).thesis
         db_mod.thesis_save(
-            conn, symbol, price, t.balance, t.verdict,
+            # A case too thin to mean anything takes no side, whatever the one
+            # or two points it had came to.
+            conn, symbol, price,
+            0.0 if thesis_mod.no_view(t.verdict) else t.balance, t.verdict,
             [{"headline": p.headline, "detail": p.detail,
               "evidence": [{"claim": e.claim, "value": e.value,
                             "source": e.source, "url": e.url} for e in p.evidence]}
@@ -2923,11 +2958,14 @@ def save_thesis():
 
 @app.route("/thesis/delete", methods=["POST"])
 def delete_thesis():
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        db_mod.thesis_delete(conn, int(request.form["thesis_id"]), user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+        db_mod.thesis_delete(conn, thesis_id, user=uid())
+    except ValueError:
+        return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2936,19 +2974,20 @@ def delete_thesis():
 @app.route("/thesis/close", methods=["POST"])
 def close_thesis():
     """Record how a thesis actually turned out, at today's price."""
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        thesis_id = int(request.form["thesis_id"])
         row = db_mod.thesis_get(conn, thesis_id, user=uid())
         if row is None:
-            return render_template("error.html", symbol="",
-                                   message="No thesis with id %d." % thesis_id), 400
+            return _thesis_not_found()
 
         outcome = request.form.get("outcome") or ""
         if outcome not in thesis_mod.OUTCOMES:
             return render_template("error.html", symbol=row["symbol"],
-                                   message="%r is not an outcome this records."
-                                           % outcome), 400
+                                   message="Choose how it turned out from the list, "
+                                           "then close it."), 400
 
         # Price it at close, not at whatever the user remembers. A thesis is
         # judged against the market, so the market supplies the number.
@@ -2967,9 +3006,11 @@ def close_thesis():
                         "cannot be priced to close the thesis. Try again in a "
                         "minute." % row["symbol"]), 503
 
-        db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+        try:
+            db_mod.thesis_close(conn, thesis_id, float(price), outcome, user=uid())
+        except ValueError:
+            # Deleted from another tab between the look and the close.
+            return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -2978,15 +3019,14 @@ def close_thesis():
 @app.route("/thesis/reopen", methods=["POST"])
 def reopen_thesis():
     """Undo a closing, for when it was recorded by mistake."""
+    thesis_id = _thesis_id()
+    if thesis_id is None:
+        return _thesis_not_found()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        thesis_id = int(request.form["thesis_id"])
-        if db_mod.thesis_get(conn, thesis_id, user=uid()) is None:
-            return render_template("error.html", symbol="",
-                                   message="No thesis with id %d." % thesis_id), 400
         db_mod.thesis_reopen(conn, thesis_id, user=uid())
-    except (KeyError, ValueError) as exc:
-        return render_template("error.html", message=str(exc), symbol=""), 400
+    except ValueError:
+        return _thesis_not_found()
     finally:
         conn.close()
     return redirect(_safe_back(request.form.get("back"), url_for("monitor")))
@@ -4941,14 +4981,14 @@ def monitor():
                 # One unpriceable symbol must not take the whole page down.
                 bars_of[sym] = None
         price, split = _thesis_price(row, bars_of[sym])
-        stored = {"price": row["price"], "balance": row["balance"],
-                  "created": row["created_ts"]}
+        stored = _stored_thesis(row)
         look = (thesis_mod.review(stored, price) if price else
                 {"usable": False, "reason": "Could not price %s today." % sym})
         proposed = (thesis_mod.suggested_outcome(stored, price)
                     if price and not row["outcome"] else None)
         judged.append({"row": row, "now": price, "review": look,
                        "proposed": proposed,
+                       "no_view": thesis_mod.no_view(row["verdict"]),
                        "quoted": bars_of[sym].last_price if split != 1.0 else None,
                        "split_words": (market_mod.split_words(split)
                                        if split != 1.0 else "")})
