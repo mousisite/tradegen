@@ -615,7 +615,7 @@ def _session_key(row, bars, series) -> Optional[Tuple[int, float]]:
         day = (live + int(getattr(bars, "gmt_offset", 0) or 0)) // 86400
     else:
         level = _yesterday(bars, series)[0 if row["kind"] == "takes_prior_high" else 1]
-        day = clock.trading_day(live, clock.kind_of(bars)).toordinal()
+        day = clock.trading_day(live, clock.kind_of(bars), bars).toordinal()
     return (int(day), float(level)) if _finite(level) else None
 
 
@@ -798,6 +798,9 @@ def _price_action(row, bars, series: Optional[Dict[str, np.ndarray]] = None
     instrument = clock.instrument_of(bars)
     daily = clock.kind_of(bars) == "daily"
     if kind == "takes_session_range":
+        if symbol.upper().endswith("=X"):
+            raise NotApplicable("London's range is read for futures and coins, not for "
+                                "currency pairs.")
         if instrument == "stock":
             raise NotApplicable("%s trades only in the day session, so it has no "
                                 "London session." % symbol)
