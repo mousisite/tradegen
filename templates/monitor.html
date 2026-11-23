@@ -102,7 +102,9 @@
 
   <div class="card">
     <form method="post" action="{{ url_for('add_alert') }}">
-      <div class="setgrid">
+      {# Dense: on a wide screen Bars sits beside Value, above its long note,
+         which in Value's own column was eleven lines deep. #}
+      <div class="setgrid" style="grid-auto-flow:dense">
         <div class="setfield">
           <label for="a-symbol">Instrument</label>
           <input class="field fig" id="a-symbol" name="symbol" type="text" data-suggest="fill"
@@ -126,8 +128,11 @@
         <div class="setfield">
           <label for="a-threshold">Value</label>
           <input class="field fig" id="a-threshold" name="threshold" type="number"
-                 step="any" inputmode="decimal" placeholder="price, percent or level">
-          <div class="hint">A percent is a whole number: 5 means 5%. Leave empty
+                 step="any" inputmode="decimal" placeholder="price, percent or level"
+                 aria-describedby="a-threshold-hint">
+        </div>
+        <div class="setfield" style="grid-column:1 / -1">
+          <div class="hint" id="a-threshold-hint" style="margin-top:calc(5px - var(--s3));max-width:76ch">A percent is a whole number: 5 means 5%. Leave empty
             for the conditions that need no value: the moving average, a change
             of call, and the price action ones (yesterday's high and low, the
             opening gap, a break of the last swing, the newest gap and London's
@@ -171,7 +176,7 @@
         {% for row, text in alerts %}
           <tr>
             <td>{{ text }}
-              {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs)">{{ row['note'] }}</div>{% endif %}
+              {% if row['note'] %}<div class="faint" style="font-size:var(--t-xs);overflow-wrap:anywhere">{{ row['note'] }}</div>{% endif %}
               {% if row['state'] and kinds.get(row['kind'], {}).get('call') %}<div class="faint" style="font-size:var(--t-xs)">call when last checked: {{ row['state'] }}</div>{% endif %}</td>
             <td data-label="State">
               {# One that keeps watching is still on after it fires: it is
@@ -253,7 +258,7 @@
     <form method="post" action="{{ url_for('alert_email') }}" class="card"
           style="margin-top:var(--s3);display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap">
       <input type="hidden" name="on" value="{{ '0' if alert_email else '1' }}">
-      <span class="prose" style="margin:0;flex:1 1 240px">{% if alert_email %}Fired alerts and
+      <span class="prose" style="margin:0;flex:1 1 240px;max-width:none">{% if alert_email %}Fired alerts and
         crossed stops are also emailed to you.{% else %}Get an email when an alert
         fires or a position crosses its stop.{% endif %}</span>
       <button class="btn quiet sm" type="submit">{{ 'Stop the emails' if alert_email else 'Email me' }}</button>
@@ -331,7 +336,7 @@
             <td class="fig soft" data-label="Bars">{{ w['interval']|bar_words }}</td>
             <td class="soft" data-label="Added">{{ w['added_ts']|ago }}</td>
             <td class="soft" data-label="Last analysed">{{ w['last_run']|ago if w['last_run'] else 'not yet' }}</td>
-            <td class="soft" data-label="Note">{{ w['note'] or '—' }}</td>
+            <td class="soft" data-label="Note" style="overflow-wrap:anywhere">{{ w['note'] or '—' }}</td>
             <td class="r">
               <div class="acts">
                 <a data-working href="{{ url_for('analyse', symbol=w['symbol'],

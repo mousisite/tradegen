@@ -279,7 +279,7 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
                 justify-content: center; }
 .verdicts { list-style: none; margin: 0; padding: 0; display: grid;
             gap: var(--s1);
-            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+            grid-template-columns: repeat(auto-fill, minmax(min(290px, 100%), 1fr)); }
 .verdicts a { display: flex; align-items: center; gap: 10px; padding: 12px 14px;
               border: 1px solid var(--rule); border-radius: var(--r-md);
               background: var(--surface); color: var(--ink); }
@@ -374,8 +374,10 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 /* ---------- layout ---------- */
 
 .stack { display: flex; flex-direction: column; gap: var(--s3); }
-/* A table of that name (cards on a phone, below) stays a table on a wide
-   screen: as a column of flex items its header left its columns. */
+/* "stack" is also the class of a table whose rows become cards on a phone
+   (below). Wider than that it stays a table: as a column of boxes its header
+   row stood apart from the columns it names, and the table stopped short of
+   the card it sits in. */
 table.stack { display: table; }
 .cols  { display: grid; gap: var(--s3); }
 .cols.a { grid-template-columns: 5fr 7fr; }
@@ -384,11 +386,10 @@ table.stack { display: table; }
 
 section + section { margin-top: var(--s5); }
 /* The journal's figures, then "Log a trade by hand": a section straight
-   after a card sat on it with no space between. */
-.card + section { margin-top: var(--s5); }
-/* So did one straight after a line of words: "Tap one to see it" on the
-   front page, and the journal's "Open". */
-.prose + section { margin-top: var(--s4); }
+   after a card sat on it with no space between, and so did one after a
+   line of text, a form or a tinted box. */
+.card + section, p + section, form + section,
+.plainbox + section, section + .plainbox { margin-top: var(--s5); }
 
 .sechead {
   display: flex; align-items: baseline; gap: var(--s2);
@@ -423,6 +424,7 @@ section + section { margin-top: var(--s5); }
 input.field { flex: 1 1 260px; min-width: 0; }
 input.field::placeholder { color: var(--ink-3); }
 select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
+               text-overflow: ellipsis;
                appearance: none;
                background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%23726d64' stroke-width='1.6'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5'/%3E%3C/svg%3E");
                background-repeat: no-repeat; background-position: right 12px center; }
@@ -596,10 +598,6 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
    five trades in it. */
 .tablewrap { overflow-x: auto; position: relative; }
 table { width: 100%; border-collapse: collapse; }
-/* .stack alone is a column of boxes. On a table it set the head and the body
-   each to a width of its own, so the headings stood out of line with the
-   figures under them. On a phone the rules below make it cards. */
-table.stack { display: table; }
 thead th {
   text-align: left; white-space: nowrap;
   font-size: var(--t-xs); font-weight: 500; letter-spacing: .06em;
@@ -614,11 +612,27 @@ tbody td {
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--paper); }
 th.r, td.r { text-align: right; }
+/* A card that opens with its table: the column names clear of its edge. */
+.card.pad0 > .tablewrap:first-child thead th { padding-top: var(--s2); }
 .card.pad0 thead th:first-child, .card.pad0 tbody td:first-child { padding-left: var(--s3); }
 .card.pad0 thead th:last-child,  .card.pad0 tbody td:last-child  { padding-right: var(--s3); }
 /* A row's buttons, side by side at the end of the row. */
 .acts { display: flex; gap: 5px; justify-content: flex-end; align-items: center;
         flex-wrap: wrap; }
+/* Beside wide columns a row's button and its label were squeezed until their
+   two words broke in two, the close form fell to one field a line and cut off
+   the last digits of a coin's price, and the opener under either ("Edit",
+   "Trail the stop") started in the middle of nowhere. A table of ten columns
+   keeps its figures closer, so that its last button stays in view. */
+@media (min-width: 761px) {
+  td .btn, td .chip { white-space: nowrap; }
+  td .inline-form { min-width: 214px; }
+  td .inline-form input.field { flex-basis: 70px; }
+  td .inline-form input[name="price"] { flex-basis: 138px; }
+  td .acts + details > summary, td .inline-form + details > summary { text-align: right; }
+  td .acts + details > form, td .inline-form + details > form { justify-content: flex-end; }
+  table.tight th, table.tight td { padding-left: 10px; padding-right: 10px; }
+}
 
 /* A row of things to act on (a trade, an alert, a result) is a card of its
    own on a phone: what it is about across the top, each figure under its
@@ -670,6 +684,39 @@ th.r, td.r { text-align: right; }
   table.stack .inline-form .field { flex: 1 1 92px; }
   table.stack .inline-form input[name="price"] { flex-basis: 130px; }
 }
+/* On a tablet or a small window a table keeps its columns, closer together, and their names may
+   take two lines, so that a row's last button is not a sideways scroll away. */
+@media (min-width: 761px) and (max-width: 1060px) {
+  thead th, tbody td { padding-left: 8px; padding-right: 8px; }
+  thead th { white-space: normal; vertical-align: bottom; }
+}
+/* The journal's ten columns need more than a tablet has, so there too each
+   trade is a card: its figures four to a line, then the form that closes it. */
+@media (min-width: 761px) and (max-width: 1140px) {
+  table.tight, table.tight > tbody { display: block; }
+  table.tight > thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .card.pad0 table.tight > tbody > tr {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px var(--s2); padding: var(--s2) var(--s3);
+    border-bottom: 1px solid var(--hairline);
+  }
+  table.tight > tbody > tr:last-child { border-bottom: 0; }
+  .card.pad0 table.tight > tbody > tr > td { display: block; min-width: 0; padding: 0;
+                                             border: 0; text-align: left; }
+  table.tight > tbody > tr > td:not([data-label]),
+  table.tight > tbody > tr > td.wide { grid-column: 1 / -1; }
+  table.tight > tbody > tr > td[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    font: 500 var(--t-xs)/1.4 var(--sans); letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  table.tight .inline-form { justify-content: flex-start; }
+  table.tight .inline-form + details > summary { text-align: left; }
+  table.tight .inline-form + details > form { justify-content: flex-start; }
+}
 /* A long sentence in a table that still scrolls sideways: wide enough to
    read in a few lines, not one word to a line down a narrow column. */
 @media (max-width: 760px) {
@@ -707,8 +754,16 @@ th.r, td.r { text-align: right; }
          margin: 0; max-width: 68ch; }
 .prose + .prose { margin-top: var(--s1); }
 .prose b { color: var(--ink); font-weight: 600; }
+/* Text, a list and a row of figures keep clear of each other. */
+.prose + .figs, ul.list + .prose, ul.list + .eyebrow,
+.prose + .eyebrow { margin-top: var(--s2); }
+ul.list + .eyebrow, .prose + .eyebrow { display: block; }
+.prose + ul.list, .prose + .tablewrap, summary + .tablewrap,
+section > .eyebrow + ul.list, .plainbox > .eyebrow + .prose,
+.plainbox > .eyebrow + ul.list { margin-top: var(--s1); }
 
-ul.list { margin: 0; padding-left: 19px; }
+/* As wide as .prose: across a whole card a point ran to 150 letters a line. */
+ul.list { margin: 0; padding-left: 19px; max-width: 68ch; }
 ul.list li { font-size: var(--t-sm); color: var(--ink-2); margin-bottom: 7px; }
 ul.list li:last-child { margin-bottom: 0; }
 ul.list.warn li::marker { color: var(--hold); }
@@ -1038,6 +1093,7 @@ body:has(#firebar:not([hidden])) .jump { position: static; }
 .notify-said { margin-top: var(--s1); color: var(--ink); }
 .notify-acts { display: flex; gap: var(--s1); flex-wrap: wrap; margin: var(--s2) 0; }
 .notify-acts:not(:has(button:not([hidden]))) { display: none; }
+.notify .fine { max-width: 76ch; }
 
 /* ---------- accounts ---------- */
 

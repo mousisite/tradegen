@@ -545,6 +545,74 @@ MEASURE = r"""
 }
 """
 
+# What a computer or a tablet shows wrong. A table whose header row stands
+# apart from its columns, or that stops short of its card; a button or link in
+# a table that is a sideways scroll away; a chart whose words are stretched;
+# and a point of a list that runs on past a hundred letters to the line.
+WIDE_MEASURE = r"""
+() => {
+  const W = document.documentElement.clientWidth;
+  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [],
+               stretched: [], long: []};
+  const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+    (typeof el.className === 'string' && el.className.trim()
+      ? '.' + el.className.trim().split(/\s+/).join('.') : '');
+  for (const t of document.querySelectorAll('table')) {
+    const head = t.querySelector('thead tr'), row = t.querySelector('tbody tr');
+    if (!t.offsetParent || !head || !row) { continue; }
+    if (head.parentElement.getBoundingClientRect().width < 2) { continue; }   // drawn as cards
+    if (head.children.length === row.children.length) {
+      for (let i = 0; i < head.children.length; i++) {
+        const a = head.children[i].getBoundingClientRect().left;
+        const b = row.children[i].getBoundingClientRect().left;
+        if (Math.abs(a - b) > 2) {
+          out.heads.push(name(t) + ' column ' + i + ' named at ' + Math.round(a) +
+                         ', its figures at ' + Math.round(b));
+          break;
+        }
+      }
+    }
+    const inside = t.parentElement.clientWidth;
+    if (t.parentElement.classList.contains('tablewrap') && t.offsetWidth < inside - 2) {
+      out.heads.push(name(t) + ' is ' + t.offsetWidth + ' wide in ' + inside);
+    }
+  }
+  for (const wrap of document.querySelectorAll('.tablewrap')) {
+    if (!wrap.offsetParent) { continue; }
+    const edge = wrap.getBoundingClientRect().right;
+    for (const el of wrap.querySelectorAll('button, a, input, select, summary')) {
+      const r = el.getBoundingClientRect();
+      if (el.type !== 'hidden' && r.width >= 1 && r.right > edge + 1) {
+        out.away.push(name(el) + ' "' + el.textContent.trim().slice(0, 20) + '" in ' +
+                      name(wrap.querySelector('table')));
+      }
+    }
+  }
+  for (const t of document.querySelectorAll('svg.chart text')) {
+    const m = t.getScreenCTM();
+    if (t.getClientRects().length && m && Math.abs(m.a / m.d - 1) > 0.02) {
+      out.stretched.push('"' + t.textContent.trim() + '" ' + (m.a / m.d).toFixed(2) + ' times');
+      break;
+    }
+  }
+  const pen = document.createElement('canvas').getContext('2d');
+  for (const li of document.querySelectorAll('ul.list > li')) {
+    if (!li.offsetParent) { continue; }
+    const s = getComputedStyle(li);
+    pen.font = s.fontSize + ' ' + s.fontFamily;
+    const letter = pen.measureText('the quick brown fox jumps over the lazy dog').width / 43;
+    if (li.getBoundingClientRect().width / letter > 100) {
+      const words = document.createRange();
+      words.selectNodeContents(li);
+      if (words.getBoundingClientRect().width / letter > 100) {
+        out.long.push('"' + li.textContent.trim().slice(0, 40) + '"');
+      }
+    }
+  }
+  return out;
+}
+"""
+
 # Text against what is behind it, as WCAG's contrast ratio: 4.5 to 1 at
 # least, or 3 to 1 for large text. Colours that change with the theme ease
 # in over a fifth of a second, so they are stopped first and read as they
@@ -1041,31 +1109,42 @@ def run(browser, site, base, check, head):
           "current, and no Menu above it", not tabs, tabs[:5])
 
     # -----------------------------------------------------------------------
-    head("ON A WIDE SCREEN A TABLE'S HEADER IS OVER ITS COLUMNS")
+    head("EVERY PAGE ON A COMPUTER AND A TABLET")
     # -----------------------------------------------------------------------
-    # The tables that are cards on a phone: their class is also a layout's, a
-    # column of flex items, and as that the header sat out of line.
-    ctx = browser.new_context(viewport={"width": 1200, "height": 900},
-                              service_workers="block")
-    ctx.set_default_timeout(15000)
-    ctx.route("**/*", lambda route: route.continue_()
-              if route.request.url.startswith(base + "/") else route.abort())
-    page = ctx.new_page()
-    seen, off = 0, []
-    for path in ("/backtests", "/backtest/pin-bar", "/trades", "/monitor"):
-        page.goto(base + path)
-        for lefts in page.evaluate("""() => [...document.querySelectorAll('table.stack')]
-                .filter(t => t.tHead && t.tBodies[0].rows.length
-                             && getComputedStyle(t).visibility === 'visible'
-                             && t.getBoundingClientRect().width > 0)
-                .map(t => [t.tHead.rows[0], t.tBodies[0].rows[0]].map(
-                    r => [...r.cells].map(c => Math.round(c.getBoundingClientRect().left))))"""):
-            seen += 1
-            if any(abs(a - b) > 1 for a, b in zip(*lefts)):
-                off.append((path, lefts))
-    check("every header starts where its column does (%d tables)" % seen,
-          seen >= 3 and not off, off[:3] or seen)
-    ctx.close()
+    broad, heads, hidden, stretched, long_ = [], [], [], [], []
+    for who in ("visitor", "free account"):
+        member = who != "visitor"
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768},
+                                  service_workers="block")
+        ctx.set_default_timeout(15000)
+        ctx.route("**/*", lambda route: route.continue_()
+                  if route.request.url.startswith(base + "/") else route.abort())
+        if member:
+            ctx.add_cookies([session_cookie(site, base)])
+        page = ctx.new_page()
+        for path, whom, _tab in PAGES:
+            if whom == ("visitor" if member else "member"):
+                continue
+            path = path.format(run=run_id, share=share_path)
+            page.goto(base + path)
+            for width in (820, 1024, 1366, 1920):
+                page.set_viewport_size({"width": width, "height": 768})
+                m = page.evaluate(WIDE_MEASURE)
+                where = "%s %s at %d" % (who, path, width)
+                if m["wide"] > 0:
+                    broad.append("%s is %d too wide" % (where, m["wide"]))
+                heads += ["%s: %s" % (where, x) for x in m["heads"]]
+                hidden += ["%s: %s" % (where, x) for x in m["away"]]
+                stretched += ["%s: %s" % (where, x) for x in m["stretched"]]
+                long_ += ["%s: %s" % (where, x) for x in m["long"]]
+        ctx.close()
+    check("no page is wider than the window, from 820 to 1920 wide", not broad, broad[:5])
+    check("every table fills its card, with each column's name over its figures",
+          not heads, heads[:5])
+    check("no button or link in a table is a sideways scroll away on a tablet or a "
+          "computer", not hidden, hidden[:5])
+    check("no chart's words are stretched", not stretched, stretched[:5])
+    check("no point of a list runs past a hundred letters to the line", not long_, long_[:5])
 
     # -----------------------------------------------------------------------
     head("A NOTCH AND A HOME BAR")
