@@ -48,6 +48,8 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
 from flask.json.provider import DefaultJSONProvider
+from werkzeug.routing import IntegerConverter
+from werkzeug.wsgi import wrap_file
 
 from bot import accounts as accounts_mod
 from bot import alerts as alerts_mod
@@ -115,6 +117,19 @@ class _RequestJSON(DefaultJSONProvider):
 
 
 app.json = _RequestJSON(app)
+
+
+class _RowNumber(IntegerConverter):
+    """A whole number in an address, no longer than the database can hold.
+
+    Python refuses to read a number thousands of digits long, with an error
+    the router does not expect: anyone's address of one, signed in or not, was
+    a 500, a traceback and an error report. A longer one now matches nothing.
+    """
+    regex = r"\d{1,19}"
+
+
+app.url_map.converters["int"] = _RowNumber
 
 # Signed cookies need a key that survives a restart, or everyone is signed out
 # every time the server starts. bot/auth.py keeps one next to the database.
@@ -5697,7 +5712,7 @@ def alert_action(action):
         return render_template("error.html", message="Unknown action.", symbol=""), 404
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
-        alert_id = int(request.form["alert_id"])
+        alert_id = _row_id(request.form["alert_id"])
         if action == "delete":
             db_mod.alert_delete(conn, alert_id, user=uid())
         elif action == "pause":
@@ -5976,7 +5991,7 @@ def push_remove():
     if g.demo:
         abort(404)
     try:
-        device = int(request.form.get("device_id") or "")
+        device = _row_id(request.form.get("device_id"))
     except ValueError:
         return render_template("error.html", symbol="",
                                message="No device was named."), 400
