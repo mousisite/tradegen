@@ -366,6 +366,9 @@ h2.eyebrow { font-family: inherit; }   /* a heading to jump to, drawn as a label
 /* ---------- layout ---------- */
 
 .stack { display: flex; flex-direction: column; gap: var(--s3); }
+/* A table of rows is a table until it is a card per row on a phone: as a column
+   its heading row is drawn out of line with the cells it names. */
+table.stack { display: table; }
 .cols  { display: grid; gap: var(--s3); }
 .cols.a { grid-template-columns: 5fr 7fr; }
 .cols.b { grid-template-columns: 1fr 1fr; }

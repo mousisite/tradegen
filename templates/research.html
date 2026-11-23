@@ -42,7 +42,7 @@
     {% if f and f.country %}<span>{{ f.country }}</span>{% endif %}
     <span>researched in {{ "%.1f"|format(r.elapsed) }}s</span>
   </div>
-  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap">
+  <div style="display:flex;gap:var(--s1);margin-top:var(--s3);flex-wrap:wrap;align-items:flex-start">
     {% set exact = exact_arg(r.symbol) %}
     <a class="btn quiet sm" data-working
        href="{{ url_for('analyse', symbol=r.symbol, interval=a.bars.interval, exact=exact) }}">
@@ -74,7 +74,7 @@
       <button class="btn sm" type="submit">Save this thesis</button>
       <label class="sr" for="t-note">Note to keep with the thesis, optional</label>
       <input class="field sm" id="t-note" name="note" type="text" maxlength="200"
-             placeholder="note (optional)" autocomplete="off" style="max-width:200px">
+             placeholder="note (optional)" autocomplete="off" style="flex:0 1 200px;width:200px">
     </form>
   </div>
 </div>
@@ -354,7 +354,7 @@
 {% endif %}
 
 {% if plain %}
-<div class="plainbox">
+<div class="plainbox" style="margin-top:var(--s3)">
   <span class="eyebrow">In plain words</span>
   {% if plain.available %}
     <ul class="list">{% for x in plain.points %}<li>{{ x }}</li>{% endfor %}</ul>
