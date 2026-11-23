@@ -735,6 +735,20 @@ try:
     for _ in range(2):
         c.post("/trades/open", data=one)
     check("a form with no name is logged as it always was", held() == 5, held())
+    # A clock a little ahead of this one: the entry time is kept as the moment
+    # the form arrived, which is later for the second press.
+    ahead = journal.entry_field(int(time.time()) + 100)
+    fast = dict(twice, form_id="clock-ahead", opened=ahead, opened_shown="")
+    c.post("/trades/open", data=fast)
+    check("a trade entered a minute from now is kept as now", held() == 6, held())
+    time.sleep(1.1)
+    c.post("/trades/open", data=fast)
+    check("and pressed twice it is still one", held() == 6, held())
+    c.post("/trades/open", data=dict(
+        fast, opened=journal.entry_field(int(time.time()) - 3600)))
+    check("where the same form with an hour-earlier time is another", held() == 7, held())
+    conn.execute("DELETE FROM trades WHERE user_id=? AND form_id='clock-ahead'", (ivy.id,))
+    conn.commit()
     # Two presses at once: both get past the first look.
     import threading
     gate = threading.Barrier(2)

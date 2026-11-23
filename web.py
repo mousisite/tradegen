@@ -1387,20 +1387,47 @@ def _attention_stored(conn, me: int) -> Dict:
                      for v in fresh if v.get("action") == "BUY"]}
 
 
+# The front page's price readings under way, by the positions being read: each
+# is an event set when it is done, and the marks, None until then.
+_MARKING: Dict[Tuple, Dict] = {}
+_MARKING_LOCK = threading.Lock()
+
+
 def _marks_within(open_trades, wait: float):
     """_mark_to_market's answer, and whether it was still not back after wait."""
     if not open_trades:
         return {}, False
-    done: Dict = {}
-    worker = threading.Thread(target=lambda: done.update(_mark_to_market(open_trades)),
-                              name="orenth-front-page-prices", daemon=True)
-    worker.start()
-    worker.join(wait)
-    if worker.is_alive():
+    key = (app.config.get("DB_PATH"),) + tuple(
+        (t["id"], t["trail_pct"], t["trail_dist"]) for t in open_trades)
+    with _MARKING_LOCK:
+        run = _MARKING.get(key)
+        mine = run is None
+        if mine:
+            run = _MARKING[key] = {"done": threading.Event(), "marks": None}
+
+    def read():
+        try:
+            run["marks"] = _mark_to_market(open_trades)
+        finally:
+            with _MARKING_LOCK:
+                _MARKING.pop(key, None)
+            run["done"].set()
+
+    if mine:
+        try:
+            threading.Thread(target=read, name="orenth-front-page-prices",
+                             daemon=True).start()
+        except RuntimeError:             # no room for another thread just now
+            with _MARKING_LOCK:
+                _MARKING.pop(key, None)
+            run["done"].set()
+    if not run["done"].wait(wait) or run["marks"] is None:
         # Left to finish on its own: what it fetches is kept for a minute, so
-        # the journal or the next look at this page gets it straight away.
+        # the journal or the next look at this page gets it straight away. A
+        # look while it is still reading waits for it rather than starting
+        # another: the page reloaded ten times was ten readings at once.
         return {}, True
-    return done, False
+    return run["marks"], False
 
 
 def _attention(stored: Dict, open_trades) -> Dict:
@@ -1595,7 +1622,8 @@ def analyse():
     try:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            open_rows = db_mod.list_trades(conn, status="open", user=uid())
+            open_rows = db_mod.list_trades(conn, status="open", account="paper",
+                                           limit=None, user=uid())
         finally:
             conn.close()
         if open_rows:
@@ -1931,19 +1959,13 @@ def _mark_one(trade):
 
 
 def _touched_day(trade, bars, when: Optional[int]) -> str:
-    """The day a stop was traded through, for the journal and the front page.
+    """The day a stop was traded through, for the journal and the front page."""
+    day = portfolio_mod.crossed_day(portfolio_mod.trade_interval(trade), bars, when)
+    return day.strftime("%d %b %Y").lstrip("0") if day else ""
 
-    The New York date, as the journal counts its days. A daily bar is named
-    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
-    session opens, while it is still the evening before in New York.
-    """
-    if when is None:
-        return ""
-    times = getattr(bars, "timestamp", None)
-    a_bar = times is not None and int(when) in {int(t) for t in times}
-    if a_bar and portfolio_mod.trade_interval(trade) == "1d":
-        return _day(when)
-    return _day_ny(when)
+
+# Seconds the journal goes on asking for the prices of its open positions.
+MARK_FOR = 25.0
 
 
 def _mark_to_market(open_trades):
@@ -1952,16 +1974,25 @@ def _mark_to_market(open_trades):
     Each fetch is roughly a quarter of a second of network wait. Done one after
     another, twenty positions would hang the page for five seconds; done at the
     same time it stays under one. Failures are per-trade, so one delisted
-    symbol cannot blank the whole table.
+    symbol cannot blank the whole table. Those not asked for after MARK_FOR
+    seconds are left without a price, so that a slow source and a long journal
+    cannot hold one of the server's few threads for minutes.
     """
     out = {}
     if not open_trades:
         return out
 
     from concurrent.futures import as_completed
+    give_up = time.monotonic() + MARK_FOR
+
+    def mark(trade):
+        if time.monotonic() >= give_up:
+            raise TimeoutError("too slow")
+        return _mark_one(trade)
+
     workers = min(8, len(open_trades))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_mark_one, t): t["id"] for t in open_trades}
+        futures = {pool.submit(mark, t): t["id"] for t in open_trades}
         for future in as_completed(futures):
             trade_id = futures[future]
             try:

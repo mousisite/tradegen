@@ -1221,15 +1221,6 @@ MISSING_TRIES = 2
 MISSING_WAIT = 3600.0
 
 
-def _crossed_day(interval: str, bars, when: int) -> str:
-    """The day a stop was traded through, the one the journal says
-    (web._touched_day): the New York date, or a daily bar's own day."""
-    times = getattr(bars, "timestamp", None)
-    if interval == "1d" and times is not None and int(when) in {int(t) for t in times}:
-        return _day(when)
-    return clock.label_ny(when, intraday=False)
-
-
 def check_stops(conn, user=None, skip_closed: bool = False,
                 now: Optional[float] = None,
                 fired: Optional[List[Fired]] = None) -> Dict:
@@ -1321,7 +1312,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         # Past the stop now, or traded through it since opening and come back:
         # the journal marks both as stopped, by the one rule they all read a
         # position through (portfolio.read_stop), trail and split included.
-        from .portfolio import read_trade_stop
+        from .portfolio import crossed_day, day_words, read_trade_stop
         read = read_trade_stop(row, bars, split)
         if read.trail is not None:
             # The highs this round saw hold the trail up for every reader.
@@ -1353,7 +1344,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                        "you are out." % (row["symbol"], said, kind,
                                          format_price(stop), side_word, moved))
         else:
-            when = _crossed_day(bar_size(row), bars, read.touched_at)
+            when = day_words(crossed_day(bar_size(row), bars, read.touched_at))
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it there once "

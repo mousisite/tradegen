@@ -14,12 +14,14 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from . import fundamentals as fund
 from . import risk as risk_mod
+from .clock import ny_clock
 from .market import DataError, fetch_bars, split_factor_since, split_words
 
 
@@ -27,6 +29,11 @@ from .market import DataError, fetch_bars, split_factor_since, split_words
 # is a row and a column of the table, so a very long list is a slow page and
 # a table nobody can read.
 COMPARE_MOST = 40
+
+# Seconds the page keeps asking for prices and betas. A journal holds up to two
+# hundred positions, and a source that answers slowly held one of the server's
+# few threads for as long as it took to ask about every one of them.
+READ_FOR = 25.0
 
 
 @dataclass
@@ -325,6 +332,7 @@ class Position:
     breached: bool = False
     touched: Optional[float] = None       # the price that crossed the stop since opening
     touched_at: Optional[int] = None
+    touched_day: Optional[date] = None    # the day to say it was crossed on (crossed_day)
     touched_stop: Optional[float] = None  # the stop in force when it was crossed
     beta_assumed: bool = False
     status: str = "open"
@@ -458,6 +466,7 @@ def build(rows, account: float, with_correlation: bool = True,
         for r in rows
     ]
 
+    started = time.monotonic()
     _enrich(positions, view)
     for p in positions:
         if p.split != 1.0:
@@ -493,7 +502,10 @@ def build(rows, account: float, with_correlation: bool = True,
     # What is left of the account is what was not paid out: a holding that has
     # risen since was still bought at its entry, and one without a price still
     # holds its money. Counted at today's value, cash fell when a holding rose.
-    paid = sum(p.entry * p.quantity for p in positions if p.sized)
+    # A futures contract is held on a deposit, not bought at its full value:
+    # one micro contract, worth more than a small account, left no cash at all.
+    paid = sum(p.entry * p.quantity for p in positions
+               if p.sized and not p.symbol.upper().endswith("=F"))
     view.cash = max(0.0, account - paid)
 
     for p in sized:
@@ -516,7 +528,12 @@ def build(rows, account: float, with_correlation: bool = True,
                 (p.beta if p.beta is not None else 1.0) * p.notional * p.direction
                 for p in sized) / view.gross_exposure
 
-    if with_correlation and len({p.symbol for p in priced}) >= 2:
+    if (with_correlation and len({p.symbol for p in priced}) >= 2
+            and time.monotonic() - started >= READ_FOR):
+        view.observations.append(
+            "Prices came in too slowly to compare how the holdings move together. "
+            "Open this page again in a minute.")
+    elif with_correlation and len({p.symbol for p in priced}) >= 2:
         worth: Dict[str, float] = {}
         for p in priced:
             worth[p.symbol] = worth.get(p.symbol, 0.0) + abs(p.notional)
@@ -556,8 +573,17 @@ def keep_reads(conn, view: PortfolioView, now: Optional[float] = None) -> None:
 
 
 def _enrich(positions: List[Position], view: PortfolioView) -> None:
-    """Attach live price, sector and risk stats to each holding, concurrently."""
-    def grab(p: Position):
+    """Attach live price, sector and risk stats to each holding, concurrently.
+
+    Every price first, since every figure on the page needs those. Whatever
+    has not been asked for after READ_FOR seconds is left unknown.
+    """
+    give_up = time.monotonic() + READ_FOR
+
+    def price(p: Position):
+        if time.monotonic() >= give_up:
+            view.failed.append(p.symbol)
+            return
         try:
             # The trade's own bars, which the journal, paper.py and the stop
             # notice read it on: on daily bars a whole day is held to the stop
@@ -578,9 +604,13 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             p.price, p.stop = read.price, read.stop
             p.touched_at, p.touched = read.touched_at, read.touched
             p.touched_stop = read.touched_stop
+            p.touched_day = crossed_day(p.interval or "1d", bars, read.touched_at)
             p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
+
+    def rest(p: Position):
+        if p.price is None or time.monotonic() >= give_up:
             return
         try:
             if p.asset_class == "equity":
@@ -600,7 +630,8 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             pass
 
     with ThreadPoolExecutor(max_workers=min(6, len(positions))) as pool:
-        list(pool.map(grab, positions))
+        list(pool.map(price, positions))
+        list(pool.map(rest, positions))
 
 
 def _name_weights(positions: List[Position], gross: float) -> Dict[str, float]:
@@ -623,9 +654,12 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     exposure_pct = view.gross_exposure / account * 100
     count = len({p.symbol for p in priced})
     view.observations.append(
-        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash."
+        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash.%s"
         % (exposure_pct, count, "" if count == 1 else "s",
-           "{:,.0f}".format(view.cash)))
+           "{:,.0f}".format(view.cash),
+           " A futures contract is held on a deposit, so its full value is counted as "
+           "deployed but is not taken out of cash."
+           if any(p.symbol.upper().endswith("=F") for p in sized) else ""))
 
     # Said first and loudest: a breached stop is the one thing on this page
     # that needs doing today, and "nothing at risk" would hide it.
@@ -634,7 +668,7 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         if (p.price - p.stop) * p.direction > 0 and p.touched is not None:
             crossed = p.touched_stop if p.touched_stop is not None else p.stop
             where = ("traded through its %s of %s on %s (at %s) and is back at %s"
-                     % (kind, _px(crossed), _day(p.touched_at), _px(p.touched),
+                     % (kind, _px(crossed), day_words(p.touched_day), _px(p.touched),
                         _px(p.price)))
         else:
             where = "is at %s against a %s of %s" % (_px(p.price), kind, _px(p.stop))
@@ -757,9 +791,25 @@ def _px(value: float) -> str:
     return format_price(value)
 
 
-def _day(ts: Optional[int]) -> str:
-    import time
-    return time.strftime("%d %b", time.gmtime(int(ts))).lstrip("0") if ts else "a recent day"
+def crossed_day(interval: str, bars, when: Optional[int]):
+    """The date a stop was traded through, the same wherever it is said, or None.
+
+    The New York date, as the journal counts its days. A daily bar is named
+    by its own day instead: a coin's starts at midnight UTC, and a Hong Kong
+    session opens, while it is still the evening before in New York.
+    """
+    if when is None:
+        return None
+    times = getattr(bars, "timestamp", None)
+    if (interval == "1d" and times is not None
+            and int(when) in {int(t) for t in times}):
+        return datetime.fromtimestamp(int(when), timezone.utc).date()
+    return ny_clock(when)[0]
+
+
+def day_words(day) -> str:
+    """'5 Nov' for a date."""
+    return day.strftime("%d %b").lstrip("0") if day else "a recent day"
 
 
 def what_if(view: PortfolioView, shock_pct: float) -> Dict:

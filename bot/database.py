@@ -697,16 +697,19 @@ def already_logged(conn: sqlite3.Connection, form_id: Optional[str], symbol: str
     """Whether this very form, with these very numbers, was logged already.
 
     The numbers as well as the form: someone who goes back to a form they
-    sent and changes it is logging another trade.
+    sent and changes it is logging another trade. The entry time only to
+    within the clock slack: one a minute ahead of this clock is kept as the
+    moment it arrived, which is another moment for the second press.
     """
+    from .journal import CLOCK_SLACK
     if not form_id:
         return False
     return conn.execute(
         "SELECT 1 FROM trades WHERE user_id=? AND form_id=? AND symbol=? AND direction=? "
         "AND entry=? AND stop=? AND target1 IS ? AND quantity IS ? "
-        "AND (? IS NULL OR ts_opened=?) LIMIT 1",
+        "AND (? IS NULL OR ABS(ts_opened-?) <= ?) LIMIT 1",
         (int(user), form_id, _symbol(symbol), direction, float(entry), float(stop),
-         target1, quantity, opened_ts, opened_ts)).fetchone() is not None
+         target1, quantity, opened_ts, opened_ts, CLOCK_SLACK)).fetchone() is not None
 
 
 class TradeChanged(ValueError):
