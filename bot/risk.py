@@ -20,6 +20,7 @@ import numpy as np
 from .market import Bars, DataError, fetch_bars
 
 TRADING_DAYS = 252
+COIN_DAYS = 365           # a coin trades every day, round the clock
 
 
 @dataclass
@@ -45,11 +46,26 @@ class RiskProfile:
     up_days: Optional[float] = None
     notes: List[str] = field(default_factory=list)
     reliable: bool = False
+    days_per_year: int = TRADING_DAYS           # what the volatility is annualised over
+
+
+def _closes(bars: Bars) -> np.ndarray:
+    """The closes to measure returns on, with dividends counted.
+
+    A share drops by its dividend on the day it goes ex, and whoever holds it
+    is paid that much. Left uncounted, every such drop was a loss nobody had,
+    and a 5% payer's Sharpe ratio read below zero.
+    """
+    close = np.asarray(bars.close, dtype=float)
+    factor = getattr(bars, "dividend_factor", None)
+    if factor is None or len(factor) != len(close):
+        return close
+    return close * np.asarray(factor, dtype=float)
 
 
 def daily_returns(bars: Bars) -> np.ndarray:
     """Simple returns from close to close, with non-finite values removed."""
-    close = np.asarray(bars.close, dtype=float)
+    close = _closes(bars)
     if len(close) < 3:
         return np.array([])
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -60,7 +76,7 @@ def daily_returns(bars: Bars) -> np.ndarray:
 def _closes_by_day(bars) -> Dict[int, float]:
     """The last close of each trading day, keyed by the bar's own day number."""
     out: Dict[int, float] = {}
-    for day, close in zip(bars.session_id, bars.close):
+    for day, close in zip(bars.session_id, _closes(bars)):
         if np.isfinite(close):
             out[int(day)] = float(close)
     return out
@@ -103,10 +119,13 @@ def profile(symbol: str, interval: str = "1d", benchmark: str = "SPY") -> RiskPr
         return out
 
     out.reliable = len(rets) >= 120
-    # Annualisation factor depends on the bar size, not a fixed 252.
-    per_year = {"1d": TRADING_DAYS, "1h": TRADING_DAYS * 6.5,
-                "30m": TRADING_DAYS * 13, "15m": TRADING_DAYS * 26,
-                "5m": TRADING_DAYS * 78}.get(interval, TRADING_DAYS)
+    # Annualisation factor depends on the bar size and on how long the thing
+    # trades: a stock 6.5 hours on 252 days, a coin all 24 on all 365.
+    coin = getattr(bars, "asset_class", "") == "crypto"
+    days, hours = (COIN_DAYS, 24) if coin else (TRADING_DAYS, 6.5)
+    out.days_per_year = days
+    per_year = days * {"1h": hours, "30m": hours * 2, "15m": hours * 4,
+                       "5m": hours * 12}.get(interval, 1)
     scale = math.sqrt(per_year)
 
     out.volatility = float(np.std(rets, ddof=1)) * scale
@@ -261,7 +280,7 @@ def position_risk(entry: float, stop: float, quantity: float,
                                 _money(gap_loss), out["gap_pct_of_account"]))
 
     if profile_ and profile_.volatility and entry:
-        daily_vol = profile_.volatility / math.sqrt(TRADING_DAYS)
+        daily_vol = profile_.volatility / math.sqrt(profile_.days_per_year)
         moves = out["stop_distance_pct"] / 100 / daily_vol if daily_vol else None
         if moves is not None:
             out["stop_in_daily_moves"] = moves

@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import yahoo
+from . import clock, yahoo
 from .market import DataError, fetch_bars
 
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
@@ -191,6 +191,21 @@ def risk_free_rate(default: float = 0.042) -> float:
     return default
 
 
+def expiry_close(ts: int) -> int:
+    """When an expiry's contracts stop trading: 16:00 in New York that day.
+
+    Yahoo stamps an expiry at midnight UTC on its date, which is the evening
+    before in New York and the better part of a day too early.
+    """
+    day = time.gmtime(ts)
+    return clock.ny(day.tm_year, day.tm_mon, day.tm_mday, 16, 0)
+
+
+def days_to(ts: int, now: float) -> int:
+    """Calendar days from today's date in New York to the expiry's date."""
+    return max(0, (clock.ny_clock(expiry_close(ts))[0] - clock.ny_clock(now)[0]).days)
+
+
 def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
     """Fetch a chain and compute Greeks for every contract.
 
@@ -206,7 +221,7 @@ def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
     now = time.time()
     expirations = []
     for ts in first.get("expirationDates", []):
-        days = max(0, int((ts - now) / 86400))
+        days = days_to(ts, now)
         expirations.append({"timestamp": ts, "days": days,
                             "date": time.strftime("%Y-%m-%d", time.gmtime(ts))})
 
@@ -225,7 +240,9 @@ def load_chain(symbol: str, target_days: Optional[int] = None) -> Chain:
 
     block = (raw.get("options") or [{}])[0]
     rate = risk_free_rate()
-    years = max(chosen["days"], 0) / 365.0
+    # The time that is really left, to the minute. Cut down to whole days from
+    # the stamp, a 30% volatility read 33% a week out and 45% two days out.
+    years = max(expiry_close(chosen["timestamp"]) - now, 0.0) / (365.0 * 86400.0)
 
     chain = Chain(symbol=symbol.upper(), spot=float(spot),
                   expiry=chosen["timestamp"], expiry_date=chosen["date"],
