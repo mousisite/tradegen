@@ -8,15 +8,20 @@
    would be a few pixels tall, so a phone gets the narrow one. #}
 {% block head_extra %}{% if not page.measured %}<meta name="robots" content="noindex">{% endif %}
 <style>
-  .learn-steps { list-style: none; margin: 0; padding: 0; }
-  .learn-steps li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--s2);
+  {# The stamps and labels are one column, so the sentences start in line. #}
+  .learn-steps { list-style: none; margin: 0; padding: 0; display: grid;
+                 grid-template-columns: auto minmax(0, 1fr); column-gap: var(--s2); }
+  .learn-steps li { grid-column: 1 / -1;
+                    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--s2);
+                    grid-template-columns: subgrid;
                     padding: 10px 0; border-bottom: 1px solid var(--hairline);
                     font-size: var(--t-sm); color: var(--ink-2); line-height: 1.6; }
   .learn-steps li:last-child { border-bottom: 0; }
+  .learn-steps li > span:last-child { max-width: 68ch; }
   .learn-stamp { font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-3);
                  white-space: nowrap; padding-top: 2px; }
   .learn-steps .chip { align-self: start; justify-self: start; white-space: nowrap; }
-  .learn-source { font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
+  .learn-source { max-width: 76ch; font-size: var(--t-xs); color: var(--ink-3); line-height: 1.6; }
   .learn-figure .chart { max-height: 380px; }
   .learn-figure .narrow { display: none; }
   @media (max-width: 600px) {
