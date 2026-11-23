@@ -9,7 +9,7 @@
    price is fetched and nothing is analysed. Confirm logs exactly this. #}
 {% set long = size.direction > 0 %}
 <div class="pagehead">
-  <span class="eyebrow">A simulated trade</span>
+  <span class="eyebrow">A paper trade</span>
   <h1>Review this paper trade</h1>
   <p>Nothing is bought or sold, and no order goes to any broker. Confirming
     only writes this trade into your journal, so you can see later how the
@@ -65,7 +65,7 @@
       <span class="eyebrow">The size</span>
       <dl class="pairs">
         <dt>Size</dt>
-        <dd><span class="fig">{{ size.quantity_text }}</span> units
+        <dd><span class="fig">{{ size.quantity_text }}</span> unit{{ '' if size.quantity == 1 else 's' }}
           <span class="faint">{{ size.notional|money }} at the entry</span></dd>
         <dt>Money at risk</dt>
         <dd><span class="fig">{{ size.risk|money }}</span>

@@ -94,9 +94,16 @@ def counted(samples: int, worked: int, fall: bool = False) -> str:
     from the explanation below (public.snapshot), so it must not vary. fall is
     for a page that gives the counts alone, when they are of bets on a fall.
     """
+    bet = "a bet on the price falling " if fall else ""
+    if samples == 1:
+        return ("In tests on past prices, this same setup came up once and %s."
+                % (bet + "worked that time, reaching its target before its stop"
+                   if worked else
+                   bet + "did not work that time: it did not reach its target "
+                         "before its stop"))
     return ("In tests on past prices, this same setup came up %d times and "
             "%sworked %d of them, reaching its target before its stop."
-            % (samples, "a bet on the price falling " if fall else "", worked))
+            % (samples, bet, worked))
 
 
 def explain_plan(plan, bars, hold_text: str = "") -> Dict:
@@ -213,7 +220,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
                          % ("nearer" if mine < tested else "further",
                             mine, "smaller" if mine < tested else "bigger"))
 
-        if plan.breakeven_rate:
+        if plan.breakeven_rate and plan.prob_samples > 1:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
             if fall_odds:
                 sure += (" A bet on a fall needed to work %d of those %d times "

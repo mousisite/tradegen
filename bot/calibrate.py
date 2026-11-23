@@ -503,10 +503,11 @@ def calibrate(ctx: Context, current_score: float, stop_atr: float,
     reliable = bn >= min_bucket and len(every) >= 120
 
     if not reliable:
-        note = ("Only %d comparable %ssetups in history. Treat this figure as "
-                "indicative, not measured." % (bn, (side + " ") if direction else ""))
+        note = ("Only %d comparable %ssetup%s in history. Treat this figure as "
+                "indicative, not measured." % (bn, (side + " ") if direction else "",
+                                               "" if bn == 1 else "s"))
     elif ci_lo is not None and ci_lo <= breakeven <= (ci_hi or 1.0):
-        note = ("Confidence interval straddles the %.0f%% break-even line, so "
+        note = ("The 95%% range takes in the %.0f%% break-even line, so "
                 "no edge is demonstrated at this score." % (breakeven * 100))
     elif rate > breakeven:
         note = "Hit rate clears break-even on %d comparable setups." % bn

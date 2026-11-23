@@ -41,8 +41,9 @@
     {% if page.measured_setups %}
       <p class="lead">On {{ page.main_interval_words }} prices, with a target twice
         the risk and after costs, {{ t[1] }} of the {{ page.measured_setups }}
-        setup{{ 's' if page.measured_setups != 1 }} measured kept money by more than its margin of error,
-        {{ t[-1] }} lost money by more than its margin, and {{ t[0] }} cannot be
+        setup{{ 's' if page.measured_setups != 1 }} measured kept money by more than
+        {{ 'its' if 1 in (t[1], page.measured_setups) else 'their' }} margin of error,
+        {{ t[-1] }} lost money by more than {{ 'its' if 1 in (t[-1], page.measured_setups) else 'their' }} margin, and {{ t[0] }} cannot be
         told apart from luck{% if t[none] %}; {{ t[none] }} had too few trades to
         say{% endif %}.</p>
     {% endif %}
@@ -160,9 +161,10 @@
         {% for pct, names in page.costs %}{{ pct }} on {{ names|join(', ') }}{{ '; ' if not loop.last else '.' }}{% endfor %}</li>
     {% endif %}
     {% if page.skipped_days.incomplete or page.skipped_days.roll %}
-      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }} days
-        with too few bars and {{ page.skipped_days.roll }} futures contract-change
-        days.</li>
+      <li>Left out over all the instruments: {{ page.skipped_days.incomplete }}
+        day{{ '' if page.skipped_days.incomplete == 1 else 's' }} with too few bars and
+        {{ page.skipped_days.roll }} futures contract-change
+        day{{ '' if page.skipped_days.roll == 1 else 's' }}.</li>
     {% endif %}
   </ul>
   <span class="eyebrow" style="display:block;margin-top:var(--s3)">What this cannot tell you</span>

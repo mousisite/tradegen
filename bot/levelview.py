@@ -805,9 +805,10 @@ def _measured_window(bars, now: float, conn) -> List[str]:
         where = "%s's %s bars" % (bars.symbol, charts.bar_words(bars.interval))
         when = _LAB_WHEN.get(lab, "at this time of day")
         if count < labstore.MIN_TRADES:
-            out.append("In the Setup lab, %d sweep, break and retest trades on %s were "
+            out.append("In the Setup lab, %d sweep, break and retest trade%s on %s %s "
                        "entered %s New York time: too few to say anything."
-                       % (count, where, when))
+                       % (count, "" if count == 1 else "s", where,
+                          "was" if count == 1 else "were", when))
         else:
             out.append("In the Setup lab, %d sweep, break and retest trades on %s were "
                        "entered %s New York time. %d kept money after costs, and on average "
