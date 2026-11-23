@@ -1250,6 +1250,13 @@ def _plain_price(value):
     return ("%.*f" % (digits, number)).rstrip("0").rstrip(".")
 
 
+@app.template_filter("bare")
+def _bare(value):
+    """A number to fill a box with as a person would type it: 10000, not 10000.0."""
+    number = _number(value)
+    return "%.15g" % number if number is not None else ""
+
+
 @app.template_filter("ago")
 def _ago(ts):
     try:
@@ -2299,7 +2306,7 @@ def trail_trade():
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    return redirect(url_for("trades", _anchor="open"))
 
 
 class _NoTrade(ValueError):
@@ -2620,7 +2627,8 @@ def open_trade_manual():
         return render_template("error.html", symbol="", message=message), 400
     finally:
         conn.close()
-    return redirect(url_for("trades"))
+    # To the open trades, where it now is: on a phone, below the figures.
+    return redirect(url_for("trades", _anchor="open"))
 
 
 @app.route("/trades/delete", methods=["POST"])
@@ -5145,16 +5153,18 @@ def usage():
     finally:
         conn.close()
 
-    trend = ""
+    trend = trend_narrow = ""
     if len(data["daily"]) > 1:
         # Days come as epoch seconds and runs as counts: said as dates and
         # whole numbers, not as the years and percents of a filed figure.
-        trend = charts_mod.bar_chart(
+        # Drawn wide and narrow, as the research page's year is: shrunk to a
+        # phone, the wide drawing's labels were under five pixels tall.
+        trend, trend_narrow = (charts_mod.bar_chart(
             [d["day"] for d in data["daily"]],
             [float(d["runs"]) for d in data["daily"]],
-            width=720, height=180, title="Analyses per day",
+            width=width, height=180, title="Analyses per day",
             label=lambda ts: time.strftime("%d %b", time.gmtime(ts)).lstrip("0"),
-            fmt=lambda v: "%d" % round(v))
+            fmt=lambda v: "%d" % round(v)) for width in (720, 300))
 
     # Where the database actually sits, because the answer decides whether a
     # deploy keeps everyone's journal or silently deletes it, and nothing else
@@ -5187,6 +5197,7 @@ def usage():
 
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
+                           trend_narrow=trend_narrow,
                            storage=storage, counts=counts, offsite=offsite,
                            plans_off=billing_mod.half_set(),
                            backups=backups,
@@ -5930,7 +5941,8 @@ def add_alert():
         page, _, query = back.partition("?")
         kept = [p for p in query.split("&") if p and p != "alert_set=1"]
         return redirect("%s?%s" % (page, "&".join(kept + ["alert_set=1"])))
-    return redirect(url_for("monitor"))
+    # To the list, which on a phone is screens below the top of the page.
+    return redirect(url_for("monitor", _anchor="alerts"))
 
 
 @app.route("/monitor/alert/<action>", methods=["POST"])
@@ -5971,7 +5983,7 @@ def alert_action(action):
         return render_template("error.html", message=message, symbol=""), 400
     finally:
         conn.close()
-    return redirect(url_for("monitor"))
+    return redirect(url_for("monitor", _anchor="alerts"))
 
 
 # Every alert and open position is priced again, and a call alert may need an
@@ -6312,7 +6324,8 @@ def _run_routine(name):
     # The shared caches are left alone: a routine's analyses are its own, and
     # emptying them made everyone else's pages, the example's included, be
     # worked out again each time anybody pressed a button.
-    return redirect(url_for("monitor"))
+    # To what it found, which is under the routines: on a phone, off the screen.
+    return redirect(url_for("monitor", _anchor="ran"))
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -7241,6 +7254,18 @@ def _recheck_plans_job():
         return result
     finally:
         conn.close()
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+def refused(exc):
+    # A form with something missing, or sent from another site. Werkzeug's own
+    # page for these is bare white, with no way back.
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "That did not go through."}), exc.code
+    return render_template("error.html", symbol="",
+                           message="That did not go through. Go back, open the page "
+                                   "again and try once more."), exc.code
 
 
 @app.errorhandler(404)

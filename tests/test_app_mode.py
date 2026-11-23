@@ -255,6 +255,23 @@ try:
           "Tap to pick one, or take a photo of a chart." in inside
           and "Ctrl+V" not in inside and "drag one in" not in inside)
 
+    # A form with something missing got the web server's own bare white page.
+    bad = member.post("/share", data={"x": "1"})
+    check("a form that cannot be read is answered on a page of the site, with a way back",
+          bad.status_code == 400 and "That did not go through." in text(bad)
+          and 'class="tabbar"' in text(bad), text(bad)[:200])
+    body = text(member.get("/settings"))
+    check("a setting reads 10000 in its box, not 10000.0",
+          'value="10000"' in body and 'value="10000.0"' not in body)
+    for path, form in (("/screener", "/screener#results"), ("/tools/size", "/tools/size#result"),
+                       ("/tools/survival", "/tools/survival#result")):
+        check("%s opens at its answer, which on a phone is off the screen" % path,
+              'action="%s"' % form in text(member.get(path)))
+    for path, spot in (("/tools/size?entry=100&stop=97", 'id="result"'),
+                       ("/tools/size?entry=abc&stop=97", 'id="result"'),
+                       ("/tools/survival?hit=250", 'id="result"')):
+        check("%s has that answer once" % path, text(member.get(path)).count(spot) == 1)
+
     print()
     print("=" * 72)
     print("BILLING ON: STRIPE STAYS OUT OF THE APP")

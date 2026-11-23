@@ -49,7 +49,17 @@
 {% if trend %}
 <section>
   <div class="sechead"><h2>Analyses per day</h2></div>
-  <div class="card">{{ trend|safe }}</div>
+  <style>
+    .daychart .narrow { display: none; }
+    @media (max-width: 600px) {
+      .daychart .wide { display: none; }
+      .daychart .narrow { display: block; }
+    }
+  </style>
+  <div class="card daychart">
+    <div class="wide">{{ trend|safe }}</div>
+    <div class="narrow">{{ trend_narrow|safe }}</div>
+  </div>
 </section>
 {% endif %}
 

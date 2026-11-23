@@ -21,7 +21,9 @@
 </div>
 
 <div class="card">
-  <p class="fig loss" style="font-size:var(--t-sm);margin:0 0 var(--s2)">{{ message }}</p>
+  <p class="fig loss" style="font-size:var(--t-sm);margin:0 0 var(--s2)">{#- A whole sentence, whoever wrote it: the journal's own begin in lower case. -#}
+    {%- set said = message|string|trim -%}
+    {{ said[:1]|upper }}{{ said[1:] }}{{ '.' if said and said[-1] not in '.!?…:' }}</p>
   {% if no_key and current_user and current_user.is_local %}
     <p class="prose">To read charts from images, create a file called
       <b>.env</b> in the Orenth folder containing:</p>

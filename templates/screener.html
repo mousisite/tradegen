@@ -18,7 +18,9 @@
         <div style="font-weight:600;font-size:var(--t-base);font-family:var(--serif)">
           {{ p.label }}</div>
         <p class="prose" style="margin-top:6px">{{ p.why }}</p>
-        <form method="get" action="{{ url_for('screener') }}" data-working
+        {# To the results, which on a phone are screens below the filters: the
+           page came back at its top and looked as if nothing had happened. #}
+        <form method="get" action="{{ url_for('screener') }}#results" data-working
               style="margin-top:var(--s2)">
           <input type="hidden" name="preset" value="{{ key }}">
           <button class="btn quiet sm" type="submit">Run this screen</button>
@@ -31,7 +33,7 @@
 <section>
   <div class="sechead"><h2>Or build your own</h2></div>
   <div class="card">
-    <form method="get" action="{{ url_for('screener') }}" data-working>
+    <form method="get" action="{{ url_for('screener') }}#results" data-working>
       <input type="hidden" name="go" value="1">
       <div class="setgrid">
         <div class="setfield">
@@ -81,7 +83,7 @@
 </section>
 
 {% if result %}
-<section>
+<section id="results">
   <div class="sechead">
     <h2>Results</h2>
     <span class="count">{{ result.passed|length }} passed</span>
