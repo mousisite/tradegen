@@ -187,6 +187,23 @@ check("a backup file is written", _os.path.exists(path))
 check("it verifies", backup_mod.verify(path))
 check("the csv exports are written alongside",
       any(f.endswith(".csv") for f in _os.listdir(folder)))
+# They are everybody's rows together, for the day this app is gone: without
+# whose each is, nobody's journal could be handed back.
+import csv as _csv
+
+whose = {}
+for f in _os.listdir(folder):
+    if f.endswith(".csv"):
+        with open(_os.path.join(folder, f), encoding="utf-8", newline="") as fh:
+            reader = _csv.DictReader(fh)
+            whose[f] = (reader.fieldnames, list(reader))
+check("each says whose every row is, except the record that is nobody's",
+      len(whose) >= 5 and all(("user_id" in names) != ("strategies" in f)
+                              for f, (names, _rows) in whose.items()),
+      {f: names for f, (names, _rows) in whose.items()})
+check("and the trade is its owner's",
+      [(r["user_id"], r["symbol"]) for f, (_n, rows) in whose.items() if "-trades-" in f
+       for r in rows] == [("1", "AAPL")])
 
 restored = db.connect(path)
 try:

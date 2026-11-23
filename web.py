@@ -4614,8 +4614,13 @@ def export_data(dataset, fmt):
     finally:
         conn.close()
 
+    body = built["body"]
+    if fmt == "csv":
+        # Marked as UTF-8, or Excel opens it as something older and an accent
+        # or a currency sign in a note comes out as two or three others.
+        body = "\ufeff" + body
     return Response(
-        built["body"], mimetype=built["mimetype"],
+        body, mimetype=built["mimetype"],
         headers={"Content-Disposition":
                  'attachment; filename="%s"' % built["filename"]})
 
