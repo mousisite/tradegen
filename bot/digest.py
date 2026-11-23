@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from . import accounts, billing, codes, public
 from . import database as db
 from . import market
-from .market import DataError, DataThrottled
+from .market import DataError, DataThrottled, DataUnavailable
 
 # Monday, 13:00 UTC: morning across the US, before the market opens. Tuesday
 # counts too, so a server that was down on Monday still sends that week.
@@ -56,7 +56,10 @@ def token(secret, user_id: int) -> str:
 
 
 def check_token(secret, user_id: int, given: str) -> bool:
-    return hmac.compare_digest(token(secret, user_id), given or "")
+    # As bytes: text with a letter outside ASCII raises here, and a mangled
+    # link is a wrong one, not a fault.
+    return hmac.compare_digest(token(secret, user_id).encode("ascii"),
+                               (given or "").encode("utf-8", "replace"))
 
 
 def can_receive(user) -> bool:
@@ -70,9 +73,20 @@ def set_wanted(conn: sqlite3.Connection, user_id: int, on: bool) -> None:
     conn.commit()
 
 
-def strongest(verdicts: List[Dict], n: int = 3) -> List[Dict]:
-    """The popular BUYs that worked most often before."""
-    buys = [v for v in verdicts if v.get("action") == "BUY" and v.get("samples")]
+# A popular check older than this is not today's, as on the front page. One
+# whose checks keep failing stays stored as it last was.
+FRESH = 24 * 3600
+
+
+def strongest(verdicts: List[Dict], n: int = 3,
+              now: Optional[float] = None) -> Optional[List[Dict]]:
+    """The popular BUYs that worked most often before, from checks of the last
+    day only; None when there is no such check to choose from."""
+    now = now or time.time()
+    fresh = [v for v in verdicts if now - (v.get("at") or 0) <= FRESH]
+    if not fresh:
+        return None
+    buys = [v for v in fresh if v.get("action") == "BUY" and v.get("samples")]
     return sorted(buys, key=lambda v: v["worked"] / v["samples"], reverse=True)[:n]
 
 
@@ -87,6 +101,13 @@ def strongest(verdicts: List[Dict], n: int = 3) -> List[Dict]:
 
 CHECK_EVERY = public.MAX_AGE      # as often as a popular stock is checked
 CHECK_PER_RUN = 20                # the rest wait for the next hourly run
+# Of those, how many may go to instruments whose last try failed, such as a
+# mistyped or delisted ticker. Nothing is saved for one that cannot be priced,
+# so without this twenty of them, never checked and so always first in line,
+# took every run and no other watched instrument was checked again.
+RETRY_PER_RUN = CHECK_PER_RUN // 4
+# When each one's last try failed, for this process's life.
+_FAILED: Dict[str, float] = {}
 KEEP_DAYS = 14
 RECENT = 86400                    # an alert or a crossed stop of the last day
 MOVE_SHOWN = 0.02                 # a move this size is news on its own
@@ -172,6 +193,8 @@ def check_watched(conn: sqlite3.Connection, check: Callable[[str, bool], Dict],
     is due when it has no row, when its newest is CHECK_EVERY old, or when its
     call is wanted and the newest row has none. Never-checked first, then the
     oldest; a source that says stop ends the run, and the rest wait an hour.
+    Those whose last try failed come after the rest, a few a run, the one
+    tried longest ago first.
     """
     now = now or time.time()
     wanted = watched(conn, full, now)
@@ -180,8 +203,12 @@ def check_watched(conn: sqlite3.Connection, check: Callable[[str, bool], Dict],
            if s not in latest or now - latest[s]["at"] >= CHECK_EVERY
            or (with_call and not latest[s]["action"])]
     due.sort(key=lambda s: (latest[s]["at"] if s in latest else 0, s))
+    for symbol in [s for s in _FAILED if s not in wanted]:
+        _FAILED.pop(symbol, None)               # off every list: forgotten
+    retry = sorted((s for s in due if s in _FAILED), key=lambda s: (_FAILED[s], s))
+    batch = [s for s in due if s not in _FAILED] + retry[:RETRY_PER_RUN]
     checked, errors = 0, []
-    for n, symbol in enumerate(due[:limit]):
+    for n, symbol in enumerate(batch[:limit]):
         if n:
             sleep(pause)
         try:
@@ -189,11 +216,15 @@ def check_watched(conn: sqlite3.Connection, check: Callable[[str, bool], Dict],
             db.watch_call_save(conn, symbol, got["day"], got.get("action"),
                                got["price"], got.get("prev_close"), int(now))
             checked += 1
+            _FAILED.pop(symbol, None)
         except DataThrottled as exc:
             errors.append("%s: %s" % (symbol, exc))
             break
         except Exception as exc:          # one bad ticker must not stop the run
             errors.append("%s: %s" % (symbol, exc))
+            # A source that did not answer says nothing about the ticker.
+            if not isinstance(exc, DataUnavailable):
+                _FAILED[symbol] = now
     db.watch_calls_prune(conn, now - KEEP_DAYS * 86400)
     return {"checked": checked, "errors": errors}
 
@@ -234,6 +265,7 @@ def since_yesterday(conn: sqlite3.Connection, user_id: int, full: bool,
                "was": before["action"] if before and shown else None,
                "move": None, "price": latest["price"] if latest else None,
                "at": latest["at"] if latest else None,
+               "day": latest["day"] if latest else None,
                "alerts": [e["message"] for e in mine
                           if e["kind"] not in ("stop_breach", "split")],
                "stops": [e["message"] for e in mine if e["kind"] == "stop_breach"]}
@@ -293,23 +325,37 @@ def notes(since: Dict) -> List[str]:
     return out
 
 
-def compose(user, rows: List[Dict], picks: List[Dict], base: str,
+def _session(day: Optional[int]) -> str:
+    """"Fri 20 Nov: " for a trading day, to open a row with; "" for none."""
+    if day is None:
+        return ""
+    t = time.gmtime(int(day) * 86400)
+    return "%s %d %s: " % (time.strftime("%a", t), t.tm_mday, time.strftime("%b", t))
+
+
+def compose(user, rows: List[Dict], picks: Optional[List[Dict]], base: str,
             stop_url: str, since: Optional[Dict] = None) -> Tuple[str, str]:
     """Subject and plain-text body. Plain text reads like a person wrote it,
     which is also what keeps it out of spam folders. since is the person's
-    since_yesterday(), said after their watchlist."""
+    since_yesterday(), said after their watchlist: each row with the session
+    it is about, since on a Monday morning that is Friday's, not the day
+    before. picks is strongest(), None when nothing was checked in time."""
     # BTC-USD reads as BTC, unless this email also names the fund listed as
     # BTC: then each goes by Yahoo's own symbol, as on the front page, so the
     # coin's call and the fund's are not two lines under one name.
     named_as: Dict[str, set] = {}
-    for r in list(rows) + list((since or {}).get("rows") or []) + list(picks):
+    for r in list(rows) + list((since or {}).get("rows") or []) + list(picks or []):
         named_as.setdefault(public.short(r["symbol"]), set()).add(r["symbol"])
 
     def label(symbol: str) -> str:
         short = public.short(symbol)
         return symbol if len(named_as.get(short, ())) > 1 else short
 
-    lines = ["Hi %s," % user.display, "", "Here is what Orenth says this week."]
+    # By name only: without one, the part of the address before the @ is
+    # what display falls back to, and a hidden Apple address is random there.
+    name = (user.name or "").strip()
+    lines = ["Hi %s," % name if name else "Hi,", "",
+             "Here is what Orenth says this week."]
     if rows:
         lines += ["", "YOUR WATCHLIST"]
         for r in rows:
@@ -324,9 +370,10 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
         lines += ["", "Your watchlist is empty. Add stocks from any analysis "
                       "page and they will show up here."]
     if since and (since["rows"] or since["quiet"]):
-        lines += ["", "SINCE YESTERDAY"]
+        lines += ["", "SINCE THE TRADING DAY BEFORE"]
         for r in since["rows"]:
-            lines.append("  %-6s %s" % (label(r["symbol"]), change_line(r)))
+            lines.append("  %-6s %s%s" % (label(r["symbol"]), _session(r["day"]),
+                                          change_line(r)))
             lines += ["         Alert: %s" % m for m in r["alerts"]]
             lines += ["         Stop: %s" % m for m in r["stops"]]
         lines += ["  %s" % s for s in notes(since)]
@@ -335,6 +382,8 @@ def compose(user, rows: List[Dict], picks: List[Dict], base: str,
         for p in picks:
             lines.append("  %-6s BUY    worked %d of %d times in tests on past prices"
                          % (label(p["symbol"]), p["worked"], p["samples"]))
+    elif picks is None:
+        lines.append("  The popular stocks could not be checked today.")
     else:
         lines.append("  None this week. Nothing on the popular list clears the "
                      "bar, so Orenth says wait. That is a normal answer.")
@@ -367,7 +416,7 @@ def run(conn: sqlite3.Connection, secret, base: str,
     if not ready() or not sending_window(now):
         return {"checked": 0}
     this_week = week(now)
-    picks = strongest(public.verdicts(conn))
+    picks = strongest(public.verdicts(conn), now=now)
     seen: Dict[Tuple[str, bool], Optional[Dict]] = {}
 
     def check(symbol: str, exact: bool = False) -> Dict:

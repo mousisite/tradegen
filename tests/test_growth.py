@@ -109,6 +109,21 @@ try:
     check("the counts are not said twice on the page",
           said["sure"].startswith("When it worked"), said["sure"])
 
+    falling = fake_result("NVDA", "AVOID", 83, 61)
+    falling.plan.odds_direction = -1
+    from bot import plain as plain_words
+    down = public.snapshot(falling, plain_words.explain_plan(falling.plan, falling.bars))
+    check("a strong record of falls never reads as a record of buying",
+          "a bet on the price falling worked 61 of them" in public.counts_line(down)
+          and "a bet on a fall worked 61 of 83 times"
+          in public.counts_line(down, short=True), public.counts_line(down))
+    check("and the page does not say it twice", "Here, worked means" not in down["sure"],
+          down["sure"])
+    falling.plan.action, falling.plan.direction = "WAIT", -1
+    short = public.snapshot(falling, plain_words.explain_plan(falling.plan, falling.bars))
+    check("a plan to short says its counts as they are", not short["fall"]
+          and "a bet on" not in public.counts_line(short))
+
     conn = db.connect(DB)
     asked, slept = [], []
 
@@ -133,6 +148,12 @@ try:
                    sleep=slept.append)
     check("a day later everything is checked again",
           len(asked) == len(public.POPULAR), len(asked))
+    public.save_verdict(conn, down)
+    page = c.get("/stock/nvda").data.decode("utf-8", "replace")
+    said_by = [m for m in page.split("\n") if "61 of them" in m]
+    check("not in the page, its link preview, its FAQ answer or its share text",
+          len(said_by) >= 4 and all("a bet on the price falling worked 61" in m
+                                    for m in said_by), said_by)
     public.save_verdict(conn, snap)
     conn.close()
 
@@ -674,6 +695,17 @@ try:
     digest.run(conn, web.app.secret_key, "https://orenth.app", look_up,
                send=send, now=monday + 7 * 86400)
     check("and again the next week", len(outbox) == 2)
+    day_old = dict(snap_for("GME", "BUY", 40, 30), at=monday - 9 * 86400)
+    today = dict(snap_for("KO", "BUY", 40, 20), at=monday - 3600)
+    check("a popular check nine days old is not one of this week's strongest",
+          [v["symbol"] for v in digest.strongest([day_old, today], now=monday)] == ["KO"])
+    check("one that says wait leaves none, which is a normal answer",
+          digest.strongest([dict(today, action="WAIT")], now=monday) == [])
+    stale = digest.strongest([day_old], now=monday)
+    _, said_stale = digest.compose(reader, [], stale, "https://orenth.app", stop)
+    check("but with nothing checked in time the email says that, not that nothing passed",
+          stale is None and "could not be checked today" in said_stale
+          and "clears the" not in said_stale, said_stale)
 
     def broken(*a, **k):
         raise RuntimeError("smtp down")
@@ -693,6 +725,8 @@ try:
           "Stop the weekly email?" in page and fresh(reader.id).weekly_email)
     check("a forged stop link is refused",
           c.post("/email/stop?u=%d&t=%s" % (reader.id, "0" * 32)).status_code == 404)
+    check("and a mangled one, with a letter no stop link has, is not a fault",
+          c.get("/email/stop?u=%d&t=caf%%C3%%A9" % reader.id).status_code == 404)
     r = c.post(url, data={"List-Unsubscribe": "One-Click"})
     check("pressing it, or the inbox button, stops it",
           r.status_code == 200 and not fresh(reader.id).weekly_email)
