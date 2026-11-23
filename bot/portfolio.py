@@ -654,13 +654,12 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
     exposure_pct = view.gross_exposure / account * 100
     count = len({p.symbol for p in priced})
     view.observations.append(
-        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash."
+        "%.0f%% of the account is deployed across %d position%s, leaving %s in cash.%s"
         % (exposure_pct, count, "" if count == 1 else "s",
-           "{:,.0f}".format(view.cash)))
-    if any(p.symbol.upper().endswith("=F") for p in sized):
-        view.observations.append(
-            "A futures contract is held on a deposit, so its full value is counted "
-            "as deployed but is not taken out of cash.")
+           "{:,.0f}".format(view.cash),
+           " A futures contract is held on a deposit, so its full value is counted as "
+           "deployed but is not taken out of cash."
+           if any(p.symbol.upper().endswith("=F") for p in sized) else ""))
 
     # Said first and loudest: a breached stop is the one thing on this page
     # that needs doing today, and "nothing at risk" would hide it.
