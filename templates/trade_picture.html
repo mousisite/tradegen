@@ -65,7 +65,7 @@
 </div>
 
 <div style="margin-top:var(--s3)">
-  <a class="btn quiet" href="{{ url_for('trades') }}{% if t['status'] == 'closed' %}#t{{ t['id'] }}{% endif %}">Back to the journal</a>
+  <a class="btn quiet" href="{{ url_for('trades', page=page if page > 1 else none) }}{% if t['status'] == 'closed' %}#t{{ t['id'] }}{% endif %}">Back to the journal</a>
 </div>
 
 {% endblock %}

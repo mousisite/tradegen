@@ -2620,10 +2620,18 @@ def trade_picture(trade_id: int):
         except ValueError:
             abort(404)
         parts = db_mod.trade_parts(row, db_mod.exits_for(conn, [trade_id]).get(trade_id, []))
+        # The page of the journal a closed one is on, for the way back to it.
+        page = 1
+        if row["status"] == "closed":
+            page += conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='closed' "
+                "AND account='paper' AND (ts_closed>? OR (ts_closed=? AND id>?))",
+                (uid(), row["ts_closed"], row["ts_closed"], trade_id)
+            ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
     from bot import journal as journal_mod
-    return render_template("trade_picture.html", t=row, parts=parts,
+    return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
                            broke=journal_mod.broke_rules_of(row),
                            followed=journal_mod.FOLLOWED_LABELS.get(

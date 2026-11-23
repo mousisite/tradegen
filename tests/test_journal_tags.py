@@ -670,6 +670,10 @@ try:
                                        "lesson": "", "page": "2"})
     check("a review on the second page comes back to it",
           "page=2" in r.headers["Location"] and r.headers["Location"].endswith("#t%d" % last))
+    first = conn.execute("SELECT id FROM trades WHERE symbol='CLS99'").fetchone()[0]
+    check("the picture of a trade on the second page leads back to it there",
+          'href="/trades?page=2#t%d"' % last in text(c.get("/trades/%d/picture" % last))
+          and 'href="/trades#t%d"' % first in text(c.get("/trades/%d/picture" % first)))
     r = c.post("/trades/delete", data={"trade_id": str(last), "page": "2"})
     check("and so does a delete", r.headers["Location"].endswith("/trades?page=2"))
     front = flat(text(c.get("/")))
