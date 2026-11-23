@@ -75,11 +75,11 @@ def _owned(out: Dict, row, user: Optional[int]) -> Dict:
     return out
 
 
-def _yours(sql: str, user: Optional[int], where: str = "WHERE"):
+def _yours(sql: str, user: Optional[int]):
     """The query and its arguments, for one person or for everybody."""
     if user is None:
         return sql, []
-    return "%s %s user_id = ?" % (sql, where), [int(user)]
+    return sql + " WHERE user_id = ?", [int(user)]
 
 
 # --- trades -----------------------------------------------------------------
