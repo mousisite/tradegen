@@ -185,6 +185,47 @@ check("cash is what was not paid out, whatever the holding is worth now",
 check("and deployed is still today's value", close(up.invested, 2000) and close(down.invested, 500))
 part = whole({"AAA": 60.0, "GONE": None}, [held(1, "AAA"), held(2, "GONE", qty=5)])
 check("with a price missing too", close(part.cash, 10000 - 1000 - 500), part.cash)
+mes = whole({"MES=F": 6000.0}, [held(1, "MES=F", qty=5, entry=6000, stop=5980)], asset="other")
+check("a futures contract is held on a deposit, so its full value is not taken out of cash",
+      close(mes.cash, 10000) and close(mes.gross_exposure, 30000)
+      and any("held on a deposit" in o for o in mes.observations), (mes.cash, mes.observations))
+
+# A source that answers slowly holds the page for so long and no longer.
+import time as _time  # noqa: E402
+
+real_slow = (P.fetch_bars, P.READ_FOR, P.fund.load, P.risk_mod.profile)
+asked_prices = []
+
+
+def slow_prices(symbol, interval="1d", lookback=None):
+    asked_prices.append(symbol)
+    _time.sleep(0.2)
+    raise P.DataError("no prices")
+
+
+P.fetch_bars, P.READ_FOR = slow_prices, 0.5
+try:
+    began = _time.time()
+    v = P.build([held(n, "S%03d" % n) for n in range(200)], account=10000)
+    took = _time.time() - began
+finally:
+    P.fetch_bars, P.READ_FOR, P.fund.load, P.risk_mod.profile = real_slow
+check("two hundred positions and a slow source do not hold the page for minutes",
+      took < 3 and len(asked_prices) < 60 and len(v.failed) == 200,
+      (took, len(asked_prices), len(v.failed)))
+
+# The day a stop was crossed is the same on every page: New York's, or a daily
+# bar's own.
+from types import SimpleNamespace as _NS  # noqa: E402
+
+midnight = 1795219200                                  # 21 Nov 2026 00:00 UTC
+daily = _NS(timestamp=[midnight - 86400, midnight])
+check("a crossing in the New York evening is that day's, as in the journal",
+      P.day_words(P.crossed_day("5m", daily, midnight)) == "20 Nov"
+      and P.day_words(P.crossed_day("1d", daily, midnight + 5400)) == "20 Nov")
+check("and a daily bar keeps its own day",
+      P.day_words(P.crossed_day("1d", daily, midnight)) == "21 Nov"
+      and P.crossed_day("1d", daily, None) is None)
 
 v = whole({"AAA": 100.0, "NEW": 100.0}, [held(1, "AAA"), held(2, "NEW")], {"AAA": 1.5})
 check("a holding with no beta counts as one that moves with the market, as in the shock table",

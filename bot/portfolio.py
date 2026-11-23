@@ -30,6 +30,11 @@ from .market import DataError, fetch_bars, split_factor_since, split_words
 # a table nobody can read.
 COMPARE_MOST = 40
 
+# Seconds the page keeps asking for prices and betas. A journal holds up to two
+# hundred positions, and a source that answers slowly held one of the server's
+# few threads for as long as it took to ask about every one of them.
+READ_FOR = 25.0
+
 
 @dataclass
 class Trail:
@@ -461,6 +466,7 @@ def build(rows, account: float, with_correlation: bool = True,
         for r in rows
     ]
 
+    started = time.monotonic()
     _enrich(positions, view)
     for p in positions:
         if p.split != 1.0:
@@ -522,7 +528,12 @@ def build(rows, account: float, with_correlation: bool = True,
                 (p.beta if p.beta is not None else 1.0) * p.notional * p.direction
                 for p in sized) / view.gross_exposure
 
-    if with_correlation and len({p.symbol for p in priced}) >= 2:
+    if (with_correlation and len({p.symbol for p in priced}) >= 2
+            and time.monotonic() - started >= READ_FOR):
+        view.observations.append(
+            "Prices came in too slowly to compare how the holdings move together. "
+            "Open this page again in a minute.")
+    elif with_correlation and len({p.symbol for p in priced}) >= 2:
         worth: Dict[str, float] = {}
         for p in priced:
             worth[p.symbol] = worth.get(p.symbol, 0.0) + abs(p.notional)
@@ -562,8 +573,17 @@ def keep_reads(conn, view: PortfolioView, now: Optional[float] = None) -> None:
 
 
 def _enrich(positions: List[Position], view: PortfolioView) -> None:
-    """Attach live price, sector and risk stats to each holding, concurrently."""
-    def grab(p: Position):
+    """Attach live price, sector and risk stats to each holding, concurrently.
+
+    Every price first, since every figure on the page needs those. Whatever
+    has not been asked for after READ_FOR seconds is left unknown.
+    """
+    give_up = time.monotonic() + READ_FOR
+
+    def price(p: Position):
+        if time.monotonic() >= give_up:
+            view.failed.append(p.symbol)
+            return
         try:
             # The trade's own bars, which the journal, paper.py and the stop
             # notice read it on: on daily bars a whole day is held to the stop
@@ -588,6 +608,9 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             p.read = read
         except (DataError, Exception):
             view.failed.append(p.symbol)
+
+    def rest(p: Position):
+        if p.price is None or time.monotonic() >= give_up:
             return
         try:
             if p.asset_class == "equity":
@@ -607,7 +630,8 @@ def _enrich(positions: List[Position], view: PortfolioView) -> None:
             pass
 
     with ThreadPoolExecutor(max_workers=min(6, len(positions))) as pool:
-        list(pool.map(grab, positions))
+        list(pool.map(price, positions))
+        list(pool.map(rest, positions))
 
 
 def _name_weights(positions: List[Position], gross: float) -> Dict[str, float]:

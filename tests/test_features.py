@@ -303,6 +303,51 @@ try:
           and "ZZQ rose above" in body)
     time.sleep(1.6)                    # let the abandoned fetches finish
 
+    # Reloaded while the prices are still being read, the page waits for that
+    # reading rather than starting another beside it.
+    real_mark, reads = web._mark_to_market, []
+
+    def slow_mark(trades):
+        reads.append(len(trades))
+        time.sleep(0.6)
+        return real_mark(trades)
+
+    web._mark_to_market = slow_mark
+    web.DASHBOARD_WAIT = 0.05
+    try:
+        for _ in range(4):
+            c.get("/")
+        web.DASHBOARD_WAIT = 3.0
+        body = text(c.get("/"))
+    finally:
+        web._mark_to_market = real_mark
+        web.DASHBOARD_WAIT = real_wait
+    check("the page reloaded while prices are read starts no second reading",
+          len(reads) == 1, reads)
+    check("and shows what that one found", "did not come back in time" not in flat(body)
+          and not web._MARKING)
+
+    # And a reading itself stops asking after so long, for the journal, which
+    # waits for it.
+    real_one, real_for, marked = web._mark_one, web.MARK_FOR, []
+
+    def slow_one(trade):
+        marked.append(trade["id"])
+        time.sleep(0.2)
+        return {"price": 1.0, "r": 0.0, "status": "open"}
+
+    web._mark_one, web.MARK_FOR = slow_one, 0.5
+    try:
+        t0 = time.time()
+        marks = web._mark_to_market([{"id": n} for n in range(200)])
+        took = time.time() - t0
+    finally:
+        web._mark_one, web.MARK_FOR = real_one, real_for
+    check("a long journal and a slow source do not hold a page for minutes",
+          took < 3 and len(marked) < 80 and len(marks) == 200
+          and sum(m["status"] == "no data" for m in marks.values()) == 200 - len(marked),
+          (took, len(marked), len(marks)))
+
     print()
     print("=" * 72)
     print("THE REVIEW BEFORE A PAPER TRADE")
