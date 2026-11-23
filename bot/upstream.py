@@ -55,15 +55,21 @@ PROBE_FOR = 30.0
 # is a message.
 THRESHOLD = 3
 
-# Most answers kept at once. One parsed price history can be over a megabyte,
-# the server has half a gigabyte, and the cache is only here to collapse the
-# repeats of a single page view, which never need more than a few dozen.
-MAX_ENTRIES = 100
+# Most answers kept at once, and the most they may weigh together. The server
+# has half a gigabyte. Measured, parsed: a year of daily bars is 64 KB, five
+# years 300 KB, a month of a stock's 5-minute bars 350 KB, a coin's 1.8 MB, and
+# sixty days of a coin's 5-minute bars, or two years of its hourly ones, 3.5 MB.
+# A hundred of those weighed 350 MB, so it is the weight that is limited: 64 MB
+# is some two hundred five-year histories.
+MAX_ENTRIES = 400
+MAX_BYTES = 64 * 1024 * 1024
 
 _lock = threading.Lock()
 # Told when a request sent to see whether the source is back has settled.
 _settled = threading.Condition(_lock)
 _cache: Dict[str, Tuple[float, object]] = {}
+# What each kept answer weighs, by its key.
+_weights: Dict[str, int] = {}
 # One entry per question being asked right now: an event set when the answer
 # is in, and the error, when asking failed.
 _inflight: Dict[str, Dict] = {}
@@ -300,14 +306,16 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
         # once here, but not past a source that has said stop in the meantime,
         # and keep what comes back for the next caller.
         result = ask()
+        size = weight(result)
         with _lock:
-            _store(key, result)
+            _store(key, result, size)
         return result
 
     try:
         result = ask()
+        size = weight(result)
         with _lock:
-            _store(key, result)
+            _store(key, result, size)
         return result
     except Exception as exc:
         flight["error"] = exc
@@ -318,18 +326,56 @@ def cached(key: str, fetch: Callable[[], object], ttl: float = DEFAULT_TTL,
         flight["done"].set()
 
 
-def _store(key: str, result: object) -> None:
+def weight(answer: object) -> int:
+    """About how many bytes a parsed answer holds, read off its shape.
+
+    A price history is a few long lists of numbers, so each is counted by its
+    length rather than number by number: 36 bytes each, which is what one
+    measures with its place in the list.
+    """
+    total, todo = 0, [answer]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, dict):
+            total += 240 + 110 * len(x)
+            todo.extend(v for v in x.values() if isinstance(v, (dict, list, str)))
+        elif isinstance(x, list):
+            # Lists of objects are walked; a list of numbers may begin with a
+            # few blanks, and is told by its first and its last.
+            if x and any(isinstance(end, (dict, list, str)) for end in (x[0], x[-1])):
+                total += 8 * len(x)
+                todo.extend(x)
+            else:
+                total += 36 * len(x)
+        elif isinstance(x, str):
+            total += 50 + len(x)
+        else:
+            total += 32
+    return total
+
+
+def _held() -> int:
+    return sum(_weights.get(k, 0) for k in _cache)
+
+
+def _forget(key: str) -> None:
+    _cache.pop(key, None)
+    _weights.pop(key, None)
+
+
+def _store(key: str, result: object, size: int) -> None:
     """Keep an answer and let go of what can no longer be served. Lock held."""
     now = time.time()
     _cache[key] = (now, result)
+    _weights[key] = size
     # Expired entries used to stay until four hundred others pushed them out,
     # which at a megabyte or more each could outgrow the whole server.
     for old in [k for k, (at, _) in _cache.items() if now - at >= _max_ttl]:
         if old != key:
-            del _cache[old]
-    while len(_cache) > MAX_ENTRIES:
-        del _cache[min((k for k in _cache if k != key),
-                       key=lambda k: _cache[k][0])]
+            _forget(old)
+    while len(_cache) > 1 and (len(_cache) > MAX_ENTRIES
+                               or _held() > MAX_BYTES):
+        _forget(min((k for k in _cache if k != key), key=lambda k: _cache[k][0]))
 
 
 def stats() -> Dict:
@@ -337,6 +383,7 @@ def stats() -> Dict:
     with _lock:
         return {
             "cached_keys": len(_cache),
+            "cached_bytes": _held(),
             "in_flight": len(_inflight),
             "hosts": {
                 host: {
@@ -355,6 +402,7 @@ def reset() -> None:
     global _max_ttl
     with _lock:
         _cache.clear()
+        _weights.clear()
         _inflight.clear()
         _breakers.clear()
         _max_ttl = 0.0
