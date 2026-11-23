@@ -24,10 +24,11 @@ import html
 import math
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import feedparser
 import requests
@@ -360,6 +361,14 @@ def gather_social(symbol: str, limit: int = 30) -> List[Item]:
     return out
 
 
+# Scores Claude has given, by exactly what it was asked: when, how many it
+# scored, and the scores.
+SCORED_TTL = 30 * 60.0
+SCORED_KEPT = 200
+_SCORED: Dict[Tuple[str, str, str], Tuple[float, int, List[float]]] = {}
+_SCORED_LOCK = threading.Lock()
+
+
 def _score_with_claude(items: List[Item], symbol: str) -> int:
     """Score items with Claude. Returns how many it scored, or 0 when that was
     too few to use; the word list scores any it left out.
@@ -378,6 +387,16 @@ def _score_with_claude(items: List[Item], symbol: str) -> int:
 
     numbered = "\n".join("%d. %s" % (i + 1, it.text[:220])
                          for i, it in enumerate(items))
+    # The same items are the same question, and each asking is paid for. The
+    # analysis above this is kept per person's settings, so one account with a
+    # different size in each address asked it again every time.
+    asked = (os.environ.get("CLAUDE_MODEL", ""), symbol, numbered)
+    with _SCORED_LOCK:
+        kept = _SCORED.get(asked)
+    if kept is not None and time.time() - kept[0] < SCORED_TTL:
+        for it, score in zip(items, kept[2]):
+            it.score = score
+        return kept[1]
     prompt = (
         "You are scoring market sentiment for the instrument %s for a SHORT-TERM "
         "day trade (hours, not months).\n\n"
@@ -424,6 +443,12 @@ def _score_with_claude(items: List[Item], symbol: str) -> int:
     # An item it gave no score for used to count as neutral, whatever it said.
     for idx, it in enumerate(items):
         it.score = got[idx] if idx in got else lexicon_score(it.text)
+    # One cut short is worth asking again.
+    if ended != "max_tokens":
+        with _SCORED_LOCK:
+            _SCORED[asked] = (time.time(), len(got), [it.score for it in items])
+            while len(_SCORED) > SCORED_KEPT:
+                del _SCORED[min(_SCORED, key=lambda k: _SCORED[k][0])]
     return len(got)
 
 

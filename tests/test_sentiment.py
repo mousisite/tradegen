@@ -206,6 +206,17 @@ try:
     check("the page says so when the word list did part of it",
           "Claude" in part and "list of finance words" in part
           and "Claude" in whole and "finance words" not in whole, (part, whole))
+    # Each asking is paid for, and the analysis above it is kept per person's
+    # settings: a different account size in each address asked again each time.
+    replies.update(stop="end_turn", text="\n".join("%d: 0.9" % k for k in range(1, 7)))
+    items = headlines()
+    check("the same headlines are not paid for twice",
+          sentiment._score_with_claude(items, "AAPL") == 6
+          and [i.score for i in items] == [0.1] * 6, [i.score for i in items])
+    items = headlines() + [sentiment.Item("A new one", "x", "news", 1.0)]
+    replies.update(text="\n".join("%d: 0.9" % k for k in range(1, 8)))
+    check("but a new one among them is read", sentiment._score_with_claude(items, "AAPL")
+          == 7 and items[0].score == 0.9, [i.score for i in items])
 finally:
     if real_module is None:
         _sys.modules.pop("anthropic", None)
