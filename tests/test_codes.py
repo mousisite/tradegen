@@ -449,7 +449,8 @@ try:
     outbox = {}
     real_send, real_twilio = codes._smtp_send, codes._twilio
     codes._smtp_send = lambda to, code: outbox.__setitem__(to, code)
-    codes._twilio = fake_twilio
+    twilio_asked = []
+    codes._twilio = lambda *a, **k: (twilio_asked.append(a), fake_twilio(*a, **k))[1]
     try:
         r = c.post("/signin/email", data={"to": "Fay@Example.com", "next": "/trades"})
         check("asking for a code moves on to the code page",
@@ -459,8 +460,14 @@ try:
         check("which says where it was sent", "fay@example.com" in page)
         r = c.post("/signin/email/code", data={"code": "999999"
                                                if outbox["fay@example.com"] != "999999" else "888888"})
+        page = r.data.decode("utf-8", "replace")
         check("a wrong code keeps them on the page with a reason",
-              r.status_code == 200 and "not right" in r.data.decode("utf-8", "replace"))
+              r.status_code == 200 and "not right" in page)
+        check("read out, and tied to the box it is about",
+              'role="alert" id="code-error"' in page
+              and 'aria-describedby="code-error" aria-invalid="true">' in page)
+        check("and starting again still goes where they were headed",
+              'href="/signin/email?next=/trades"' in page)
         r = c.post("/signin/email/code", data={"code": outbox["fay@example.com"]})
         check("the right code signs them in and goes where they were headed",
               r.status_code == 302 and r.headers["Location"].endswith("/trades"),
@@ -481,6 +488,24 @@ try:
         check("a bad address is explained, not crashed on",
               bad.status_code == 200
               and "does not look like an email" in bad.data.decode("utf-8", "replace"))
+        check("and tied to the box", 'value="not-an-email" aria-describedby="to-error" '
+              'aria-invalid="true">' in bad.data.decode("utf-8", "replace"))
+        # A form on another site would mail an address of its choosing.
+        for path, to in (("/signin/email", "victim@example.com"),
+                         ("/signin/phone", "+1 555 765 9999")):
+            sent = len(outbox), len(twilio_asked)
+            stranger = web.app.test_client()
+            r = stranger.post(path, data={"to": to}, headers={
+                "Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})
+            check("a form on another site sends no code by %s" % path[8:],
+                  (len(outbox), len(twilio_asked)) == sent
+                  and not r.headers.getlist("Set-Cookie")
+                  and "here to be sent a code" in r.data.decode("utf-8", "replace"),
+                  (r.status_code, r.headers))
+            r = stranger.post(path, data={"to": to}, headers={
+                "Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"})
+            check("while the form here does", r.status_code == 302
+                  and (len(outbox), len(twilio_asked)) != sent)
         check("going to the code page with nothing pending starts over",
               c.get("/signin/phone/code").status_code == 302)
     finally:

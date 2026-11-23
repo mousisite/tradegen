@@ -487,7 +487,8 @@ try:
     check("without the flow cookie the post back is refused",
           forged.status_code == 400, forged.status_code)
     check("and says to start again",
-          "did not match this browser" in forged.data.decode("utf-8", "replace"))
+          "took too long, or was started in another browser"
+          in re.sub(r"\s+", " ", forged.data.decode("utf-8", "replace")))
     check("without asking Apple anything", len(FAKE.posts) == before)
     check("and nobody was signed in",
           outsider.get("/account").status_code == 302)
@@ -498,14 +499,15 @@ try:
     wrong = web.app.test_client()
     wrong.set_cookie("apple_flow", flow.decoded_value, path="/auth/apple")
     out = wrong.post("/auth/apple/callback", data={"code": "c", "state": "guessed"})
-    check("a flow cookie with the wrong state is refused", out.status_code == 400)
+    check("a flow cookie with the wrong state is refused", out.status_code == 400
+          and "did not match this browser" in out.data.decode("utf-8", "replace"))
 
     wrong.set_cookie("apple_flow", flow.decoded_value[:-3] + "AAA", path="/auth/apple")
     out = wrong.post("/auth/apple/callback", data={"code": "c", "state": "x"})
     check("a cookie that was tampered with is refused", out.status_code == 400)
 
     starter = web.app.test_client()
-    start = starter.get("/auth/apple")
+    start = starter.get("/auth/apple?next=/monitor")
     flow = starter.get_cookie("apple_flow", path="/auth/apple")
     cancel = web.app.test_client()
     cancel.set_cookie("apple_flow", flow.decoded_value, path="/auth/apple")
@@ -514,6 +516,36 @@ try:
         "state": parse_qs(urlparse(start.headers["Location"]).query)["state"][0]})
     check("cancelling at Apple says so", out.status_code == 400 and
           "cancelled" in out.data.decode("utf-8", "replace"))
+    check("and the buttons still go where they were headed",
+          'href="/auth/apple?next=/monitor"' in out.data.decode("utf-8", "replace"))
+
+    # Someone who waited longer on Apple's page than the cookie lasts.
+    for where, query, flow_seconds in (("the website", "", 0), ("the app", "app", 0),
+                                       ("the app, with its cookie gone", "app", None)):
+        starter = web.app.test_client()
+        start = starter.get("/auth/apple" + ("?app=1&challenge=" + "a" * 43
+                                             if query else ""))
+        flow = starter.get_cookie("apple_flow", path="/auth/apple")
+        slow = web.app.test_client()
+        usual = web.APPLE_FLOW_SECONDS
+        if flow_seconds is not None:
+            slow.set_cookie("apple_flow", flow.decoded_value, path="/auth/apple")
+            web.APPLE_FLOW_SECONDS = -1
+        try:
+            out = slow.post("/auth/apple/callback", data={
+                "error": "user_cancelled_authorize", "state": parse_qs(urlparse(
+                    start.headers["Location"]).query)["state"][0]})
+        finally:
+            web.APPLE_FLOW_SECONDS = usual
+        if query:
+            check("too slow in %s: its sheet goes back to the app, which is told it "
+                  "ran out" % where, out.headers.get("Location")
+                  == "app.orenth.ios://auth/finish?error=expired",
+                  (out.status_code, out.headers.get("Location")))
+        else:
+            check("too slow on %s is told it took too long" % where,
+                  out.status_code == 400 and "took too long"
+                  in re.sub(r"\s+", " ", out.data.decode("utf-8", "replace")))
 
     section("THE NAME ARRIVES ONCE")
 

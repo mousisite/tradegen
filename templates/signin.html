@@ -28,7 +28,7 @@
       of Pro free.</div>
   {% endif %}
   {% if reason %}
-    <div class="notice">{{ reason }}</div>
+    <div class="notice" role="alert">{{ reason }}</div>
   {% endif %}
   {# Opened from a link inside TikTok, Instagram or another app, where Google
      answers with a page of its own that says only that access is blocked. #}
@@ -139,7 +139,7 @@
 </div>
 
 {% if app_signin %}
-<script src="{{ url_for('static', filename='signin-app.js') }}" defer></script>
+<script src="{{ url_for('static', filename='signin-app.js', v=asset_version) }}" defer></script>
 {% endif %}
 
 {% endblock %}

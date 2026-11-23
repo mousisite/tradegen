@@ -148,9 +148,16 @@
     <div class="tools">
       {# Sign in, because the front page and the example's own banner already
          ask newcomers to create an account; this is the way back in for
-         someone who has one. The page it opens does both. #}
+         someone who has one. The page it opens does both, and signing in
+         comes back to the page they were on, with what was asked of it only
+         where the page is nothing without that: an address can carry any
+         words, and they are not repeated. #}
       {% if auth_on and (demo or not current_user) and active != 'signin' %}
-        <a class="btn sm" href="{{ url_for('signin') }}">Sign in</a>
+        {% set here = none if request.method != 'GET'
+           or request.endpoint in (none, 'index', 'email_stop')
+           else request.full_path.rstrip('?') if request.endpoint in
+           ('analyse', 'research', 'ideas', 'screener') else request.path %}
+        <a class="btn sm" href="{{ url_for('signin', next=here) }}" rel="nofollow">Sign in</a>
       {% endif %}
       {% if go_pro and active != 'pricing' %}
         <a class="btn sm" href="{{ url_for('pricing') }}">Go Pro</a>
