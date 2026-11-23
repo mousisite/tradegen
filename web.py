@@ -1621,7 +1621,8 @@ def analyse():
     try:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
-            open_rows = db_mod.list_trades(conn, status="open", user=uid())
+            open_rows = db_mod.list_trades(conn, status="open", account="paper",
+                                           limit=None, user=uid())
         finally:
             conn.close()
         if open_rows:
