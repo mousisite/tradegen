@@ -122,6 +122,9 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status, account);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
+-- Deleting an account looks for trades naming each of its analyses. Without
+-- this it read everybody's trades once per analysis, holding the write lock.
+CREATE INDEX IF NOT EXISTS idx_trades_run ON trades(run_id);
 
 -- Parts of a position closed while the rest stays open, in the trade's own
 -- shares. The trades row keeps the size it was opened with. A trade closed in
