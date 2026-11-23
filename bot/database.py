@@ -254,6 +254,10 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # What is deleted is overwritten, not only unlinked: freed pages are copied
+    # into every backup, and the privacy page says a deleted account's data is
+    # in none made afterwards.
+    conn.execute("PRAGMA secure_delete = ON")
     if not _prepared(path):
         try:
             with _PREPARE_LOCK:

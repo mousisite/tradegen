@@ -1231,6 +1231,46 @@ try:
           r.get_json()["known"] is False
           and [d["address"] for d in device_rows(dave.id)] == [FCM + "laptop"])
 
+    section("A SIGN-IN OVER ANOTHER ENDS IT, AND TAKES THEIR DEVICE OFF")
+    ann = person("ann-shared@example.com")
+    ben = person("ben-shared@example.com")
+
+    def signs_in(user):
+        """A real sign-in, in the browser c is."""
+        with c.session_transaction() as sess:
+            held = dict(sess)
+        with web.app.test_request_context("/"):
+            web.session.update(held)
+            web._open_session(user)
+            now = dict(web.session)
+        with c.session_transaction() as sess:
+            sess.clear()
+            sess.update(now)
+        return held.get(web.SESSION_KEY)
+
+    def alive(token):
+        conn = db.connect(DB)
+        try:
+            return A.user_for_session(conn, token) is not None
+        finally:
+            conn.close()
+
+    sign_out()
+    signs_in(ann)
+    c.post("/api/push/subscribe", json={"kind": "web",
+                                        "subscription": subscription(FCM + "shared")})
+    first = signs_in(ann)
+    check("the same person signing in again ends the first sign-in", not alive(first))
+    check("and keeps their own device on", len(device_rows(ann.id)) == 1)
+    c.post("/api/push/subscribe", json={"kind": "web", "check": True,
+                                        "subscription": subscription(FCM + "shared")})
+    second = signs_in(ben)
+    check("someone else signing in there ends it too", not alive(second))
+    check("and takes the device off the person before", not device_rows(ann.id))
+    check("while they are signed in themselves",
+          "ben-shared@example.com" in c.get("/account").data.decode("utf-8", "replace"))
+    web._RATE.clear()
+
     section("FROM A FIRED ALERT TO A NOTIFICATION")
     web.market_mod.split_history = lambda symbol: []
     web._call_now = lambda symbol, interval="1d": None

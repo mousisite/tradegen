@@ -93,9 +93,9 @@
   <p class="prose">If you press Share on an analysis, Orenth makes a public
     page with that stock, the call, its counts and the date. It does not show
     your name or email. Deleting your account deletes these pages.</p>
-  <p class="prose">Your invite link records who joined through it, so both of
-    you can be given the free week. If you turn on the weekly email, Orenth
-    sends it to your sign-in address every Monday until you turn it off, with
+  <p class="prose">Your invite link records who joined through it, and how many
+    free weeks it has earned you, so both of you can be given the free week.
+    If you turn on the weekly email, Orenth sends it to your sign-in address every Monday until you turn it off, with
     a link in every one to stop it. If you ask for alert emails on the
     Monitor page, each alert that fires and each position that crosses its
     stop is emailed to that address too, until you switch them off there.</p>
@@ -296,8 +296,10 @@
   </p>
   <p class="prose">
     The server keeps backups so that a fault cannot lose everyone's journal.
-    A backup made before you deleted your account still holds a copy until it
-    is replaced by newer ones, which takes about a week. The server also
+    A backup made before you deleted your account still holds a copy until
+    {% if backup_days %}it is replaced by newer ones, which takes about
+    {{ 'a week' if backup_days <= 7 else '%d days'|format(backup_days) }}{% else %}it
+    is deleted by hand{% endif %}. The server also
     copies the database each time a new version of Orenth starts, and keeps
     the last {{ release.keep }} of those copies{% if release.days %}, deleting
     each after {{ release.days }} days{% else %}; one made before you deleted

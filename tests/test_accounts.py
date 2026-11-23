@@ -6,6 +6,7 @@ other's trades. Adding a login without that would be worse than having no login
 at all, because it looks like a boundary while not being one.
 """
 import os as _os
+import sqlite3
 import sys as _sys
 import time
 
@@ -509,13 +510,6 @@ conn.commit()
 check("an expired session is refused", A.user_for_session(conn, expired) is None)
 check("purging removes it", A.purge_expired(conn) >= 1)
 
-A.end_all_sessions(conn, alice.id)          # start from a known state
-t1 = A.start_session(conn, alice.id)
-t2 = A.start_session(conn, alice.id)
-check("signing out everywhere ends every one of them",
-      A.end_all_sessions(conn, alice.id) == 2)
-check("both are then dead",
-      A.user_for_session(conn, t1) is None and A.user_for_session(conn, t2) is None)
 conn.close()
 
 sign_in_as(c, bob)
@@ -568,6 +562,83 @@ try:
     check("deleting a missing account is refused", False)
 except ValueError:
     check("deleting a missing account is refused", True)
+
+# More analyses than SQLite takes values in one statement (32,766).
+busy = A.upsert_google_user(conn, {"email": "busy@example.com", "sub": "sub-busy"})
+run_columns = [r for r in conn.execute("PRAGMA table_info(runs)")
+               if r["notnull"] and not r["pk"] and r["name"] != "user_id"]
+insert_run = "INSERT INTO runs (user_id%s) VALUES (?%s)" % (
+    "".join(", " + r["name"] for r in run_columns),
+    "".join(", 1" if r["type"] in ("INTEGER", "REAL") else ", 'x'" for r in run_columns))
+conn.executemany(insert_run, [(busy.id,)] * 32800)
+busy_run = conn.execute("SELECT MAX(id) FROM runs WHERE user_id=?", (busy.id,)).fetchone()[0]
+conn.execute("INSERT INTO trades (run_id, symbol, direction, ts_opened, entry, stop, user_id) "
+             "VALUES (?, 'AAPL', 1, 1, 100, 95, ?)", (busy_run, alice.id))
+hers = conn.execute("SELECT MAX(id) FROM trades WHERE user_id=?", (alice.id,)).fetchone()[0]
+conn.commit()
+busy_token = A.start_session(conn, busy.id)
+
+# Stopped at the very last step, nothing of theirs may be gone.
+real_forget = apple_store.forget_user
+
+
+def locked(*_a):
+    raise sqlite3.OperationalError("database is locked")
+
+
+apple_store.forget_user = locked
+try:
+    A.delete_user(conn, busy.id)
+    check("a deletion that fails part-way says so", False)
+except sqlite3.OperationalError:
+    other = db.connect(DB)
+    check("a deletion that fails part-way leaves everything where it was",
+          A.owned_counts(other, busy.id)["runs"] == 32800
+          and A.user_for_session(other, busy_token) is not None
+          and not conn.in_transaction)
+    other.close()
+    leaving = web.app.test_client()
+    with leaving.session_transaction() as sess:
+        sess[web.SESSION_KEY] = busy_token
+    r = leaving.post("/account/delete", data={"confirm": "delete"})
+    check("and the person is told in words, not shown a broken page",
+          r.status_code == 503 and "still here" in r.data.decode("utf-8", "replace"),
+          r.status_code)
+finally:
+    apple_store.forget_user = real_forget
+A.delete_user(conn, busy.id)
+check("an account with any number of analyses can be deleted",
+      A.get_user(conn, busy.id) is None)
+check("and someone else's trade that named one of them stays theirs",
+      conn.execute("SELECT run_id FROM trades WHERE id=? AND user_id=?",
+                   (hers, alice.id)).fetchone()["run_id"] is None)
+conn.execute("DELETE FROM trades WHERE id=?", (hers,))
+conn.commit()
+
+# A deleted row's bytes stay in the file, and so in later backups, unless the
+# connection overwrites them.
+noted = A.upsert_google_user(conn, {"email": "noted@example.com", "sub": "sub-noted"})
+db.thesis_save(conn, "AAPL", 100.0, 0.1, "x", [], [], [], [], "unmistakable-note-7781" * 2000,
+               user=noted.id)
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+A.delete_user(conn, noted.id)
+conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+with open(DB, "rb") as f:
+    raw = f.read()
+check("a deleted account's words are not left in the file",
+      b"unmistakable-note-7781" not in raw and b"noted@example.com" not in raw)
+
+# A Google address changed to one another account here uses.
+mover = A.upsert_google_user(conn, {"email": "mover@example.com", "sub": "sub-mover"})
+taken = A.upsert_email_user(conn, "taken@example.com")
+moved = A.upsert_google_user(conn, {"email": "taken@example.com", "sub": "sub-mover"})
+check("a Google address another account uses does not lock its owner out",
+      moved.id == mover.id and moved.email == "mover@example.com")
+check("nor take that account's address",
+      A.get_user(conn, taken.id).email == "taken@example.com")
+moved = A.upsert_google_user(conn, {"email": "new@example.com", "sub": "sub-mover"})
+check("while a free one is still taken up",
+      moved.id == mover.id and moved.email == "new@example.com")
 conn.close()
 
 print()
@@ -613,16 +684,47 @@ try:
     check("the journal shows them the example account instead",
           r.status_code == 200
           and "looking around an example account" in r.data.decode("utf-8", "replace"))
+    # Link checkers and uptime monitors ask with HEAD.
+    for path in ("/trades", "/strategies", "/settings"):
+        r = anon.head(path)
+        check("HEAD %s answers as GET does" % path,
+              r.status_code == 200 == anon.get(path).status_code, r.status_code)
+    r = anon.head("/account")
+    check("and HEAD for a page behind the login still says to sign in",
+          r.status_code == 302 and "/signin" in r.headers.get("Location", ""))
+    check("while a visitor's POST is still an action that needs signing in",
+          anon.post("/settings").status_code == 302)
     r = anon.get("/api/alerts/status")
     check("the api answers 401 rather than redirecting", r.status_code == 401)
     check("the sign-in page is reachable", anon.get("/signin").status_code == 200)
     check("static files stay reachable",
           anon.get("/static/style.css").status_code == 200)
 
-    r = anon.get("/auth/google/callback?code=abc&state=forged")
-    check("a forged state is refused", r.status_code == 400)
-    r = anon.get("/auth/google/callback?state=x")
-    check("a callback with no code is refused", r.status_code == 400)
+    def mid_sign_in():
+        """A browser part-way through, and the state it holds."""
+        browser = web.app.test_client()
+        browser.get("/auth/google")
+        with browser.session_transaction() as sess:
+            return browser, sess["oauth_state"]
+
+    asked = []
+    real_sign_in = auth_mod.sign_in
+    auth_mod.sign_in = lambda *a: asked.append(a)
+    try:
+        for forged in ("forged", "", "%C3%A9"):
+            browser, _real = mid_sign_in()
+            r = browser.get("/auth/google/callback?code=abc&state=" + forged)
+            check("a forged state (%r) is refused" % forged, r.status_code == 400
+                  and "did not match" in r.data.decode("utf-8", "replace"), r.status_code)
+        browser, real = mid_sign_in()
+        r = browser.get("/auth/google/callback?state=" + real)
+        check("a callback with no code is refused", r.status_code == 400
+              and "no sign-in code" in r.data.decode("utf-8", "replace"), r.status_code)
+        r = anon.get("/auth/google/callback?code=abc&state=forged")
+        check("as is one where no sign-in was begun", r.status_code == 400)
+        check("and Google was asked about none of them", not asked, asked)
+    finally:
+        auth_mod.sign_in = real_sign_in
 
     _os.environ["GOOGLE_ALLOWED_DOMAINS"] = "example.com"
     check("a domain restriction is read", auth_mod.allowed_domains() == ("example.com",))

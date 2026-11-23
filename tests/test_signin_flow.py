@@ -145,6 +145,32 @@ try:
     for tag in ('name="description"', 'property="og:title"',
                 'property="og:image"', 'name="twitter:card"'):
         check("the page carries %s" % tag, tag in card)
+    # Google answers "access blocked" inside another app's own browser, and
+    # nearly every visitor comes from a link in one.
+    def signin_for(agent):
+        return web.app.test_client().get("/signin", headers={"User-Agent": agent}) \
+            .data.decode("utf-8", "replace")
+
+    iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) " \
+             "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    for where, agent in (
+            ("TikTok on an iPhone", iphone + "Mobile/15E148 musical_ly_37.1.0 JsSdk/2.0 "
+                                             "BytedanceWebview/d8a21c6"),
+            ("TikTok on Android", "Mozilla/5.0 (Linux; Android 14; SM-S911U Build/UP1A; wv) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+                                  "Chrome/130.0.0.0 Mobile Safari/537.36 trill_370104"),
+            ("Instagram", iphone + "Mobile/22B83 Instagram 356.0.0.29 (iPhone14,7)"),
+            ("Facebook", iphone + "Mobile/22B83 [FBAN/FBIOS;FBAV/489.0.0]")):
+        check("%s is told how to get out to sign in" % where,
+              "open the page in your" in signin_for(agent))
+    for where, agent in (
+            ("Safari", iphone + "Version/18.1 Mobile/15E148 Safari/604.1"),
+            ("Chrome on Android", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"),
+            ("the Orenth app", iphone + "Mobile/15E148 OrenthApp/1.0"),
+            ("no browser named", "")):
+        check("%s is not" % where, "data-embedded" not in signin_for(agent))
+
     # X and several chat clients drop a card whose image is not https, and
     # behind a TLS terminator the app sees a plain http request, so these must
     # be built from the public address rather than the observed one.
@@ -398,12 +424,14 @@ try:
     check("the app opens without a redirect", home.status_code == 200,
           home.status_code)
     body = home.data.decode("utf-8", "replace")
-    check("the page knows who it is", "Dana" in body or "D" in body)
+    check("the page knows who it is", 'title="trader@example.com"' in body)
 
     account_page = visitor.get("/account").data.decode("utf-8", "replace")
     check("the account page shows the signed-in address",
           "trader@example.com" in account_page)
     check("and offers a way out", "Sign out" in account_page)
+    check("and says how it can be signed in to, not how this sign-in began",
+          re.search(r"You can sign in with\s+Google\.", account_page))
 
     with visitor.session_transaction() as sess:
         check("the one-time state was consumed", "oauth_state" not in sess)
@@ -440,7 +468,25 @@ try:
     r = visitor.get("/signout")
     check("a link cannot sign anyone out", r.status_code == 405
           and visitor.get("/account").status_code == 200, r.status_code)
-    visitor.post("/signout")
+    said = r.data.decode("utf-8", "replace")
+    check("and whoever opens it is told so on a page of the site",
+          "Go back and use" in said and "Orenth" in said
+          and "POST" in r.headers.get("Allow", ""), said[:200])
+    r = visitor.get("/api/push/subscribe")
+    check("an API address says it in JSON", r.status_code == 405 and r.is_json)
+    # A form on another site, whose post carries no cookie: the answer must
+    # not tell the browser to drop the one it has.
+    r = web.app.test_client().post("/signout", headers={
+        "Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"})
+    check("a form on another site cannot sign anyone out", r.status_code == 302
+          and "said=out" not in r.headers["Location"]
+          and not r.headers.getlist("Set-Cookie"), r.headers)
+    r = visitor.post("/signout", headers={"Sec-Fetch-Site": "cross-site"})
+    check("not even one that does carry it", visitor.get("/account").status_code == 200)
+    r = visitor.post("/signout", headers={"Sec-Fetch-Site": "same-origin",
+                                          "Origin": "https://www.example.com"})
+    check("the button here does, whatever address the server thinks it has",
+          "said=out" in r.headers["Location"])
     check("signed out, the front door goes back to the landing page",
           visitor.get("/").status_code == 200)
     check("and the account page is behind the login again",
@@ -586,6 +632,40 @@ try:
     print("=" * 72)
     print("WHERE A SIGN-IN LANDS")
     print("=" * 72)
+
+    page = web.app.test_client().get("/trades").data.decode("utf-8", "replace")
+    check("the header's Sign in button remembers the page they are on",
+          'href="/signin?next=/trades"' in page)
+    page = web.app.test_client().get("/analyse?symbol=ZZZZNONE&interval=1d") \
+        .data.decode("utf-8", "replace")
+    check("and which analysis it was", "/signin?next=/analyse?symbol%3DZZZZNONE" in page
+          or "/signin?next=/analyse?symbol=ZZZZNONE" in page,
+          [l for l in page.splitlines() if "/signin" in l])
+    page = web.app.test_client().get("/").data.decode("utf-8", "replace")
+    check("but the front page needs no remembering", "/signin?next" not in page)
+    cancelled = web.app.test_client()
+    cancelled.get("/auth/google?next=/monitor")
+    page = cancelled.get("/auth/google/callback?error=access_denied") \
+        .data.decode("utf-8", "replace")
+    check("after cancelling at Google, the buttons still go where they were headed",
+          'href="/auth/google?next=/monitor"' in page)
+    check("and the reason is read out to whoever cannot see it",
+          '<div class="notice" role="alert">You cancelled' in page)
+
+    # Each one is a call to Google, and anyone can start one.
+    web._RATE.clear()
+    web.GOOGLE_SIGNINS_PER_HOUR, usual = 1, web.GOOGLE_SIGNINS_PER_HOUR
+    counting = FakeGoogle(token_status=400)
+    try:
+        for expect in (400, 400, 400, 429):
+            out = attempt(counting, "sign-ins from one network: %d" % expect, expect)
+    finally:
+        web.GOOGLE_SIGNINS_PER_HOUR = usual
+        web._RATE.clear()
+    check("past the limit Google is not asked", len(counting.token_posts) == 3,
+          len(counting.token_posts))
+    check("and the page says to wait",
+          "Too many sign-ins" in out.data.decode("utf-8", "replace"))
 
     def land(next_path):
         client = web.app.test_client()

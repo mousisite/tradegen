@@ -335,12 +335,18 @@ def forget_ids(conn: sqlite3.Connection, user_id: int, ids: Sequence[int]) -> in
     return cur.rowcount
 
 
-def forget_session(conn: sqlite3.Connection, session_ref: str) -> int:
-    """Forget the devices a sign-in switched on, when it signs out."""
+def forget_session(conn: sqlite3.Connection, session_ref: str,
+                   keep_for: int = 0) -> int:
+    """Forget the devices a sign-in switched on, when it signs out.
+
+    keep_for leaves one person's: when a new sign-in in the same browser
+    takes the old one's place, their own device there stays theirs.
+    """
     if not session_ref:
         return 0
     ensure_schema(conn)
-    cur = conn.execute("DELETE FROM push_devices WHERE session_ref=?", (session_ref,))
+    cur = conn.execute("DELETE FROM push_devices WHERE session_ref=? AND user_id<>?",
+                       (session_ref, int(keep_for)))
     conn.commit()
     return cur.rowcount
 

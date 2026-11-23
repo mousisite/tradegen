@@ -237,7 +237,7 @@ SESSION_KEY = "stockbot_session"
 
 # Bumped by hand when the legal pages change, so the date on them is
 # the date they were actually revised.
-LEGAL_UPDATED = "16 November 2026"
+LEGAL_UPDATED = "23 November 2026"
 
 
 def _served_publicly() -> bool:
@@ -311,8 +311,9 @@ def _moved_permanently():
 
 
 # Pages a visitor who is not signed in may open, as the example account. Only
-# ever for GET: nothing here can write, and every form on these pages posts to
-# an endpoint that is not on this list, so it sends them to sign up instead.
+# ever for GET (and HEAD, the same page without its body): nothing here can
+# write, and every form on these pages posts to an endpoint that is not on
+# this list, so it sends them to sign up instead.
 DEMO_ENDPOINTS = {"analyse", "research", "ideas", "screener", "portfolio",
                   "trades", "monitor", "strategies", "settings",
                   # The journal's breakdown and a trade's picture, of the
@@ -339,7 +340,7 @@ def _identify():
         return None
     if request.endpoint in PUBLIC_ENDPOINTS:
         return None
-    if request.method == "GET" and request.endpoint in DEMO_ENDPOINTS:
+    if request.method in ("GET", "HEAD") and request.endpoint in DEMO_ENDPOINTS:
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
             g.user = demo_mod.user(conn)
@@ -355,7 +356,7 @@ def _identify():
         return jsonify({"error": "Not signed in."}), 401
     # A visitor who tried to do something. A POST cannot be replayed as a GET
     # after signing in, so they are brought back to the page they were on.
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return redirect(url_for("signin", next=_referrer_path()))
     # full_path always ends in "?" when there is no query string.
     return redirect(url_for("signin", next=request.full_path.rstrip("?")))
@@ -723,7 +724,8 @@ def _note_app():
 
 @app.context_processor
 def _app_mode():
-    return {"in_app": _in_app(), "visit_host": _visit_host()}
+    return {"in_app": _in_app(), "visit_host": _visit_host(),
+            "embedded_browser": _embedded_browser()}
 
 
 def _visit_host() -> str:
@@ -738,6 +740,25 @@ def _visit_host() -> str:
     except ValueError:
         host = None
     return (host or "").removeprefix("www.")
+
+
+# What the browsers built into other apps put in their User-Agent: TikTok's
+# (under three names), Instagram's, Facebook's and Messenger's, Snapchat's,
+# LinkedIn's and Pinterest's, and the mark Android gives any such browser.
+EMBEDDED_BROWSERS = ("musical_ly", "BytedanceWebview", "trill_", "Instagram",
+                     "FBAN", "FBAV", "FB_IAB", "Snapchat/", "LinkedInApp",
+                     "[Pinterest/", "; wv)")
+
+
+def _embedded_browser() -> bool:
+    """Whether this page is open in the browser built into another app.
+
+    Google refuses to sign anyone in there, so the sign-in page says how to
+    get out of it. Like _in_app, it only ever chooses what to show. Orenth's
+    own app signs in through the system browser and is told nothing.
+    """
+    agent = request.headers.get("User-Agent") or ""
+    return not _in_app() and any(mark in agent for mark in EMBEDDED_BROWSERS)
 
 
 def uid() -> int:
@@ -3309,8 +3330,8 @@ def google_start():
     if not auth_mod.configured():
         setup = not _served_publicly()
         why = auth_mod.why_not() if setup else ""
-        return render_template("signin.html", reason=why, setup=setup,
-                               why_not=why, next_url=""), 503
+        return render_template("signin.html", reason=why, setup=setup, why_not=why,
+                               next_url=_safe_back(request.args.get("next"), "")), 503
 
     challenge, refused = _app_challenge()
     if refused:
@@ -3333,8 +3354,14 @@ def google_start():
         url = auth_mod.authorization_url(_redirect_uri(), state, verifier)
     except auth_mod.AuthError as exc:
         return render_template("signin.html", reason=_sign_in_trouble(exc),
-                               why_not="", next_url=""), 503
+                               why_not="", next_url=session["oauth_next"]), 503
     return redirect(url)
+
+
+# Each of these asks Google's server something, and anyone can start one. Far
+# above what a school or a phone company's shared address needs: a network is
+# allowed three times this an hour (see _rate_limited).
+GOOGLE_SIGNINS_PER_HOUR = 100
 
 
 @app.route("/auth/google/callback")
@@ -3356,31 +3383,41 @@ def google_callback():
              "Google did not complete the sign-in. Start again from "
              "this page."),
             "cancelled" if request.args.get("error") == "access_denied"
-            else "failed")
+            else "failed", next_url=next_url)
 
     state = request.args.get("state", "")
-    # Constant time, because this is a secret being compared.
-    if not expected or not hmac.compare_digest(str(expected), str(state)):
+    # Constant time, because this is a secret being compared, and as bytes:
+    # given text, compare_digest raises on a letter outside ASCII.
+    if not expected or not hmac.compare_digest(
+            str(expected).encode("utf-8"), state.encode("utf-8")):
         return _sign_in_failed(
             challenge, "That sign-in link did not match this browser session. "
-                       "Start again from this page.", "expired")
+                       "Start again from this page.", "expired",
+            next_url=next_url)
 
     code = request.args.get("code", "")
     if not code:
-        return _sign_in_failed(challenge, "Google returned no sign-in code.")
+        return _sign_in_failed(challenge, "Google returned no sign-in code.",
+                               next_url=next_url)
 
+    if _rate_limited("google_signin", GOOGLE_SIGNINS_PER_HOUR):
+        return _sign_in_failed(
+            challenge, "Too many sign-ins were tried from this connection in "
+                       "the last hour. Wait a while, then try again.",
+            "failed", 429, next_url=next_url)
     try:
         profile = auth_mod.sign_in(code, _redirect_uri(), verifier)
     except auth_mod.AuthError as exc:
-        return _sign_in_failed(challenge, _sign_in_trouble(exc))
+        return _sign_in_failed(challenge, _sign_in_trouble(exc), next_url=next_url)
 
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _kept_for_review(conn, profile.get("email"), "Google sign-in"):
-            return _sign_in_failed(challenge, REVIEW_KEPT % "Google", "refused")
+            return _sign_in_failed(challenge, REVIEW_KEPT % "Google", "refused",
+                                   next_url=next_url)
         user = events_mod.new_account(conn, accounts_mod.upsert_google_user, profile)
     except ValueError as exc:
-        return _sign_in_failed(challenge, str(exc), "refused")
+        return _sign_in_failed(challenge, str(exc), "refused", next_url=next_url)
     finally:
         conn.close()
     if challenge:
@@ -3395,6 +3432,10 @@ def google_callback():
 # sent only to /auth/apple and only over https.
 APPLE_FLOW = "apple_flow"
 APPLE_FLOW_SECONDS = 10 * 60
+# Ends the state of a sign-in the app started in its browser sheet. The state
+# comes back from Apple even when the cookie has run out, so the sheet can
+# still be sent back to the app instead of being left on the website.
+APPLE_FROM_APP = ".app"
 # Every one of these is a call to Apple, and anyone can start a sign-in, so
 # they are limited per network (_rate_limited allows a network three times
 # this an hour).
@@ -3437,6 +3478,8 @@ def apple_start():
     if refused:
         return _to_app(error="failed")
     state, nonce = apple_mod.new_state(), apple_mod.new_nonce()
+    if challenge:
+        state += APPLE_FROM_APP
     flow = {"state": state, "nonce": apple_mod.nonce_hash(nonce),
             "next": _safe_back(request.args.get("next"), ""), "app": challenge,
             # A friend's invite this visitor arrived with: it lives in the
@@ -3458,26 +3501,32 @@ def apple_callback():
     if not apple_mod.web_ready():
         abort(404)
     flow = _apple_flow()
-    challenge = flow.get("app", "")
+    challenge, next_url = flow.get("app", ""), flow.get("next", "")
     state = request.form.get("state", "")
     # Constant time, because this is a secret being compared.
     if not flow or not hmac.compare_digest(
             str(flow.get("state", "")).encode("utf-8"), state.encode("utf-8")):
+        # With no cookie, the person took longer than it lasts, or a page
+        # elsewhere made this up. Either way only a reason goes to the app.
         return _apple_done(_sign_in_failed(
-            challenge, "That sign-in did not match this browser. Start again "
-                       "from this page.", "expired"))
+            challenge or state.endswith(APPLE_FROM_APP),
+            "That sign-in did not match this browser. Start again from this "
+            "page." if flow else
+            "That Apple sign-in took too long, or was started in another "
+            "browser. Start again from this page.", "expired",
+            next_url=next_url))
     error = request.form.get("error", "")
     if error:
         cancelled = error == "user_cancelled_authorize"
         return _apple_done(_sign_in_failed(
             challenge, "Signing in with Apple was cancelled." if cancelled
             else "Apple did not complete the sign-in.",
-            "cancelled" if cancelled else "failed"))
+            "cancelled" if cancelled else "failed", next_url=next_url))
     if _rate_limited("apple_signin", APPLE_SIGNINS_PER_HOUR):
         return _apple_done(_sign_in_failed(
             challenge, "Too many sign-ins were tried from this connection in "
                        "the last hour. Wait a while, then try again.",
-            "failed", 429))
+            "failed", 429, next_url=next_url))
 
     client_id = apple_mod.services_id()
     try:
@@ -3488,26 +3537,27 @@ def apple_callback():
         identity = apple_mod.verify_identity(tokens.get("id_token"), client_id,
                                              flow.get("nonce", ""))
     except apple_mod.AppleError as exc:
-        return _apple_done(_sign_in_failed(challenge, str(exc)))
+        return _apple_done(_sign_in_failed(challenge, str(exc), next_url=next_url))
     refresh_token = tokens.get("refresh_token")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         if _kept_for_review(conn, identity.get("email"), "Sign in with Apple"):
             return _apple_done(_sign_in_failed(challenge, REVIEW_KEPT % "Apple",
-                                               "refused"))
+                                               "refused", next_url=next_url))
         user = events_mod.new_account(
             conn, accounts_mod.upsert_apple_user, identity,
             apple_mod.name_from_post(request.form.get("user", "")),
             refresh_token if isinstance(refresh_token, str) else "", client_id)
     except ValueError as exc:
-        return _apple_done(_sign_in_failed(challenge, str(exc), "refused"))
+        return _apple_done(_sign_in_failed(challenge, str(exc), "refused",
+                                           next_url=next_url))
     finally:
         conn.close()
     if challenge:
-        return _apple_done(_hand_to_app(user, challenge, flow.get("next", "")))
+        return _apple_done(_hand_to_app(user, challenge, next_url))
     if flow.get("ref"):
         session["ref"] = flow["ref"]
-    return _apple_done(_finish_sign_in(user, flow.get("next", "")))
+    return _apple_done(_finish_sign_in(user, next_url))
 
 
 @app.route("/auth/apple/nonce")
@@ -3734,15 +3784,17 @@ def _hand_to_app(user, challenge: str, next_url: str):
     return _to_app(code=handoff_token)
 
 
-def _sign_in_failed(challenge: str, message: str, reason: str = "failed",
-                    status: int = 400):
+def _sign_in_failed(challenge, message: str, reason: str = "failed",
+                    status: int = 400, next_url: str = ""):
     """A sign-in that did not finish. Said on the sign-in page or, when the
     app started it, to the app in a word, so nobody is left on an error page
-    inside the browser sheet."""
+    inside the browser sheet. next_url is the page they were on their way
+    to, so the next try still ends there."""
     if challenge:
         return _to_app(error=reason)
     return app.make_response((render_template(
-        "signin.html", reason=message, why_not="", next_url=""), status))
+        "signin.html", reason=message, why_not="",
+        next_url=_safe_back(next_url, "")), status))
 
 
 def _from_this_site() -> bool:
@@ -3751,14 +3803,15 @@ def _from_this_site() -> bool:
     The rest of the site leans on the session cookie being SameSite=Lax. A
     sign-in cannot, being what starts the session: a form on another site
     could otherwise sign its visitor in to an account of its choosing.
-    Browsers set these headers themselves: Sec-Fetch-Site, then Origin, then,
-    for an older browser sending neither, the Referer. One that sends none of
-    them is let through, since then there is nothing to go on.
+    Browsers set these headers themselves: Sec-Fetch-Site, which settles it
+    whatever address this server believes it has, then Origin, then, for an
+    older browser sending neither, the Referer. One that sends none of them
+    is let through, since then there is nothing to go on.
     """
     from urllib.parse import urlparse
     fetched = request.headers.get("Sec-Fetch-Site", "")
-    if fetched and fetched != "same-origin":
-        return False
+    if fetched:
+        return fetched == "same-origin"
 
     def origin_of(url: str) -> str:
         parts = urlparse(url)
@@ -3788,10 +3841,12 @@ def app_finish():
         abort(404)
     if not _from_this_site():
         return _sign_in_failed("", HANDOFF_FAILED, status=403)
+    next_url = request.form.get("next", "")
     if _rate_limited("app_finish", APP_FINISHES_PER_HOUR):
         return _sign_in_failed("", "Too many sign-ins were tried from this "
                                    "connection in the last hour. Wait a while, "
-                                   "then try again.", status=429)
+                                   "then try again.", status=429,
+                               next_url=next_url)
     # Named so that an error report strips them, as it does any token.
     handoff_token = request.form.get("code", "")
     verifier_secret = request.form.get("verifier", "")
@@ -3802,8 +3857,8 @@ def app_finish():
     finally:
         conn.close()
     if user is None:
-        return _sign_in_failed("", HANDOFF_FAILED)
-    return _finish_sign_in(user, found[1] or request.form.get("next", ""))
+        return _sign_in_failed("", HANDOFF_FAILED, next_url=next_url)
+    return _finish_sign_in(user, found[1] or next_url)
 
 
 def _finish_sign_in(user, next_url: str):
@@ -3813,12 +3868,24 @@ def _finish_sign_in(user, next_url: str):
 
 
 def _open_session(user) -> None:
-    """The session itself, for a sign-in that answers with JSON, not a page."""
+    """The session itself, for a sign-in that answers with JSON, not a page.
+
+    It takes the place of any this browser already held, which ends as
+    signing out would end it: on a shared computer, someone else's would
+    otherwise stay good for weeks with nothing left to sign it out, and go
+    on sending their alerts to this browser.
+    """
+    old = session.get(SESSION_KEY, "")
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         accounts_mod.purge_expired(conn)
         token = accounts_mod.start_session(
             conn, user.id, request.headers.get("User-Agent", ""))
+        if old:
+            # Their own device, when it is the same person signing in
+            # again, stays on.
+            push_mod.forget_session(conn, _session_ref(old), keep_for=user.id)
+            accounts_mod.end_session(conn, old)
         # A friend's link they arrived through, credited once the account
         # exists. accept() ignores it for anyone who was not brand new.
         ref = session.pop("ref", "")
@@ -3859,7 +3926,11 @@ def code_start(channel):
     next_url = _safe_back(request.values.get("next"), "")
     error = None
     value = ""
-    if request.method == "POST":
+    if request.method == "POST" and not _from_this_site():
+        # A form on another site would send a code to an address of its
+        # choosing, from its visitor's network.
+        error = "Type your %s here to be sent a code." % spec["label"]
+    elif request.method == "POST":
         value = (request.form.get("to") or "").strip()[:200]
         conn = db_mod.connect(app.config.get("DB_PATH"))
         try:
@@ -3919,7 +3990,8 @@ def code_verify(channel):
         finally:
             conn.close()
     return render_template("code_verify.html", channel=channel,
-                           to=pending["to"], error=error)
+                           to=pending["to"], error=error,
+                           next_url=pending.get("next", ""))
 
 
 # Apple's reviewers must be able to sign in to the iPhone app, and they cannot
@@ -4506,9 +4578,13 @@ def _tell_pro_moved(person) -> None:
 def signout():
     """End this session everywhere, not just in this browser.
 
-    POST only. The session cookie travels with a link followed from another
-    site, so a GET here let any page sign its visitors out.
+    POST only, and only from a page here. The session cookie travels with a
+    link followed from another site, so a GET let any page sign its visitors
+    out. A form elsewhere arrives without the cookie, but the answer to it
+    told the browser to drop the one it had.
     """
+    if not _from_this_site():
+        return redirect(url_for("signin"))
     token = session.pop(SESSION_KEY, "")
     if token:
         conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -4543,12 +4619,11 @@ def account():
             if not g.user.is_local:
                 invite = {"url": _public_base() + url_for(
                               "join", code=invites_mod.code_for(conn, uid())),
-                          "joined": invites_mod.joined(conn, uid())}
+                          "joined": invites_mod.joined(conn, uid()),
+                          "left": invites_mod.rewards_left(conn, uid())}
         finally:
             conn.close()
         plan["limit"] = billing_mod.free_limits()["analyses_per_day"]
-        plan["bonus_until"] = (g.user.bonus_until
-                               if g.user.bonus_until > time.time() else 0)
     weekly = {"ready": digest_mod.ready() and digest_mod.can_receive(g.user),
               "on": g.user.weekly_email}
     return render_template("account.html", counts=counts, everyone=everyone,
@@ -4556,6 +4631,7 @@ def account():
                            datasets=export_mod.DATASETS, plan=plan,
                            invite=invite, weekly=weekly,
                            invite_days=invites_mod.BONUS_DAYS,
+                           invite_max=invites_mod.MAX_REWARDS,
                            apple=_apple_plan())
 
 
@@ -4568,12 +4644,14 @@ def delete_account():
         return render_template("error.html", symbol="",
                                message="Type delete to confirm."), 400
     conn = db_mod.connect(app.config.get("DB_PATH"))
+    cancelled = False
     try:
         # Stop the subscription first, or a deleted account keeps being
         # charged. If Stripe cannot be reached, nothing is deleted.
         customer = billing_mod.customer_of(conn, uid())
         if customer and billing_mod.ready():
             billing_mod.close_customer(customer)
+            cancelled = True
         _end_apple_sign_in(conn, uid())
         accounts_mod.delete_user(conn, uid())
     except billing_mod.BillingError:
@@ -4581,6 +4659,16 @@ def delete_account():
             "error.html", symbol="",
             message="Your subscription could not be cancelled just now, so "
                     "nothing was deleted. Try again in a minute."), 502
+    except sqlite3.Error:
+        # Deleting is all or nothing, so nothing of theirs is gone, and the
+        # steps before it are safe to take again.
+        app.logger.exception("Account %d could not be deleted", uid())
+        message = ("Your account could not be deleted just now, so everything in "
+                   "it is still here. Try again in a minute.")
+        if cancelled:
+            message += (" Any Pro you were paying for on the Orenth website has "
+                        "already been cancelled.")
+        return render_template("error.html", symbol="", message=message), 503
     except ValueError as exc:
         return render_template("error.html", message=str(exc), symbol=""), 400
     finally:
@@ -4922,6 +5010,10 @@ def privacy():
     # two cannot drift apart.
     release = {"keep": serve.KEEP_RELEASE_COPIES,
                "days": getattr(serve, "RELEASE_COPY_DAYS", 0)}
+    # The timed backups are kept by count, so one lasts that many times the
+    # hours between them. 0 is none ever replaced: every one kept, or no
+    # more being made.
+    backup_days = math.ceil(_backups_kept() * offsite_mod.backup_hours() / 24)
     # Who carries and runs this copy, named where it can be told: Cloudflare
     # adds CF-Connecting-IP to every request it carries (_client_ip reads
     # it), Render sets RENDER and RENDER_SERVICE_ID on its machines, and Fly
@@ -4934,8 +5026,20 @@ def privacy():
                            heading="Privacy", updated=LEGAL_UPDATED,
                            session_days=accounts_mod.SESSION_DAYS,
                            contact=_contact(), offsite=offsite, hosting=hosting,
-                           release=release,
+                           release=release, backup_days=backup_days,
                            sampled=_sampled_words(monitoring.status()["sampled"]))
+
+
+def _backups_kept() -> int:
+    """How many timed backups serve.py keeps; 0 when it deletes none."""
+    import serve
+    read = getattr(serve, "_backups_to_keep", None)
+    if read is not None:
+        return max(0, read())
+    try:
+        return max(0, int(os.environ.get("STOCKBOT_BACKUP_KEEP", "8")))
+    except ValueError:
+        return 0                # nothing is pruned while it cannot be read
 
 
 def _sampled_words(share: float) -> str:
@@ -6579,6 +6683,22 @@ def not_found(_exc):
     if request.path.startswith("/api/"):
         return jsonify({"error": "No such address."}), 404
     return render_template("notfound.html"), 404
+
+
+@app.errorhandler(405)
+def wrong_method(exc):
+    if request.path.startswith("/api/"):
+        page = jsonify({"error": "That address does not take this kind of "
+                                 "request."})
+    else:
+        page = app.make_response(render_template(
+            "error.html", symbol="",
+            message="There is nothing to open at this address: it is only used "
+                    "by a button on one of Orenth's pages. Go back and use the "
+                    "button there."))
+    page.status_code = 405
+    page.headers["Allow"] = ", ".join(sorted(exc.valid_methods or ()))
+    return page
 
 
 @app.errorhandler(413)

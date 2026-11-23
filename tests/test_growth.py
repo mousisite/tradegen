@@ -615,6 +615,9 @@ try:
           remembered == code and r.headers["Location"].endswith("/"))
     page = c.get("/").data.decode("utf-8", "replace")
     check("which says a friend invited them", "A friend invited you" in page)
+    check("and what they get, without speaking for the friend, who may have had theirs",
+          "you both get" not in page
+          and "you both get" not in c.get("/signin").data.decode("utf-8", "replace"))
     c.get("/join/notacode")
     with c.session_transaction() as sess:
         check("a made-up code is not remembered", sess.get("ref") == code)
@@ -650,10 +653,62 @@ try:
     check("past the cap, the friend still gets a week but the host does not",
           fresh(third.id).bonus_until > time.time() and
           fresh(host.id).bonus_until == before)
+    # One friend, joining, leaving and joining again, used to earn the host a
+    # week every time, because the count was of friends still here.
+    looper = user("looper@example.com")
+    again_code = invites.code_for(conn, looper.id)
+    invites.MAX_REWARDS = 3
+    for _ in range(6):
+        leaver = A.upsert_email_user(conn, "leaver@example.com")
+        check("a friend who comes back can still use the link",
+              invites.accept(conn, leaver.id, again_code))
+        A.delete_user(conn, leaver.id)
+    check("but the host's weeks stop at the cap, however often they do",
+          abs(fresh(looper.id).bonus_until - time.time() - 3 * week) < 120
+          and invites.joined(conn, looper.id) == 0,
+          (fresh(looper.id).bonus_until - time.time()) / week)
+    # An account whose friends joined before rewards were counted.
+    veteran = user("veteran@example.com")
+    for n in range(3):
+        past = A.upsert_email_user(conn, "past%d@example.com" % n)
+        conn.execute("UPDATE users SET invited_by=? WHERE id=?", (veteran.id, past.id))
+    conn.commit()
+    newest = A.upsert_email_user(conn, "newest@example.com")
+    invites.accept(conn, newest.id, invites.code_for(conn, veteran.id))
+    check("friends from before the count are counted too",
+          fresh(veteran.id).bonus_until == 0 and fresh(newest.id).bonus_until > time.time())
     invites.MAX_REWARDS = cap
     conn.close()
+    payer = user("payer@example.com")
+    conn = db.connect(DB)
+    billing.set_plan(conn, payer.id, "pro", "active", "cus_payer",
+                     int(time.time()) + 20 * 86400)
+    conn.close()
+    sign_in(payer)
+    page = c.get("/account").data.decode("utf-8", "replace")
+    check("someone paying for Pro is not promised a week that adds nothing",
+          "add nothing while you are paying for Pro" in page
+          and "<b>both</b> get" not in page and "we both get" not in page)
+    # They cancel later, and then a friend joins.
+    conn = db.connect(DB)
+    billing.set_plan(conn, payer.id, "free", "canceled", "cus_payer", 0)
+    invites.accept(conn, A.upsert_email_user(conn, "payers-friend@example.com").id,
+                   invites.code_for(conn, payer.id))
+    conn.close()
+    page = c.get("/account").data.decode("utf-8", "replace")
+    check("someone who used to pay is told when their free days end",
+          "Free from invites until" in page)
     sign_in(host)
     page = c.get("/account").data.decode("utf-8", "replace")
+    check("everyone else still reads that both get it",
+          "<b>both</b> get" in page and "we both get a free week" in page)
+    check("and for how many friends", "for your first %d" % cap in page)
+    invites.MAX_REWARDS = 2
+    page = c.get("/account").data.decode("utf-8", "replace")
+    invites.MAX_REWARDS = cap
+    check("someone who has had them all is promised no more",
+          "as many as" in page and "<b>both</b> get" not in page
+          and "we both get" not in page)
     check("the account page has the invite link", "/join/" + code in page)
     check("and says how many joined", "3 joined so far" in page)
     check("and until when Pro is free", "Free from invites until" in page)
@@ -767,6 +822,8 @@ try:
           "Stop the weekly email?" in page and fresh(reader.id).weekly_email)
     check("a forged stop link is refused",
           c.post("/email/stop?u=%d&t=%s" % (reader.id, "0" * 32)).status_code == 404)
+    check("nor one with a letter outside ASCII, which is no page here either",
+          c.get("/email/stop?u=%d&t=%%C3%%A9" % reader.id).status_code == 404)
     r = c.post(url, data={"List-Unsubscribe": "One-Click"})
     check("pressing it, or the inbox button, stops it",
           r.status_code == 200 and not fresh(reader.id).weekly_email)

@@ -56,7 +56,9 @@ def token(secret, user_id: int) -> str:
 
 
 def check_token(secret, user_id: int, given: str) -> bool:
-    return hmac.compare_digest(token(secret, user_id), given or "")
+    # As bytes: given text, compare_digest raises on a letter outside ASCII.
+    return hmac.compare_digest(token(secret, user_id).encode("ascii"),
+                               (given or "").encode("utf-8"))
 
 
 def can_receive(user) -> bool:

@@ -95,8 +95,8 @@ def why_not() -> str:
         missing.append("GOOGLE_CLIENT_ID")
     if not client_secret():
         missing.append("GOOGLE_CLIENT_SECRET")
-    return ("Google sign-in is not set up: %s is not set in the environment or "
-            ".env file." % " and ".join(missing))
+    return ("Google sign-in is not set up: %s %s not set in the environment or "
+            ".env file." % (" and ".join(missing), "is" if len(missing) == 1 else "are"))
 
 
 # --- PKCE -------------------------------------------------------------------
@@ -126,8 +126,7 @@ def new_state() -> str:
 
 # --- the flow ---------------------------------------------------------------
 
-def authorization_url(redirect_uri: str, state: str, verifier: str,
-                      login_hint: str = "") -> str:
+def authorization_url(redirect_uri: str, state: str, verifier: str) -> str:
     """Where to send the browser to sign in."""
     if not configured():
         raise AuthError(why_not(), setup=True)
@@ -147,8 +146,6 @@ def authorization_url(redirect_uri: str, state: str, verifier: str,
     domains = allowed_domains()
     if len(domains) == 1:
         params["hd"] = domains[0]
-    if login_hint:
-        params["login_hint"] = login_hint
     return AUTH_URL + "?" + urlencode(params)
 
 

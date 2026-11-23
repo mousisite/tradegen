@@ -27,7 +27,8 @@
         {% elif methods and methods|length > 1 %}
           You can sign in with {{ methods[:-1]|join(', ') }} or {{ methods[-1] }}.
         {% else %}
-          Signed in with {{ current_user.provider|capitalize }}.
+          You can sign in with {{ methods[0] if methods else
+          current_user.provider|capitalize }}.
         {% endif %}
         {% if current_user.email.endswith(('@privaterelay.appleid.com', '@private.icloud.com')) %}
           This is a private address from Apple: email sent to it reaches your
@@ -52,8 +53,8 @@
       <p class="prose"><b>Pro.</b> No limits.{% if apple.pro %} Through
         Apple{% if apple.pro.test %}, from a test purchase{% endif %},
         {% if apple.pro.renews %}renewing on{% else %}until{% endif %}
-        {{ apple.pro.until|day }}.{% elif plan.bonus_until and not plan.customer %}
-        Free from invites until {{ plan.bonus_until|day }}.{% endif %}</p>
+        {{ apple.pro.until|day }}.{% elif apple.via == 'invite' %}
+        Free from invites until {{ apple.invite_until|day }}.{% endif %}</p>
       {% if apple.pro %}
         <p class="fine">{{ apple_pro_said }}</p>
         {% if apple.twice %}
@@ -85,10 +86,27 @@
   <div class="sechead"><h2>Invite friends</h2>
     <span class="tail">{{ invite.joined }} joined so far</span></div>
   <div class="card">
+    {# The free days are a date on the account, so they run out alongside a
+       plan that is being paid for. #}
+    {% set paying = apple.pro or apple.via == 'web' %}
+    {% if not invite.left %}
+    <p class="prose">When a friend joins through your link, they get
+      {{ invite_days }} days of Pro free, no card needed. You have had your
+      own free days for {{ invite_max }} friends, which is as many as
+      invites give.</p>
+    {% elif paying %}
+    <p class="prose">When a friend joins through your link, they get
+      {{ invite_days }} days of Pro free, no card needed. You get
+      {{ invite_days }} days too, for your first {{ invite_max }} friends, but
+      they start when your friend joins, so they
+      add nothing while you are paying for Pro.</p>
+    {% else %}
     <p class="prose">When a friend joins through your link, you <b>both</b> get
-      {{ invite_days }} days of Pro free. No card needed.</p>
+      {{ invite_days }} days of Pro free, for your first {{ invite_max }}
+      friends. No card needed.</p>
+    {% endif %}
     <div class="sharebar" data-url="{{ invite.url }}"
-         data-text="I use Orenth to check stocks before I buy. Join with my link and we both get a free week of Pro.">
+         data-text="I use Orenth to check stocks before I buy. Join with my link and {{ 'get' if paying or not invite.left else 'we both get' }} a free week of Pro.">
       <input class="field" type="text" value="{{ invite.url }}" readonly
              aria-label="Your invite link" onclick="this.select()">
       <button class="btn" type="button" data-act="share">Share link</button>
