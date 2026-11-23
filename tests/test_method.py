@@ -2560,6 +2560,40 @@ check("the default model is kept from thinking past the page's time",
 
 
 # ---------------------------------------------------------------------------
+head("AN ANSWER THAT IS NOT DATA")
+# ---------------------------------------------------------------------------
+
+class Nothing:
+    status_code, headers, text = 200, {}, "null"
+
+    def json(self):
+        return None
+
+
+def rubbish(module, ask):
+    real_parts = (module.requests.get, module.time, yahoo._ensure, yahoo._SESSION)
+    module.requests.get = lambda *a, **k: Nothing()
+    module.time = types.SimpleNamespace(sleep=lambda s: None, time=time.time)
+    yahoo._ensure = lambda force=False, seen=None: None
+    yahoo._SESSION = types.SimpleNamespace(get=lambda *a, **k: Nothing())
+    upstream.reset()
+    try:
+        return ask()
+    except Exception as exc:
+        return exc
+    finally:
+        module.requests.get, module.time, yahoo._ensure, yahoo._SESSION = real_parts
+        upstream.reset()
+
+
+got = rubbish(market, lambda: market.fetch_bars("TEST", "1d"))
+check("prices that are not data are the source's failure, said as that",
+      isinstance(got, market.DataUnavailable), repr(got))
+got = rubbish(yahoo, lambda: yahoo.quotes(["TEST"]))
+check("as are figures", isinstance(got, yahoo.YahooError), repr(got))
+
+
+# ---------------------------------------------------------------------------
 head("EX-DIVIDEND TOMORROW, SEEN THE EVENING BEFORE")
 # ---------------------------------------------------------------------------
 
