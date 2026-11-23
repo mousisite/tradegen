@@ -921,6 +921,23 @@ try:
     check("and tried again later that week", len(outbox) == 3)
     conn.close()
 
+    ran_with = []
+    real_run = digest.run
+    digest.run = lambda conn, secret, base, *a, **k: (ran_with.append(base), {"checked": 1})[1]
+    try:
+        _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+        web.app.logger.disabled = True
+        none = web._weekly_email_job()
+        _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app/"
+        one = web._weekly_email_job()
+    finally:
+        digest.run = real_run
+        web.app.logger.disabled = False
+        _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
+    check("with no public address for its stop link, no email is sent",
+          none == {"checked": 0} and one == {"checked": 1}
+          and ran_with == ["https://orenth.app"], (none, ran_with))
+
     sign_out()
     url = "/email/stop?u=%d&t=%s" % (reader.id, digest.token(web.app.secret_key, reader.id))
     page = c.get(url).data.decode("utf-8", "replace")

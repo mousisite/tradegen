@@ -6122,6 +6122,14 @@ def _refresh_popular_job():
 
 
 def _weekly_email_job():
+    # Every copy carries a link that stops them, which the law asks for. With
+    # no public address to make it from, it would go to the reader's own
+    # computer, so nothing is sent until there is one.
+    if not _public_base_offline().startswith("https://"):
+        if digest_mod.ready() and digest_mod.sending_window(time.time()):
+            app.logger.warning("The weekly email is not sent: without the site's https "
+                               "address its stop link would lead nowhere.")
+        return {"checked": 0}
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         return digest_mod.run(conn, app.secret_key, _public_base_offline(),
