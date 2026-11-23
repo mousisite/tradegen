@@ -327,7 +327,9 @@ check("value persisted", cfgmod.load(harness.CFG_PATH)["account_size"] == 5000.0
 body = c.get("/").data.decode("utf-8", "replace")
 check("daily is preselected on the Analyse box", '<option value="1d" selected>' in body
       and "Daily bars are preselected because" in body
-      and "the only interval where Orenth has measured" in " ".join(body.split()))
+      and "trading costs take the least from them" in " ".join(body.split()))
+check("and no claim is made that other bar sizes never pay",
+      "the only interval" not in body)
 c.post("/settings", data={"interval": "1h"})
 body = c.get("/").data.decode("utf-8", "replace")
 check("the default interval chosen in Settings is the one preselected there",

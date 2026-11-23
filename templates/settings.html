@@ -5,7 +5,7 @@
 
 <div class="pagehead">
   <h1>Settings</h1>
-  <p>These change what Orenth recommends and how much it tells you to buy.
+  <p>These change the calls Orenth makes for you and the sizes it works out.
     The broker cost figures matter more than anything else on this page.</p>
 </div>
 
@@ -66,8 +66,9 @@
         <input class="field fig" id="cost_bps_equity" name="cost_bps_equity"
                type="number" step="any" min="0" inputmode="decimal"
                value="{{ cfg.cost_bps_equity }}">
-        <div class="hint">Basis points, in and out combined. 2 is typical for a
-          commission-free broker paying only the spread.</div>
+        <div class="hint">In basis points, hundredths of a percent, in and out
+          combined. 2 is typical for a commission-free broker, paying only the
+          spread.</div>
       </div>
       <div class="setfield">
         <label for="cost_bps_crypto">Crypto, round trip</label>
@@ -88,10 +89,11 @@
       </div>
     </div>
     <p class="prose" style="margin-top:var(--s3)">
-      <b>Why this dominates everything.</b> On five-minute crypto bars, a 20
-      basis point round trip costs about 1.4 times the entire stop distance.
-      That pushes the break-even win rate near 98%, which nothing achieves. Put
-      your real numbers here before you trust a single call.
+      <b>Why this matters most.</b> On five-minute crypto bars, a round trip of
+      20 basis points can cost 1.4 times the whole distance to the stop. With
+      a target one and a half times as far as the stop, 96 trades in 100 would
+      have to win just to break even, which nothing achieves. Put your real
+      numbers here before you trust a single call.
     </p>
   </div>
 </section>
@@ -107,8 +109,8 @@
             <option value="{{ code }}" {{ 'selected' if code == cfg.interval }}>{{ label }}</option>
           {% endfor %}
         </select>
-        <div class="hint">Daily is the only interval measured with positive
-          expectancy so far.</div>
+        <div class="hint">The bar size chosen when a page opens. Trading costs
+          take the least from daily bars, where the stop sits furthest away.</div>
       </div>
       <div class="setfield">
         <label for="stop_atr_multiple">Stop distance</label>

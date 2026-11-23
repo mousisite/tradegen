@@ -408,8 +408,8 @@ def _exit_count(conn: sqlite3.Connection, user: Optional[int] = None) -> int:
 DATASETS = {
     "trades": {
         "label": "Trade journal",
-        "why": "Every position opened and closed, with its R multiple. This is "
-               "the one you need at tax time. Its prices and sizes are in the "
+        "why": "Every position opened and closed, with its R: what it made or "
+               "lost for each amount risked. Its prices and sizes are in the "
                "shares each trade was opened with. Times are in UTC, so a late "
                "evening in New York is already the next day.",
         "rows": trades,
@@ -419,9 +419,10 @@ DATASETS = {
     "exits": {
         "label": "Trade exits",
         "why": "Each sale or cover with its own date, size and price, parts of "
-               "a position included. A tax return asks for each one. After a "
-               "share split, quantity_traded and price_traded give it in the "
-               "shares of that day, as your broker lists it.",
+               "a position included. If you log trades "
+               "you really made, keep it for tax. After a share split, "
+               "quantity_traded and price_traded give it in the shares of that "
+               "day, as your broker lists it.",
         "rows": exits,
         "count": _exit_count,
         "columns": EXIT_COLUMNS,
@@ -457,8 +458,9 @@ DATASETS = {
     },
     "strategies": {
         "label": "Measured strategy record",
-        "why": "Every back-test result the bot has accumulated. The slowest "
-               "thing here to rebuild from scratch.",
+        "why": "The newest back-test of each strategy on each instrument and "
+               "bar size Orenth has analysed. The slowest thing here to "
+               "rebuild from scratch.",
         "rows": strategies,
         "count": _rows_in("strategy_stats", owned=False),
         "columns": STRATEGY_COLUMNS,
@@ -467,7 +469,7 @@ DATASETS = {
     },
     "runs": {
         "label": "Analysis history",
-        "why": "Every call the bot has made, so you can check it against what "
+        "why": "Every call Orenth has made, so you can check it against what "
                "happened afterwards.",
         "rows": runs,
         "count": _rows_in("runs"),

@@ -329,25 +329,26 @@ WHAT IT DOES
 - Analyse any stock or coin. Orenth back-tests 44 strategies against that instrument's own price history, takes off realistic trading costs, and says buy, wait or avoid, with the count behind it: how often this setup came up in tests on past prices, and how often it reached its target first.
 - Says so when there is no edge. Often the honest answer is to wait, and Orenth says it plainly.
 - Find: choose stocks or crypto and a risk level, and Orenth ranks what is worth a closer look.
-- Screener: filter companies by the numbers in their SEC filings. Company figures on the research page link to the filing they came from.
+- Screener: filter companies by price, size and reported fundamentals.
+- Research: a company's yearly accounts, as filed with the SEC, link to the filing they came from.
 - Journal: log practice trades with an entry, a stop and a target, then find out whether you were right or just lucky.
 - Portfolio: see what your logged positions add up to, and what a bad day could cost.
 - Alerts: pick a price or watch a stock, and get a notification when something happens.
-- Track record: every day Orenth writes down its call on popular stocks and coins, and scores every one of them, wins and losses alike.
+- Track record: each trading day Orenth writes down its call on popular stocks and coins and scores it in public, wins and losses alike.
 - Strategy tests: see which strategies did best in tests on past prices of each stock and coin, after costs.
 
 LOOK AROUND FIRST
 Explore a full example account without signing up. Create a free account to keep your own journal, watchlist and alerts.
 
 FREE AND PRO
-Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro removes the limits: as many stocks and coins a day as you like, every result in every Find list, and as many alerts as you like.
+Orenth is free, with a daily limit on how many different stocks and coins you can analyse. Pro lifts the limit: as many stocks and coins a day as you like, every Find result worth a look and the strongest worth watching, and as many alerts as you like, within fair use.
 
 Orenth Pro is an auto-renewing subscription: Orenth Pro Monthly (1 month) or Orenth Pro Yearly (1 year). The price is shown in the app, in your currency, before you buy. Payment is charged to your Apple Account when you confirm the purchase. The subscription renews automatically unless it is cancelled at least 24 hours before the end of the current period. Manage or cancel it in Settings > Apple Account > Subscriptions.
 
 PRIVACY
 No ads and no tracking. Your journal, watchlist and alerts belong to your account. Your account can be deleted at any time from the Account page, and your journal and saved theses downloaded from the Orenth website.
 
-Orenth is analysis software, not financial advice. Every figure is measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
+Orenth is analysis software, not financial advice. The odds and test results are measured from past prices and can stop describing the future at any moment. Never risk money you cannot afford to lose.
 
 Terms of Use (EULA): https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
 Orenth terms: https://orenth.app/terms
