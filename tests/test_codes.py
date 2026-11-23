@@ -517,6 +517,55 @@ finally:
         _os.environ.pop(key, None)
 
 print()
+print("=" * 72)
+print("A SETTING TYPED WRONG")
+print("=" * 72)
+
+# A stray letter in the first stopped every start of the site, and in the
+# second every code sent by email answered that something had broken.
+import subprocess  # noqa: E402
+
+ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+for typed, used in (("forty", 40), ("", 40), (" ", 40), ("-3", 40), ("12", 12), ("0", 0)):
+    ran = subprocess.run(
+        [_sys.executable, "-c", "import sys; sys.path.insert(0, %r); "
+         "from bot import codes; print(codes.PHONE_PER_HOUR)" % ROOT],
+        env=dict(_os.environ, PHONE_CODES_PER_HOUR=typed),
+        capture_output=True, text=True, timeout=60)
+    check("texts an hour typed as %r are %d" % (typed, used),
+          ran.stdout.strip() == str(used), (ran.stdout, ran.stderr[-300:]))
+    check("and the log says when it was not usable",
+          ("PHONE_CODES_PER_HOUR" in ran.stderr) == (typed in ("forty", "-3")), ran.stderr)
+
+asked = []
+
+
+class Refuses:
+    def __init__(self, host, port, **kw):
+        asked.append(port)
+        raise OSError("made up")
+
+
+real_smtp = codes.smtplib.SMTP
+codes.smtplib.SMTP = Refuses
+_os.environ.update({"SMTP_HOST": "smtp.example.com", "SMTP_USER": "u",
+                    "SMTP_PASSWORD": "p", "MAIL_FROM": "hi@example.com"})
+try:
+    for typed, used in (("tls", 587), ("", 587), ("99999", 587), ("2525", 2525)):
+        _os.environ["SMTP_PORT"] = typed
+        try:
+            codes.send_mail("a@example.com", "s", "b")
+        except codes.CodeError:
+            pass
+        except Exception as exc:
+            asked.append("%s: %s" % (type(exc).__name__, exc))
+        check("a mail port typed as %r is %d" % (typed, used), asked[-1:] == [used], asked)
+finally:
+    codes.smtplib.SMTP = real_smtp
+    for key in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM", "SMTP_PORT"):
+        _os.environ.pop(key, None)
+
+print()
 print("%d failure(s)" % len(fails))
 print("CODES OK" if not fails else "FAILURES: %s" % fails)
 _sys.exit(1 if fails else 0)

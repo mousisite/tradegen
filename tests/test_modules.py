@@ -165,11 +165,13 @@ rendered = RE._facts_block(payload)
 print("   rendered brief: %d characters" % len(rendered))
 check("brief is substantial", len(rendered) > 600)
 check("brief has no None leaking", "None" not in rendered)
-r = RE.analyse(payload) if RE.available() else RE.Reasoning(False,
-    reason_unavailable="no key in this test environment")
+# Always without a key, whatever the shell has: with one, this would pay for a
+# real answer, and what it checks is the refusal.
+os.environ.pop("ANTHROPIC_API_KEY", None)
+r = RE.analyse(payload)
 print("   reasoning available: %s" % r.available)
-print("   %s" % (r.summary[:110] if r.available else r.reason_unavailable[:110]))
-check("degrades gracefully without a key", r.available or bool(r.reason_unavailable))
+print("   %s" % r.reason_unavailable[:110])
+check("degrades gracefully without a key", not r.available and bool(r.reason_unavailable))
 
 print()
 print("=" * 72)

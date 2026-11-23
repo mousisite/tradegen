@@ -2,10 +2,26 @@
 import sys, time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness
+harness.isolate("learning")      # the default settings, whatever config.json says
+
 from bot import config as config_mod
 from bot.market import fetch_bars
 from bot.strategies import build_context, evaluate, classify_regime
 from bot.learning import measure_strategies, learned_weights, summarise
+
+# The bounds the learning promises, written out so that widening them shows.
+LEAST, MOST = 0.25, 1.90
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
 
 cfg = config_mod.load()
 for sym, iv in [("AAPL", "5m"), ("BTC-USD", "1h"), ("SPY", "1d")]:
@@ -47,7 +63,15 @@ for sym, iv in [("AAPL", "5m"), ("BTC-USD", "1h"), ("SPY", "1d")]:
     _, comp_learn, _ = evaluate(ctx, i, learned=lw)
     print("  composite: base %+.3f -> learned %+.3f" % (comp_base, comp_learn))
 
-print("\nLEARNING OK")
+    check("%s %s: there are learned weights to look at" % (sym, iv), len(lw) > 0)
+    check("%s %s: every one is between %g and %g" % (sym, iv, LEAST, MOST),
+          all(LEAST <= v <= MOST for v in lw.values()),
+          {k: v for k, v in lw.items() if not LEAST <= v <= MOST})
+    check("%s %s: the combined score stays between -1 and 1" % (sym, iv),
+          -1.0 <= comp_base <= 1.0 and -1.0 <= comp_learn <= 1.0,
+          (comp_base, comp_learn))
+
+print("\nLEARNING OK" if not fails else "\nFAILURES: %s" % fails)
 
 
 # --- exit code so a runner can tell pass from fail -------------------------

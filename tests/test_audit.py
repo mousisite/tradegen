@@ -36,6 +36,23 @@ for name in ("vwap_position", "vwap_band_fade"):
     print("    %-16s score=%+.3f  weight=%.2f  %s"
           % (name, sig.score, sig.weight, sig.reason))
 
+fails = []
+
+
+def check(name, ok, detail=""):
+    print("  %s %s%s" % ("OK  " if ok else "FAIL", name,
+                         ("  " + str(detail)) if detail and not ok else ""))
+    if not ok:
+        fails.append(name)
+
+
+# One bar a session makes session VWAP the bar's own middle, which says nothing.
+check("on daily bars the VWAP is not the session's", ctx.vwap_is_session is False)
+check("nor is it each bar's own typical price",
+      np.mean(np.abs(ctx.s["vwap"] - (b.high + b.low + b.close) / 3.0) < 1e-9) < 0.5)
+check("on 5-minute bars it is the session's",
+      S.build_context(fetch_bars("AAPL", "5m")).vwap_is_session is True)
+
 print()
 print("=" * 70)
 print("2. DOES THE OPENING RANGE STRATEGY MEAN ANYTHING ON DAILY BARS?")
@@ -43,6 +60,11 @@ print("=" * 70)
 sig = S.BY_NAME["opening_range_break"].fn(ctx, i)
 print("  opening_range_break  score=%+.3f weight=%.2f  %s"
       % (sig.score, sig.weight, sig.reason))
+check("the opening range has no say on daily bars",
+      sig.weight == 0 and sig.score == 0, (sig.score, sig.weight))
+sig = S.BY_NAME["session_sweep"].fn(ctx, i)
+check("nor have the day's sessions", sig.weight == 0 and sig.score == 0,
+      (sig.score, sig.weight))
 
 print()
 print("=" * 70)
@@ -75,6 +97,11 @@ for iv in ("5m", "1h", "1d"):
           % (iv, comp, len(idle), len(degenerate)))
     if idle:
         print("       idle: %s" % ", ".join(idle))
+    check("%s: every score and the combined one are between -1 and 1" % iv,
+          -1.0 <= comp <= 1.0 and all(-1.0 <= s.score <= 1.0 for s in sigs))
+    check("%s: no weight is negative" % iv, all(s.weight >= 0 for s in sigs))
+    check("%s: most strategies have a say" % iv, len(idle) < len(sigs) / 2,
+          (len(idle), len(sigs)))
 
 print()
 print("=" * 70)

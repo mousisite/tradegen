@@ -209,6 +209,23 @@
         disk and point <span class="fig">STOCKBOT_DB</span> at it before
         anyone relies on this.</p>
     {% endif %}
+    {% if not backups.hours %}
+      <p class="prose loss"><b>No backups are being taken.</b>
+        The timer that takes them is switched off, or this copy of the app was
+        started without it.
+        {% if backups.kept %}Last backup: {{ backups.taken|ago }},
+        {{ backups.kept }} kept.{% endif %}</p>
+    {% elif backups.age is none %}
+      <p class="prose loss"><b>No backup has been taken yet.</b> The first is
+        taken about five minutes after the server starts. If this still says
+        so later, the server log says why.</p>
+    {% else %}
+      <p class="prose{% if backups.late %} loss{% endif %}">Last backup:
+        {{ backups.taken|ago }}, {{ backups.kept }} kept. One is taken every
+        {{ "%g"|format(backups.hours) }} hours.
+        {% if backups.late %}<b>It is overdue.</b> The server log says
+        why.{% endif %}</p>
+    {% endif %}
   </div>
 </section>
 

@@ -24,7 +24,7 @@ NAME = "Orenth"
 DOMAIN = "orenth.app"
 TAGLINE = "It back-tests its own advice and tells you when it has no edge."
 POINTS = [
-    "Every figure cites the filing it came from",
+    "Yearly company financials link to the filing they came from",
     "Position sizes price what a gap past your stop costs",
     "Closed theses separate being right from being lucky",
 ]

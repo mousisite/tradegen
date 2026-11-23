@@ -2,6 +2,8 @@
 import sys, time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness  # noqa: F401  (the default settings, whatever config.json says)
 import numpy as np
 from bot.market import fetch_bars
 from bot import strategies as S

@@ -6,18 +6,74 @@ makes suites depend on the order they run in. Instead each suite gets a throw
 away directory, which is removed when the process ends.
 """
 import atexit
+import errno
 import os
 import shutil
+import socket
 import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# web.py and serve.py read .env as they are imported. A suite that has removed
+# the real keys must not be given them back: it would call Claude or Stripe.
+os.environ["STOCKBOT_NO_DOTENV"] = "1"
 
 # Set by isolate(), so a suite can read the paths it was given.
 DB_PATH = ""
 CFG_PATH = ""
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+
+# Every folder a suite makes with tempfile goes when the process ends. The
+# ones suites made for themselves used to stay, some twenty for every full run.
+_real_mkdtemp = tempfile.mkdtemp
+
+
+def _mkdtemp(*args, **kwargs):
+    made = _real_mkdtemp(*args, **kwargs)
+    atexit.register(shutil.rmtree, made, ignore_errors=True)
+    return made
+
+
+tempfile.mkdtemp = _mkdtemp
+
+
+def _listed_offline() -> bool:
+    """Whether run_all.py lists the suite being run as needing no network."""
+    try:
+        import run_all
+    except ImportError:
+        return False
+    name = os.path.basename(sys.argv[0] or "")
+    return any(s[0] == name and not s[1] for s in run_all.SUITES)
+
+
+OFFLINE = _listed_offline()
+
+
+def _no_network(event, args):
+    """Refuse any other machine, as an unplugged cable would. A suite that
+    needs no network must not depend on one, nor send requests to one."""
+    if event == "socket.getaddrinfo":
+        host = args[0]
+    elif event == "socket.connect" and isinstance(args[1], tuple):
+        host = args[1][0]
+    else:
+        return
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if not host or host in ("localhost", "::1", "0.0.0.0", "::") \
+            or host.startswith("127."):
+        return
+    if event == "socket.getaddrinfo":
+        raise socket.gaierror(socket.EAI_NONAME, "no network in an offline suite")
+    raise OSError(errno.ENETUNREACH, "no network in an offline suite")
+
+
+if OFFLINE:
+    sys.addaudithook(_no_network)
 
 
 def isolate(label: str = "suite"):
@@ -27,7 +83,6 @@ def isolate(label: str = "suite"):
     for importing Flask, and should still get an isolated database.
     """
     tmp = tempfile.mkdtemp(prefix="stockbot-test-%s-" % label)
-    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
 
     db_path = os.path.join(tmp, "data", "stockbot.db")
     cfg_path = os.path.join(tmp, "config.json")
@@ -58,6 +113,12 @@ def _point_web_at(db_path: str, cfg_path: str) -> None:
         cache = getattr(web, attr, None)
         if isinstance(cache, dict):
             cache.clear()
+    if OFFLINE:
+        # Neither the front page's own analysis nor the example account's
+        # prices are asked for where they could not arrive.
+        from bot import demo
+        web._example_state["busy"] = True
+        demo._price = lambda symbol: demo._FALLBACK[symbol]
 
 
 def isolated_web(label: str = "web"):
@@ -66,7 +127,13 @@ def isolated_web(label: str = "web"):
     Returns (test_client, db_path). Use db.connect(db_path) for direct checks so
     the test and the server are certain to be looking at the same file.
     """
-    import web
     db_path, cfg_path = isolate(label)
+    import web
     _point_web_at(db_path, cfg_path)
     return web.app.test_client(), db_path
+
+
+# Once as this is imported, before any suite imports web: web.py reads or makes
+# the cookie key beside the database as it loads, and code under test may load
+# the settings file. Both would otherwise be the real ones.
+isolate("start")

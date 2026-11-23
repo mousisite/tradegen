@@ -1,7 +1,7 @@
 @echo off
-REM Double-click this to open Stock Bot in your browser.
+REM Double-click this to open Orenth in your browser.
 REM It starts a small local web server and opens the page for you.
-title Stock Bot - server
+title Orenth - server
 cd /d "%~dp0"
 
 if not exist "%~dp0.runtime\python\python.exe" (
@@ -14,7 +14,7 @@ if not exist "%~dp0.runtime\python\python.exe" (
 )
 
 echo.
-echo   Starting Stock Bot...
+echo   Starting Orenth...
 echo   Your browser will open in a moment.
 echo.
 echo   Keep this window open while you use it.

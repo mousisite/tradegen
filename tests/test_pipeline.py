@@ -1,7 +1,13 @@
 """Full regression across the expanded system."""
-import sys, io, os, tempfile, traceback, time
+import sys, io, os, traceback, time
 import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import harness
+
+# A private database and settings, so two runs at once do not share a file.
+tmp = harness.isolate("pipeline")[0]
+
 from rich.console import Console
 from bot import config as config_mod, report as report_mod, database as db
 from bot.market import fetch_bars, DataError
@@ -12,10 +18,6 @@ from bot.learning import measure_strategies, learned_weights
 from bot.sentiment import Sentiment
 from bot.decision import decide
 
-tmp = os.path.join(tempfile.gettempdir(), "t_full2.db")
-for s in ("", "-wal", "-shm"):
-    if os.path.exists(tmp + s):
-        os.remove(tmp + s)
 conn = db.connect(tmp)
 
 cfg = config_mod.load()
@@ -73,7 +75,16 @@ for sym, iv in combos:
         print("   FAIL %-9s %-4s" % (sym, iv))
         traceback.print_exc()
 
-print("\npassed %d, failed %d in %.1fs" % (ok, fail, time.time() - t_start))
+skipped = len(combos) - ok - fail
+print("\npassed %d, failed %d, skipped %d in %.1fs"
+      % (ok, fail, skipped, time.time() - t_start))
+# A download or two can fail on any day. With most of them failing this has
+# shown nothing, and saying it passed would hide that.
+ENOUGH = 30
+if ok + fail < ENOUGH:
+    print("   FAIL only %d of %d could be downloaded; at least %d are needed"
+          % (ok + fail, len(combos), ENOUGH))
+    fail += 1
 print("actions:", actions)
 print("db:", db.stats(conn))
 

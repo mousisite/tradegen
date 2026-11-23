@@ -38,7 +38,9 @@ prepare_output()
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # tests/harness.py sets this, so a test run never picks up real keys.
+    if not os.environ.get("STOCKBOT_NO_DOTENV"):
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
@@ -121,6 +123,11 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(days=accounts_mod.SESSION_DAYS),
+    # The cookie is set at sign-in for as long as the server's own record of
+    # it lasts, and again only when it changes. Sent with every answer, it
+    # rode on files marked as the same for everybody, which no cache in front
+    # of the site may then keep.
+    SESSION_REFRESH_EACH_REQUEST=False,
 )
 
 # Behind a reverse proxy the app sees plain http on an internal hostname, so
@@ -128,14 +135,25 @@ app.config.update(
 # because the redirect address has to match the registered one exactly. These
 # headers are what the proxy uses to say what the browser actually asked for.
 # Only enabled deliberately, since trusting them when there is no proxy in
-# front would let a client spoof its own scheme and host.
+# front would let a client spoof its own scheme and address. The address
+# counts the one hop nearest the app, and the Host header is taken as it
+# arrives: the hosts pass the visitor's own on, and do not set
+# X-Forwarded-Host or X-Forwarded-Prefix, so those could only be a visitor's.
+# Under serve.py, waitress hands the headers on only behind a proxy.
 _public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip()
+
+
+def behind_proxy() -> bool:
+    """Whether the operator says a proxy is in front of this server."""
+    return ((os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
+            in ("1", "true", "yes"))
+
+
 # An https public address is an operator saying there is a TLS terminator in
 # front, which is the only way these headers get set at all.
-if (os.environ.get("STOCKBOT_BEHIND_PROXY", "").strip().lower()
-        in ("1", "true", "yes")) or _public.lower().startswith("https://"):
+if behind_proxy() or _public.lower().startswith("https://"):
     from werkzeug.middleware.proxy_fix import ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
 
 # A session cookie sent over plain http can be read in transit. On a public
 # deployment that is unacceptable, so the flag is set whenever the app knows it
@@ -168,6 +186,11 @@ def _harden(response):
             and request.endpoint != "static"
             and response.mimetype in ("text/html", "application/json", "text/csv")):
         h.setdefault("Cache-Control", "private, no-store")
+    # A file asked for by this release's fingerprint never changes under that
+    # address, so a browser need not ask for it again on every page.
+    if (request.endpoint == "static" and response.status_code in (200, 206, 304)
+            and request.args.get("v") == ASSET_VERSION):
+        h["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
 
 
@@ -249,8 +272,7 @@ def _served_publicly() -> bool:
     means a TLS terminator in front.
     """
     public = (os.environ.get("STOCKBOT_PUBLIC_URL") or "").strip().lower()
-    proxied = (os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
-    return public.startswith("https://") or proxied in ("1", "true", "yes")
+    return public.startswith("https://") or behind_proxy()
 
 
 def auth_required() -> bool:
@@ -327,6 +349,10 @@ def _identify():
     """Attach the signed-in person, or the local account, to this request."""
     g.user = None
     g.demo = False
+    # Neither depends on who asks. A style sheet needs no database, and the
+    # health check has to reach its own answer when there is none to open.
+    if request.endpoint in ("static", "healthcheck"):
+        return None
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
         token = session.get(SESSION_KEY)
@@ -4931,10 +4957,24 @@ def usage():
         "on_disk": db_path.startswith("/data") or db_path.startswith("/var/data"),
     }
 
+    # The timed backups on this disk. serve.py says how often it takes them;
+    # started any other way, none are taken. A missing folder is no backups.
+    import backup as backup_mod
+    hours = app.config.get("BACKUP_HOURS") or 0
+    try:
+        age, kept = (backup_mod.newest_age(backup_mod.folder()),
+                     backup_mod.how_many(backup_mod.folder()))
+    except OSError:
+        age, kept = None, 0
+    backups = {"hours": hours, "kept": kept, "age": age,
+               "taken": None if age is None else time.time() - age,
+               "late": hours > 0 and (age is None or age > 2 * hours * 3600)}
+
     from bot import upstream as upstream_mod
     return render_template("usage.html", data=data, days=days, trend=trend,
                            storage=storage, counts=counts, offsite=offsite,
                            plans_off=billing_mod.half_set(),
+                           backups=backups,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))
 

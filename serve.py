@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
 import sys
 import threading
@@ -30,7 +31,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Load .env before anything reads a credential out of the environment.
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    # tests/harness.py sets this, so a test run never picks up real keys.
+    if not os.environ.get("STOCKBOT_NO_DOTENV"):
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
@@ -78,6 +81,8 @@ def _prune_release_copies(db_path) -> None:
     except Exception as exc:
         print("  could not prune the copies taken before releases: %s: %s"
               % (type(exc).__name__, exc))
+        logging.getLogger("serve").error(
+            "The copies taken before releases could not be pruned", exc_info=True)
     sys.stdout.flush()
 
 
@@ -122,17 +127,129 @@ def _copy_before_release(db_path) -> None:
         print("  copied the database before release %s" % release[:12])
     except Exception as exc:
         print("  COPY BEFORE RELEASE FAILED: %s: %s" % (type(exc).__name__, exc))
+        # Logged as an error too, which is what reaches error reporting: the
+        # release starts with nothing to go back to.
+        logging.getLogger("serve").error(
+            "The copy of the database before this release failed", exc_info=True)
     sys.stdout.flush()
+
+
+# How many timed backups are kept when STOCKBOT_BACKUP_KEEP does not say.
+KEEP_BACKUPS = 8
+
+# The largest request taken in at all. waitress reads a whole body before the
+# app sees any of it, up to a gigabyte unless told otherwise, so anyone could
+# fill the server's disk. Well above the app's own 12 MB, so a picture a
+# little too large still gets the app's own answer.
+MAX_BODY = 64 * 1024 * 1024
+
+
+def _backups_to_keep() -> int:
+    """STOCKBOT_BACKUP_KEEP, or the default when it is blank or not a number.
+    0 keeps every one. A backup must never fail because this was mistyped."""
+    try:
+        keep = float((os.environ.get("STOCKBOT_BACKUP_KEEP") or "").strip())
+    except ValueError:
+        return KEEP_BACKUPS
+    return int(keep) if abs(keep) <= 1e9 else KEEP_BACKUPS
+
+
+def _whole(name: str, default: int, most: int) -> int:
+    """A setting from 1 to most, or the default when it is blank, mistyped or
+    out of range. A typing mistake must not keep the site from starting."""
+    try:
+        value = int((os.environ.get(name) or "").strip())
+    except ValueError:
+        return default
+    return value if 1 <= value <= most else default
+
+
+# What PORT and WEB_THREADS are when they cannot be used, and the most each
+# may be.
+WHOLE = {"PORT": (8000, 65535), "WEB_THREADS": (8, 256)}
+
+
+def _mistyped() -> list:
+    """What the log should say about settings that could not be understood."""
+    said = []
+    for name, (default, most) in WHOLE.items():
+        raw = os.environ.get(name)
+        if raw is None or raw.strip() == str(_whole(name, default, most)):
+            continue
+        try:
+            if int(raw) == _whole(name, default, most):
+                continue
+        except ValueError:
+            pass
+        said.append("%s is %s, so %d is used" % (
+            name, "empty" if not raw.strip() else
+            "%r, which is not a whole number from 1 to %d" % (raw, most), default))
+    for name, most, used in (
+            ("STOCKBOT_BACKUP_HOURS", 8760.0, "a backup every 12 hours"),
+            ("STOCKBOT_BACKUP_KEEP", 1e9, "the newest %d are kept" % KEEP_BACKUPS)):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            fine = float(raw) <= most       # not true of "nan" or "inf" either
+        except ValueError:
+            fine = False
+        if not fine:
+            said.append("%s is %s, so the usual is used: %s" % (
+                name, "empty" if not raw.strip() else
+                "%r, which is not a usable number" % raw, used))
+    proxy = (os.environ.get("STOCKBOT_BEHIND_PROXY") or "").strip().lower()
+    if proxy not in ("", "0", "false", "no", "off", "1", "true", "yes"):
+        said.append("STOCKBOT_BEHIND_PROXY is %r, which is read as off; 1 "
+                    "switches it on" % proxy)
+    return said
+
+
+def _server_settings(behind_proxy: bool) -> dict:
+    """How waitress is run, whatever address it listens on."""
+    return {
+        # A trading page can take a few seconds to build; the default
+        # channel timeout would cut long analyses off.
+        "channel_timeout": 180,
+        "ident": "stockbot",
+        "max_request_body_size": MAX_BODY,
+        # waitress deletes X-Forwarded-For and -Proto unless told not to, and
+        # ProxyFix in web.py then had nothing to read: every visitor had the
+        # proxy's address, over http. With no proxy in front they are still
+        # deleted, since then a visitor could have written them.
+        "clear_untrusted_proxy_headers": not behind_proxy,
+    }
+
+
+def _stop_when_told() -> None:
+    """Shut down in order when the host stops this server.
+
+    Render sends SIGTERM at every deploy. With no handler the first process
+    of a container ignores it, and is killed half a minute later in the middle
+    of whatever it was doing. waitress takes SystemExit as the word to finish
+    the requests it is answering, and main() then stops the jobs.
+    """
+    def told(_number, _frame):
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, told)
+    except ValueError:
+        pass            # only the main thread may; nothing else is different
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Serve Orenth in production.")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("PORT", "8000")))
+                        default=_whole("PORT", *WHOLE["PORT"]))
     parser.add_argument("--threads", type=int,
-                        default=int(os.environ.get("WEB_THREADS", "8")))
+                        default=_whole("WEB_THREADS", *WHOLE["WEB_THREADS"]))
     args = parser.parse_args(argv)
+
+    # Files made from here on are this server's alone to read: the database
+    # and its backups hold everyone's address, journal and sign-ins.
+    os.umask(0o077)
 
     # Errors the app handles, and failures in the background jobs, are written
     # to the log, and the host keeps whatever the process prints. Without this
@@ -147,15 +264,17 @@ def main(argv=None) -> int:
     # there are only a handful of them.
     socket.setdefaulttimeout(30)
 
+    # Before anything else, so a failure during start-up is reported too, one
+    # while the app itself is loading included.
+    from bot import monitoring
+    monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
+
     # Imported here so that --help works even if something below is missing.
     from waitress import serve
 
     import web
     from bot import database as db_mod
-    from bot import monitoring, offsite as offsite_mod, scheduler as scheduler_mod
-
-    # Before anything else, so a failure during start-up is reported too.
-    monitoring.start(release=os.environ.get("RENDER_GIT_COMMIT", ""))
+    from bot import offsite as offsite_mod, scheduler as scheduler_mod
 
     # The database every connection opens. DB_PATH is set only by web.main(),
     # which this file never calls, so here it is STOCKBOT_DB or the default,
@@ -236,13 +355,16 @@ def main(argv=None) -> int:
     # A backup nobody runs is not a backup. This runs one on a timer inside the
     # server, keeps the most recent few, and verifies each before keeping it.
     backups = None
-    every_hours = float(os.environ.get("STOCKBOT_BACKUP_HOURS", "12") or 0)
+    every_hours = offsite_mod.backup_hours()
+    keep = _backups_to_keep()
+    for said in _mistyped():
+        print("    setting        %s" % said)
+    # For the operator's page, which shows how the timed backups are going.
+    web.app.config["BACKUP_HOURS"] = every_hours
     if every_hours > 0:
         import backup as backup_mod
 
-        target = (os.environ.get("STOCKBOT_BACKUP_DIR") or "").strip()
-        if not target:
-            target = os.path.join(os.path.dirname(db_mod.default_path()), "backups")
+        target = backup_mod.folder()
 
         def take_one():
             from bot import database as db_mod
@@ -266,11 +388,17 @@ def main(argv=None) -> int:
                 monitoring.note("A backup failed to verify and was discarded",
                                 path=path)
                 raise RuntimeError("backup at %s did not verify" % path)
-            backup_mod.prune(target, int(os.environ.get("STOCKBOT_BACKUP_KEEP", "8")))
-            # Then off this disk, when that is set up. In a thread of its own,
-            # so a slow or failing copy never holds up or fails this backup;
-            # how it went is logged and shown on /usage.
+            # Off this disk, when that is set up, before anything else can go
+            # wrong. In a thread of its own, so a slow or failing copy never
+            # holds up or fails this backup; how it went is logged and shown
+            # on /usage.
             offsite_mod.copy_in_background(path)
+            try:
+                backup_mod.prune(target, keep)
+            except Exception as exc:
+                # The backup itself is good, and the next one prunes again.
+                monitoring.note("Old backups could not be pruned",
+                                error="%s: %s" % (type(exc).__name__, exc))
             # Off a terminal, print is block-buffered, and a backup you cannot
             # see happening is nearly as bad as one that fails quietly.
             sys.stdout.flush()
@@ -302,15 +430,16 @@ def main(argv=None) -> int:
     sys.stdout.flush()
 
     try:
+        _stop_when_told()
         serve(web.app, host=args.host, port=args.port, threads=args.threads,
-              # A trading page can take a few seconds to build; the default
-              # channel timeout would cut long analyses off.
-              channel_timeout=180, ident="stockbot")
+              **_server_settings(web.behind_proxy()))
     finally:
         if loop is not None:
             loop.stop()
         if backups is not None:
-            backups.stop()
+            # Long enough for a backup being written to finish, and still
+            # inside the half minute Render allows.
+            backups.stop(timeout=15.0)
     return 0
 
 

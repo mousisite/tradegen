@@ -16,5 +16,6 @@ anthropic==1.4.0  # Optional features only, but the import must resolve when a k
 sentry-sdk[flask]==2.69.1
 # Signing and encrypting: Sign in with Apple, and phone and browser notifications.
 cryptography==50.0.2
-# HTTP/2, which Apple's push service requires.
+# HTTP/2, which Apple's push service requires, and the client that speaks it.
 h2==4.4.1
+httpx2==2.12.0

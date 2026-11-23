@@ -1517,12 +1517,19 @@ try:
     check("registers the worker after load, and never inside the iPhone app",
           "'serviceWorker' in navigator && !window.Capacitor" in home
           and "navigator.serviceWorker.register('/sw.js'" in home)
+    sign_in(alice)
+    hers = c.get("/privacy").data.decode("utf-8")
+    sign_out()
     check("every page asks for the style sheet and its scripts marked with the version",
-          'href="/static/style.css%s"' % marked in home
-          and 'src="/static/notify.js%s"' % marked in home)
+          all('href="/static/style.css%s"' % marked in page for page in (home, hers))
+          and 'src="/static/notify.js%s"' % marked in hers)
+    check("a visitor's browser is not sent the notifications script, of no use to it",
+          "/static/notify.js" not in home)
     in_app = c.get("/privacy", headers={"User-Agent": "Mozilla/5.0 (iPhone) OrenthApp/1"})
-    check("and so does an app page for the phone script",
-          'src="/static/native.js%s"' % marked in in_app.data.decode("utf-8"))
+    check("an app page asks for the phone script marked too, and for the one that "
+          "opens a tapped notification, signed in or not",
+          all('src="/static/%s%s"' % (name, marked) in in_app.data.decode("utf-8")
+              for name in ("native.js", "notify.js")))
 
     sign_in(alice)
     account = c.get("/account").data.decode("utf-8")

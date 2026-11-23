@@ -1,6 +1,7 @@
 # Orenth
 
-**Live at [orenth.app](https://orenth.app).** Free, no ads, no tracking scripts.
+**Live at [orenth.app](https://orenth.app).** Free to use, with a paid Pro plan
+for more of the same. No ads.
 
 Give it a screenshot of a chart. It identifies the instrument, pulls live market
 data, runs **44 trading strategies**, measures which of them actually work on
@@ -39,7 +40,7 @@ required.
 | **Research** | The business behind the ticker: filed financials, valuation, a two-sided thesis, options pricing, recent filings, every claim cited |
 | **Screener** | Ready-made and custom screens over a chosen universe, showing the numbers that got each name through |
 | **Portfolio** | What you are exposed to: concentration, sector weights, correlation between holdings, a market-shock table |
-| **Trades** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
+| **Journal** | Open positions marked to market, close or delete them, log trades by hand, realised performance |
 | **Monitor** | Alerts, a watchlist, saved theses, and four routines that do the checking for you |
 | **Strategies** | Leaderboard of all 44 strategies, filterable by instrument and market conditions |
 | **Settings** | Account size, risk, broker costs and thresholds, editable in the browser with validation |
@@ -126,7 +127,7 @@ otherwise. Each links to where the work happens.
 | 12 | Bull and bear thesis | `bot/thesis.py` | Both cases argued from the gathered evidence, each point carrying what would prove it wrong |
 | 13 | Source citations | throughout | Every figure carries where it came from; filings link to sec.gov |
 | 14 | Investment thesis memory | `bot/thesis.py`, `bot/database.py` | A thesis is saved with the price at the time and closed out later as right, wrong, right-by-luck, or undecided. The outcome offered when you close one is the one the price supports, not the one you remember |
-| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Thirteen conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
+| 15 | Alerts | `bot/alerts.py`, `bot/scheduler.py` | Conditions covering price, percentage moves, RSI, 52-week highs and lows, volume, moving averages, price action and a change of call, plus the specific ones a given trade plan implies, set in one click. Checked on a timer by the server, not only when you open the page |
 | 15b | Scheduled events | `bot/catalysts.py` | Whether earnings or an ex-dividend date falls **inside this plan's own holding window**, which is the only version of that question that changes a decision |
 | 15c | Position overlap | `bot/portfolio.py` | Before you add a position, whether it is really a new one or more of what you already hold |
 | 15d | Export | `bot/export.py` | The journal, theses, watchlist, alerts, measured strategy record and analysis history as CSV or JSON |
@@ -179,9 +180,8 @@ gap between those two columns is the whole story of retail day trading.
 | AAPL | 0.07R | 0.04R | 0.02R | 0.01R |
 
 At 20bp round-trip on a 5-minute crypto bar, fees exceed the entire stop
-distance. Break-even for 5-minute BTC is about 98%. Scalping crypto at retail
-fee levels is arithmetically unprofitable before strategy quality even enters
-the picture.
+distance. Scalping crypto at retail fee levels is arithmetically unprofitable
+before strategy quality even enters the picture.
 
 Net expectancy per trade:
 
@@ -368,10 +368,11 @@ Design choices that keep it honest:
 - **Wilson confidence intervals**, which stay sensible at small sample sizes.
 - **A holdout check** on the most recent third. If the edge exists only in older
   data, the report says so.
-- **Break-even is measured.** It is the hit rate at which the average win and
-  the average loss of those same trades, after costs, cancel out:
-  `loss / (win + loss)`. Not every losing trade loses the full stop, so
-  `(1+c)/(1+R)`, which assumes it, asks for too much.
+- **Break-even is measured, not assumed.** It is worked out from what winning
+  and losing trades were worth after costs: with an average win `W` and an
+  average loss `L` (a negative number), it is `-L/(W-L)`. The textbook
+  `(1+c)/(1+R)`, with cost `c` and reward:risk `R`, stands in only when there
+  are no wins or no losses to measure.
 
 ---
 
@@ -508,14 +509,15 @@ paper.bat <command> [options]
 | `strategy_weights` | Per-strategy base weights, before regime and learned adjustment |
 | `alert_check_minutes` | Minutes between background alert checks, or 0 to switch them off |
 
-Two environment variables move where things are stored, which is how you keep a
-paper journal and a live one side by side without editing anything:
+These environment variables are the ones most often set. The first two move
+where things are stored, which is how you keep a paper journal and a live one
+side by side without editing anything; DEPLOY.md lists the rest:
 
 | Variable | Effect |
 |---|---|
 | `STOCKBOT_DB` | Use this database file instead of `data/stockbot.db` |
 | `STOCKBOT_CONFIG` | Use this settings file instead of `config.json` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. With no sign-in setting at all, a copy on your own machine has no login |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Turn on Google sign-in. With no way to sign in set up, your own machine needs no login; a public server shows the example account and says signing in is off |
 | `GOOGLE_ALLOWED_DOMAINS` | Restrict sign-in to certain email domains |
 | `STOCKBOT_SECRET_KEY` | Signs session cookies. Generated into `data/secret.key` if unset |
 
@@ -754,9 +756,10 @@ against published values, Black-Scholes against textbook figures, put-call
 parity, the lexicon's handling of negation, database invariants, every template
 compiling, every link resolving, and a full analysis end to end.
 
-Every suite gets a private database and settings file through `tests/harness.py`.
-Nothing in the suite can read or write your real journal, and no suite depends
-on the order it runs in.
+Every suite that opens the database, the settings or the website gets private
+ones through `tests/harness.py`, which also keeps the keys in `.env` out of a
+test run. Nothing in the suite can read or write your real journal, and no
+suite depends on the order it runs in.
 
 ---
 
@@ -764,7 +767,7 @@ on the order it runs in.
 
 | Source | Used for | Notes |
 |---|---|---|
-| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, crypto. |
+| Yahoo Finance charts | OHLCV, symbol resolution, news | Free, no key. Equities, ETFs, futures, crypto. |
 | Yahoo Finance quoteSummary | Ratios, profile, balance sheet, cash flow | Free, but needs a cookie and crumb handshake, which `bot/yahoo.py` performs and refreshes |
 | Yahoo Finance options | Chains, open interest, implied volatility | Same handshake. Greeks are computed here, not taken on trust |
 | SEC EDGAR | Filed financials (XBRL company facts), filing history | Free, no key, requires a real User-Agent and stays inside the 10 requests/second limit |
@@ -785,12 +788,13 @@ source in `gather_social` in `bot/sentiment.py`.
 
 ## Limitations
 
-- **The backtest assumes stops and targets fill at the exact level.** Real fills
-  gap through stops, especially on news and at the open. The trade plan now
-  states this in cash: alongside what the stop budgets, it shows what a move the
-  size of that instrument's worst measured day would actually cost. For Bitcoin
+- **A stop is an order, not a price.** The back-test fills a stop the bar opened
+  through at that bar's open. Inside a bar it still assumes the stop's own
+  price, and real fills can be worse, especially on news. The trade plan states
+  this in cash: alongside what the stop budgets, it shows what a move the size
+  of that instrument's worst measured day would actually cost. For Bitcoin
   that is routinely three times the budgeted risk; for an index fund closer to
-  1.2 times. The backtest itself still assumes the clean fill.
+  1.2 times.
 - **Cost is modelled as a flat spread.** No size-dependent slippage, no partial
   fills.
 - **Sixty days of 5-minute history is one market regime.** An edge measured
@@ -815,7 +819,7 @@ Three details do most of the work:
 
 - **Every figure is monospaced with tabular numerals**, so columns of prices and
   R multiples line up and stay scannable.
-- **Semantic colours are warm.** Gains are olive `#68773b`, losses rust
+- **Semantic colours are warm.** Gains are olive `#616f37`, losses rust
   `#a53e2a`. A neon green on cream would look violently wrong.
 - **Contrast was solved, not copied.** The published warm tokens are tuned for
   large display type and fail AA as small text on cream: muted grey lands at
@@ -823,33 +827,25 @@ Three details do most of the work:
   until it cleared 4.5:1, keeping the hue and gaining legibility.
 
 There is a warm dark theme too, which follows your system setting. The
-decisions are recorded in `design-system/stock-bot/MASTER.md`.
+colours and the reasons for them are at the top of `static/style.css`.
 
 ---
 
 ## Putting it on the internet
 
-Double-clicked, the web app runs on your machine. `http://127.0.0.1:8000` only
-works there, which is deliberate: your API key, your trades and your positions
-stay local.
+Started from `Stock Bot.bat`, the web app runs on your machine.
+`http://127.0.0.1:8000` only works there, which is deliberate: your API key,
+your trades and your positions stay local.
 
-The same code serves [orenth.app](https://orenth.app), and DEPLOY.md is the
-step-by-step guide to putting it online.
-
-**Hosting.** `serve.py` runs it under waitress, a production server, in the
-container the `Dockerfile` builds, behind the host's own proxy.
-
-**Concurrency.** One analysis pins a CPU core for seconds, and the cache is
-per-process and in memory, so this is one instance on one machine. Many more
-simultaneous users would need a job queue and a shared cache.
-
-**Multi-user data.** With sign-in switched on, each person has their own
-trades, watchlist, alerts and theses (see Accounts above), in one SQLite file
-on a persistent disk.
+orenth.app is the same code on a server: one Render instance behind
+Cloudflare, run by waitress (`serve.py`), with an account for each person and
+one SQLite file on a disk that outlives each release. [DEPLOY.md](DEPLOY.md)
+has the steps. It must stay one instance, because two cannot share that file,
+and one analysis keeps a CPU core busy for a few seconds.
 
 There is also licensing to check before running your own: publishing trading
-signals for money is regulated in many countries, and the rules differ by
-where you and your users are.
+signals for money is regulated in many countries, and the rules differ by where
+you and your users are.
 
 ---
 
@@ -860,7 +856,7 @@ Stock Bot.bat       double-click this: starts the web server
 web.py              the Flask web app
 templates/          web pages, including the settings screen
 static/style.css    warm editorial design system
-design-system/      the recorded design decisions
+design-system/      an early design study, kept for its history only
 menu.py             terminal menu
 analyze.py          analysis CLI
 paper.py            paper trading journal CLI
@@ -873,6 +869,8 @@ backup.py           consistent snapshots via SQLite's backup API, then verified
 preflight.py        checks a live deployment before anyone else sees it
 Dockerfile          the deployed image
 DEPLOY.md           putting it online, step by step
+mobile/             the iPhone app: the site in a native shell
+tools/              redraw the logo and the preview card, and operator's scripts
 tests/              every suite, runnable with tests/run_all.py
 bot/
   engine.py         the analysis pipeline, shared by web and CLI
@@ -891,6 +889,20 @@ bot/
 
   accounts.py       who owns what, sessions, and the shared/personal split
   auth.py           Google sign-in: authorization code flow with PKCE
+  codes.py          sign-in codes by email and text, and their limits
+  apple.py          Sign in with Apple, on the site and in the app
+  billing.py        Free and Pro, through Stripe, and the free allowance
+  appstore.py       checking what Apple says about a purchase is Apple's
+  apple_store.py    Pro bought in the iPhone app
+  invites.py        a friend's link, and the Pro time it gives
+  demo.py           the example account a signed-out visitor is shown
+  public.py         the pages anyone can read, and their pictures to share
+  digest.py         the weekly email
+  push.py           notifications to phones and browsers
+  webapp.py         the installable app and the offline worker's files
+  events.py         counts of what happened, for the operator
+  safejson.py       JSON read without trusting how deep it goes
+  terminal.py       console output setup
   quality.py        Piotroski, Altman, Beneish and accruals, from filed figures
   charts.py         price and filed-financial charts as inline SVG
   monitoring.py     optional error reporting, with personal data stripped
@@ -912,7 +924,7 @@ bot/
   portfolio.py      exposure, concentration, sector weights, shock tests
   screener.py       two-stage screening, shallow then deep
   thesis.py         the bull and bear cases, with evidence and falsifiers
-  alerts.py         21 alert conditions and the checker
+  alerts.py         the alert conditions and the checker
   reasoning.py      LLM reasoning over gathered facts only
   workflows.py      the four automated routines
 
