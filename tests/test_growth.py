@@ -1058,13 +1058,17 @@ try:
         none = web._weekly_email_job()
         _os.environ["STOCKBOT_PUBLIC_URL"] = "https://orenth.app/"
         one = web._weekly_email_job()
+        _os.environ["STOCKBOT_PUBLIC_URL"] = "HTTPS://orenth.app"
+        typed = web._weekly_email_job()
     finally:
         digest.run = real_run
         web.app.logger.disabled = False
         _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
     check("with no public address for its stop link, no email is sent",
           none == {"checked": 0} and one == {"checked": 1}
-          and ran_with == ["https://orenth.app"], (none, ran_with))
+          and ran_with[:1] == ["https://orenth.app"], (none, ran_with))
+    check("an address typed in capitals is one, as everywhere else",
+          typed == {"checked": 1} and len(ran_with) == 2, (typed, ran_with))
 
     sign_out()
     url = "/email/stop?u=%d&t=%s" % (reader.id, digest.token(web.app.secret_key, reader.id))
