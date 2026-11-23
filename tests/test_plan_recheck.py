@@ -448,6 +448,86 @@ check("a proxy setting that is not understood is said to be off",
       code == 0 and "STOCKBOT_BEHIND_PROXY is 'yes please', which is read as off" in said,
       said[-400:])
 
+head("NOR DOES A MISTYPED PORT OR NUMBER OF THREADS STOP IT")
+listened = []
+
+
+def listen(*_a, **kw):
+    listened.append((kw["port"], kw["threads"]))
+
+
+for typed in ("", " ", "many", "8.5", "0", "-1", "99999999"):
+    del listened[:]
+    try:
+        code, said = start(serving=listen, PORT=typed, WEB_THREADS=typed)
+    except (Exception, SystemExit) as exc:
+        code, said = "%s: %s" % (type(exc).__name__, exc), ""
+    check("typed as %r they are the usual 8000 and 8, and the log says so" % typed,
+          code == 0 and listened == [(8000, 8)]
+          and "PORT is" in said and "WEB_THREADS is" in said,
+          (code, listened, said[-300:]))
+code, said = start(serving=listen, PORT="10000", WEB_THREADS=" 6 ")
+check("numbers are used as they are, with nothing to say",
+      listened[-1] == (10000, 6) and "    setting" not in said, (listened, said[-300:]))
+
+head("ERROR REPORTING STARTS BEFORE THE APP IS LOADED")
+# A release that could not be loaded looped on restart with the site down, and
+# error reporting heard nothing of it.
+import builtins  # noqa: E402
+from bot import monitoring as monitoring_mod  # noqa: E402
+
+order = []
+real_import, real_start = builtins.__import__, monitoring_mod.start
+
+
+def watched(name, *args, **kwargs):
+    if name == "web":
+        order.append("app")
+    return real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = watched
+monitoring_mod.start = lambda *a, **k: order.append("reports")
+try:
+    start()
+finally:
+    builtins.__import__, monitoring_mod.start = real_import, real_start
+check("the reports first, then the app", order[:2] == ["reports", "app"], order)
+
+head("A COPY BEFORE A RELEASE THAT FAILS IS AN ERROR IN THE LOG")
+import logging  # noqa: E402
+
+errors = []
+
+
+class Errors(logging.Handler):
+    def emit(self, record):
+        errors.append((record.levelname, record.getMessage()))
+
+
+handler = Errors(level=logging.ERROR)
+logging.getLogger("serve").addHandler(handler)
+real_take, real_prune = backup_mod.take, backup_mod.prune
+
+
+def no_room(*_a, **_kw):
+    raise OSError("made up")
+
+
+backup_mod.take = no_room
+_os.environ["RENDER_GIT_COMMIT"] = "hhhh8888"
+try:
+    serve._copy_before_release(DB)
+    backup_mod.prune = no_room
+    serve._prune_release_copies(DB)
+finally:
+    backup_mod.take, backup_mod.prune = real_take, real_prune
+    _os.environ.pop("RENDER_GIT_COMMIT", None)
+    logging.getLogger("serve").removeHandler(handler)
+check("so error reporting hears of it, and of old ones that cannot be deleted",
+      [level for level, _ in errors] == ["ERROR", "ERROR"]
+      and "before this release failed" in errors[0][1], errors)
+
 head("THE HOST STOPPING THE SERVER STOPS IT IN ORDER")
 # SIGTERM, which the host sends at every deploy, used to be ignored until the
 # process was killed half a minute later.
@@ -542,6 +622,10 @@ def through_waitress(**settings):
     env = {k: v for k, v in _os.environ.items()
            if k not in ("STOCKBOT_BEHIND_PROXY", "STOCKBOT_PUBLIC_URL")}
     env.update(settings)
+    # It ends without tidying up, so its folders go inside one that is tidied.
+    import tempfile
+    room = tempfile.mkdtemp(prefix="stockbot-test-serve-child-")
+    env.update(TEMP=room, TMP=room, TMPDIR=room)
     ran = subprocess.run([_sys.executable, "-c", CHILD], env=env, timeout=120,
                          capture_output=True, text=True)
     for line in ran.stdout.splitlines():

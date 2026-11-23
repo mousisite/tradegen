@@ -10,7 +10,9 @@ on the day you need it.
 SQLite's own backup API copies a consistent snapshot of a live database while
 it is being written to, which is what this uses.
 
-    python backup.py                     writes into backups/
+    python backup.py                     writes where the server keeps its own
+                                         (STOCKBOT_BACKUP_DIR, or backups beside
+                                         STOCKBOT_DB), else into backups/
     python backup.py --out D:\\safe       somewhere else
     python backup.py --keep 30           prune to the newest 30
     python backup.py --csv               also write the plain-text exports
@@ -42,7 +44,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # the same stamp: stockbot-<stamp>.db and stockbot-<dataset>-<stamp>.csv.
 _STAMP = r"\d{4}-\d{2}-\d{2}-\d{6}(?:-\d+)?"
 _COPY = re.compile(r"^stockbot-(%s)\.db$" % _STAMP)
-_PART = re.compile(r"^stockbot-(?:[a-z_]+-)?(%s)\.(?:db|db-wal|db-shm|csv)$" % _STAMP)
+_PART = re.compile(r"^stockbot-(?:[a-z_]+-)?(%s)\.(?:db|db-wal|db-shm|db-journal|csv)$"
+                   % _STAMP)
+# A copy still being written, or left behind by a server stopped part-way.
+_UNFINISHED = re.compile(r"^stockbot-%s\.db\.part(?:-journal|-wal|-shm)?$" % _STAMP)
+UNFINISHED_FOR = 3600.0
 
 # Free space a backup must leave behind. Backups live on the same disk as the
 # live database, and a backup that fills it stops every write the site makes.
@@ -65,8 +71,28 @@ def _free_bytes(path: str) -> int:
     return shutil.disk_usage(path).free
 
 
+def folder() -> str:
+    """Where the server keeps its timed backups."""
+    from bot import database as db_mod
+
+    return ((os.environ.get("STOCKBOT_BACKUP_DIR") or "").strip()
+            or os.path.join(os.path.dirname(db_mod.default_path()), "backups"))
+
+
+def _remove_unfinished(part: str) -> None:
+    for path in (part, part + "-journal", part + "-wal", part + "-shm"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> str:
-    """Copy a consistent snapshot of the live database, or of source."""
+    """Copy a consistent snapshot of the live database, or of source.
+
+    Written under a temporary name and given its own only once whole: a copy
+    cut off part-way would otherwise sit there as the newest backup, empty.
+    """
     from bot import database as db_mod
 
     source_path = source or db_mod.default_path()
@@ -93,18 +119,26 @@ def take(out_dir: str, with_csv: bool = False, source: Optional[str] = None) -> 
     # replace the other. Rare in normal use and disastrous when it happens,
     # because the count of backups you think you have would be wrong.
     suffix = 1
-    while os.path.exists(target_path):
+    while os.path.exists(target_path) or os.path.exists(target_path + ".part"):
         target_path = os.path.join(out_dir, "stockbot-%s-%d.db" % (stamp, suffix))
         suffix += 1
 
-    source = sqlite3.connect(source_path, timeout=30.0)
-    target = sqlite3.connect(target_path)
+    part = target_path + ".part"
     try:
-        # The backup API, not a file copy: consistent even mid-write.
-        source.backup(target)
-    finally:
-        target.close()
-        source.close()
+        source = sqlite3.connect(source_path, timeout=30.0)
+        try:
+            target = sqlite3.connect(part)
+            try:
+                # The backup API, not a file copy: consistent even mid-write.
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
+        os.replace(part, target_path)
+    except BaseException:
+        _remove_unfinished(part)
+        raise
 
     print("  database  %s  (%s)" % (target_path, _size(target_path)))
 
@@ -193,13 +227,24 @@ def prune(out_dir: str, keep: int, max_age: Optional[float] = None) -> None:
             if max_age is None or now - os.path.getmtime(p) <= max_age}
     for name in sorted(os.listdir(out_dir)):
         part = _PART.match(name)
-        if part is None or part.group(1) in kept:
+        if _UNFINISHED.match(name):
+            # Old enough that nothing can still be writing it.
+            try:
+                if now - os.path.getmtime(os.path.join(out_dir, name)) < UNFINISHED_FOR:
+                    continue
+            except OSError:
+                continue
+        elif part is None or part.group(1) in kept:
             continue
         try:
             os.remove(os.path.join(out_dir, name))
             print("  removed old backup %s" % name)
         except OSError as exc:
             print("  could not remove %s: %s" % (name, exc))
+
+
+def how_many(out_dir: str) -> int:
+    return len(_copies(out_dir))
 
 
 def newest_age(out_dir: str) -> Optional[float]:
@@ -291,8 +336,7 @@ def restore(path: str) -> bool:
                 _said_busy()
                 return False
             print("  Backing up the database as it is now, so this can be undone")
-            undo = take((os.environ.get("STOCKBOT_BACKUP_DIR") or "").strip()
-                        or os.path.join(os.path.dirname(live), "backups"))
+            undo = take(folder())
         except (OSError, sqlite3.OperationalError) as exc:
             # No room for the copy, or the file could not be opened: going on
             # would leave nothing to undo with.
@@ -425,16 +469,35 @@ def _offsite(args) -> bool:
         return False
 
 
+def _keep_by_default() -> int:
+    """How many to keep when --keep does not say: 14, or the server's own
+    number where it keeps more. Backing up by hand into the server's folder
+    must never delete a timed backup the server means to keep."""
+    try:
+        keep = float((os.environ.get("STOCKBOT_BACKUP_KEEP") or "").strip())
+    except ValueError:
+        return 14
+    if not abs(keep) <= 1e9:
+        return 14
+    return max(14, int(keep)) if int(keep) > 0 else 0
+
+
 def main(argv=None) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
+    # Nobody else on the machine may read what is written: it holds everyone's
+    # address and journal, as the cookie key's own file does its secret.
+    os.umask(0o077)
+    beside_code = os.path.join(here, "backups")
+    set_on_server = any((os.environ.get(k) or "").strip()
+                        for k in ("STOCKBOT_BACKUP_DIR", "STOCKBOT_DB"))
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n")[0],
         epilog="The off-site commands need the four BACKUP_S3_ settings, which "
                "DEPLOY.md explains. Once they are set, the server copies each "
                "automatic backup by itself.")
-    parser.add_argument("--out", default=os.path.join(here, "backups"),
+    parser.add_argument("--out", default="",
                         help="where to write backups, and where --fetch saves one")
-    parser.add_argument("--keep", type=int, default=14,
+    parser.add_argument("--keep", type=int, default=_keep_by_default(),
                         help="how many to keep, 0 for all")
     parser.add_argument("--csv", action="store_true",
                         help="also write plain-text exports")
@@ -453,6 +516,12 @@ def main(argv=None) -> int:
                         help="download one off-site copy into the --out folder and "
                              "check it, to restore from")
     args = parser.parse_args(argv)
+    if not args.out:
+        # On a server, where its own backups go: the folder beside the code is
+        # inside the container there, and gone at the next deploy. A fetched
+        # copy stays out of there, or it would count as the newest backup and
+        # the next would wait for it to come due.
+        args.out = folder() if set_on_server and not args.fetch else beside_code
 
     if args.offsite or args.offsite_list or args.fetch:
         print()
