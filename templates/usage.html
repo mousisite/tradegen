@@ -16,6 +16,12 @@
     everyone has Pro and nobody can buy it.</p>
 {% endif %}
 
+{% if plans_paused %}
+  <p class="notice"><b>Selling is paused:</b> everyone has everything, and
+    nothing is on sale. Set SALES_PAUSED to 0 to sell again. Whoever already
+    pays goes on paying until that is stopped in Stripe.</p>
+{% endif %}
+
 <div class="card">
   <div class="figs">
     <div class="f"><div class="k">Accounts</div>

@@ -5,9 +5,12 @@ FROM python:3.11-slim
 
 # MALLOC_ARENA_MAX: the C library otherwise keeps a heap of its own for each of
 # the app's dozens of threads and seldom gives one back, on half a gigabyte.
+# SALES_PAUSED: nothing is on sale for now (bot/billing.py). The host's own
+# setting wins: SALES_PAUSED=0 there sells again.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     MALLOC_ARENA_MAX=2 \
+    SALES_PAUSED=1 \
     PORT=8000 \
     STOCKBOT_DB=/data/stockbot.db \
     STOCKBOT_CONFIG=/data/config.json \

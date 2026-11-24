@@ -402,8 +402,13 @@
     withdrawn for abuse of the service or of the data sources it depends on.
   </p>
 
-  {% if billing_on %}
+  {% if billing_on or sales_paused %}
   <h2>Pro</h2>
+  {% if sales_paused %}
+  <p class="prose">Pro is not on sale at the moment, and everyone can use all of
+    Orenth for free. The rest of this part is for whoever already has a
+    subscription.</p>
+  {% endif %}
   <p class="prose">
     Pro is a monthly or yearly subscription that renews automatically until
     you cancel it. You keep Pro until the end of the period you have paid

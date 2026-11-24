@@ -540,6 +540,7 @@ Then three things in Stripe's own settings, which the app cannot check:
 | `PHONE_ALLOWED_PREFIXES` | no | Country codes allowed to get texts, e.g. `+1,+44`. Limits SMS fraud |
 | `PHONE_CODES_PER_HOUR` | no | Texts the whole site may send an hour, default 40 |
 | `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET` | for paid plans | All three turn on Free and Pro. Webhook address: `<PUBLIC_URL>/billing/webhook` with `checkout.session.completed` and `customer.subscription.created/updated/deleted` |
+| `SALES_PAUSED` | no | `1` stops selling while Stripe stays set up: everyone has everything, nothing is on sale, and who already pays can still cancel. The Dockerfile sets `1`; add it as `0` in the host's settings to sell |
 | `STRIPE_PRICE_ID_YEARLY` | no | A yearly price, offered beside the monthly one with what it saves |
 | `PRO_PRICE_LABEL` | no | Shown only if Stripe cannot be reached; prices are otherwise read from Stripe |
 | `FREE_ANALYSES_PER_DAY`, `FREE_FIND_RESULTS`, `FREE_ALERTS` | no | The free allowance, default 3, 3 and 1 |

@@ -823,6 +823,7 @@ def _expose_user():
             "auth_on": auth_required(),
             "email_ready": codes_mod.email_ready(),
             "billing_on": billing_mod.ready(),
+            "sales_paused": billing_mod.paused(),
             # The upgrade button, for signed-in free accounts only, and in
             # the iPhone app only while Pro can be bought there, through Apple.
             "go_pro": (billing_mod.ready() and getattr(g, "user", None) is not None
@@ -4765,6 +4766,16 @@ def pricing():
     them (_upgrade), never from the address: a ?reason= in a link let anyone
     write in it.
     """
+    if billing_mod.paused():
+        # The address is in people's bookmarks and in what was shared.
+        pays = False
+        if getattr(g, "user", None) is not None and not g.demo:
+            conn = db_mod.connect(app.config.get("DB_PATH"))
+            try:
+                pays = bool(billing_mod.customer_of(conn, g.user.id))
+            finally:
+                conn.close()
+        return render_template("paused.html", pays=pays)
     if not billing_mod.ready():
         abort(404)
     return _pricing_page()
@@ -5503,6 +5514,7 @@ def usage():
                            trend_narrow=trend_narrow,
                            storage=storage, counts=counts, offsite=offsite,
                            plans_off=billing_mod.half_set(),
+                           plans_paused=billing_mod.paused(),
                            backups=backups,
                            upstream=upstream_mod.stats(),
                            scheduler=(ALERTS.status() if ALERTS else None))

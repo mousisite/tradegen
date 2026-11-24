@@ -121,7 +121,7 @@
 </section>
 
 <section class="closing">
-  <p class="lead">Free to start.</p>
+  <p class="lead">{{ 'Everything is free for now.' if sales_paused else 'Free to start.' }}</p>
   <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
   {% if billing_on %}
     <p class="fine" style="margin-top:var(--s2)">

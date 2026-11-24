@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% set active = 'pricing' %}
+{% set page_blurb = "Orenth is free for now: every feature, with nothing to buy and no card needed." %}
+{% block title %}Free for now · Orenth{% endblock %}
+{% block head_extra %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+
+<div class="pagehead" style="text-align:center">
+  <h1>Everything is free for now.</h1>
+  <p style="margin-inline:auto">Every feature, with nothing to buy and no card needed.</p>
+</div>
+
+<section class="closing">
+  {% if not current_user or demo %}
+    <a class="btn" href="{{ url_for('signin') }}">Create free account</a>
+  {% else %}
+    <a class="btn" href="{{ url_for('index') }}">Open Orenth</a>
+    {% if pays and not in_app %}
+    <p class="fine" style="margin-top:var(--s2)">If you still pay for Pro, you can
+      stop it on your <a href="{{ url_for('account') }}">Account page</a>.</p>
+    {% endif %}
+  {% endif %}
+</section>
+
+{% endblock %}

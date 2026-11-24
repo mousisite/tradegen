@@ -17,6 +17,8 @@ The prices shown are read from Stripe itself, so the page can never say one
 amount while Stripe charges another.
 
 Optional settings:
+  SALES_PAUSED            1 stops selling without unsetting anything: everyone
+                          has everything, and who already pays can still cancel
   STRIPE_PRICE_ID_YEARLY  a yearly price, offered beside the monthly one
   PRO_PRICE_LABEL         shown only if Stripe cannot be reached for the price
   FREE_ANALYSES_PER_DAY   different instruments a free account can open a day (3)
@@ -90,8 +92,19 @@ def _set(key: str) -> bool:
     return bool((os.environ.get(key) or "").strip())
 
 
+def paused() -> bool:
+    """Whether selling has been stopped for now, with everything still set up.
+
+    Nothing is on sale and everyone has everything, as before paid plans. What
+    key_set() is for goes on, and so do Stripe's messages, so the plans on
+    record are right on the day selling starts again.
+    """
+    said = (os.environ.get("SALES_PAUSED") or "").strip().lower()
+    return said in ("1", "true", "yes", "on") and all(_set(k) for k in REQUIRED)
+
+
 def ready() -> bool:
-    return all(_set(k) for k in REQUIRED)
+    return all(_set(k) for k in REQUIRED) and not paused()
 
 
 def key_set() -> bool:
@@ -117,6 +130,8 @@ def describe() -> str:
     """Whether paid plans are on, for the lines printed at start-up."""
     if ready():
         return "on"
+    if paused():
+        return "PAUSED (SALES_PAUSED): everyone has everything and nothing is on sale"
     missing = half_set()
     return ("OFF, though partly set up: %s. Everyone has Pro and nobody can "
             "buy it" % missing) if missing else "off"

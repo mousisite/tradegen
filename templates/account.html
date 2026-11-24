@@ -104,10 +104,21 @@
 <section>
   <div class="sechead"><h2>Your plan</h2></div>
   <div class="card">
+    {% if sales_paused %}
+    <p class="prose" style="margin-bottom:var(--s2)">Everything in Orenth is free for everyone for now, so there is
+      nothing to pay for. If you still have a subscription, you can stop it here.</p>
+    {% endif %}
     <form method="post" action="{{ url_for('billing_portal') }}">
       <button class="btn quiet" type="submit">Manage subscription</button>
     </form>
     <p class="fine">Cancel, change your card or see receipts, on Stripe's page.</p>
+  </div>
+</section>
+{% elif sales_paused %}
+<section>
+  <div class="sechead"><h2>Your plan</h2></div>
+  <div class="card">
+    <p class="prose">Everything in Orenth is free for everyone for now.</p>
   </div>
 </section>
 {% endif %}
