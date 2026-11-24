@@ -30,7 +30,7 @@
 
 {% if example %}
   <a class="card example" href="{{ url_for('analyse', symbol=example.symbol, interval='1d') }}">
-    <span class="eyebrow">Latest check &middot; {{ example.symbol }} at
+    <span class="eyebrow">Latest check, with the news &middot; {{ example.symbol }} at
       {{ example.price|price }}{% if example.age_min %} &middot;
       {% if example.age_min < 120 %}{{ example.age_min }} min ago{% else %}{{ example.at|ago }}{% endif %}{% endif %}</span>
     <span class="lead">

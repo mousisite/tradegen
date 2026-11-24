@@ -912,6 +912,9 @@ try:
           waits == [web.DEMO_SCAN_WAIT] and web.DEMO_SCAN_WAIT <= 2, waits)
     check("an example from twenty minutes ago is not called live",
           "Live right now" not in page and "Latest check" in page and "20 min ago" in page)
+    check("the front page's check says it counts the news, and a public page that it does not",
+          "Latest check, with the news" in page and "prices only: a full" in " ".join(
+              c.get("/stock/nvda").data.decode("utf-8", "replace").split()))
     check("someone with an account is offered a way back in",
           ">Sign in</a>" in page and ">Sign up</a>" not in page)
     check("the screener is not said to read filings",

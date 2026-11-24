@@ -54,7 +54,8 @@
     {% endif %}
     <p class="prose faint" style="font-size:var(--t-xs)">
       Price {{ '$' if snap.currency == 'USD' else snap.currency ~ ' ' if snap.currency }}{{ snap.price|price }} · {{ snap.interval|bar_words }} bars ·
-      {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}{% endif %}
+      {% if frozen %}as it was on {{ snap.at|day }}{% else %}checked {{ snap.at|ago }}, prices only: a full
+      analysis counts the news as well{% endif %}
     </p>
   </div>
 
