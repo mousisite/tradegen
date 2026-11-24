@@ -1609,6 +1609,45 @@ try:
         check("a round that breaks off has still looked at those before",
               conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=? AND last_checked>0",
                            (busy.id,)).fetchone()[0] == 49)
+
+        # What is read of one download for the price-action kinds is a hundred
+        # kilobytes and more, and a round over many read thousands.
+        conn.execute("UPDATE alerts SET active=0")
+        conn.commit()
+        for n in range(48):
+            at_ = db.alert_add(conn, "MM%d" % (n % 16), "structure_breaks", user=busy.id, cap=None)
+            conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (old + n, at_))
+        for k in range(4):
+            at_ = db.alert_add(conn, "MM%d" % k, "price_above", threshold=50.0, user=busy.id,
+                               cap=None)
+            conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (old + 5 * k, at_))
+        conn.commit()
+
+        class Structure(dict):
+            here, most, read = 0, 0, 0
+
+            def __init__(self):
+                Structure.read += 1
+                Structure.here += 1
+                Structure.most = max(Structure.most, Structure.here)
+
+            def __del__(self):
+                Structure.here -= 1
+
+        alerts.fetch_bars = bars_for
+        real_series, real_action = alerts.liquidity.series, alerts._price_action
+        alerts.liquidity.series = lambda bars: Structure()
+        alerts._price_action = lambda row, bars, series: (None, "bar:1")
+        try:
+            res = alerts.check(conn)
+        finally:
+            alerts.liquidity.series, alerts._price_action = real_series, real_action
+        check("the structure of each download is read once, and one is held at a time",
+              res["checked"] == 52 and (Structure.read, Structure.most) == (16, 1),
+              (res["checked"], Structure.read, Structure.most))
+        check("and the other alerts are told in the order they always were, newest first",
+              [f.symbol for f in res["fired"]] == ["MM3", "MM2", "MM1", "MM0"],
+              [f.symbol for f in res["fired"]])
     finally:
         conn.set_trace_callback(None)
         alerts.fetch_bars, web.market_mod.split_history = real_fetch_bars, real_splits

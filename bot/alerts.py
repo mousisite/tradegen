@@ -1080,11 +1080,10 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             except Exception:
                 calls[key] = None
 
-    structure: Dict = {}
     # Those looked at with nothing to say, written down many at a time.
     quiet: List[tuple] = []
     try:
-        _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
+        _look(conn, rows, data, failed, calls, quiet, fired, errors, now)
     finally:
         if quiet:
             db.alerts_checked(conn, quiet)
@@ -1096,11 +1095,26 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
 QUIET_AT_ONCE = 200
 
 
-def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now) -> None:
+def _side_by_side(rows) -> List:
+    """The alerts as they came, but those that read the structure of the same
+    prices one after another.
+
+    So it is read once for them all and then let go of. Kept to the end of a
+    round over five thousand alerts, what had been read of some two thousand
+    downloads came to two hundred megabytes, on a server of 512.
+    """
+    first: Dict = {}
+    place = [first.setdefault((r["symbol"], _bars_for(r)), n)
+             if r["kind"] in PRICE_ACTION_KINDS else n for n, r in enumerate(rows)]
+    return [rows[n] for n in sorted(range(len(rows)), key=place.__getitem__)]
+
+
+def _look(conn, rows, data, failed, calls, quiet, fired, errors, now) -> None:
     """Each alert against its prices: check()'s round, once they are in."""
     from . import database as db
 
-    for row in rows:
+    structure: Dict = {}                # of the prices being looked at
+    for row in _side_by_side(rows):
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
         if bars is None:
@@ -1129,6 +1143,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
                 # The structure is read once per download, however many
                 # alerts look at it.
                 if key not in structure:
+                    structure.clear()
                     structure[key] = liquidity.series(bars)
                 hit, seen = _price_action(row, bars, structure[key])
             elif row["kind"] in BAR_KINDS:
