@@ -342,9 +342,10 @@ def _seed(db, conn, user_id, now):
     db.open_trade(conn, "BTC-USD", "1d", 1, 64250.0, 58900.0, 79000.0, quantity=21.5,
                   user=user_id)
     closed = db.open_trade(conn, "BRK-B", "1d", 1, 480.0, 465.0, 510.0, quantity=10,
-                           user=user_id)
+                           notes=LONG_NOTE, user=user_id)
     db.exit_trade(conn, closed, 492.5, 4, "target", user=user_id)
     db.exit_trade(conn, closed, 471.0, None, "stop", user=user_id)
+    db.review_trade(conn, closed, "yes", LONG_NOTE, user=user_id)
     db.exit_trade(conn, nvda, 181.0, 10, "manual", user=user_id)
 
     fired = db.alert_add(conn, "AAPL", "price_above", 250.0, note="Breakout level",
@@ -885,6 +886,7 @@ PAGES = [
     ("/portfolio", "all", "More"),
     ("/trades", "all", "Journal"),
     ("/trades/simulate?run_id={run}", "member", "Journal"),
+    ("/trades/{trade}/picture", "member", "Journal"),
     ("/trades/breakdown", "all", "Journal"),
     ("/tools/size?entry=100&stop=97&target=106", "all", "Journal"),
     ("/tools/survival", "all", "Journal"),
@@ -1051,6 +1053,8 @@ def run(browser, site, base, check, head):
     try:
         run_id = conn.execute("SELECT id FROM runs WHERE user_id=? AND symbol='TSLA'",
                               (site.free.id,)).fetchone()[0]
+        trade_id = conn.execute("SELECT id FROM trades WHERE user_id=? AND symbol='BRK-B'",
+                                (site.free.id,)).fetchone()[0]
     finally:
         conn.close()
     blocked = []
@@ -1089,7 +1093,7 @@ def run(browser, site, base, check, head):
         for path, whom, tab in PAGES:
             if whom == ("visitor" if member else "member"):
                 continue
-            path = path.format(run=run_id, share=share_path)
+            path = path.format(run=run_id, share=share_path, trade=trade_id)
             page.set_viewport_size({"width": 360, "height": 800})
             page.emulate_media(color_scheme="light")
             page.goto(base + path)
@@ -1171,7 +1175,7 @@ def run(browser, site, base, check, head):
         for path, whom, _tab in PAGES:
             if whom == ("visitor" if member else "member"):
                 continue
-            path = path.format(run=run_id, share=share_path)
+            path = path.format(run=run_id, share=share_path, trade=trade_id)
             page.goto(base + path)
             for width in (820, 1024, 1366, 1920):
                 page.set_viewport_size({"width": width, "height": 768})
@@ -1262,7 +1266,7 @@ def run(browser, site, base, check, head):
             pretended = False
             ctx.close()
             break
-        paths = [p.format(run=run_id, share=share_path) for p, whom, _tab in PAGES
+        paths = [p.format(run=run_id, share=share_path, trade=trade_id) for p, whom, _tab in PAGES
                  if whom == ("member" if member else "visitor") or (member and whom == "all")]
         if member:
             paths.append("/app-offline.html")

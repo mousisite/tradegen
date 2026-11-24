@@ -363,7 +363,7 @@
               <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}
               {{ tag_chips(t) }}
               {% if t['followed_plan'] or t['lesson'] %}
-                <div class="faint" style="font-size:var(--t-xs);margin-top:4px">{% if t['followed_plan'] %}Followed the plan:
+                <div class="faint" style="font-size:var(--t-xs);margin-top:4px;overflow-wrap:anywhere">{% if t['followed_plan'] %}Followed the plan:
                   {{ tags.followed_labels.get(t['followed_plan'], '')|lower }}.{% endif %}
                   {% if t['lesson'] %}{{ t['lesson'] }}{% endif %}</div>
               {% endif %}
