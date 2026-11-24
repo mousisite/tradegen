@@ -469,6 +469,10 @@ try:
     page = c.get("/record").data.decode("utf-8", "replace")
     check("while waiting, it says how many calls it is holding",
           "5 calls written down since 5 Jan 2026" in page)
+    # It opens to search when the first few settle, weeks before any is scored.
+    check("with a description of its own, not the front page's",
+          "None is scored yet. Not financial advice." in re.search(
+              r'name="description" content="(.*?)"', page).group(1), page[:600])
 
     # NVDA, BUY at 100 with target 104.5: reaches it on the third day.
     check("a buy that reached its target was right",
@@ -835,6 +839,9 @@ try:
     check("short enough to be shown whole", all(
         len(h[0]) < 60 and len(h[1]) < 155 for p, h in heads.items() if p != "/"),
         {p: (len(h[0]), len(h[1])) for p, h in heads.items()})
+    # A price that opens past the stop loses more, as the page itself says.
+    check("and the size calculator's promises no more than its page does",
+          "loses no more than that at the stop" in heads["/tools/size"][1], heads["/tools/size"])
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("asking someone to analyse a stock says analyse, like the button",
           "Analyse any stock or coin" in page and "Check any stock" not in page)
