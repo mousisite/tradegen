@@ -847,7 +847,8 @@ try:
     check("having tried its own bars first", FETCHED[:2] == [("OLDT", "5m"), ("OLDT", "1h")],
           FETCHED)
     check("with entry, stop, target and exit drawn",
-          all(w in page for w in ("Entry ", "Stop ", "Target ", "Exit ")))
+          all(w in page for w in ("Entry ", "Stop ", "Target ", "Exit "))
+          and "The dashed lines are the entry, stop, target and exit." in page)
     check("in New York time", "New York time" in page)
     check("and nothing unfinished", ">None<" not in page and not NAN.search(page))
     recent = db.open_trade(conn, "ZZN", "15m", -1, 100.0, 101.0, user=alice.id,
@@ -855,6 +856,9 @@ try:
     page = flat(text(c.get("/trades/%d/picture" % recent)))
     check("a recent trade uses its own bars", "Drawn on" not in page and "<svg" in page
           and "still open" in page)
+    check("and its lines are named in a sentence, with no target and no exit",
+          "The dashed lines are the entry and stop." in page,
+          page[page.find("The dashed lines"):][:80])
     sign_in(c, bob)
     check("someone else's trade is not found", c.get("/trades/%d/picture"
                                                      % old_trade).status_code == 404)
