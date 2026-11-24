@@ -5692,13 +5692,13 @@ def export_data(dataset, fmt):
     _slow_from_here()
     if not _EXPORTING.acquire(timeout=5):
         return _come_back()
-    if _rate_limited("export", EXPORTS_PER_HOUR):
-        _EXPORTING.release()
-        return _too_often("downloaded files")
-    # On disk rather than in memory, and gone once it has been sent.
-    made = tempfile.TemporaryFile()
-    conn = db_mod.connect(app.config.get("DB_PATH"))
+    made = conn = None
     try:
+        if _rate_limited("export", EXPORTS_PER_HOUR):
+            return _too_often("downloaded files")
+        # On disk rather than in memory, and gone once it has been sent.
+        made = tempfile.TemporaryFile()
+        conn = db_mod.connect(app.config.get("DB_PATH"))
         # A CSV is marked as UTF-8, or Excel opens it as something older and an
         # accent or a currency sign in a note comes out as two or three others.
         text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
@@ -5709,11 +5709,15 @@ def export_data(dataset, fmt):
         made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
     except BaseException:
-        made.close()
+        if made is not None:
+            made.close()
         raise
     finally:
-        conn.close()
+        # Whatever happened, a disk with no room included: kept, every later
+        # download by anybody waited for it until the server was restarted.
         _EXPORTING.release()
+        if conn is not None:
+            conn.close()
     size = made.tell()
     made.seek(0)
     return Response(

@@ -1146,6 +1146,7 @@ try:
     print("=" * 72)
     import io
     import json
+    import tempfile
     import threading
     from bot import export as export_mod
     from bot import ideas as ideas_mod
@@ -1653,6 +1654,21 @@ try:
             ideas_mod._shortlist, ideas_mod._job = real_shortlist, real_job
         check("a list of ideas drawn without a place waits for no company's filings",
               waited == [0, None], waited)
+        # A disk with no room, once.
+        def full(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        real_file, tempfile.TemporaryFile = tempfile.TemporaryFile, full
+        try:
+            c.get("/export/trades.csv")
+        except OSError:
+            pass
+        finally:
+            tempfile.TemporaryFile = real_file
+        began = time.time()
+        check("a download that breaks keeps nobody's after it waiting",
+              c.get("/export/trades.csv").status_code == 200 and time.time() - began < 4
+              and not web._SLOW, (time.time() - began, web._SLOW))
     finally:
         for key in STRIPE:
             _os.environ.pop(key, None)
