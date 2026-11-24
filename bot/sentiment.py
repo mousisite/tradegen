@@ -294,13 +294,15 @@ FEED_HOURS = 7 * 24.0
 YAHOO_MOST = 15
 
 
-def _yahoo_news(symbol: str) -> List[Item]:
+def _yahoo_news(symbol: str, named=None) -> List[Item]:
     """Headlines from Yahoo Finance, or none when it does not answer.
 
     Asked by Yahoo's own symbol. A coin's bare ticker is often a company's or
     a fund's there (LINK, LTC, BTC), and its headlines were scored as the
     coin's. Yahoo's search has none under a coin's symbol, and its headline
-    feed has.
+    feed has, but goes by the letters: a builder called Dai-Dan is in Dai's,
+    and the rupee in every coin's. named is what finds the coin in a headline
+    of that feed, and the rest are left out.
     """
     coin = coin_ticker(symbol) is not None
     items: List[Item] = []
@@ -329,9 +331,11 @@ def _yahoo_news(symbol: str) -> List[Item]:
             if coin and not feed.get("version"):
                 _gave_nothing("Yahoo Finance", "HTTP 200, and not a feed")
             for e in feed.get("entries", ()):
+                title = html.unescape(e.get("title", ""))
                 age = _age_hours(e.get("published_parsed"))
-                if age <= FEED_HOURS and len(items) < YAHOO_MOST:
-                    items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
+                if age <= FEED_HOURS and len(items) < YAHOO_MOST and (
+                        named is None or named.search(title)):
+                    items.append(Item(text=title, kind="news",
                                       source="Yahoo Finance", age_hours=age,
                                       url=e.get("link", ""), via="Yahoo Finance"))
             for n in () if coin else r.json().get("news", []):
@@ -356,13 +360,17 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     A source that has not answered in SOURCES_WAIT seconds is left out.
     """
     known = name if name and name.upper() != symbol.upper() else ""
-    coin = coin_ticker(symbol)
+    coin, named = coin_ticker(symbol), None
     if coin:
         # Yahoo calls a coin by the pair, "Bitcoin USD", and headlines do not.
         # Its ticker is asked for as well, and nothing about stocks: many are
         # named by an ordinary word, and the headlines of every stock that rose
         # on optimism were scored as the Optimism coin's.
-        query = '"%s" %s crypto' % (re.sub(r"[\s-]+USD$", "", known, flags=re.I) or coin, coin)
+        called = re.sub(r"[\s-]+USD$", "", known, flags=re.I) or coin
+        query = '"%s" %s crypto' % (called, coin)
+        # The ticker, and a name short enough to be a word ("gram"), as written.
+        named = re.compile(r"(?<![\w-])(?:%s|%s)(?![\w-])" % (
+            re.escape(coin), ("(?i:%s)" if len(called) > 4 else "%s") % re.escape(called)))
     else:
         query = '"%s" stock OR crypto' % (known or symbol)
     give_up = time.monotonic() + SOURCES_WAIT
@@ -370,7 +378,7 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     items: List[Item] = []
     try:
         for job in (pool.submit(_google_news, query, limit, FEED_HOURS if coin else math.inf),
-                    pool.submit(_yahoo_news, symbol)):
+                    pool.submit(_yahoo_news, symbol, named)):
             try:
                 items += job.result(timeout=max(0.0, give_up - time.monotonic()))
             except Exception:

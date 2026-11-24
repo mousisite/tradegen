@@ -196,6 +196,37 @@ try:
           yahoo_said(Reply(200, content=many)))
     check("and they are the newest",
           max(i.age_hours for i in sentiment._yahoo_news("BTC-USD")) < 15)
+
+    # Yahoo's feed goes by the letters. What it really gave for Dai, the dollar
+    # coin, was a Japanese builder's buyback, which read as bullish; the rupee
+    # was in every coin's.
+    def from_yahoo(symbol, name, *titles):
+        page = ("<rss version='2.0'><channel><title>x</title>%s</channel></rss>" % "".join(
+            "<item><title>%s</title><pubDate>%s</pubDate></item>" % (t, stamp(k + 1))
+            for k, t in enumerate(titles))).encode()
+        upstream.reset()
+        sentiment.requests.get = lambda url, **k: (
+            Reply(200, content=page) if url == sentiment._YAHOO_FEED else
+            Reply(200, {"news": [{"title": t} for t in titles]})
+            if url == sentiment._YAHOO_SEARCH else Reply(404))
+        return [i.text for i in sentiment.gather_news(symbol, name)]
+
+    others = ("Is Dai-Dan (TSE:1980) Still Cheap After Its Buyback Plan?",
+              "Rupee under pressure", "Sector Update: Financial Stocks Higher")
+    check("a headline that does not name the coin is not its news",
+          from_yahoo("DAI-USD", "Dai USD", "Better Buy: Tether or Dai?", *others)
+          == ["Better Buy: Tether or Dai?"],
+          from_yahoo("DAI-USD", "Dai USD", "Better Buy: Tether or Dai?", *others))
+    check("one that gives its ticker, or its name in any letters, is",
+          from_yahoo("BTC-USD", "Bitcoin USD", "BITCOIN falls", "What bitcoin's fall means",
+                     "Is $BTC cheap?", "These (BTC) miners rose", "BTCS sells its ether")
+          == ["BITCOIN falls", "What bitcoin's fall means", "Is $BTC cheap?",
+              "These (BTC) miners rose"])
+    check("but not a word that only has the ticker's letters",
+          from_yahoo("NEAR-USD", "NEAR Protocol USD", "Gold near a record",
+                     "NEAR gains 5%") == ["NEAR gains 5%"])
+    check("and a company's are as Yahoo gives them",
+          from_yahoo("AAPL", "Apple Inc.", *others) == list(others))
     read, said, _again = from_the_feed(Reply(200, content=feed.replace(
         b"<title>Bitcoin surges to a record", b"<title>Miners raise money as it rises")))
     check("a source that answered is named and nothing is logged",
