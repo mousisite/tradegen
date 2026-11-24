@@ -41,13 +41,14 @@
       {{ 'email or phone' if email_ready and phone_ready else ('email' if
       email_ready else 'phone') }} here.{% endif %}
       {# A friend's invite goes along: the other browser has not heard of it. #}
-      <p style="margin:var(--s1) 0 0"><button class="btn quiet" type="button" data-copy-address
+      <p style="margin:var(--s1) 0 0"><button class="btn quiet" type="button" hidden data-copy-address
         data-url="{{ site_base }}{{ url_for('join', code=session['ref']) if session.get('ref') else url_for('signin') }}">Copy
         the link</button> <span class="soft" data-copied role="status" aria-live="polite"></span></p></div>
   <script>
   (function () {
     var button = document.querySelector('[data-copy-address]');
     if (!button) { return; }
+    button.hidden = false;
     var url = button.getAttribute('data-url');
     var said = document.querySelector('[data-copied]');
     function done() { said.textContent = 'Copied. Paste it in your browser.'; }

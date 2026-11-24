@@ -1491,24 +1491,64 @@ def _example_kept():
         return cfg, key, _CACHE.get(key)
 
 
+def _work_out_example(cfg: Dict, key: Tuple):
+    """The example worked out again and kept, or None while somebody's own
+    asking for it is running. Marked as running itself: whoever opens the page
+    behind it meanwhile is shown the last one, as the front page shows it, or
+    waits for this one, and has no second worked out that says something else."""
+    with _CACHE_LOCK:
+        if key in _RUNNING:
+            return None
+        owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
+    try:
+        # As a page's own, since one may be waiting for it.
+        result = engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d", source="web",
+                                record=False)
+        with _CACHE_LOCK:
+            kept = _CACHE[key] = (time.time(), result, {})
+        return kept
+    except Exception as exc:
+        owned["error"] = exc
+        raise
+    finally:
+        with _CACHE_LOCK:
+            if _RUNNING.get(key) is owned:
+                _RUNNING.pop(key, None)
+        owned["done"].set()
+
+
+# How old the list behind the Find tile may be before another is started. A
+# finished one is dropped at JOB_KEEP, so well before it, or there is none to
+# show for the minutes the next one takes.
+FIND_BEHIND = ideas_mod.JOB_KEEP - 2 * EXAMPLE_TTL
+
+
+def _start_find() -> None:
+    """Have the list behind the Find tile made, so that it opens on a finished
+    one. Nobody has asked for it yet: only where the server's own jobs run, and
+    not while a scan somebody asked for is going or waiting its turn."""
+    if not BACKGROUND:
+        return
+    try:
+        _demo_shortlist("stocks", "medium", "balanced", wait=0.0, ttl=FIND_BEHIND,
+                        may_start=lambda: not any(
+                            j["running"] for j in ideas_mod._JOBS.values()))
+    except ideas_mod.Busy:
+        pass
+    except Exception as exc:
+        app.logger.warning("The list behind the Find tile could not be started: %s", exc)
+
+
 def _refresh_example() -> None:
     try:
         # The one the page behind it opens: worked out apart from it, and
         # without the news, the front page and that page gave two answers.
         cfg, key, kept = _example_kept()
         if kept is None or time.time() - kept[0] >= EXAMPLE_TTL:
-            kept = (time.time(), engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
-                                                record=False), {})
-            with _CACHE_LOCK:
-                _CACHE[key] = kept
-        _shown_example(kept[1], kept[0])
-        try:
-            # The list behind the Find tile, so that it opens on a finished
-            # one: started when there is none from the last few hours.
-            _demo_shortlist("stocks", "medium", "balanced", wait=0.0,
-                            ttl=ideas_mod.JOB_KEEP)
-        except ideas_mod.Busy:
-            pass
+            kept = _work_out_example(cfg, key)
+        if kept is not None:
+            _shown_example(kept[1], kept[0])
+        _start_find()
     except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
         # visitor. The page simply renders without it, and the log says why: a
@@ -1529,12 +1569,17 @@ def _example():
     now = time.time()
     with _example_lock:
         data = _example_state["data"]
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
     try:
         # A visitor may have had it worked out again since.
-        kept = _example_kept()[2]
+        kept = _example_kept()[2] if rested else None
         if kept is not None and data is not None and kept[0] > data["at"]:
             data = _shown_example(kept[1], kept[0])
     except Exception:
+        # Left a while, as a refresh that failed is, or it is in the log for
+        # every visit.
+        with _example_lock:
+            _example_state["failed"] = now
         app.logger.exception("The front page example could not be read")
     with _example_lock:
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
@@ -1545,7 +1590,8 @@ def _example():
     if data is None:
         return None
     # Say how old it is rather than presenting a quarter-hour-old call as live.
-    return dict(data, age_min=int((now - data["at"]) // 60))
+    # One kept since this began is not from the future.
+    return dict(data, age_min=max(0, int((now - data["at"]) // 60)))
 
 
 @app.route("/")
@@ -5837,10 +5883,10 @@ DEMO_SCAN_WAIT = 1.0
 
 def _demo_shortlist(market: str, horizon: str, risk: str,
                     wait: float = ideas_mod.PAGE_WAIT,
-                    ttl: float = DEMO_SCAN_TTL) -> Dict:
+                    ttl: float = DEMO_SCAN_TTL, may_start=None) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     return ideas_mod.find(market, horizon, cfg, risk, wait=min(wait, DEMO_SCAN_WAIT),
-                          ttl=ttl, join_wait=0)
+                          ttl=ttl, join_wait=0, may_start=may_start)
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."

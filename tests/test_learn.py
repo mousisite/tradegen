@@ -244,6 +244,19 @@ try:
           (shown["side"], shown["symbol"]) == ("buy", "NQ=F"), shown and shown["side"])
     check("and otherwise the one there is",
           learn_mod._example(pair[:1], ("crowd_breakout",))["side"] == "short")
+    real_chart, charts_drawn = learn_mod.charts.trade_chart, []
+
+    def counted(*a, **k):
+        charts_drawn.append(1)
+        return real_chart(*a, **k)
+
+    learn_mod.charts.trade_chart = counted
+    try:
+        learn_mod._example([with_example(s, -1) for s in ("ES=F", "NQ=F", "SPY", "QQQ")],
+                           ("crowd_breakout",))
+    finally:
+        learn_mod.charts.trade_chart = real_chart
+    check("and only the one shown is drawn", len(charts_drawn) == 2, len(charts_drawn))
 
     # What a claim is compared with, its unit, and the figures by earlier times.
     conn = db.connect(DB)
@@ -379,6 +392,16 @@ try:
           status == 200 and "Inside the day, with the course" in page
           and "-0.08R" in page and "/learn/sweep-break-retest" in page, status)
     check("before the house method", page.find("Inside the day") < page.find("How we tested"))
+    from bot import learn as learn_mod
+    reads, real_box = [], learn_mod.lab_box
+    learn_mod.lab_box = lambda conn, name: reads.append(name) or real_box(conn, name)
+    try:
+        get("/backtest/liquidity-model")
+        get("/backtest/pin-bar")
+    finally:
+        learn_mod.lab_box = real_box
+    check("the lab's store is read once for it, and not for a strategy it does not test",
+          reads == ["liquidity_model"], reads)
     # The house method below it names ATR on purpose; only blanks are checked here.
     blanks = [w for w in leaks(page) if w in ("None", "nan", "undefined", "NaN")]
     check("with no blank printed as a word", not blanks, blanks)

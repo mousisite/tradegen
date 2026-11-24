@@ -5,6 +5,7 @@ import json
 import os as _os
 import re
 import sys as _sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -375,7 +376,15 @@ try:
     check("Strategies lists every strategy with enough setups",
           page.count('<td class="lead">') == len(_strats.REGISTRY),
           page.count('<td class="lead">'))
-    conn.execute("DELETE FROM strategy_stats WHERE symbol='ALLFORTY'")
+    conn.execute("UPDATE strategy_stats SET symbol='NVDA' WHERE symbol='ALLFORTY'")
+    conn.commit()
+    every, one = (" ".join(c.get("/strategies" + q).data.decode("utf-8", "replace").split())
+                  for q in ("", "?symbol=NVDA"))
+    check("a visitor is told the figures count every instrument, only while they do",
+          "Only popular names can be picked here. The figures count every instrument" in every
+          and "Only popular names can be picked here." in one
+          and "The figures count every instrument" not in one)
+    conn.execute("DELETE FROM strategy_stats WHERE symbol='NVDA'")
     conn.commit()
     conn.close()
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
@@ -760,9 +769,53 @@ try:
               len(asked_of) == 1 and asked_of[0][2].get("with_news", True)
               and not asked_of[0][2]["record"] and key in web._CACHE
               and web._CACHE[key][1].plan.prob_samples == 60, (asked_of, list(web._CACHE)))
+        check("no scan is started where the server's own jobs do not run", scans == [], scans)
+        web.BACKGROUND["stand-in"] = None
+        web._refresh_example()
         check("and the list behind the Find tile is started, without waiting for it",
-              scans and scans[-1][1]["wait"] == 0.0
-              and scans[-1][1]["ttl"] == web.ideas_mod.JOB_KEEP, scans)
+              len(scans) == 1 and scans[0][1]["wait"] == 0.0, scans)
+        jobs = web.ideas_mod._JOBS
+        jobs.clear()
+        idle = scans[0][1]["may_start"]()
+        jobs["a member's"] = {"running": True}
+        check("but never takes a place while a scan somebody asked for is going",
+              idle and not scans[0][1]["may_start"]())
+        jobs.clear()
+
+        def no_scan(*_a, **_k):
+            raise RuntimeError("The scan stopped without an answer.")
+
+        web.ideas_mod.find, shown = no_scan, web._example_state["at"]
+        web._refresh_example()
+        check("a scan that cannot be started is not the example's failure",
+              web._example_state["failed"] == 0.0 and web._example_state["at"] == shown)
+
+        # A finished list is kept for JOB_KEEP and then dropped. Another is
+        # started while there is still that one to show.
+        web.ideas_mod.find = real_find
+        real_run, web.ideas_mod._run = web.ideas_mod._run, lambda *a: None
+        try:
+            for age in (web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL - 60,
+                        web.ideas_mod.JOB_KEEP - web.EXAMPLE_TTL - 60):
+                jobs.clear()
+                then = time.time() - age
+                web._demo_shortlist("stocks", "medium", "balanced", wait=0.0)
+                (asked, job), = jobs.items()
+                job.update(running=False, started=then, scan={
+                    "market": "stocks", "interval": "1d", "rows": [], "failed": [],
+                    "asked_for": 1, "cut_short": False, "throttled": False, "complete": True,
+                    "seconds": 1.0, "scanned_at": then, "finished_at": then})
+                web._refresh_example()
+                check("a list %d minutes old %s" % (age // 60, "is left" if job is jobs[asked]
+                                                    else "is made again, and shown meanwhile"),
+                      (jobs[asked] is job) == (age < web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL)
+                      and (jobs[asked]["scan"] or jobs[asked]["previous"]) is job["scan"],
+                      jobs[asked])
+        finally:
+            web.ideas_mod._run = real_run
+            web.BACKGROUND.clear()
+            jobs.clear()
+        web.ideas_mod.find = lambda *a, **k: scans.append((a, k))
         _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
         web._CACHE.clear()
         web._refresh_example()
@@ -770,9 +823,81 @@ try:
         check("no model is paid to read headlines for it, and a member's own is kept apart",
               asked_of[-1][1] is False and paid not in web._CACHE and len(web._CACHE) == 1,
               (asked_of[-1], list(web._CACHE)))
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        # The first visitor of a quarter hour sees the last one here, and has it
+        # worked out again: the page behind must not answer something else.
+        begun, finish = threading.Event(), threading.Event()
+
+        def takes_a_while(symbol, cfg, **how):
+            asked_of.append((symbol, None, how))
+            begun.set()
+            finish.wait(20)
+            return fake_result("NVDA", "AVOID", 50, 20)
+
+        last_one, behind = fake_result("NVDA", "WAIT", 60, 30), []
+        web._CACHE.clear()
+        web._CACHE[key] = (time.time() - web.EXAMPLE_TTL - 5, last_one, {})
+        del asked_of[:]
+        web.engine.analyse = takes_a_while
+        refresh = threading.Thread(target=web._refresh_example)
+        refresh.start()
+        begun.wait(20)
+
+        def opens_it():
+            with web.app.test_request_context("/analyse?symbol=NVDA"):
+                web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+                behind.append(web.cached_analysis("NVDA", "1d", dict(
+                    web.config_mod.DEFAULTS), True, record=False, ttl=web.DEMO_TTL))
+
+        opens = threading.Thread(target=opens_it)
+        opens.start()
+        opens.join(5)
+        at_once = list(behind)
+        finish.set()
+        refresh.join(20)
+        opens.join(20)
+        check("opened while it is worked out again, the page behind shows the last one too, "
+              "and no second is worked out beside it",
+              at_once == [last_one] and len(asked_of) == 1 and not web._RUNNING,
+              (at_once, len(asked_of), web._RUNNING))
+        web._CACHE.clear()
+        del asked_of[:]
+        web._RUNNING[key] = {"done": threading.Event(), "error": None}
+        web._refresh_example()
+        check("and while somebody's own asking for it runs, it is left to that one",
+              asked_of == [] and not web._CACHE and list(web._RUNNING) == [key], asked_of)
+        web._RUNNING.clear()
+
+        def no_prices(*_a, **_k):
+            raise web.DataError("nothing just now")
+
+        web.engine.analyse = no_prices
+        web._refresh_example()
+        check("one that fails is not left marked as running",
+              not web._RUNNING and web._example_state["failed"] > 0, web._RUNNING)
+        web.engine.analyse = worked_out
+
+        # Kept in the moment after this look began.
+        web._example_state.update(failed=0.0)
+        web._CACHE[key] = (time.time() + 0.5, fake_result("NVDA", "AVOID", 50, 20), {})
+        check("the age said is never less than nothing", web._example()["age_min"] == 0,
+              web._example())
+        # Words that cannot be put together, at every look.
+        real_words, web.plain_mod.explain_plan = web.plain_mod.explain_plan, no_prices
+        told, real_log = [], web.app.logger.exception
+        web.app.logger.exception = lambda *a, **k: told.append(a)
+        try:
+            web._CACHE[key] = (time.time() + 1, fake_result("NVDA", "BUY", 50, 40), {})
+            looks = [web._example()["action"] for _ in range(5)]
+        finally:
+            web.plain_mod.explain_plan, web.app.logger.exception = real_words, real_log
+        check("words that cannot be put together are said in the log once, not at every visit",
+              len(told) == 1 and looks == ["AVOID"] * 5, (told, looks))
     finally:
         _os.environ.pop("ANTHROPIC_API_KEY", None)
         web.engine.analyse, web.ideas_mod.find = real_analyse, real_find
+        web._RUNNING.clear()
         web._CACHE.clear()
         web._CACHE.update(kept_before)
         with web._example_lock:

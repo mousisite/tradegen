@@ -702,14 +702,17 @@ def _example(results: Sequence[Dict], names: Sequence[str]) -> Optional[Dict]:
     for name in names:
         # "Buying the breakout" is measured both ways, and a short under those
         # words reads as a mistake: a buy first, when there is one.
-        for side in (("buy", "short") if name == "crowd_breakout" else (None,)):
+        for side in ((1, -1) if name == "crowd_breakout" else (None,)):
             for interval in setups.LAB_INTERVALS:
                 for res in results:
                     if res.get("interval") != interval:
                         continue
                     ex = ((res.get("setups") or {}).get(name) or {}).get("example")
+                    # Only the one shown is drawn, which is most of the work.
+                    if side is not None and (ex or {}).get("direction") != side:
+                        continue
                     drawn = example_view(ex, res.get("symbol", ""), interval, name)
-                    if drawn and side in (None, drawn["side"]):
+                    if drawn:
                         return drawn
     return None
 

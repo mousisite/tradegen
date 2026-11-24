@@ -165,6 +165,9 @@ try:
         check("%s is told how to get out to sign in, and can copy the address" % where,
               "open the page in your" in signin_for(agent)
               and re.search(r'data-copy-address\s+data-url="[^"]*/signin"', signin_for(agent)))
+        check("%s: the button is there only where its script is" % where,
+              re.search(r'<button[^>]*\shidden\s[^>]*data-copy-address', signin_for(agent))
+              and "button.hidden = false" in signin_for(agent))
     for where, agent in (
             ("Safari", iphone + "Version/18.1 Mobile/15E148 Safari/604.1"),
             ("Chrome on Android", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "

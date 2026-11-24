@@ -44,7 +44,7 @@
   </form>
   {% if demo and seen %}
   <p class="prose faint" style="font-size:var(--t-xs);margin-top:var(--s1)">Only popular
-    names can be picked here. The figures count every instrument analysed.</p>
+    names can be picked here.{% if not symbol %} The figures count every instrument analysed.{% endif %}</p>
   {% endif %}
 </div>
 
