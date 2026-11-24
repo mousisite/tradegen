@@ -342,9 +342,10 @@ def _seed(db, conn, user_id, now):
     db.open_trade(conn, "BTC-USD", "1d", 1, 64250.0, 58900.0, 79000.0, quantity=21.5,
                   user=user_id)
     closed = db.open_trade(conn, "BRK-B", "1d", 1, 480.0, 465.0, 510.0, quantity=10,
-                           user=user_id)
+                           notes=LONG_NOTE, user=user_id)
     db.exit_trade(conn, closed, 492.5, 4, "target", user=user_id)
     db.exit_trade(conn, closed, 471.0, None, "stop", user=user_id)
+    db.review_trade(conn, closed, "yes", LONG_NOTE, user=user_id)
     db.exit_trade(conn, nvda, 181.0, 10, "manual", user=user_id)
 
     fired = db.alert_add(conn, "AAPL", "price_above", 250.0, note="Breakout level",
@@ -435,7 +436,7 @@ MEASURE = r"""
     };
     const out = {wide: document.scrollingElement.scrollWidth, sticking: [], small: [],
                  fonts: [], keys: [], cards: [], away: [], unnamed: [], tiny: [],
-                 bar: null};
+                 lone: [], bar: null};
     if (out.wide > width) {
       for (const el of document.body.querySelectorAll('*')) {
         if (out.sticking.length >= 4 || hidden(el) || held(el)) { continue; }
@@ -524,6 +525,24 @@ MEASURE = r"""
         }
       }
     }
+    // The "?" of a help note stays on the line of the word before it.
+    for (const d of document.querySelectorAll('details.help:not(.list)')) {
+      if (hidden(d.querySelector('.q'))) { continue; }
+      const walk = document.createTreeWalker(d.parentElement, NodeFilter.SHOW_TEXT);
+      let said = null;
+      for (let t = walk.nextNode(); t && !d.contains(t) &&
+           t.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING; t = walk.nextNode()) {
+        if (t.textContent.trim() && !t.parentElement.closest('.sr, .help')) { said = t; }
+      }
+      if (!said) { continue; }
+      const words = document.createRange();
+      words.selectNodeContents(said);
+      const lines = [...words.getClientRects()].filter(r => r.width > 1);
+      if (lines.length && d.querySelector('.q').getBoundingClientRect().top >
+                          lines[lines.length - 1].bottom - 2) {
+        out.lone.push('after "' + said.textContent.trim().slice(-30) + '"');
+      }
+    }
     const bar = document.querySelector('nav.tabbar');
     if (bar && getComputedStyle(bar).display !== 'none') {
       const items = [...bar.querySelectorAll(':scope > a, :scope > details > summary')];
@@ -552,7 +571,7 @@ MEASURE = r"""
 WIDE_MEASURE = r"""
 () => {
   const W = document.documentElement.clientWidth;
-  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [],
+  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [], slide: [],
                stretched: [], long: []};
   const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
     (typeof el.className === 'string' && el.className.trim()
@@ -579,6 +598,10 @@ WIDE_MEASURE = r"""
   }
   for (const wrap of document.querySelectorAll('.tablewrap')) {
     if (!wrap.offsetParent) { continue; }
+    if (wrap.querySelector('table.stack') && wrap.scrollWidth > wrap.clientWidth + 1) {
+      out.slide.push(name(wrap.querySelector('table')) + ' ' + wrap.scrollWidth + ' wide in ' +
+                     wrap.clientWidth);
+    }
     const edge = wrap.getBoundingClientRect().right;
     for (const el of wrap.querySelectorAll('button, a, input, select, summary')) {
       const r = el.getBoundingClientRect();
@@ -863,6 +886,7 @@ PAGES = [
     ("/portfolio", "all", "More"),
     ("/trades", "all", "Journal"),
     ("/trades/simulate?run_id={run}", "member", "Journal"),
+    ("/trades/{trade}/picture", "member", "Journal"),
     ("/trades/breakdown", "all", "Journal"),
     ("/tools/size?entry=100&stop=97&target=106", "all", "Journal"),
     ("/tools/survival", "all", "Journal"),
@@ -1029,6 +1053,8 @@ def run(browser, site, base, check, head):
     try:
         run_id = conn.execute("SELECT id FROM runs WHERE user_id=? AND symbol='TSLA'",
                               (site.free.id,)).fetchone()[0]
+        trade_id = conn.execute("SELECT id FROM trades WHERE user_id=? AND symbol='BRK-B'",
+                                (site.free.id,)).fetchone()[0]
     finally:
         conn.close()
     blocked = []
@@ -1058,7 +1084,7 @@ def run(browser, site, base, check, head):
     head("EVERY PAGE AT 360 AND 430 WIDE, LIGHT AND DARK")
     # -----------------------------------------------------------------------
     wide, small, fonts, tabs, moved = [], [], [], [], []
-    keys, cards, away, unnamed, tiny, faint = [], [], [], [], [], []
+    keys, cards, away, unnamed, tiny, faint, lone = [], [], [], [], [], [], []
     views, longest = 0, 0
     for who, ua in (("visitor", None), ("free account", None), ("app", APP_UA)):
         member = who != "visitor"
@@ -1067,7 +1093,7 @@ def run(browser, site, base, check, head):
         for path, whom, tab in PAGES:
             if whom == ("visitor" if member else "member"):
                 continue
-            path = path.format(run=run_id, share=share_path)
+            path = path.format(run=run_id, share=share_path, trade=trade_id)
             page.set_viewport_size({"width": 360, "height": 800})
             page.emulate_media(color_scheme="light")
             page.goto(base + path)
@@ -1095,6 +1121,7 @@ def run(browser, site, base, check, head):
                 away += ["%s: %s" % (where, a) for a in m["away"]]
                 unnamed += ["%s: %s" % (where, u) for u in m["unnamed"]]
                 tiny += ["%s: %s" % (where, t) for t in m["tiny"]]
+                lone += ["%s: %s" % (where, t) for t in m["lone"]]
                 # The colours do not change with the width, only the theme.
                 if width == 360:
                     faint += ["%s: %s" % (where, f) for f in page.evaluate(CONTRAST)]
@@ -1125,6 +1152,7 @@ def run(browser, site, base, check, head):
     check("every ticker box asks for capitals, no corrections and a Go key, and every "
           "price and size box for the decimal keypad", not keys, keys[:5])
     check("no chart is shrunk until its labels are under 8 pixels", not tiny, tiny[:5])
+    check("no help note's ? falls onto a line of its own", not lone, lone[:5])
     check("no text is fainter than 4.5 to 1 against its background (3 to 1 if large), "
           "light or dark", not faint, faint[:5])
     check("the tab bar is there with its five places, 44 or more each, the right one "
@@ -1133,7 +1161,7 @@ def run(browser, site, base, check, head):
     # -----------------------------------------------------------------------
     head("EVERY PAGE ON A COMPUTER AND A TABLET")
     # -----------------------------------------------------------------------
-    broad, heads, hidden, stretched, long_ = [], [], [], [], []
+    broad, heads, hidden, stretched, long_, slide = [], [], [], [], [], []
     for who in ("visitor", "free account"):
         member = who != "visitor"
         ctx = browser.new_context(viewport={"width": 1366, "height": 768},
@@ -1147,7 +1175,7 @@ def run(browser, site, base, check, head):
         for path, whom, _tab in PAGES:
             if whom == ("visitor" if member else "member"):
                 continue
-            path = path.format(run=run_id, share=share_path)
+            path = path.format(run=run_id, share=share_path, trade=trade_id)
             page.goto(base + path)
             for width in (820, 1024, 1366, 1920):
                 page.set_viewport_size({"width": width, "height": 768})
@@ -1157,6 +1185,7 @@ def run(browser, site, base, check, head):
                     broad.append("%s is %d too wide" % (where, m["wide"]))
                 heads += ["%s: %s" % (where, x) for x in m["heads"]]
                 hidden += ["%s: %s" % (where, x) for x in m["away"]]
+                slide += ["%s: %s" % (where, x) for x in m["slide"]]
                 stretched += ["%s: %s" % (where, x) for x in m["stretched"]]
                 long_ += ["%s: %s" % (where, x) for x in m["long"]]
         ctx.close()
@@ -1165,6 +1194,8 @@ def run(browser, site, base, check, head):
           not heads, heads[:5])
     check("no button or link in a table is a sideways scroll away on a tablet or a "
           "computer", not hidden, hidden[:5])
+    check("no list of rows that is cards on a phone scrolls sideways there, the "
+          "portfolio's eleven columns included", not slide, slide[:5])
     check("no chart's words are stretched", not stretched, stretched[:5])
     check("no point of a list runs past a hundred letters to the line", not long_, long_[:5])
 
@@ -1235,7 +1266,7 @@ def run(browser, site, base, check, head):
             pretended = False
             ctx.close()
             break
-        paths = [p.format(run=run_id, share=share_path) for p, whom, _tab in PAGES
+        paths = [p.format(run=run_id, share=share_path, trade=trade_id) for p, whom, _tab in PAGES
                  if whom == ("member" if member else "visitor") or (member and whom == "all")]
         if member:
             paths.append("/app-offline.html")

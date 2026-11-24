@@ -225,6 +225,8 @@ for ticker, name, where, coin, coin_name in SHARED:
           heading(listing))
     check("%s without it is still %s" % (ticker, coin_name), heading(bare) == (coin, coin_name),
           heading(bare))
+    check("a coin's page says crypto, not the source's own code for it",
+          "<b>Crypto</b>" in bare and ">CCC<" not in bare and "<b>NasdaqGM</b>" in listing)
     again = text(c.get("/analyse?symbol=%s&interval=1d&news=0" % ticker))
     check("and kept apart in the cache: the coin again is the coin",
           heading(again) == (coin, coin_name), heading(again))

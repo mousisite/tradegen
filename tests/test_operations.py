@@ -298,12 +298,13 @@ try:
     # Each holds megabytes, and only the count of forty ever pushed one out.
     now = time.time()
     web._CACHE["spent"] = (now - web.DEMO_TTL - 1, types.SimpleNamespace(run_id=None), {})
-    web._CACHE["usable"] = (now - web.DEMO_TTL + 60, types.SimpleNamespace(run_id=None), {})
+    usable = ("NVDA", False, "1d", True, "house")
+    web._CACHE[usable] = (now - web.DEMO_TTL + 60, types.SimpleNamespace(run_id=None), {})
     at_once("FRESH", 1)
     check("an analysis too old to be served again is dropped when one is kept",
           "spent" not in web._CACHE, list(web._CACHE))
     check("and one the example may still serve is not",
-          "usable" in web._CACHE and any(k[0] == "FRESH" for k in web._CACHE if len(k) == 5),
+          usable in web._CACHE and any(k[0] == "FRESH" for k in web._CACHE if len(k) == 5),
           list(web._CACHE))
 finally:
     web.engine.analyse = real_analyse

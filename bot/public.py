@@ -514,9 +514,52 @@ def strategy_label(name: str) -> str:
     return " ".join(words)[:1].upper() + " ".join(words)[1:]
 
 
+# Each of the others as it reads in a question, as bot/setups.py ASKED says the
+# course's setups. The label alone ("Pivot levels") is not an English subject.
+# "Trading against" and "reversal" are what the mean-reversion ones do: sell a
+# stretch up, buy a stretch down. Each is short enough for its question to be
+# shown whole where a page's title is cut at sixty letters.
+_ASKED = {
+    "trend_stack": "following lined-up moving averages",
+    "macd_momentum": "following MACD momentum",
+    "supertrend_follow": "following the Supertrend line",
+    "adx_di_cross": "following ADX and the directional index",
+    "ichimoku_cloud": "the Ichimoku cloud",
+    "parabolic_sar_flip": "a Parabolic SAR flip",
+    "linreg_channel": "following a linear regression line",
+    "aroon_trend": "following the Aroon trend",
+    "tsi_trend": "following TSI momentum",
+    "roc_momentum": "following rate-of-change momentum",
+    "rsi_reversion": "trading against an extreme RSI",
+    "bollinger_fade": "a Bollinger Band reversal",
+    "keltner_reversion": "a Keltner channel reversal",
+    "zscore_reversion": "trading against an extreme z-score",
+    "stochastic_reversal": "a stochastic reversal",
+    "williams_reversal": "a Williams %R reversal",
+    "cci_reversion": "trading against an extreme CCI",
+    "vwap_band_fade": "a VWAP band reversal",
+    "squeeze_breakout": "a Bollinger squeeze breakout",
+    "donchian_breakout": "a Donchian channel breakout",
+    "opening_range_break": "an opening range breakout",
+    "volatility_expansion": "a volatility breakout",
+    "inside_bar_break": "an inside bar breakout",
+    "volume_confirmation": "following a move that volume backs",
+    "obv_divergence": "an OBV divergence",
+    "mfi_extremes": "trading against an extreme MFI",
+    "accumulation_trend": "following accumulation/distribution",
+    "vwap_position": "following price above or below VWAP",
+    "market_structure": "following higher highs or lower lows",
+    "pivot_levels": "trading from pivot points",
+    "gap_behaviour": "trading an opening gap",
+    "engulfing_pattern": "an engulfing candle",
+    "pin_bar": "a pin bar",
+    "momentum_thrust": "following three strong bars in a row",
+}
+
+
 def strategy_asked(name: str) -> str:
     """A strategy's name as it reads in "Does ... work?"."""
-    return _setups.ASKED.get(name) or strategy_label(name)
+    return _setups.ASKED.get(name) or _ASKED.get(name) or strategy_label(name)
 
 
 def strategy_slug(name: str) -> str:

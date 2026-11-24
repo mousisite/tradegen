@@ -5,6 +5,7 @@ did not happen to open stays invisible until a user opens it. This walks the
 templates directory instead of the route list, which does not depend on anyone
 remembering to add a page here.
 """
+import html
 import os
 import re
 import sys
@@ -181,25 +182,37 @@ def _drawn(name, **values):
     return re.sub(r"\s+", " ", page)
 
 
-def _strategy_page(tested):
-    from bot import strategies
+def _strategy_page(tested, name="rsi_reversion"):
+    from bot import public, strategies
     summary = {"tested": tested, "verdict": 0, "kept": 0.05, "se": 0.1, "paid": tested,
                "n": 100, "separate": 60.0, "wins": 40, "side": "", "base": None,
                "short_base": None, "long_share": 0.5, "index": None, "indexes": ()}
-    return _drawn("backtest.html", strategy="rsi_reversion", label="RSI reversion",
-                  asked="RSI reversion", asked_of=str, info=strategies.BY_NAME["rsi_reversion"],
+    return _drawn("backtest.html", strategy=name, label=public.strategy_label(name),
+                  asked=public.strategy_asked(name), asked_of=str,
+                  info=strategies.BY_NAME[name],
                   results=[], rare=None, course=False, intraday=False, summary=summary, kin=[],
                   method=web._house_method(), strategy_slug=str, short=str, slug=str)
 
 
 def test_one_of_a_thing_is_not_called_several():
     one, three = _strategy_page(1), _strategy_page(3)
-    assert "Back-tested on 1 stock or coin ·" in one
+    assert "prices of 1 stock or coin, after costs" in one
     assert "1 stocks and coins" not in one and "1 popular stocks" not in one, one[:3000]
     assert "On the 1 stock or coin it has enough trades on" in one and "of the 1." not in one
     # Only those it has enough trades on are counted, not every one tested.
     assert "Across the 3 stocks and coins it has enough trades on" in three
     assert "It kept money on 3 of the 3." in three
+
+
+def test_a_strategy_pages_title_and_description_fit_a_search_result():
+    from bot import public, strategies
+    for s in strategies.REGISTRY:
+        page = _strategy_page(48, s.name)
+        title = html.unescape(re.search("<title>(.*?)</title>", page).group(1))
+        said = html.unescape(re.search('name="description" content="(.*?)"', page).group(1))
+        assert title == "Does %s work? · Orenth" % public.strategy_asked(s.name), title
+        assert len(title) < 60 and len(said) < 156, (title, len(said), said)
+        assert said.startswith(public.strategy_label(s.name)), said
 
 
 def _strategies_page(rows=(), symbol=None, regime="all"):
@@ -251,6 +264,8 @@ if __name__ == "__main__":
     print("   OK   strategy names come from one label")
     test_one_of_a_thing_is_not_called_several()
     print("   OK   a strategy tested on one stock says so")
+    test_a_strategy_pages_title_and_description_fit_a_search_result()
+    print("   OK   every strategy page's title and description fit a search result")
     test_an_empty_choice_does_not_say_nothing_was_ever_measured()
     print("   OK   an empty choice on Strategies says it is the choice")
     test_a_result_of_nothing_is_not_drawn_as_a_loss()

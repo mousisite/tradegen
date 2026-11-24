@@ -153,8 +153,8 @@
             <td data-label="Call"><span class="chip {{ 'long' if r.action == 'BUY'
                  else 'short' if r.action == 'SHORT' else 'hold' }}">{{ r.action }}</span></td>
             <td class="r fig" data-label="Price">{{ r.price|price }}</td>
-            <td class="r fig" data-label="Enter at">{{ r.entry|price if r.entry else '—' }}</td>
-            <td class="r fig loss" data-label="Get out at">{{ r.stop|price if r.stop else '—' }}</td>
+            <td class="r fig" data-label="Enter at">{{ r.entry|price(r.stop) if r.entry else '—' }}</td>
+            <td class="r fig loss" data-label="Get out at">{{ r.stop|price(r.entry) if r.stop else '—' }}</td>
             <td class="r fig {{ 'loss' if (r.gap_multiple or 0) > 2.5 }}" data-label="Gap risk">
               {{ "%.1fx"|format(r.gap_multiple) if r.gap_multiple else '—' }}</td>
             <td class="r fig" data-label="Worked before">

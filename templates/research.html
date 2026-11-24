@@ -609,16 +609,19 @@
       is below, with the reason for what could not.</p>
   </div>
   {% else %}
+  {# To the cent, but for a share worth less than a dollar: some are worth less
+     than a cent, and read 0.00. #}
+  {% macro worth(x) %}{{ x|money if x >= 1 else x|price }}{% endmacro %}
   <div class="card">
     <div class="figs" style="margin-bottom:var(--s3)">
       {% if v.agreement == 'single' %}
       <div class="f"><div class="k">Modelled value</div>
-        <div class="v fig">{{ v.midpoint|price }}</div></div>
+        <div class="v fig">{{ worth(v.midpoint) }}</div></div>
       {% else %}
       <div class="f"><div class="k">Modelled range</div>
-        <div class="v fig">{{ v.low|price }}–{{ v.high|price }}</div></div>
+        <div class="v fig">{{ worth(v.low) }}–{{ worth(v.high) }}</div></div>
       <div class="f"><div class="k">Midpoint</div>
-        <div class="v fig">{{ v.midpoint|price }}</div></div>
+        <div class="v fig">{{ worth(v.midpoint) }}</div></div>
       {% endif %}
       <div class="f"><div class="k">Price today</div>
         <div class="v fig">{{ r.price|price }}</div></div>

@@ -70,14 +70,17 @@
       <span class="name">{{ r.bars.name }}</span>
     </div>
     <div class="price">
-      <span class="now">{{ r.bars.last_price|price }}</span>
+      {# Read against the entry a plan waits for, so a price that is not there
+         yet does not read as if it were. A market entry is this price, rounded. #}
+      <span class="now">{{ r.bars.last_price|price(*(beside if plan.entry_type == 'limit' else [])) }}</span>
       {% if chg is not none %}
         <span class="chg {{ 'gain' if chg >= 0 else 'loss' }}">{{ chg|signed }}%</span>
       {% endif %}
     </div>
   </div>
   <div class="factline">
-    <span><b>{{ r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
+    {# The source's "exchange" for a coin is a code of its own, CCC. #}
+    <span><b>{{ 'Crypto' if r.bars.asset_class == 'crypto' else r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
     <span>{{ r.bars.interval|bar_words }} bars</span>
     {# A daily bar is its day; a shorter one's time is the exchange's own. #}
     <span>last bar <b>{{ r.bars.last_bar_time[:10] if r.bars.interval == '1d' else r.bars.last_bar_time }}</b>{% if r.bars.interval != '1d' %}
@@ -144,11 +147,11 @@
     <span class="eyebrow">The plan</span>
     <dl class="pairs">
       <dt>Entry</dt>
-      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
+      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price(*beside) }}</b>
           <span class="faint">{{ plan.entry_type }}</span>{{ help('entry') }}</dd>
-      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}{{ help('stop') }}</dd>
-      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}{{ help('target') }}</dd>
-      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}{{ help('runner') }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price(*beside) }}{{ help('stop') }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price(*beside) }}{{ help('target') }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price(*beside) }}{{ help('runner') }}</dd>
       <dt>Reward to risk</dt>
       {# The break-even belongs to the trade the odds were measured on. When
          this plan's own levels give a different reward, pairing the two
@@ -189,7 +192,7 @@
         A move the size of this instrument's worst day in
         {{ plan.position.gap_samples }} bars ({{ (plan.position.gap_move)|pct(1) }})
         would open past the stop at about
-        {{ plan.position.gap_price|price }}, costing roughly
+        {{ plan.position.gap_price|price(*beside) }}, costing roughly
         {{ plan.position.gap_loss|money }} rather than the
         {{ plan.position.risk_amount|money }} budgeted. Position sizing that
         only counts the stop understates what a bad morning does.</p>
@@ -205,7 +208,7 @@
     {% elif r.run_id and a == 'WAIT' %}
       <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
         A wait is not a trade yet, so there is nothing to log. To hear when the
-        price reaches {{ plan.entry|price }}, set the entry alert further down.</p>
+        price reaches {{ plan.entry|price(*beside) }}, set the entry alert further down.</p>
     {% endif %}
   </div>
 </div>
@@ -286,7 +289,7 @@
         {% endif %}
         {% if b.flip_words %}<div class="prose">{{ b.flip_words }}{{ help('flip_level') }}</div>{% endif %}
         <div class="prose"><b>How this read did before.</b>
-          {% for w in b.record_words %}{{ w }} {% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
+          {% for w in b.record_words %}{{ w }}{{ ' ' if not loop.last }}{% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
         <p class="prose faint" style="font-size:var(--t-xs)">The rules are Orenth's own
           reading of the course's method, not a forecast, and the lean does not change the
           call above.</p>
@@ -627,7 +630,7 @@
               <tr>
                 <td class="r fig {{ 'gain' if it.score > 0.1 else 'loss' if it.score < -0.1 else 'soft' }}"
                     style="width:56px">{{ it.score|signed }}</td>
-                <td>{{ it.text[:108] }}
+                <td>{{ it.text|truncate(108, False, '…', 0) }}
                   <span class="faint">· {{ "%.1f"|format(it.age_hours) }}h ·
                     {{ it.kind }}</span></td>
               </tr>
@@ -688,7 +691,7 @@
             </table>
           </div>
           <p class="prose" style="margin-top:var(--s2)">
-            Measured over {{ overlap.samples }} shared daily returns. Correlation
+            Measured over {{ "{:,}".format(overlap.samples) }} shared daily returns. Correlation
             rises toward one in a sell-off, so these numbers flatter the account
             on exactly the day it matters most.
           </p>
@@ -798,7 +801,8 @@
      fill the app's one screen with bare text, so it is the website's. #}
   {% if not demo and not in_app %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
                                        exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
-  · {% endif %}Data from Yahoo Finance, Google News and StockTwits
+  · {% endif %}Data from Yahoo Finance
+  {%- for s in r.sentiment.read_from|reject('equalto', 'Yahoo Finance') %}{{ ' and ' if loop.last else ', ' }}{{ s }}{% endfor %}
   {% if r.run_id and not demo %}· saved in your recent analyses{% endif %}
 </p>
 

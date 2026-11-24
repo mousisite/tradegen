@@ -88,7 +88,8 @@ def strength_band(score: Optional[Score]) -> str:
 def _of_measured(score: Score) -> str:
     of = score.measured or 9
     if of == 9:
-        return "%d of the nine measures" % int(score.value)
+        return ("all nine measures" if int(score.value) == 9 else
+                "%d of the nine measures" % int(score.value))
     return "%d of the %d measures that could be checked" % (int(score.value), of)
 
 

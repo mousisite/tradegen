@@ -820,6 +820,32 @@ sign_in(stranger, alice)
 stranger.get("/", headers=BROWSER)
 check("nor is a signed-in person's dashboard", count("landing_view") == before + 1)
 
+# A longer write has the database just then: the look is not counted, which is
+# what was chosen, and not reported as something broken.
+import logging
+noted = []
+
+
+class Noted(logging.Handler):
+    def emit(self, record):
+        noted.append((record.levelname, record.getMessage(), record.exc_info))
+
+
+writer, listening, was_ms = db.connect(DB), Noted(), events.BUSY_MS
+writer.execute("BEGIN IMMEDIATE")
+logging.getLogger("bot.events").addHandler(listening)
+events.BUSY_MS = 50
+try:
+    r = web.app.test_client().get("/", headers=BROWSER)
+finally:
+    events.BUSY_MS = was_ms
+    logging.getLogger("bot.events").removeHandler(listening)
+    writer.rollback()
+    writer.close()
+check("a look while the database is busy is let go, with a line in the log and no fault",
+      r.status_code == 200 and count("landing_view") == before + 1
+      and [n[0] for n in noted] == ["WARNING"] and noted[0][2] is None, noted)
+
 # A sign-up through the emailed code, as a person would do it.
 _os.environ.update(MAIL)
 outbox = {}
@@ -1350,6 +1376,65 @@ finally:
 
 for key in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"):
     _os.environ.pop(key, None)
+
+print()
+print("=" * 72)
+print("ONE ANALYSIS'S ARITHMETIC AT A TIME, PEOPLE'S FIRST")
+print("=" * 72)
+import threading
+
+from bot import engine as engine_mod  # noqa: E402
+
+turn, inside, order = engine_mod._Turn(), [0, 0], []
+
+
+def work(name, person):
+    with turn(person):
+        inside[0] += 1
+        inside[1] = max(inside[1], inside[0])
+        order.append(name)
+        time.sleep(0.15)
+        inside[0] -= 1
+
+
+crowd = [threading.Thread(target=work, args=("first", True))]
+crowd[0].start()
+time.sleep(0.05)
+for name, person in (("scan", False), ("ann", True), ("ben", True)):
+    crowd.append(threading.Thread(target=work, args=(name, person)))
+    crowd[-1].start()
+    time.sleep(0.02)
+for th in crowd:
+    th.join(20)
+check("two are never worked out side by side", inside == [0, 1], inside)
+check("somebody waiting goes before a background job that came sooner",
+      order[0] == "first" and order[-1] == "scan" and len(order) == 4, order)
+turn.GIVES_WAY = 0.2
+del order[:]
+stop = time.time() + 1.2
+
+
+def keen(n):
+    while time.time() < stop:
+        work("person", True)
+
+
+crowd = [threading.Thread(target=keen, args=(n,)) for n in range(3)]
+crowd.append(threading.Thread(target=work, args=("scan", False)))
+for th in crowd:
+    th.start()
+for th in crowd:
+    th.join(20)
+check("but not for ever", "scan" in order[:5], order)
+try:
+    with turn(True):
+        raise ValueError("a strategy broke")
+except ValueError:
+    pass
+done = threading.Thread(target=work, args=("after", True))
+done.start()
+done.join(5)
+check("one that breaks gives up its turn", order[-1] == "after", order)
 
 print()
 print("%d failure(s)" % len(fails))

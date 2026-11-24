@@ -35,16 +35,16 @@
     <div class="f"><div class="k">Average per trade</div>
       <div class="v fig {{ 'gain' if o.avg_r > 0 else 'loss' if o.avg_r < 0 }}">{{ o.avg_r|signed(2) }}R</div>
       <div class="n">{% if o.margin is not none %}give or take {{ '%.2f'|format(o.margin) }}R{% else %}too few to give a margin{% endif %}</div></div>
-    <div class="f"><div class="k">Green days {{ help('green_days') }}</div>
+    <div class="f"><div class="k">Green days{{ help('green_days') }}</div>
       <div class="v fig">{{ r.green.green }} of {{ r.green.days }}</div>
       <div class="n">{{ r.green.red }} down{% if r.green.even %} · {{ r.green.even }} even{% endif %}</div></div>
     {% if r.breakeven %}
-    <div class="f"><div class="k">Break-even hit rate {{ help('breakeven_own') }}</div>
+    <div class="f"><div class="k">Break-even hit rate{{ help('breakeven_own') }}</div>
       <div class="v fig">{{ r.breakeven.needed|pct }}</div>
       <div class="n">you hit {{ r.breakeven.reached|pct }}</div></div>
     {% endif %}
     {% if r.best_day %}
-    <div class="f"><div class="k">Best day's share {{ help('best_day_share') }}</div>
+    <div class="f"><div class="k">Best day's share{{ help('best_day_share') }}</div>
       <div class="v fig">{{ r.best_day.share|pct }}</div>
       <div class="n">{{ r.best_day.best_r|signed(2) }}R of {{ r.best_day.total_r|signed(2) }}R</div></div>
     {% endif %}

@@ -18,15 +18,21 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
+from .market import decimals_apart
 from .quality import strength_band
 
 
-def _money(value: Optional[float], currency: str = "") -> str:
+def _money(value: Optional[float], currency: str = "", beside=()) -> str:
+    """A price as it is said in a sentence; beside is the others said with it,
+    and when two would read the same, all get the decimals to differ."""
     if value is None:
         return "?"
     # Any other currency is named, as format_price names it: a bare number
     # beside dollar prices reads as dollars.
     symbol = "$" if not currency or currency == "USD" else currency + " "
+    finer = decimals_apart([value, *beside], _money) if beside else 0
+    if finer:
+        return symbol + format(value, ",.%df" % finer)
     if abs(value) >= 1000:
         return "%s%s" % (symbol, format(value, ",.0f"))
     if abs(value) >= 1:
@@ -124,6 +130,11 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     fall_odds = ((getattr(plan, "odds_direction", 0) or 0) < 0
                  and not short_side and action != "SHORT")
 
+    levels = (plan.entry, plan.stop, plan.target1)
+
+    def at(level) -> str:
+        return _money(level, currency, levels)
+
     headline = _WHAT_IT_MEANS.get(action, "The app has no clear view here.")
     if action == "WAIT" and short_side:
         headline = _SHORT_WAIT
@@ -134,13 +145,13 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
     if action == "WAIT" and plan.entry and short_side:
         points.append(
             "Watch for the price to rise to %s. That is where the app would "
-            "bet on a fall." % _money(plan.entry, currency))
+            "bet on a fall." % at(plan.entry))
     elif action == "WAIT" and plan.entry:
         points.append(
             "Watch for the price to reach %s. That is the app's buy price."
-            % _money(plan.entry, currency))
+            % at(plan.entry))
     elif action == "BUY" and plan.entry:
-        points.append("The app's buy price is %s." % _money(plan.entry, currency))
+        points.append("The app's buy price is %s." % at(plan.entry))
     elif action == "SHORT" and plan.entry:
         points.append(
             "Shorting means betting the price falls. It is riskier than buying "
@@ -149,7 +160,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         points.append(
             "The signals point down. %sBuying is the opposite bet, and "
             "shorting is switched off, so the answer is: do not buy."
-            % ("The record below is how often a bet on the price falling worked "
+            % ("The past record shown is how often a bet on the price falling worked "
                "here. " if plan.probability is not None and plan.prob_samples else ""))
     elif action == "AVOID" and why_avoid == "negative_record":
         points.append(
@@ -165,16 +176,16 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         points.append(
             "If the price kept rising to %s instead, the plan says get out. "
             "That is the point where the idea was wrong."
-            % _money(plan.stop, currency))
+            % at(plan.stop))
     elif plan.stop and plan.entry:
         points.append(
             "If you bought and the price fell to %s, the plan says get out. "
             "That is the point where the idea was wrong."
-            % _money(plan.stop, currency))
+            % at(plan.stop))
 
     if plan.target1:
         points.append("If it works, the app expects around %s."
-                      % _money(plan.target1, currency))
+                      % at(plan.target1))
 
     # How sure, in counted events rather than percentages alone.
     sure = ""
@@ -194,8 +205,10 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         if avg_win and avg_loss:
             win_x = avg_win
             lose_x = abs(avg_loss)
+            # On very short bars the costs can be larger than the target is.
             sure += (" When it worked it made about %.1f times what you put at "
-                     "risk." % win_x)
+                     "risk." % win_x if win_x > 0 else
+                     " Even when it worked, trading costs took more than it made.")
             # Trading costs can make the usual miss cost the whole stop or
             # more, and misses closed part-way can come out ahead.
             if avg_loss <= -0.995:
@@ -225,7 +238,9 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
 
         if plan.breakeven_rate and plan.prob_samples > 1:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
-            if fall_odds:
+            if needed > plan.prob_samples:
+                sure += " It would have lost money even if it had worked every time."
+            elif fall_odds:
                 sure += (" A bet on a fall needed to work %d of those %d times "
                          "to come out even. That is the record for a fall, not "
                          "a reason to buy." % (needed, plan.prob_samples))

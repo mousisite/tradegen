@@ -699,7 +699,8 @@ def find(market: str = "stocks", horizon: str = "medium",
     still running after that, the answer says so: either the last finished
     scan with its age, or what has been looked at so far, marked as not yet
     the whole list. complete is True only for a scan that read enough of its
-    list to rank, as _is_complete decides.
+    list to rank, as _is_complete decides. A wait of none is for filings too:
+    those not read yet are read in the background, and say so.
     """
     from . import config as config_mod
 
@@ -719,16 +720,18 @@ def find(market: str = "stocks", horizon: str = "medium",
                                horizon, risk), running=False)
 
     job, started_here = _job(key, market, interval, cfg, limit, ttl, may_start)
+    filings = None if wait else 0
     if not started_here and join_wait is not None:
         wait = min(wait, join_wait)
     if wait and job["running"]:
         job["finished"].wait(wait)
-    return _answer(job, market, interval, limit, horizon, risk)
+    return _answer(job, market, interval, limit, horizon, risk, filings)
 
 
 def _answer(job: Dict, market: str, interval: str, limit: int, horizon: str,
-            risk: str) -> Dict:
-    """The best answer a job has right now, saying exactly what it is."""
+            risk: str, filings: Optional[float] = None) -> Dict:
+    """The best answer a job has right now, saying exactly what it is. filings
+    is how long to wait for them (None: the usual budget)."""
     with _JOBS_LOCK:
         running, scan = job["running"], job["scan"]
         previous, attempt, error = job["previous"], job["attempt"], job["error"]
@@ -743,15 +746,17 @@ def _answer(job: Dict, market: str, interval: str, limit: int, horizon: str,
 
     if not running:
         if scan is not None:
-            return dict(_shortlist(scan, horizon, risk), running=False)
+            return dict(_shortlist(scan, horizon, risk, accounts_wait=filings),
+                        running=False)
         if previous is not None:
             # The refresh did not give a complete scan, so the last one that
             # did stays the answer, and the page says why it was not replaced.
-            return dict(_shortlist(previous, horizon, risk), running=False,
-                        refresh_note=_refresh_note(attempt, error))
+            return dict(_shortlist(previous, horizon, risk, accounts_wait=filings),
+                        running=False, refresh_note=_refresh_note(attempt, error))
         if attempt is not None:
             # Nothing complete to fall back on: shown as the part-scan it is.
-            return dict(_shortlist(attempt, horizon, risk), running=False)
+            return dict(_shortlist(attempt, horizon, risk, accounts_wait=filings),
+                        running=False)
         raise RuntimeError(error or "The scan stopped without an answer.")
 
     if previous is not None:

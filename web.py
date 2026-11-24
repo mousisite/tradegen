@@ -15,6 +15,7 @@ API key never leave the machine.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 from datetime import timedelta
 import hmac
@@ -22,6 +23,8 @@ import io
 import json
 import math
 import os
+import random
+import re
 import secrets
 import sqlite3
 import sys
@@ -30,6 +33,7 @@ import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -44,10 +48,11 @@ try:
 except ImportError:
     pass
 
-from flask import (Flask, Response, abort, g, jsonify, redirect,
-                   render_template, request, send_from_directory, session,
-                   url_for)
+from flask import (Flask, Response, abort, g, has_request_context, jsonify,
+                   redirect, render_template, request, send_from_directory,
+                   session, url_for)
 from flask.json.provider import DefaultJSONProvider
+from werkzeug.exceptions import HTTPException
 from werkzeug.routing import IntegerConverter
 from werkzeug.wsgi import wrap_file
 
@@ -446,7 +451,10 @@ def _sent_from_elsewhere():
 def _referrer_path() -> str:
     """The page a request came from, as a safe path on this site, or "/"."""
     from urllib.parse import urlparse
-    ref = urlparse(request.referrer or "")
+    try:
+        ref = urlparse(request.referrer or "")
+    except ValueError:              # "http://[" is no address of anywhere
+        return "/"
     if ref.netloc and ref.netloc != request.host:
         return "/"
     path = ref.path or "/"
@@ -732,7 +740,17 @@ def _rate_limited(action: str, per_hour: int) -> bool:
                 return True
         for who, _most in budgets:
             _RATE[(action, who)].append(now)
+    g.setdefault("counted", []).extend(((action, who), now) for who, _most in budgets)
     return False
+
+
+def _uncount() -> None:
+    """Take back what this request was counted for. It is being sent away to
+    come back, so nothing was done for it, and it will be counted then."""
+    with _RATE_LOCK:
+        for key, at in g.pop("counted", ()):
+            if at in _RATE.get(key, ()):
+                _RATE[key].remove(at)
 
 
 def _too_often(what: str):
@@ -776,6 +794,8 @@ def _no_prices(exc: DataError, symbol: str = "", status: int = 404,
     fine, and that advice sent people hunting for a typo. Anything else keeps
     the status the caller gives.
     """
+    if isinstance(exc, Busy):
+        return _come_back()
     wait = _source_wait(exc)
     if wait is not None:
         page = app.make_response((render_template(
@@ -907,6 +927,7 @@ _CACHE_TTL = 90.0
 # looking around should cost the server one analysis per instrument per
 # quarter hour, however many of them there are.
 DEMO_TTL = 15 * 60.0
+DEMO_STALE = 2 * DEMO_TTL
 _CACHE_LOCK = threading.Lock()
 # Analyses running right now, by cache key, so a second request for the same
 # one waits for it instead of starting its own.
@@ -945,6 +966,15 @@ _NOT_IN_ANALYSIS = ("daily_loss_limit_r", "max_trades_per_day", "last_entry_time
                     "calm_candles")
 
 
+def _unpaid(cfg: Dict) -> Tuple[Dict, object]:
+    """The settings for an analysis open to anyone, and what its key in _CACHE
+    says of the news. Having a model score headlines is a paid request, so it
+    is not asked for there, and a member's, which may be, is kept apart."""
+    if os.environ.get("ANTHROPIC_API_KEY") and cfg.get("use_llm_sentiment", True):
+        return dict(cfg, use_llm_sentiment=False), "unpaid"
+    return cfg, True
+
+
 def _settings_key(cfg: Dict) -> str:
     """A short fingerprint of everything that changes what an analysis says."""
     import hashlib
@@ -967,12 +997,40 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
 # threads for seconds, or up to a minute of research, so one account asking for
 # eight at once (a different account size in each address is a different
 # analysis) kept every page from everybody. The example account is everybody
-# looking around, so it may have more.
+# looking around; its own are held to as many, and visitors waiting for one of
+# them may take the places nobody else wants.
 SLOW_AT_ONCE = 4
-DEMO_SLOW_AT_ONCE = 6
-SLOW_RETRY = 10
+DEMO_SLOW_AT_ONCE = 4
+# And all accounts together: this many of the threads are always left for the
+# pages that need nothing worked out, and for the health check, by which the
+# host takes a server that does not answer away. A crowd of people each inside
+# their own limit kept every page, and that, waiting for minutes.
+KEPT_FREE = 2
+SLOW_RETRY = 3
 _SLOW: Dict[int, int] = {}
 _SLOW_LOCK = threading.Lock()
+# The pages sent away to come back in a few seconds: the account, when it was
+# first asked for, and when last. The last place free is kept for those that
+# have waited longest: given to whoever asked in that instant, a page could be
+# unlucky for minutes. Not every place, as it was: each stood empty until the
+# page it was kept for came back, and a crowd was sent away again and again by
+# a server with nothing to do. One not asked for again in this long is gone.
+_IN_LINE: Dict[Tuple, List] = {}
+LINE_FOR = 10.0
+
+
+def _slow_in_all() -> int:
+    """How many threads may be at slow work at once (serve.py says how many
+    there are)."""
+    return max(1, int(app.config.get("WEB_THREADS") or 8) - KEPT_FREE)
+
+
+class Busy(market_mod.DataThrottled):
+    """Every place for slow work that this page may have is taken just now."""
+
+    def __init__(self):
+        super().__init__("A lot of pages are being worked out at once just now. Wait a "
+                         "few seconds, then try again.", SLOW_RETRY)
 
 
 class _SlowSlot:
@@ -981,17 +1039,42 @@ class _SlowSlot:
     def __init__(self):
         self.mine = None
 
-    def take(self) -> None:
+    def take(self, joining: bool = False, waits: bool = True) -> None:
+        """Take it, or raise Busy. joining is for what is being worked out for
+        somebody else already: a visitor then only waits, which the limit on
+        the example's own work is not about. waits is off for a page that is
+        drawn without it, and so does not come back for it."""
         if self.mine is not None or g.user.is_local:
             return
-        most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+        me = g.user.id
+        who = (_client_ip() if g.demo else me, request.full_path)
         with _SLOW_LOCK:
-            if _SLOW.get(g.user.id, 0) >= most:
-                raise market_mod.DataThrottled(
-                    "Several pages are being worked out at once just now. Wait a few "
-                    "seconds for them to finish, then try again.", SLOW_RETRY)
-            _SLOW[g.user.id] = _SLOW.get(g.user.id, 0) + 1
-            self.mine = g.user.id
+            now = time.monotonic()
+            for gone in [k for k, v in _IN_LINE.items() if now - v[2] > LINE_FOR]:
+                del _IN_LINE[gone]
+            came = _IN_LINE.get(who, [me, now])[1]
+            # Those before this one, as many of each account as it may have.
+            before: Dict[int, int] = {}
+            for key, (account, first, _last) in _IN_LINE.items():
+                if first < came and key != who:
+                    before[account] = before.get(account, 0) + 1
+            most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+            mine = _SLOW.get(me, 0)
+            ahead = sum(min(n, max(0, SLOW_AT_ONCE - _SLOW.get(account, 0)))
+                        for account, n in before.items())
+            if request.method not in ("GET", "HEAD"):
+                # A button cannot wait in the line, and behind one that never
+                # empties it would not work at all.
+                ahead = 0
+            if (mine >= most and not (joining and g.demo)) \
+                    or sum(_SLOW.values()) + min(1, ahead) >= _slow_in_all():
+                # Only a page that comes back by itself has a place in the line.
+                if waits and request.method == "GET":
+                    _IN_LINE[who] = [me, came, now]
+                raise Busy()
+            _IN_LINE.pop(who, None)
+            _SLOW[me] = mine + 1
+            self.mine = me
 
     def free(self) -> None:
         if self.mine is None:
@@ -1005,20 +1088,92 @@ class _SlowSlot:
             self.mine = None
 
 
+def _own_place() -> _SlowSlot:
+    """This request's one place, kept until it ends once it is taken. A page
+    that asked for a second, for its research after its analysis or a thesis
+    after both, could be sent away half-way with the first part done."""
+    if g.get("slow_place") is None:
+        g.slow_place = _SlowSlot()
+    return g.slow_place
+
+
+def _come_back():
+    """The page for a place that was not to be had: it opens itself again in a
+    few seconds, so that a crowd waits its turn without holding the threads
+    everybody's pages are drawn by. A button is never pressed again by itself."""
+    _uncount()
+    waits = request.method in ("GET", "HEAD")
+    # What was typed, to send again: the page it was typed on is drawn anew by
+    # going back. A picture, or more than any form here holds, is not read.
+    again = (not waits and request.mimetype == "application/x-www-form-urlencoded"
+             and (request.content_length or 0) <= app.config["MAX_FORM_MEMORY_SIZE"])
+    back = _referrer_path()
+    if again:
+        # Sent again from the page saying this, which is nowhere to go back to.
+        back = _safe_back(request.form.get("busy_back"), back)
+    page = app.make_response((render_template(
+        "busy.html",
+        # Not all in the same second.
+        come_back=SLOW_RETRY + random.randint(-1, 2) if waits else None,
+        back=back, again=again,
+        # A crowd's pages, or four of this account's own.
+        message=("A lot of pages are being worked out at once, so this one is waiting "
+                 "its turn. It tries again every few seconds, and opens by itself."
+                 if waits else
+                 "A lot of pages are being worked out at once, so nothing was done. "
+                 "%s a few seconds and press the button again."
+                 % ("Wait" if again else "Go back, wait"))), 503))
+    page.headers["Retry-After"] = str(SLOW_RETRY)
+    return page
+
+
+@app.errorhandler(Busy)
+def _busy(_exc):
+    return _come_back()
+
+
+def _slow_from_here() -> None:
+    """Take a place for the rest of this request, which is about to fetch what
+    it shows or write a file while the person waits. Raises Busy, above, when
+    there is none. Asked for only then: a journal with nothing open, or a form
+    not sent yet, is drawn at once however busy it is."""
+    _own_place().take()
+
+
+@app.teardown_request
+def _leave_slow_place(_exc):
+    slot = g.pop("slow_place", None)
+    if slot is not None:
+        slot.free()
+
+
+@contextlib.contextmanager
+def _patience(seconds: float):
+    """How long a page that can be drawn without it may wait for something:
+    not at all while every place for slow work is taken."""
+    slot = _own_place()
+    had = slot.mine is not None
+    try:
+        slot.take(waits=False)
+    except Busy:
+        seconds = 0.0
+    try:
+        yield seconds
+    finally:
+        if not had:
+            slot.free()
+
+
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
                     with_news: bool = True, record: bool = True,
                     ttl: Optional[float] = None,
                     exact: bool = False) -> engine.Analysis:
     """One analysis, worked out once for everyone asking for the same.
 
-    Raises DataThrottled when this account has too many going already.
+    Raises Busy when this account, or everybody, has too many going already.
     """
-    slot = _SlowSlot()
-    try:
-        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
-                                exact)
-    finally:
-        slot.free()
+    return _cached_analysis(_own_place(), symbol, interval, cfg, with_news, record, ttl,
+                            exact)
 
 
 def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
@@ -1029,8 +1184,10 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
     # account was served to the next person who asked for the same ticker.
     # So is exact: LINK exactly is Interlink Electronics, and the bare LINK
     # the Chainlink coin.
-    key = (symbol.upper(), bool(exact), interval, bool(with_news),
-           _settings_key(cfg))
+    reads: object = bool(with_news)
+    if reads and g.get("demo"):
+        cfg, reads = _unpaid(cfg)
+    key = (symbol.upper(), bool(exact), interval, reads, _settings_key(cfg))
     me = uid()
     owned = None
     while True:
@@ -1038,9 +1195,21 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
             hit = _CACHE.get(key)
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
-            hit = None
-            slot.take()
             running = _RUNNING.get(key)
+            # A visitor is having it worked out again, or there is no place
+            # for it to be. The others are shown the last one meanwhile rather
+            # than all waiting every quarter hour; it says what time its
+            # prices are from.
+            last = (hit and g.get("demo") and time.time() - hit[0] < DEMO_STALE)
+            if last and running is not None:
+                break
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    break
+                raise
+            hit = None
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
                 break
@@ -1080,14 +1249,18 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
         events_mod.first_analysis(app.config.get("DB_PATH"), me, result.run_id)
         with _CACHE_LOCK:
             now = time.time()
-            # One past every time limit is never served again, and an intraday
-            # coin's takes some 16 MB: forty left lying fill the server.
-            for old in [k for k, v in _CACHE.items() if now - v[0] >= DEMO_TTL]:
+            # One past its time limit is never served again, and an intraday
+            # coin's takes some 16 MB: forty left lying fill the server. Only
+            # the example's are opened for longer than a minute and a half.
+            for old in [k for k, v in _CACHE.items()
+                        if now - v[0] >= (DEMO_STALE if k[0] in demo_mod.SYMBOLS
+                                          and k[2] == "1d" else _CACHE_TTL)]:
                 _CACHE.pop(old)
             _CACHE[key] = (now, result,
                            {me: result.run_id} if result.run_id else {})
             # Keep the cache from growing without bound in a long session.
-            if len(_CACHE) > 40:
+            while len(_CACHE) > 1 and (len(_CACHE) > 40 or sum(
+                    _size_of(v[1]) for v in _CACHE.values()) > CACHE_MOST):
                 oldest = min(_CACHE, key=lambda k: _CACHE[k][0])
                 _CACHE.pop(oldest, None)
         return result
@@ -1104,6 +1277,19 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
                 if _RUNNING.get(key) is owned:
                     _RUNNING.pop(key, None)
             owned["done"].set()
+
+
+# The most the kept analyses may come to, in bytes: the server has half a
+# gigabyte for everything.
+CACHE_MOST = 100 * 1024 * 1024
+
+
+def _size_of(result) -> int:
+    """About how much an analysis holds: its bars, and every series on them."""
+    try:
+        return 8 * len(result.bars.close) * (len(result.context.s) + 8)
+    except (AttributeError, TypeError):
+        return 0
 
 
 def _record_cached_run(result: engine.Analysis, user: int) -> Optional[int]:
@@ -1143,9 +1329,11 @@ def _number(value) -> Optional[float]:
 
 
 @app.template_filter("price")
-def _price(value):
+def _price(value, *beside):
+    """A price. beside is the others it is read against (a stop beside its
+    entry), so that two which differ never read the same."""
     number = _number(value)
-    return format_price(number) if number is not None else "-"
+    return format_price(number, beside=beside) if number is not None else "-"
 
 
 @app.template_filter("money")
@@ -1299,33 +1487,97 @@ _example_state = {"at": 0.0, "data": None, "busy": False, "failed": 0.0}
 _example_lock = threading.Lock()
 
 
+def _shown_example(result, at: float) -> Dict:
+    """What the front page shows of an analysis, and keep it."""
+    from bot import plain as plain_mod
+    said = plain_mod.explain_plan(result.plan, result.bars)
+    plan = result.plan
+    samples = plan.prob_samples or 0
+    data = {"symbol": result.bars.symbol,
+            "samples": samples,
+            "worked": (int(round(plan.probability * samples))
+                       if plan.probability is not None and samples else 0),
+            # The odds are the side the signals lean. Leaning down, the
+            # examples are bets on a fall, and the front page says so.
+            "fall": (getattr(plan, "odds_direction", 0) or 0) < 0,
+            "action": result.plan.action,
+            "headline": said["headline"],
+            "sure": said["sure"],
+            "price": result.bars.last_price,
+            "at": at}
+    with _example_lock:
+        _example_state["data"] = data
+        _example_state["at"] = at
+    return data
+
+
+def _example_kept():
+    """The example account's own analysis of it, as _CACHE keeps it, and the
+    settings and key it is worked out and kept by."""
+    cfg, reads = _unpaid(config_mod.load(app.config.get("CFG_PATH")))
+    key = (EXAMPLE_SYMBOL, False, "1d", reads, _settings_key(cfg))
+    with _CACHE_LOCK:
+        return cfg, key, _CACHE.get(key)
+
+
+def _work_out_example(cfg: Dict, key: Tuple):
+    """The example worked out again and kept, or None while somebody's own
+    asking for it is running. Marked as running itself: whoever opens the page
+    behind it meanwhile is shown the last one, as the front page shows it, or
+    waits for this one, and has no second worked out that says something else."""
+    with _CACHE_LOCK:
+        if key in _RUNNING:
+            return None
+        owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
+    try:
+        # As a page's own, since one may be waiting for it.
+        result = engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d", source="web",
+                                record=False)
+        with _CACHE_LOCK:
+            kept = _CACHE[key] = (time.time(), result, {})
+        return kept
+    except Exception as exc:
+        owned["error"] = exc
+        raise
+    finally:
+        with _CACHE_LOCK:
+            if _RUNNING.get(key) is owned:
+                _RUNNING.pop(key, None)
+        owned["done"].set()
+
+
+# How old the list behind the Find tile may be before another is started. A
+# finished one is dropped at JOB_KEEP, so well before it, or there is none to
+# show for the minutes the next one takes.
+FIND_BEHIND = ideas_mod.JOB_KEEP - 2 * EXAMPLE_TTL
+
+
+def _start_find() -> None:
+    """Have the list behind the Find tile made, so that it opens on a finished
+    one. Nobody has asked for it yet: only where the server's own jobs run, and
+    not while a scan somebody asked for is going or waiting its turn."""
+    if not BACKGROUND:
+        return
+    try:
+        _demo_shortlist("stocks", "medium", "balanced", wait=0.0, ttl=FIND_BEHIND,
+                        may_start=lambda: not any(
+                            j["running"] for j in ideas_mod._JOBS.values()))
+    except ideas_mod.Busy:
+        pass
+    except Exception as exc:
+        app.logger.warning("The list behind the Find tile could not be started: %s", exc)
+
+
 def _refresh_example() -> None:
     try:
-        from bot import engine as engine_mod
-        from bot import plain as plain_mod
-        cfg = config_mod.load(app.config.get("CFG_PATH"))
-        result = engine_mod.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
-                                    with_news=False, with_learning=True,
-                                    record=False, resolve_symbol=False,
-                                    with_calendar=False)
-        said = plain_mod.explain_plan(result.plan, result.bars)
-        plan = result.plan
-        samples = plan.prob_samples or 0
-        data = {"symbol": result.bars.symbol,
-                "samples": samples,
-                "worked": (int(round(plan.probability * samples))
-                           if plan.probability is not None and samples else 0),
-                # The odds are the side the signals lean. Leaning down, the
-                # examples are bets on a fall, and the front page says so.
-                "fall": (getattr(plan, "odds_direction", 0) or 0) < 0,
-                "action": result.plan.action,
-                "headline": said["headline"],
-                "sure": said["sure"],
-                "price": result.bars.last_price,
-                "at": time.time()}
-        with _example_lock:
-            _example_state["data"] = data
-            _example_state["at"] = data["at"]
+        # The one the page behind it opens: worked out apart from it, and
+        # without the news, the front page and that page gave two answers.
+        cfg, key, kept = _example_kept()
+        if kept is None or time.time() - kept[0] >= EXAMPLE_TTL:
+            kept = _work_out_example(cfg, key)
+        if kept is not None:
+            _shown_example(kept[1], kept[0])
+        _start_find()
     except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
         # visitor. The page simply renders without it, and the log says why: a
@@ -1346,6 +1598,19 @@ def _example():
     now = time.time()
     with _example_lock:
         data = _example_state["data"]
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
+    try:
+        # A visitor may have had it worked out again since.
+        kept = _example_kept()[2] if rested else None
+        if kept is not None and data is not None and kept[0] > data["at"]:
+            data = _shown_example(kept[1], kept[0])
+    except Exception:
+        # Left a while, as a refresh that failed is, or it is in the log for
+        # every visit.
+        with _example_lock:
+            _example_state["failed"] = now
+        app.logger.exception("The front page example could not be read")
+    with _example_lock:
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
         rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
         if stale and rested and not _example_state["busy"]:
@@ -1354,7 +1619,8 @@ def _example():
     if data is None:
         return None
     # Say how old it is rather than presenting a quarter-hour-old call as live.
-    return dict(data, age_min=int((now - data["at"]) // 60))
+    # One kept since this began is not from the future.
+    return dict(data, age_min=max(0, int((now - data["at"]) // 60)))
 
 
 @app.route("/")
@@ -1558,7 +1824,8 @@ def _marks_within(open_trades, wait: float):
 
 def _attention(stored: Dict, open_trades) -> Dict:
     """What needs the person now: stops and targets, alerts, watchlist, BUYs."""
-    marks, late = _marks_within(open_trades, DASHBOARD_WAIT)
+    with _patience(DASHBOARD_WAIT if open_trades else 0.0) as wait:
+        marks, late = _marks_within(open_trades, wait)
     positions = [{"trade": t, "mark": marks[t["id"]]} for t in open_trades
                  if (marks.get(t["id"]) or {}).get("status") in ("past stop",
                                                                  "past target")]
@@ -1740,12 +2007,16 @@ def analyse():
                  if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
-    suggestions = []
-    for spec in alerts_mod.suggest_for(result.bars.symbol, result.plan, result.bars):
-        spec = dict(spec)
+    plan = result.plan
+    # The plan's prices are read against each other, and those of a plan that
+    # waits against the price now as well, as its own words are (decision.py).
+    beside = [plan.entry, plan.stop, plan.target1, plan.target2] + (
+        [result.bars.last_price] if plan.entry_type == "limit" else [])
+    suggestions = [dict(spec) for spec in alerts_mod.suggest_for(
+        result.bars.symbol, plan, result.bars)]
+    for spec in suggestions:
         spec["label"] = alerts_mod.describe(spec["kind"], spec["threshold"],
-                                            result.bars.symbol)
-        suggestions.append(spec)
+                                            result.bars.symbol, beside=beside)
 
     calendar_rows = (catalysts_mod.describe(result.calendar)
                      if result.calendar else [])
@@ -1761,15 +2032,20 @@ def analyse():
         finally:
             conn.close()
         if open_rows:
-            overlap = portfolio_mod.overlap(open_rows, result.bars.symbol,
-                                            "1d")
+            # A kept analysis has no place of its own, and the prices of what
+            # is held, from a source that hangs, kept every thread on this
+            # page. Without one, only whether it is held already is said.
+            with _patience(1.0) as wait:
+                overlap = portfolio_mod.overlap(
+                    [t for t in open_rows if wait or t["symbol"] == result.bars.symbol],
+                    result.bars.symbol, "1d")
     except Exception:
         # A correlation check failing must not cost the user their analysis.
         overlap = {"warnings": [], "pairs": []}
 
     return render_template("analysis.html", r=result, cfg=cfg,
                            families=families, ranked=ranked, hold_text=hold_text,
-                           plan=result.plan, calib=result.calibration,
+                           plan=plan, beside=beside, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
                            overlap=overlap,
                            chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
@@ -1866,6 +2142,9 @@ CLOSED_SHOWN = 100
 def trades():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        # Before anything is read, so a page sent away to wait costs little.
+        if db_mod.count_open(conn, "paper", user=uid()):
+            _slow_from_here()
         open_trades = db_mod.list_trades(conn, status="open", account="paper", limit=None,
                                          user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
@@ -2798,6 +3077,7 @@ def trade_picture(trade_id: int):
             ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
+    _slow_from_here()
     from bot import journal as journal_mod
     return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
@@ -2999,6 +3279,7 @@ def analyse_image():
     # limit for typed fields, which would refuse any real screenshot. The
     # picture itself is still capped by MAX_CONTENT_LENGTH.
     request.max_form_memory_size = 256 * 1024
+    _slow_from_here()
     upload = request.files.get("chart")
     if upload is None or not upload.filename:
         return render_template("error.html", symbol="",
@@ -3188,13 +3469,9 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
                      with_options: bool):
     """The research for one analysis, built once for everyone asking at once.
 
-    Raises DataThrottled as cached_analysis does.
+    Raises Busy as cached_analysis does.
     """
-    slot = _SlowSlot()
-    try:
-        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
-    finally:
-        slot.free()
+    return _research_once(_own_place(), analysis, interval, cfg, with_news, with_options)
 
 
 def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
@@ -3207,8 +3484,19 @@ def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
             hit = _RESEARCH_CACHE.get(key)
             if hit and (time.time() - hit[0]) < ttl:
                 return hit[1]
-            slot.take()
             running = _RESEARCH_RUNNING.get(key)
+            # The example's last one meanwhile, as its analysis is: put
+            # together again every quarter hour, it kept every place for as
+            # long as that takes, with visitors who only waited for it.
+            last = hit and g.demo and time.time() - hit[0] < DEMO_STALE
+            if last and running is not None:
+                return hit[1]
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    return hit[1]
+                raise
             if running is None:
                 owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
                 break
@@ -3311,12 +3599,14 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, exact, analysis)
 
     try:
         found = _cached_research(analysis, interval, cfg, with_news, with_options)
     except market_mod.DataThrottled as exc:
         return _no_prices(exc, symbol, 404)
+    # Only now: an analysis somebody else had worked out needs no place, and
+    # the research of it may still be sent away to wait, with nothing shown.
+    _spend_view(symbol, exact, analysis)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
@@ -3458,6 +3748,7 @@ def save_thesis():
             analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
             price = analysis.bars.last_price
             found = getattr(analysis.bars, "symbol", "")
+            _slow_from_here()
             t = engine.research(symbol, price, cfg, analysis=analysis,
                                 with_options=with_options,
                                 with_reasoning=False).thesis
@@ -5513,16 +5804,16 @@ _EXPORTING = threading.BoundedSemaphore(1)
 def export_data(dataset, fmt):
     """Hand back one dataset as a file. Your record, in a format you can read."""
     import tempfile
-    if _rate_limited("export", EXPORTS_PER_HOUR):
-        return _too_often("downloaded files")
-    if not _EXPORTING.acquire(timeout=20):
-        return render_template("error.html", symbol="",
-                               message="Other files are being written just now. Try "
-                                       "again in a moment."), 503
-    # On disk rather than in memory, and gone once it has been sent.
-    made = tempfile.TemporaryFile()
-    conn = db_mod.connect(app.config.get("DB_PATH"))
+    _slow_from_here()
+    if not _EXPORTING.acquire(timeout=5):
+        return _come_back()
+    made = conn = None
     try:
+        if _rate_limited("export", EXPORTS_PER_HOUR):
+            return _too_often("downloaded files")
+        # On disk rather than in memory, and gone once it has been sent.
+        made = tempfile.TemporaryFile()
+        conn = db_mod.connect(app.config.get("DB_PATH"))
         # A CSV is marked as UTF-8, or Excel opens it as something older and an
         # accent or a currency sign in a note comes out as two or three others.
         text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
@@ -5533,11 +5824,15 @@ def export_data(dataset, fmt):
         made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
     except BaseException:
-        made.close()
+        if made is not None:
+            made.close()
         raise
     finally:
-        conn.close()
+        # Whatever happened, a disk with no room included: kept, every later
+        # download by anybody waited for it until the server was restarted.
         _EXPORTING.release()
+        if conn is not None:
+            conn.close()
     size = made.tell()
     made.seek(0)
     return Response(
@@ -5582,11 +5877,12 @@ def ideas():
             # waits a few seconds for it; one joining a scan already running,
             # such as the page reloading itself, answers at once with how far
             # it has got.
-            result = (_demo_shortlist(market, horizon, risk) if g.demo else
-                      ideas_mod.find(market, horizon, cfg, risk,
-                                     wait=ideas_mod.PAGE_WAIT, join_wait=0,
-                                     may_start=lambda: not _rate_limited(
-                                         "scan", SCANS_PER_HOUR)))
+            with _patience(ideas_mod.PAGE_WAIT) as wait:
+                result = (_demo_shortlist(market, horizon, risk, wait) if g.demo else
+                          ideas_mod.find(market, horizon, cfg, risk,
+                                         wait=wait, join_wait=0,
+                                         may_start=lambda: not _rate_limited(
+                                             "scan", SCANS_PER_HOUR)))
         except ideas_mod.Busy as exc:
             # Said on the Find page itself, with the form, so asking again is
             # one press away.
@@ -5631,10 +5927,17 @@ def ideas():
 DEMO_SCAN_TTL = 60 * 60.0
 
 
-def _demo_shortlist(market: str, horizon: str, risk: str) -> Dict:
+# A whole list takes minutes, so a visitor who starts one is shown how far it
+# has got at once (the page opens itself again) rather than after a long wait.
+DEMO_SCAN_WAIT = 1.0
+
+
+def _demo_shortlist(market: str, horizon: str, risk: str,
+                    wait: float = ideas_mod.PAGE_WAIT,
+                    ttl: float = DEMO_SCAN_TTL, may_start=None) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
-    return ideas_mod.find(market, horizon, cfg, risk, wait=ideas_mod.PAGE_WAIT,
-                          ttl=DEMO_SCAN_TTL, join_wait=0)
+    return ideas_mod.find(market, horizon, cfg, risk, wait=min(wait, DEMO_SCAN_WAIT),
+                          ttl=ttl, join_wait=0, may_start=may_start)
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
@@ -5655,6 +5958,12 @@ class _NotKept(Exception):
         self.found = found
 
 
+def _kept_demo_screen(preset_key: str) -> Optional[screener_mod.ScreenResult]:
+    """A ready-made screen run for a visitor a short while ago, or None."""
+    kept = _DEMO_SCREENS.get(preset_key)
+    return kept[1] if kept is not None and time.time() - kept[0] < DEMO_TTL else None
+
+
 def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     """A ready-made screen, the same answer for every visitor.
 
@@ -5664,9 +5973,9 @@ def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     for a quarter of an hour.
     """
     from bot import upstream as upstream_mod
-    kept = _DEMO_SCREENS.get(preset_key)
-    if kept is not None and time.time() - kept[0] < DEMO_TTL:
-        return kept[1]
+    kept = _kept_demo_screen(preset_key)
+    if kept is not None:
+        return kept
 
     def fresh():
         found = screener_mod.run(symbols=None, universe=preset["universe"],
@@ -5734,6 +6043,9 @@ def screener():
         return _locked("Create an account to run your own screen",
                        "The example can run the ready-made screens. With an "
                        "account you can set your own filters.", examples=False)
+    if (preset or request.args.get("go")) and not (
+            g.demo and _kept_demo_screen(preset_key)):
+        _slow_from_here()
     if g.demo and preset:
         try:
             result = _demo_screen(preset_key, preset)
@@ -5766,6 +6078,8 @@ def portfolio():
     cfg = _cfg()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        if db_mod.count_open(conn, "paper", user=uid()):
+            _slow_from_here()
         # What is held: a position closed in part counts only what is left.
         rows = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
@@ -5811,7 +6125,14 @@ def monitor():
     finally:
         conn.close()
 
-    described = [(r, alerts_mod.describe(r["kind"], r["threshold"], r["symbol"]))
+    # One instrument's price alerts are read against each other: an entry's and
+    # a stop's, set from one analysis, must not read as the same alert twice.
+    levels: Dict[str, List] = {}
+    for r in alert_rows:
+        if alerts_mod.KINDS.get(r["kind"], {}).get("unit") == "price":
+            levels.setdefault(r["symbol"], []).append(r["threshold"])
+    described = [(r, alerts_mod.describe(r["kind"], r["threshold"], r["symbol"],
+                                         levels.get(r["symbol"], ())))
                  for r in alert_rows]
 
     # Price each open thesis so the page can say how it is doing, and propose
@@ -5829,6 +6150,7 @@ def monitor():
                      if not (r["outcome"] and r["closed_price"])})
     bars_of = {}
     if wanted:
+        _slow_from_here()
         with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
             bars_of = dict(pool.map(quote, wanted))
     judged = []
@@ -6005,6 +6327,7 @@ CHECKS_PER_HOUR = 60
 
 @app.route("/monitor/alerts/check", methods=["POST"])
 def check_alerts():
+    _slow_from_here()
     if _rate_limited("alert_check", CHECKS_PER_HOUR):
         return _too_often("checked alerts")
     conn = db_mod.connect(app.config.get("DB_PATH"))
@@ -6305,6 +6628,7 @@ def run_workflow(name):
     if name not in workflows_mod.WORKFLOWS:
         return render_template("error.html", message="There is no routine by that name.",
                                symbol=""), 404
+    _slow_from_here()
     if _rate_limited("routine", ROUTINES_PER_HOUR):
         return _too_often("run routines")
     me = uid()
@@ -6488,7 +6812,10 @@ def api_search():
     text = (request.args.get("q") or "")[:40]
     if not text.strip() or _rate_limited("search", SEARCHES_PER_HOUR):
         return jsonify([])
-    return jsonify(market_mod.search(text))
+    # Every letter typed is a question of its own: with the source hanging,
+    # one word typed kept all eight threads.
+    with _patience(1.0) as wait:
+        return jsonify(market_mod.search(text) if wait else [])
 
 
 @app.route("/api/analyse")
@@ -6517,6 +6844,8 @@ def api_analyse():
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0", exact=exact)
     except DataError as exc:
+        if isinstance(exc, Busy):
+            _uncount()
         wait = _source_wait(exc)
         if wait is not None:
             answer = jsonify({"error": str(exc), "retry_after": wait})
@@ -6570,7 +6899,8 @@ def stocks_index():
 @app.route("/stock/<sym>")
 def stock_page(sym):
     """One popular instrument's call, refreshed daily in the background."""
-    symbol = public_mod.from_slug(sym)
+    # A coin is called BTC on every page here, and its own address is btc-usd.
+    symbol = public_mod.from_slug(sym) or public_mod.from_slug(sym + "-USD")
     if symbol is None:
         abort(404)
     if sym != public_mod.slug(symbol):
@@ -7280,10 +7610,31 @@ def refused(exc):
                                    "again and try once more."), exc.code
 
 
+def _without_the_slash() -> Optional[str]:
+    """The page meant by an address with a slash too many at its end, as one
+    typed or pasted into a profile often has, or None."""
+    path = request.path
+    if request.method not in ("GET", "HEAD") or not path.endswith("/"):
+        return None
+    page = path.rstrip("/")
+    # "//elsewhere" is another site's address to a browser, and so is "/\\".
+    if not page or not re.match(r"/[A-Za-z0-9]", page) or "\\" in page:
+        return None
+    try:
+        app.url_map.bind("").match(page, method="GET")
+    except HTTPException:
+        return None
+    query = request.query_string.decode("utf-8", "replace")
+    return url_quote(page) + ("?" + query if query else "")
+
+
 @app.errorhandler(404)
 def not_found(_exc):
     if request.path.startswith("/api/"):
         return jsonify({"error": "No such address."}), 404
+    meant = _without_the_slash()
+    if meant:
+        return redirect(meant, code=301)
     return render_template("notfound.html"), 404
 
 
@@ -7379,9 +7730,12 @@ def _call_now(symbol: str, interval: str = "1d",
             action = snap.get("action") or None
     if action is None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
+        # Asked for by a button, somebody is waiting for it: as the loop's it
+        # gave way to everybody else's, ten seconds for each call.
         result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
                                 with_learning=True, record=False,
-                                db_path=app.config.get("DB_PATH"), exact=exact)
+                                db_path=app.config.get("DB_PATH"), exact=exact,
+                                source="web" if has_request_context() else "engine")
         action = (result.plan.action or "").upper() or None
     with _CALLS_LOCK:
         _CALLS[key] = (now, action)
@@ -7495,6 +7849,7 @@ def start_alert_loop(cfg):
     minutes = cfg.get("alert_check_minutes", 5)
     if not minutes:
         return None
+    alerts_mod.STOPPING.clear()
     ALERTS = scheduler_mod.Scheduler(_check_alerts_job,
                                      interval_seconds=float(minutes) * 60.0,
                                      name="stockbot-alerts")

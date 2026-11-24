@@ -1,9 +1,11 @@
 """Popular pages, sharing, invites and the weekly email."""
 import calendar
+import html as _html
 import json
 import os as _os
 import re
 import sys as _sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -232,11 +234,21 @@ try:
     for other, own in (("/stock/NVDA", "/stock/nvda"), ("/stock/Nvda?utm=x", "/stock/nvda?utm=x"),
                        ("/stock/NVDA/card.png", "/stock/nvda/card.png"),
                        ("/backtest/rsi_reversion", "/backtest/rsi-reversion"),
-                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion")):
+                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion"),
+                       ("/stock/btc", "/stock/btc-usd"), ("/stock/BTC?utm=x", "/stock/btc-usd?utm=x"),
+                       ("/stock/link", "/stock/link-usd"),
+                       ("/stocks/", "/stocks"), ("/learn/?a=b", "/learn?a=b"),
+                       ("/stock/nvda/", "/stock/nvda")):
         r = c.get(other)
         check("%s is sent to the page's one address" % other,
               r.status_code == 301 and r.headers["Location"].endswith(own),
               (r.status_code, r.headers.get("Location")))
+    # The path as the server is handed it, its %2F and %5C already read.
+    for wrong in ("/no-such-page/", "//elsewhere.example/", "/\\elsewhere.example/",
+                  "/stock/zzzz", "/stock/usd"):
+        r = c.get("/x", environ_overrides={"PATH_INFO": wrong})
+        check("%s is still no page" % wrong, r.status_code == 404
+              and "Location" not in r.headers, (r.status_code, r.headers.get("Location")))
 
     robots = c.get("/robots.txt").data.decode().splitlines()
     check("robots are kept off every page of the example account",
@@ -281,7 +293,7 @@ try:
     r = c.get("/backtest/rsi-reversion")
     page = r.data.decode("utf-8", "replace")
     check("then shows each stock it was tested on",
-          r.status_code == 200 and "Does RSI reversion work?" in page
+          r.status_code == 200 and "Does trading against an extreme RSI work?" in page
           and "/stock/nvda" in page and "/stock/amd" in page, r.status_code)
     check("and how many it kept money on", "kept money on 1 of the" in page)
     check("open to search engines once tested", "noindex" not in page)
@@ -318,9 +330,26 @@ try:
     check("and one that never fired says that", "it has not come up" in page
           and "Being tested" not in page)
     check("its heading reads as English", "Does a break of structure work?" in page)
-    check("so does every price-action setup's",
-          all(public.strategy_asked(s.name)[0].islower() for s in _strats.REGISTRY
-              if s.family == _strats.LIQUIDITY))
+    # Each of the 44 has words of its own: an article or a doing word first, and
+    # never the bare label ("Does Pivot levels work?").
+    _said = {s.name: public.strategy_asked(s.name) for s in _strats.REGISTRY}
+    check("so does every other strategy's",
+          not [n for n, said in _said.items()
+               if said.split()[0] not in ("a", "an", "the", "following", "trading")]
+          and len(set(_said.values())) == len(_said),
+          [n for n, said in _said.items() if said == public.strategy_label(n)])
+    check("each short enough for a preview to show whole",
+          all(len("Does %s work? · Orenth" % said) < 60 for said in _said.values()),
+          [said for said in _said.values() if len("Does %s work? · Orenth" % said) >= 60])
+    # Higher highs and lower lows at once is a widening range, not what it follows.
+    check("and true: it follows higher highs up or lower lows down, not both at once",
+          _said["market_structure"] == "following higher highs or lower lows")
+    page = _html.unescape(c.get("/backtest/pivot-levels").data.decode("utf-8", "replace"))
+    check("in its title, its heading, its preview and its links to the others",
+          "<title>Does trading from pivot points work?" in page
+          and "<h1>Does trading from pivot points work?</h1>" in page
+          and 'content="Does trading from pivot points work? · Orenth"' in page
+          and "Does trading an opening gap work?" in page and "Does Gap" not in page)
     check("on a phone each row of the tests and of Strategies is a card of named figures",
           all('<table class="stack">' in c.get(p).data.decode("utf-8", "replace")
               for p in ("/backtests", "/backtest/rsi-reversion"))
@@ -353,7 +382,15 @@ try:
     check("Strategies lists every strategy with enough setups",
           page.count('<td class="lead">') == len(_strats.REGISTRY),
           page.count('<td class="lead">'))
-    conn.execute("DELETE FROM strategy_stats WHERE symbol='ALLFORTY'")
+    conn.execute("UPDATE strategy_stats SET symbol='NVDA' WHERE symbol='ALLFORTY'")
+    conn.commit()
+    every, one = (" ".join(c.get("/strategies" + q).data.decode("utf-8", "replace").split())
+                  for q in ("", "?symbol=NVDA"))
+    check("a visitor is told the figures count every instrument, only while they do",
+          "Only popular names can be picked here. The figures count every instrument" in every
+          and "Only popular names can be picked here." in one
+          and "The figures count every instrument" not in one)
+    conn.execute("DELETE FROM strategy_stats WHERE symbol='NVDA'")
     conn.commit()
     conn.close()
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
@@ -441,6 +478,10 @@ try:
     page = c.get("/record").data.decode("utf-8", "replace")
     check("while waiting, it says how many calls it is holding",
           "5 calls written down since 5 Jan 2026" in page)
+    # It opens to search when the first few settle, weeks before any is scored.
+    check("with a description of its own, not the front page's",
+          "None is scored yet. Not financial advice." in re.search(
+              r'name="description" content="(.*?)"', page).group(1), page[:600])
 
     # NVDA, BUY at 100 with target 104.5: reaches it on the third day.
     check("a buy that reached its target was right",
@@ -710,8 +751,180 @@ try:
     finally:
         with web._example_lock:
             web._example_state.update(_was)
+    key = ("NVDA", False, "1d", True, web._settings_key(dict(web.config_mod.DEFAULTS)))
+    kept_before, asked_of, scans = dict(web._CACHE), [], []
+    real_analyse, real_find = web.engine.analyse, web.ideas_mod.find
+
+    def worked_out(symbol, cfg, **how):
+        asked_of.append((symbol, cfg.get("use_llm_sentiment", True), how))
+        return fake_result("NVDA", "WAIT", 60, 33)
+
+    web.engine.analyse = worked_out
+    web.ideas_mod.find = lambda *a, **k: scans.append((a, k))
+    try:
+        web._CACHE.clear()
+        web._CACHE[key] = (time.time() - 60, fake_result("NVDA", "BUY", 70, 41), {})
+        page_now = c.get("/").data.decode("utf-8", "replace")
+        web._example_state.update(at=0.0, data=None, busy=False, failed=0.0)
+        web._refresh_example()
+        check("the front page's check is the one the page behind it was given",
+              asked_of == [] and web._example_state["data"]["action"] == "BUY"
+              and web._example_state["data"]["samples"] == 70, web._example_state)
+        web._CACHE[key] = (time.time(), fake_result("NVDA", "AVOID", 50, 20), {})
+        check("and follows it when a visitor has it worked out again",
+              web._example()["action"] == "AVOID" and web._example()["samples"] == 50)
+        web._CACHE.clear()
+        web._refresh_example()
+        check("with none kept it is worked out the same way, news and all, and kept for that page",
+              len(asked_of) == 1 and asked_of[0][2].get("with_news", True)
+              and not asked_of[0][2]["record"] and key in web._CACHE
+              and web._CACHE[key][1].plan.prob_samples == 60, (asked_of, list(web._CACHE)))
+        check("no scan is started where the server's own jobs do not run", scans == [], scans)
+        web.BACKGROUND["stand-in"] = None
+        web._refresh_example()
+        check("and the list behind the Find tile is started, without waiting for it",
+              len(scans) == 1 and scans[0][1]["wait"] == 0.0, scans)
+        jobs = web.ideas_mod._JOBS
+        jobs.clear()
+        idle = scans[0][1]["may_start"]()
+        jobs["a member's"] = {"running": True}
+        check("but never takes a place while a scan somebody asked for is going",
+              idle and not scans[0][1]["may_start"]())
+        jobs.clear()
+
+        def no_scan(*_a, **_k):
+            raise RuntimeError("The scan stopped without an answer.")
+
+        web.ideas_mod.find, shown = no_scan, web._example_state["at"]
+        web._refresh_example()
+        check("a scan that cannot be started is not the example's failure",
+              web._example_state["failed"] == 0.0 and web._example_state["at"] == shown)
+
+        # A finished list is kept for JOB_KEEP and then dropped. Another is
+        # started while there is still that one to show.
+        web.ideas_mod.find = real_find
+        real_run, web.ideas_mod._run = web.ideas_mod._run, lambda *a: None
+        try:
+            for age in (web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL - 60,
+                        web.ideas_mod.JOB_KEEP - web.EXAMPLE_TTL - 60):
+                jobs.clear()
+                then = time.time() - age
+                web._demo_shortlist("stocks", "medium", "balanced", wait=0.0)
+                (asked, job), = jobs.items()
+                job.update(running=False, started=then, scan={
+                    "market": "stocks", "interval": "1d", "rows": [], "failed": [],
+                    "asked_for": 1, "cut_short": False, "throttled": False, "complete": True,
+                    "seconds": 1.0, "scanned_at": then, "finished_at": then})
+                web._refresh_example()
+                check("a list %d minutes old %s" % (age // 60, "is left" if job is jobs[asked]
+                                                    else "is made again, and shown meanwhile"),
+                      (jobs[asked] is job) == (age < web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL)
+                      and (jobs[asked]["scan"] or jobs[asked]["previous"]) is job["scan"],
+                      jobs[asked])
+        finally:
+            web.ideas_mod._run = real_run
+            web.BACKGROUND.clear()
+            jobs.clear()
+        web.ideas_mod.find = lambda *a, **k: scans.append((a, k))
+        _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+        web._CACHE.clear()
+        web._refresh_example()
+        paid = ("NVDA", False, "1d", True, key[4])
+        check("no model is paid to read headlines for it, and a member's own is kept apart",
+              asked_of[-1][1] is False and paid not in web._CACHE and len(web._CACHE) == 1,
+              (asked_of[-1], list(web._CACHE)))
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        # The first visitor of a quarter hour sees the last one here, and has it
+        # worked out again: the page behind must not answer something else.
+        begun, finish = threading.Event(), threading.Event()
+
+        def takes_a_while(symbol, cfg, **how):
+            asked_of.append((symbol, None, how))
+            begun.set()
+            finish.wait(20)
+            return fake_result("NVDA", "AVOID", 50, 20)
+
+        last_one, behind = fake_result("NVDA", "WAIT", 60, 30), []
+        web._CACHE.clear()
+        web._CACHE[key] = (time.time() - web.EXAMPLE_TTL - 5, last_one, {})
+        del asked_of[:]
+        web.engine.analyse = takes_a_while
+        refresh = threading.Thread(target=web._refresh_example)
+        refresh.start()
+        begun.wait(20)
+
+        def opens_it():
+            with web.app.test_request_context("/analyse?symbol=NVDA"):
+                web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+                behind.append(web.cached_analysis("NVDA", "1d", dict(
+                    web.config_mod.DEFAULTS), True, record=False, ttl=web.DEMO_TTL))
+
+        opens = threading.Thread(target=opens_it)
+        opens.start()
+        opens.join(5)
+        at_once = list(behind)
+        finish.set()
+        refresh.join(20)
+        opens.join(20)
+        check("opened while it is worked out again, the page behind shows the last one too, "
+              "and no second is worked out beside it",
+              at_once == [last_one] and len(asked_of) == 1 and not web._RUNNING,
+              (at_once, len(asked_of), web._RUNNING))
+        web._CACHE.clear()
+        del asked_of[:]
+        web._RUNNING[key] = {"done": threading.Event(), "error": None}
+        web._refresh_example()
+        check("and while somebody's own asking for it runs, it is left to that one",
+              asked_of == [] and not web._CACHE and list(web._RUNNING) == [key], asked_of)
+        web._RUNNING.clear()
+
+        def no_prices(*_a, **_k):
+            raise web.DataError("nothing just now")
+
+        web.engine.analyse = no_prices
+        web._refresh_example()
+        check("one that fails is not left marked as running",
+              not web._RUNNING and web._example_state["failed"] > 0, web._RUNNING)
+        web.engine.analyse = worked_out
+
+        # Kept in the moment after this look began.
+        web._example_state.update(failed=0.0)
+        web._CACHE[key] = (time.time() + 0.5, fake_result("NVDA", "AVOID", 50, 20), {})
+        check("the age said is never less than nothing", web._example()["age_min"] == 0,
+              web._example())
+        # Words that cannot be put together, at every look.
+        real_words, web.plain_mod.explain_plan = web.plain_mod.explain_plan, no_prices
+        told, real_log = [], web.app.logger.exception
+        web.app.logger.exception = lambda *a, **k: told.append(a)
+        try:
+            web._CACHE[key] = (time.time() + 1, fake_result("NVDA", "BUY", 50, 40), {})
+            looks = [web._example()["action"] for _ in range(5)]
+        finally:
+            web.plain_mod.explain_plan, web.app.logger.exception = real_words, real_log
+        check("words that cannot be put together are said in the log once, not at every visit",
+              len(told) == 1 and looks == ["AVOID"] * 5, (told, looks))
+    finally:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+        web.engine.analyse, web.ideas_mod.find = real_analyse, real_find
+        web._RUNNING.clear()
+        web._CACHE.clear()
+        web._CACHE.update(kept_before)
+        with web._example_lock:
+            web._example_state.update(_was)
+    waits = []
+    web.ideas_mod.find = lambda *a, **k: waits.append(k["wait"]) or {}
+    try:
+        web._demo_shortlist("stocks", "medium", "balanced")
+    finally:
+        web.ideas_mod.find = real_find
+    check("a visitor who starts a scan is shown how far it has got, not kept waiting",
+          waits == [web.DEMO_SCAN_WAIT] and web.DEMO_SCAN_WAIT <= 2, waits)
     check("an example from twenty minutes ago is not called live",
           "Live right now" not in page and "Latest check" in page and "20 min ago" in page)
+    check("the front page's check says it counts the news, and a public page that it does not",
+          "Latest check, with the news" in page and "prices only: a full" in " ".join(
+              c.get("/stock/nvda").data.decode("utf-8", "replace").split()))
     check("someone with an account is offered a way back in",
           ">Sign in</a>" in page and ">Sign up</a>" not in page)
     check("the screener is not said to read filings",
@@ -730,6 +943,33 @@ try:
     check("the sign-in page says it signs in too",
           "<title>Sign in or create your free account" in page
           and "<h1>Sign in or create your free account</h1>" in page)
+    # Seven pages had one search description and one preview title ("Orenth").
+    _os.environ.update(STRIPE)
+    real_offers, billing.offers = billing.offers, lambda: {}
+    try:
+        heads = {}
+        for path in ("/", "/pricing", "/terms", "/privacy", "/signin", "/learn/practice",
+                     "/tools/size", "/tools/survival"):
+            page = c.get(path).data.decode("utf-8", "replace")
+            heads[path] = [_html.unescape(re.search(p, page).group(1)) for p in (
+                r"<title>(.*?)</title>", r'name="description" content="(.*?)"',
+                r'property="og:title" content="(.*?)"',
+                r'name="twitter:title" content="(.*?)"')]
+    finally:
+        billing.offers = real_offers
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+    check("each page a search finds has a title and a description of its own",
+          len({h[0] for h in heads.values()}) == len({h[1] for h in heads.values()})
+          == len(heads), heads)
+    check("and its preview carries that title", all(h[0] == h[2] == h[3] and h[2] != "Orenth"
+                                                    for h in heads.values()), heads)
+    check("short enough to be shown whole", all(
+        len(h[0]) < 60 and len(h[1]) < 155 for p, h in heads.items() if p != "/"),
+        {p: (len(h[0]), len(h[1])) for p, h in heads.items()})
+    # A price that opens past the stop loses more, as the page itself says.
+    check("and the size calculator's promises no more than its page does",
+          "loses no more than that at the stop" in heads["/tools/size"][1], heads["/tools/size"])
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("asking someone to analyse a stock says analyse, like the button",
           "Analyse any stock or coin" in page and "Check any stock" not in page)
@@ -1108,7 +1348,9 @@ try:
     print("=" * 72)
     print("WHAT A STRANGER, OR ONE ACCOUNT, CAN SEND")
     print("=" * 72)
+    import io
     import json
+    import tempfile
     import threading
     from bot import export as export_mod
     from bot import ideas as ideas_mod
@@ -1275,6 +1517,37 @@ try:
         refused = []
         ask(99, refused)
         check("one account cannot have every thread at work for it", refused == [503], refused)
+        r = another().get("/analyse?symbol=AAPL&interval=1d&news=0&account=77")
+        said = page_of(r)
+        check("what it asked for waits its turn and opens itself, as no thread of the server does",
+              r.status_code == 503 and re.search(
+                  r'<meta http-equiv="refresh" content="[2-5]">', said)
+              and r.headers.get("Retry-After") and "opens by itself" in said
+              and "didn't work" not in said, said[:300])
+        check("told what is so, though all four at work are its own and it may wait a while",
+              "tries again every few seconds" in said and "A lot of people" not in said
+              and "in a few seconds." not in said, said[:300])
+        r = another().post("/monitor/alerts/check")
+        check("a button is not pressed again by itself",
+              r.status_code == 503 and "refresh" not in page_of(r)
+              and "press the button again" in page_of(r), page_of(r)[:300])
+        pages = {p: another().get(p).status_code for p in (
+            "/trades", "/portfolio", "/screener?go=1", "/export/trades.csv",
+            "/monitor", "/screener", "/tools/size", "/account", "/")}
+        check("nor has it more of the pages that wait for prices, while every other opens",
+              pages == {"/trades": 503, "/portfolio": 503,
+                        "/screener?go=1": 503, "/export/trades.csv": 503,
+                        "/monitor": 200, "/screener": 200,
+                        "/tools/size": 200, "/account": 200, "/": 200}, pages)
+        read = []
+        real_summary = web.db_mod.journal_summary
+        web.db_mod.journal_summary = lambda *a, **k: read.append(1) or real_summary(*a, **k)
+        try:
+            for path in ("/trades", "/portfolio"):
+                another().get(path)
+        finally:
+            web.db_mod.journal_summary = real_summary
+        check("and one sent away to wait has not read the journal for nothing", not read, read)
         other = web.app.test_client()
         conn = db.connect(DB)
         try:
@@ -1287,8 +1560,36 @@ try:
             "/analyse?symbol=MSFT&interval=1d&news=0"))
         late.start()
         check("while somebody else's is still worked out", going.acquire(timeout=20))
+        # Five of the eight threads are at it. One place more, and the other
+        # two are left for pages that need nothing worked out.
+        third, sixth = user("third@example.com"), []
+
+        def as_third(path, out):
+            mine = web.app.test_client()
+            k = db.connect(DB)
+            try:
+                token = A.start_session(k, third.id, "test")
+            finally:
+                k.close()
+            with mine.session_transaction() as sess:
+                sess[web.SESSION_KEY] = token
+            out.append(mine.get(path).status_code)
+
+        last = threading.Thread(target=as_third, args=(
+            "/analyse?symbol=TSLA&interval=1d&news=0", sixth))
+        last.start()
+        going.acquire(timeout=20)
+        late_ones = []
+        as_third("/analyse?symbol=AMD&interval=1d&news=0", late_ones)
+        as_third("/export/trades.csv", late_ones)
+        as_third("/trades", late_ones)
+        as_third("/learn", late_ones)
+        check("two threads are kept for other pages, whoever asks for the slow ones",
+              sum(web._SLOW.values()) == 6 and late_ones == [503, 503, 200, 200],
+              (web._SLOW, late_ones))
         let_go.set()
         late.join(20)
+        last.join(20)
     finally:
         let_go.set()
         for t in threads:
@@ -1296,6 +1597,411 @@ try:
         web.engine.analyse = real_analyse
     check("and each is let go of when it is done", out == [404] * web.SLOW_AT_ONCE
           and not web._SLOW, (out, web._SLOW))
+
+    # Visitors on the example, with nothing kept yet. Seven ask for the same
+    # instrument: they wait for the one answer, six of them in threads.
+    let_go.clear()
+    asked_for = []
+
+    def slow_example(symbol, *a, **k):
+        asked_for.append(symbol)
+        let_go.wait(30)
+        raise web.DataError("enough")
+
+    web.engine.analyse = slow_example
+    web._IN_LINE.clear()           # the pages refused above do not come back
+    web._CACHE.clear()
+    out = []
+    looking = [threading.Thread(target=lambda: out.append(web.app.test_client().get(
+        "/analyse?symbol=NVDA").status_code)) for _ in range(6)]
+    try:
+        for t in looking:
+            t.start()
+            time.sleep(0.05)
+        until = time.time() + 20
+        while sum(web._SLOW.values()) < 6 and time.time() < until:
+            time.sleep(0.05)
+        places = sum(web._SLOW.values())
+        r = web.app.test_client().get("/analyse?symbol=NVDA")
+        check("a crowd on a cold page waits for the one answer, and nobody gets an error page",
+              places == 6 and asked_for == ["NVDA"] and r.status_code == 503
+              and "opens by itself" in page_of(r), (places, asked_for, r.status_code))
+        check("while the front page and the public pages open",
+              [web.app.test_client().get(p).status_code
+               for p in ("/", "/stocks", "/healthz")] == [200, 200, 200])
+    finally:
+        let_go.set()
+        for t in looking:
+            t.join(20)
+        web.engine.analyse = real_analyse
+    check("and every place is given back", not web._SLOW, web._SLOW)
+
+    # The quarter hour up, with people looking: one has it worked out again,
+    # and the rest see the last one meanwhile.
+    def as_visitor(out):
+        with web.app.test_request_context("/analyse?symbol=NVDA"):
+            web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+            try:
+                out.append(web.cached_analysis("NVDA", "1d", dict(web.config_mod.DEFAULTS),
+                                               True, record=False, ttl=web.DEMO_TTL))
+            except web.DataError:
+                out.append("failed")
+
+    let_go.clear()
+    del asked_for[:]
+    web.engine.analyse = slow_example
+    last_one = SimpleNamespace(run_id=None)
+    key = ("NVDA", False, "1d", True, web._settings_key(dict(web.config_mod.DEFAULTS)))
+    web._CACHE.clear()
+    web._CACHE[key] = (time.time() - web.DEMO_TTL - 5, last_one, {})
+    refreshing, meanwhile = [], []
+    first = threading.Thread(target=as_visitor, args=(refreshing,))
+    try:
+        first.start()
+        until = time.time() + 20
+        while not asked_for and time.time() < until:
+            time.sleep(0.02)
+        as_visitor(meanwhile)
+        check("a visitor is shown the last one while it is worked out again for another",
+              meanwhile == [last_one] and asked_for == ["NVDA"], (meanwhile, asked_for))
+        web._SLOW.update({80000 + n: 1 for n in range(web._slow_in_all())})
+        real_running = dict(web._RUNNING)
+        web._RUNNING.clear()
+        web._IN_LINE.clear()
+        as_visitor(meanwhile)
+        web._RUNNING.update(real_running)
+        web._SLOW.clear()
+        web._SLOW[1] = 1
+        check("and while every place is taken, in no line for one",
+              meanwhile == [last_one] * 2 and asked_for == ["NVDA"] and not web._IN_LINE,
+              (meanwhile, asked_for, web._IN_LINE))
+        del meanwhile[1:]
+        web._CACHE[key] = (time.time() - web.DEMO_STALE - 5, last_one, {})
+        waits = threading.Thread(target=as_visitor, args=(meanwhile,))
+        waits.start()
+        waits.join(0.5)
+        check("but not one half an hour old", len(meanwhile) == 1 and waits.is_alive())
+    finally:
+        let_go.set()
+        first.join(20)
+        waits.join(20)
+        web.engine.analyse = real_analyse
+        web._CACHE.clear()
+
+    # Its research too, which takes up to three quarters of a minute.
+    def researches(out):
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+            out.append(web._cached_research(fake_result("NVDA"), "1d",
+                                            dict(web.config_mod.DEFAULTS), True, True))
+
+    def slow_research(*a, **k):
+        going.release()
+        let_go.wait(30)
+        return "the new one"
+
+    let_go.clear()
+    real_research, web.engine.research = web.engine.research, slow_research
+    with web.app.test_request_context("/research?symbol=NVDA"):
+        web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+        key = web._research_key("NVDA", "1d", dict(web.config_mod.DEFAULTS), True, True)
+    web._RESEARCH_CACHE[key] = (time.time() - web.DEMO_TTL - 5, "the last one")
+    refreshing, meanwhile = [], []
+    first = threading.Thread(target=researches, args=(refreshing,))
+    try:
+        while going.acquire(blocking=False):
+            pass
+        first.start()
+        going.acquire(timeout=20)
+        seen = threading.Thread(target=researches, args=(meanwhile,), daemon=True)
+        seen.start()
+        seen.join(2)
+        check("nor does a visitor wait for the example's research to be put together again",
+              meanwhile == ["the last one"] and sum(web._SLOW.values()) == 1,
+              (meanwhile, web._SLOW))
+    finally:
+        let_go.set()
+        first.join(20)
+        web.engine.research = real_research
+        web._RESEARCH_CACHE.clear()
+    check("who then has the new one", refreshing == ["the new one"] and not web._SLOW,
+          (refreshing, web._SLOW))
+
+    # Pages that found no place come back for one: the one that has waited
+    # longest has it first, whoever asks in the instant it comes free.
+    class Person(object):
+        is_local = False
+
+        def __init__(self, n):
+            self.id = 90000 + n
+
+    def asks(n, path="/analyse?symbol=X", method="GET", demo=False, **k):
+        with web.app.test_request_context(path, method=method, headers={
+                "CF-Connecting-IP": "203.0.113.%d" % n}):
+            web.g.user, web.g.demo = Person(0 if demo else n), demo
+            slot = web._SlowSlot()
+            try:
+                slot.take(**k)
+            except web.Busy:
+                return None
+            return slot
+
+    def drawn(n, path):
+        with web.app.test_request_context(path):
+            web.g.user, web.g.demo = Person(n), False
+            with web._patience(4.0) as wait:
+                return wait
+
+    web._IN_LINE.clear()
+    places = [asks(n) for n in range(1, 7)]
+    check("six accounts have the six places", all(places) and asks(10) is None)
+    time.sleep(0.02)
+    check("the next is after it in the line", asks(11) is None)
+    check("a page drawn without the wait, and a button, are in no line",
+          drawn(12, "/") == 0.0 and asks(13, method="POST") is None
+          and {k[0] for k in web._IN_LINE} == {90010, 90011}, web._IN_LINE)
+    places.pop().free()
+    check("a place that comes free is kept for whoever has waited longest",
+          asks(14) is None and asks(11) is None)
+    pressed = asks(13, method="POST")
+    check("save from a button, which has no way to wait for one", pressed is not None)
+    pressed.free()
+    first = asks(10)
+    check("who has it on coming back", first is not None and (90010, "/analyse?symbol=X")
+          not in web._IN_LINE, web._IN_LINE)
+    first.free()
+    second = asks(11)
+    check("and then the next", second is not None and asks(10) is None)
+    second.free()
+    # Somebody who went away holds it up for seconds, not for good.
+    for entry in web._IN_LINE.values():
+        entry[2] -= web.LINE_FOR + 1
+    late = asks(15)
+    check("one that does not come back loses its place in the line",
+          late is not None and not web._IN_LINE, web._IN_LINE)
+    for slot in places + [late]:
+        slot.free()
+    # Visitors in line past what the example may have keep nothing from members.
+    example = [asks(n, demo=True) for n in range(1, 5)]
+    check("visitors past the example's own places wait, and a member does not wait behind them",
+          all(example) and all(asks(n, path="/portfolio?%d" % n, demo=True) is None
+                               for n in range(20, 30)) and asks(16) is not None, web._IN_LINE)
+    check("but one asking for what is already being worked out joins it",
+          asks(30, demo=True, joining=True) is not None)
+    web._SLOW.clear()
+    web._IN_LINE.clear()
+    # Sixty people with a fifth of a second's work each were twenty seconds
+    # being sent away, all six places empty for pages yet to come back.
+    places = [asks(n) for n in range(1, 7)]
+    waiting = [asks(n) for n in range(40, 48)]
+    time.sleep(0.02)
+    for slot in places[:2]:
+        slot.free()
+    check("of two places free, only the last is kept for those waiting",
+          all(places) and not any(waiting) and asks(50) is not None and asks(51) is None
+          and asks(40) is not None, (web._SLOW, web._IN_LINE))
+    web._SLOW.clear()
+    web._IN_LINE.clear()
+
+    def others():
+        """Everybody else's pages, in every place there is."""
+        web._SLOW.update({80000 + n: 1 for n in range(web._slow_in_all())})
+
+    # One page, one place, and it is not sent away half-way.
+    real_research = web.engine.research
+    web.engine.analyse = lambda *a, **k: SimpleNamespace(
+        run_id=None, bars=fake_result("NVDA").bars)
+    web.engine.research = lambda *a, **k: SimpleNamespace(reasoning=None)
+    web._CACHE.clear()
+    web._RESEARCH_CACHE.clear()
+    cfg = dict(web.config_mod.DEFAULTS)
+    try:
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = guest, False
+            found = web.cached_analysis("NVDA", "1d", cfg, False)
+            others()
+            del web._SLOW[80000]
+            with web._patience(1.0) as wait:
+                pass
+            web._cached_research(found, "1d", cfg, False, False)
+            check("a page that has its place keeps it, for its research too, and has only one",
+                  web._SLOW.get(guest.id) == 1 and wait == 1.0, web._SLOW)
+        check("until it is done", guest.id not in web._SLOW, web._SLOW)
+    except web.Busy:
+        check("a page that has its place keeps it, for its research too, and has only one", False)
+    finally:
+        web.engine.analyse, web.engine.research = real_analyse, real_research
+        web._SLOW.clear()
+        web._CACHE.clear()
+        web._RESEARCH_CACHE.clear()
+
+    # Nothing is counted against somebody who was sent away.
+    _os.environ.update(STRIPE)
+    try:
+        sign_in(guest)
+        web._RATE.clear()
+        others()
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = guest, False
+            key = ("NVDA", False, "1d", True, web._settings_key(web._cfg()))
+        # Opened by somebody else a moment ago, so it needs no place.
+        web._CACHE[key] = (time.time(), fake_result("NVDA"), {guest.id: 1})
+        conn = db.connect(DB)
+        try:
+            before = billing.views_today(conn, guest.id)
+            r = c.get("/research?symbol=NVDA&interval=1d")
+            check("a free look is not spent on research that is sent away to wait",
+                  r.status_code == 503 and billing.views_today(conn, guest.id) == before,
+                  (r.status_code, before, billing.views_today(conn, guest.id)))
+        finally:
+            conn.close()
+        r = c.get("/api/analyse?symbol=TSLA")
+        check("a program is told in JSON to come back",
+              r.status_code == 503 and r.json["retry_after"] == web.SLOW_RETRY
+              and r.headers["Retry-After"] == str(web.SLOW_RETRY), r.data)
+        r = c.post("/thesis/save", data={"symbol": "TSLA", "interval": "1d", "note": "my <own> words"},
+                   headers={"Referer": "http://localhost/research?symbol=TSLA"})
+        page = page_of(r)
+        check("and neither it nor a thesis is counted in the hour's", r.status_code == 503
+              and not any(web._RATE.values()), web._RATE)
+        check("what was typed can be sent again from the page that says so",
+              'name="note" value="my &lt;own&gt; words"' in page
+              and '<form method="post" action="/thesis/save"' in page
+              and 'href="/research?symbol=TSLA">Go back' in page, page[-2500:])
+        page = page_of(c.post("/thesis/save", data={
+            "symbol": "TSLA", "interval": "1d", "note": "n",
+            "busy_back": "/research?symbol=TSLA"},
+            headers={"Referer": "http://localhost/thesis/save"}))
+        check("and going back still leads to where it was typed",
+              'href="/research?symbol=TSLA">Go back' in page
+              and page.count('name="busy_back"') == 1, page[-2500:])
+        r = c.post("/analyse/image", data={"chart": (io.BytesIO(b"x"), "chart.png")},
+                   content_type="multipart/form-data")
+        check("a picture is chosen again", r.status_code == 503
+              and "Go back, wait" in page_of(r) and "Try again" not in page_of(r))
+        check("an address that is none does not break the page that waits",
+              c.get("/screener?go=1", headers={"Referer": "http://["}).status_code == 503)
+        # A ready-made screen that is kept is worked out for nobody.
+        presets = list(web.screener_mod.PRESETS)
+        web._DEMO_SCREENS[presets[0]] = (time.time(), web.screener_mod.ScreenResult(
+            universe="most actives", scanned=1, passed=[], rejected=1, filters=[], deep=False))
+        visitor = web.app.test_client()
+        answers = [visitor.get("/screener?preset=" + p).status_code for p in presets[:2]]
+        check("a visitor is shown a ready-made screen that is kept, however busy it is",
+              answers == [200, 503], answers)
+        # Typing a ticker: each letter is a question to the source.
+        searched = []
+        real_search = web.market_mod.search
+        web.market_mod.search = lambda q, limit=6: searched.append(q) or [{"symbol": "AAPL"}]
+        try:
+            none = c.get("/api/search?q=aap").json
+            web._SLOW.clear()
+            some = c.get("/api/search?q=aapl").json
+        finally:
+            web.market_mod.search = real_search
+        check("suggestions wait for nobody's answer while every place is taken",
+              none == [] and some == [{"symbol": "AAPL"}] and searched == ["aapl"],
+              (none, some, searched))
+        check("and no place is left behind by any of it", not web._SLOW, web._SLOW)
+        # A company's filings are twenty seconds of waiting, at most.
+        waited = []
+        real_shortlist = ideas_mod._shortlist
+        ideas_mod._shortlist = lambda scan, horizon, risk, partial=False, accounts_wait=None: (
+            waited.append(accounts_wait) or {"passed": [], "watch": []})
+        job = {"running": False, "queued": False, "rows": [], "failed": [], "done": 1, "total": 1,
+               "started": time.time(), "scan": {"finished_at": time.time()}, "previous": None,
+               "attempt": None, "retry_at": 0.0, "error": None, "finished": threading.Event()}
+        real_job, ideas_mod._job = ideas_mod._job, lambda *a, **k: (job, False)
+        try:
+            for wait in (0.0, ideas_mod.PAGE_WAIT):
+                ideas_mod.find("stocks", "long", dict(web.config_mod.DEFAULTS), wait=wait,
+                               join_wait=0)
+        finally:
+            ideas_mod._shortlist, ideas_mod._job = real_shortlist, real_job
+        check("a list of ideas drawn without a place waits for no company's filings",
+              waited == [0, None], waited)
+        # A disk with no room, once.
+        def full(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        real_file, tempfile.TemporaryFile = tempfile.TemporaryFile, full
+        try:
+            c.get("/export/trades.csv")
+        except OSError:
+            pass
+        finally:
+            tempfile.TemporaryFile = real_file
+        began = time.time()
+        check("a download that breaks keeps nobody's after it waiting",
+              c.get("/export/trades.csv").status_code == 200 and time.time() - began < 4
+              and not web._SLOW, (time.time() - began, web._SLOW))
+    finally:
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+        web._SLOW.clear()
+        web._IN_LINE.clear()
+        web._CACHE.clear()
+        web._DEMO_SCREENS.clear()
+        web._RATE.clear()
+
+    # "Check them all now" is pressed by somebody who waits for it.
+    asked_as = []
+
+    def call_for(symbol, *a, source="engine", **k):
+        asked_as.append(source)
+        return SimpleNamespace(plan=SimpleNamespace(action="WAIT"))
+
+    web.engine.analyse = call_for
+    try:
+        web._call_now("ZZCALL")
+        web._CALLS.clear()
+        with web.app.test_request_context("/monitor/alerts/check", method="POST"):
+            web._call_now("ZZCALL")
+    finally:
+        web.engine.analyse = real_analyse
+        web._CALLS.clear()
+    check("a call worked out for a button gives way to nobody, as the loop's does",
+          asked_as == ["engine", "web"], asked_as)
+
+    # How long each kept analysis stays, and how much they may come to.
+    def kept(symbol, interval, age, result=None):
+        web._CACHE[(symbol, False, interval, True, "house")] = (
+            time.time() - age, result or SimpleNamespace(run_id=None), {})
+
+    def another_kept():
+        web.engine.analyse = lambda *a, **k: SimpleNamespace(run_id=None)
+        try:
+            with web.app.test_request_context("/analyse"):
+                web.g.user, web.g.demo = guest, False
+                web.cached_analysis("FRESH", "1d", dict(web.config_mod.DEFAULTS), False)
+        finally:
+            web.engine.analyse = real_analyse
+        return {(k[0], k[2]) for k in web._CACHE}
+
+    web._CACHE.clear()
+    kept("NVDA", "1d", web.DEMO_STALE + 1)
+    kept("AAPL", "1d", web.DEMO_TTL - 60)
+    kept("AAPL", "5m", web.DEMO_TTL - 60)
+    kept("OWNS", "1d", web._CACHE_TTL + 1)
+    kept("SOON", "1d", web._CACHE_TTL - 30)
+    left = another_kept()
+    check("a kept analysis goes once its minute and a half is up, the example's once its "
+          "half hour is, and not before",
+          left == {("AAPL", "1d"), ("SOON", "1d"), ("FRESH", "1d")}, left)
+
+    # Sixty days of a coin's five-minute bars is sixteen megabytes of series,
+    # and a person can open one every few seconds.
+    web._CACHE.clear()
+    for n in range(20):
+        kept("C%d-USD" % n, "5m", 60 - n, SimpleNamespace(
+            run_id=None, bars=SimpleNamespace(close=range(17000)),
+            context=SimpleNamespace(s=dict.fromkeys(range(110)))))
+    left = another_kept()
+    held = sum(web._size_of(v[1]) for v in web._CACHE.values())
+    check("and the kept ones never come to more than the server has room for",
+          held <= web.CACHE_MOST and ("C19-USD", "5m") in left
+          and ("C0-USD", "5m") not in left and ("FRESH", "1d") in left, (held, left))
+    web._CACHE.clear()
 
     def stopped(job, *a):
         job.update(running=False, error="no source", retry_at=time.time() + 60)

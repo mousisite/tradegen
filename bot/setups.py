@@ -134,7 +134,7 @@ ASKED: Dict[str, str] = {
     "equal_levels_sweep": "a sweep of equal highs or lows",
     "session_sweep": "a sweep of a session's high or low",
     "structure_flip": "a break of structure",
-    "sweep_then_flip": "a sweep followed by a break of structure",
+    "sweep_then_flip": "a sweep then a break of structure",
     "fvg_retest": "a fair value gap retest",
     "ifvg_flip": "an inverse fair value gap",
     "premium_discount": "the 50% line",

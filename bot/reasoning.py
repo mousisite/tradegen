@@ -429,9 +429,10 @@ def build_payload(symbol: str, price: float, fundamentals=None, quality=None,
         block = {"call": plan.action, "reasoning given": plan.headline,
                  "conviction": "%+.2f" % plan.conviction}
         if plan.entry:
-            block["entry"] = format_price(plan.entry)
-            block["stop"] = format_price(plan.stop)
-            block["first target"] = format_price(plan.target1)
+            levels = (plan.entry, plan.stop, plan.target1)
+            block["entry"] = format_price(plan.entry, beside=levels)
+            block["stop"] = format_price(plan.stop, beside=levels)
+            block["first target"] = format_price(plan.target1, beside=levels)
             block["reward to risk"] = "%.2f" % (plan.reward_risk or 0)
         out["Technical plan (%d-strategy engine)" % len(voting_names())] = block
 

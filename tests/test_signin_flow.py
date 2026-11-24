@@ -12,6 +12,7 @@ real upsert, the session cookie is set by the real route, and the next request
 is authenticated by the real before_request hook.
 """
 import os as _os
+import re
 import sys as _sys
 
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -161,8 +162,12 @@ try:
                                   "Chrome/130.0.0.0 Mobile Safari/537.36 trill_370104"),
             ("Instagram", iphone + "Mobile/22B83 Instagram 356.0.0.29 (iPhone14,7)"),
             ("Facebook", iphone + "Mobile/22B83 [FBAN/FBIOS;FBAV/489.0.0]")):
-        check("%s is told how to get out to sign in" % where,
-              "open the page in your" in signin_for(agent))
+        check("%s is told how to get out to sign in, and can copy the address" % where,
+              "open the page in your" in signin_for(agent)
+              and re.search(r'data-copy-address\s+data-url="[^"]*/signin"', signin_for(agent)))
+        check("%s: the button is there only where its script is" % where,
+              re.search(r'<button[^>]*\shidden\s[^>]*data-copy-address', signin_for(agent))
+              and "button.hidden = false" in signin_for(agent))
     for where, agent in (
             ("Safari", iphone + "Version/18.1 Mobile/15E148 Safari/604.1"),
             ("Chrome on Android", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "

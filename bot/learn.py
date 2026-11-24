@@ -700,14 +700,20 @@ def setup_lab(results: Sequence[Dict], name: str) -> Dict:
 def _example(results: Sequence[Dict], names: Sequence[str]) -> Optional[Dict]:
     """The first stored example trade of these setups, drawn as a chart."""
     for name in names:
-        for interval in setups.LAB_INTERVALS:
-            for res in results:
-                if res.get("interval") != interval:
-                    continue
-                ex = ((res.get("setups") or {}).get(name) or {}).get("example")
-                drawn = example_view(ex, res.get("symbol", ""), interval, name)
-                if drawn:
-                    return drawn
+        # "Buying the breakout" is measured both ways, and a short under those
+        # words reads as a mistake: a buy first, when there is one.
+        for side in ((1, -1) if name == "crowd_breakout" else (None,)):
+            for interval in setups.LAB_INTERVALS:
+                for res in results:
+                    if res.get("interval") != interval:
+                        continue
+                    ex = ((res.get("setups") or {}).get(name) or {}).get("example")
+                    # Only the one shown is drawn, which is most of the work.
+                    if side is not None and (ex or {}).get("direction") != side:
+                        continue
+                    drawn = example_view(ex, res.get("symbol", ""), interval, name)
+                    if drawn:
+                        return drawn
     return None
 
 
@@ -741,8 +747,9 @@ def example_view(ex: Optional[Dict], symbol: str, interval: str, name: str) -> O
             "setup": setups.setup(name).label if name in setups.BY_NAME else name,
             "interval_words": interval_words(interval),
             "side": "buy" if direction == 1 else "short",
-            "entry": format_price(entry), "stop": format_price(stop),
-            "target": format_price(target), "r": r,
+            "entry": format_price(entry, beside=(stop, target)),
+            "stop": format_price(stop, beside=(entry, target)),
+            "target": format_price(target, beside=(entry, stop)), "r": r,
             "entry_at": clock.label_ny(t[entry_i]), "exit_at": clock.label_ny(t[exit_i])}
 
 

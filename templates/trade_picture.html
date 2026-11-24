@@ -28,8 +28,8 @@
       <div class="wide">{{ pic.wide|safe }}</div>
       <div class="narrow">{{ pic.narrow|safe }}</div>
     </div>
-    <p class="prose" style="margin-top:var(--s2)">The dashed lines are the entry,
-      stop{% if t['target1'] %}, target{% endif %}{% if pic.left %} and exit{% endif %}.
+    {% set lines = ['entry', 'stop'] + (['target'] if t['target1'] else []) + (['exit'] if pic.left else []) %}
+    <p class="prose" style="margin-top:var(--s2)">The dashed lines are the {{ lines[:-1]|join(', ') }} and {{ lines[-1] }}.
       {% if pic.used != '1d' %}Candle times are New York time.{% endif %}</p>
   {% endif %}
   {% if pic.note %}<p class="prose" style="margin-top:var(--s2)">{{ pic.note }}</p>{% endif %}
@@ -42,19 +42,21 @@
   <div class="card">
     <span class="eyebrow">The trade</span>
     <dl class="pairs">
-      <dt>Entry</dt><dd class="fig">{{ t['entry']|price }}</dd>
-      <dt>Stop</dt><dd class="fig loss">{{ t['stop']|price }}</dd>
-      <dt>Target</dt><dd class="fig gain">{{ t['target1']|price if t['target1'] else 'none set' }}</dd>
+      {% set out = parts.avg_exit if t['status'] == 'closed' else none %}
+      <dt>Entry</dt><dd class="fig">{{ t['entry']|price(t['stop'], t['target1'], out) }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ t['stop']|price(t['entry'], t['target1'], out) }}</dd>
+      <dt>Target</dt><dd class="fig gain">{{ t['target1']|price(t['entry'], t['stop'], out) if t['target1'] else 'none set' }}</dd>
       {% if t['status'] == 'closed' %}
-        <dt>Exit</dt><dd class="fig">{{ parts.avg_exit|price }}{% if parts.parts %}
+        <dt>Exit</dt><dd class="fig">{{ out|price(t['entry'], t['stop'], t['target1']) }}{% if parts.parts %}
           <span class="faint">average of {{ parts.exits|length }} exits</span>{% endif %}</dd>
         <dt>Result</dt><dd class="fig {{ 'gain' if (parts.r or 0) > 0 else 'loss' if (parts.r or 0) < 0 }}">{{ parts.r|signed }}R
           <span class="faint">before costs</span></dd>
       {% endif %}
     </dl>
   </div>
-  <div class="card">
+  <div class="card" style="overflow-wrap:anywhere">
     <span class="eyebrow">Your notes on it</span>
+    {% if t['notes'] %}<p class="prose">{{ t['notes'] }}</p>{% endif %}
     <dl class="pairs">
       <dt>Tags</dt><dd>{{ tags|join(', ') if tags else 'none' }}</dd>
       {% if broke %}<dt>Rules</dt><dd>Logged after {{ broke|join(' and ') }} said stop</dd>{% endif %}

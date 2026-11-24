@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}One moment · Orenth{% endblock %}
+{# Every place for slow work is taken just now. A page asked for is opened
+   again by itself; a button is not pressed again for anybody. #}
+{% block head_extra %}{% if come_back %}<meta http-equiv="refresh" content="{{ come_back }}">{% endif %}{% endblock %}
+{% block content %}
+
+<div class="pagehead">
+  <h1>One moment</h1>
+</div>
+
+<div class="card">
+  <p class="prose" role="status">{{ message }}</p>
+  {% if again %}
+  <form method="post" action="{{ request.path }}" style="margin:var(--s3) 0 0">
+    {% for name, values in request.form.lists() if name != 'busy_back' %}{% for value in values %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}{% endfor %}
+    <input type="hidden" name="busy_back" value="{{ back }}">
+    <button class="btn" type="submit">Try again</button>
+  </form>
+  {% endif %}
+  <p style="margin:var(--s3) 0 0">
+    {% if come_back %}
+      <a class="btn quiet" href="{{ request.full_path.rstrip('?') }}">Try now</a>
+    {% else %}
+      <a class="btn quiet" href="{{ back }}">Go back</a>
+    {% endif %}
+  </p>
+</div>
+
+{% endblock %}

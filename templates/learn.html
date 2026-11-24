@@ -31,10 +31,10 @@
 <div class="plainbox">
   <span class="eyebrow">The short answer</span>
   {% if not page.measured %}
-    <p class="lead">Being tested. This fills in after the first nightly run.</p>
+    <p class="lead">Being tested. This fills in after the next nightly run.</p>
     <p class="prose">Every setup below is tested each night on about 60 days of
       5- and 15-minute prices of {{ page.universe|length }} futures, funds, coins and stocks. Until
-      the first run finishes there is nothing to report, and this page says so
+      that run finishes there is nothing to report, and this page says so
       rather than guess.</p>
   {% else %}
     {% set t = page.tally %}
@@ -109,7 +109,8 @@
   <p class="prose" style="margin-bottom:var(--s2)">What the course says happens,
     in Orenth's words: what was measured, what it is compared with, and how the
     two came out. Each topic says exactly how. R is the amount risked on a
-    trade.</p>
+    trade.{% if page.measured_claims and page.claims|rejectattr('measured')|rejectattr('no_cases')|list %}
+    Those that say Being tested fill in after the next nightly run.{% endif %}</p>
   <div class="card pad0">
     <div class="tablewrap">
       <table class="stack">

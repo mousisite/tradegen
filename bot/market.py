@@ -7,6 +7,7 @@ class without the user telling it what they pasted in.
 """
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -99,12 +100,39 @@ class DataUnavailable(DataError):
     """
 
 
-def format_price(value, currency: str = "") -> str:
+def decimals_apart(values, shown) -> int:
+    """The decimals that keep prices standing beside each other apart.
+
+    0 when every two that differ read differently already, as shown(value)
+    writes them: then nothing changes. A currency pair or a cash fund on short
+    bars can have an entry and a stop that both read 1.084; then the decimals
+    that write the smallest difference between them to within a half.
+    """
+    real = []
+    for value in values:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v):
+            real.append(v)
+    pairs = [(abs(a - b), shown(a) == shown(b)) for i, a in enumerate(real) for b in real[:i]
+             if abs(a - b) > 1e-9 * max(abs(a), abs(b))]
+    if not any(alike for _, alike in pairs):
+        return 0
+    # The smallest of them all: to the decimals that part an entry and a target
+    # only, a stop nearer the entry can round onto it.
+    return min(16, max(0, math.ceil(-math.log10(min(gap for gap, _ in pairs) / 2.0) - 1e-9)))
+
+
+def format_price(value, currency: str = "", beside=()) -> str:
     """Render a price readably across the full range of instrument prices.
 
     A generic significant-figure format turns 78230.4 into '7.823e+04', which
     is useless on a trading screen. Precision has to follow magnitude: index
     levels want thousands separators, small-cap tokens want six decimals.
+    `beside` is the other prices shown with this one, as a plan's stop beside
+    its entry: when two of them would read the same, all get more decimals.
     """
     if value is None:
         return "-"
@@ -114,16 +142,10 @@ def format_price(value, currency: str = "") -> str:
         return str(value)
 
     av = abs(v)
-    if av >= 1000:
-        out = "{:,.2f}".format(v)
-    elif av >= 100:
-        out = "{:,.2f}".format(v)
-    elif av >= 1:
-        out = "{:.3f}".format(v)
-    elif av >= 0.01:
-        out = "{:.5f}".format(v)
-    else:
-        out = "{:.8f}".format(v)
+    digits = 2 if av >= 100 else 3 if av >= 1 else 5 if av >= 0.01 else 8
+    if beside:
+        digits = max(digits, decimals_apart([v, *beside], format_price))
+    out = "{:,.{d}f}".format(v, d=digits)
 
     if "." in out:
         out = out.rstrip("0").rstrip(".")
@@ -831,8 +853,15 @@ def split_history(symbol: str) -> List[Tuple[int, float]]:
         raise DataThrottled(str(exc), exc.seconds)
     payload = _fetch(_chart_url(symbol),
                      {"range": "max", "interval": "3mo", "events": "split"})
-    results = (payload.get("chart") or {}).get("result") or []
-    found = _splits(results[0]) if results else []
+    try:
+        results = (payload.get("chart") or {}).get("result") or []
+        found = _splits(results[0]) if results else []
+    except (AttributeError, KeyError, TypeError):
+        # No history at all, and one this cannot read, are not the same: a
+        # split cannot be ruled out. Raised as it came it broke off the whole
+        # round of alerts, everybody else's with it.
+        raise DataUnavailable("The market data source sent a split history for %s that "
+                              "could not be read." % symbol)
     with _SPLIT_HISTORY_LOCK:
         if symbol not in _SPLIT_HISTORY and len(_SPLIT_HISTORY) >= SPLIT_HISTORY_KEPT:
             del _SPLIT_HISTORY[min(_SPLIT_HISTORY, key=lambda k: _SPLIT_HISTORY[k][0])]

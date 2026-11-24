@@ -392,10 +392,10 @@ def reverse_dcf(f: Fundamentals, price: float, years: int = 10,
                       average * 100))
     if actual is not None:
         verdict += (" The business most recently grew revenue %.1f%%." % (actual * 100))
-        if average > actual + 0.08:
+        if average > actual + 0.03:
             verdict += (" The price needs materially faster growth than the "
                         "company is currently delivering.")
-        elif average < actual - 0.05:
+        elif average < actual - 0.03:
             verdict += (" The price assumes less growth than the company is "
                         "currently delivering, which is where value can hide.")
         else:

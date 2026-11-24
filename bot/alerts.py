@@ -251,8 +251,9 @@ class Fired:
     event_id: Optional[int] = None
 
 
-def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
-    """Plain sentence for an alert, used everywhere it is displayed."""
+def describe(kind: str, threshold: Optional[float], symbol: str, beside=()) -> str:
+    """Plain sentence for an alert, used everywhere it is displayed. beside is
+    the other prices listed with this one, so that two never read the same."""
     spec = KINDS.get(kind)
     if not spec:
         return "%s: unknown condition" % symbol
@@ -267,7 +268,7 @@ def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
     elif unit == "multiple":
         shown = "%.1fx" % (threshold or 0)
     elif unit == "price":
-        shown = format_price(threshold)
+        shown = format_price(threshold, beside=beside)
     else:
         shown = "%.0f" % (threshold or 0)
     text = "%s %s %s" % (symbol, spec["label"].lower(), shown)
@@ -400,11 +401,13 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
 
     if kind == "price_above" and price > threshold:
         return fire(price, "%s is %s, above the %s you set."
-                    % (symbol, format_price(price), format_price(threshold)))
+                    % (symbol, format_price(price, beside=(threshold,)),
+                       format_price(threshold, beside=(price,))))
 
     if kind == "price_below" and price < threshold:
         return fire(price, "%s is %s, below the %s you set."
-                    % (symbol, format_price(price), format_price(threshold)))
+                    % (symbol, format_price(price, beside=(threshold,)),
+                       format_price(threshold, beside=(price,))))
 
     if kind in ("pct_up", "pct_down"):
         # Measured against the previous session close, which is what "up today"
@@ -584,8 +587,8 @@ def _traded_past(row, bars, now: float) -> Optional[Fired]:
     extreme = float(reach[j])
     return Fired(int(row["id"]), row["symbol"], row["kind"], row["threshold"], extreme,
                  "%s traded at %s %s, %s the %s you set, and was last at %s."
-                 % (row["symbol"], format_price(extreme), _bar(bars, j=j),
-                    "above" if up else "below", format_price(level),
+                 % (row["symbol"], format_price(extreme, beside=(level,)), _bar(bars, j=j),
+                    "above" if up else "below", format_price(level, beside=(extreme,)),
                     format_price(bars.last_price)),
                  row["note"] or "", _owner(row), as_of(bars))
 
@@ -967,6 +970,13 @@ def _waits(row, now: float) -> bool:
     return not sessions.can_change(row["symbol"], int(row["last_checked"]), now)
 
 
+# Set by serve.py when the server is stopping and a round has not ended in the
+# time it is given. The round then asks for nothing and looks at nothing more:
+# what it has recorded is told while there is time, and the rest is left as it
+# was for the first round after the start.
+STOPPING = threading.Event()
+
+
 def check(conn, only_active: bool = True, user=None, call_of=None,
           limit_of: Optional[Callable[[int], Optional[int]]] = None,
           skip_closed: bool = False, now: Optional[float] = None,
@@ -1025,16 +1035,31 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         return {"checked": 0, "fired": fired, "errors": [], "when": int(time.time()),
                 "skipped": skipped}
 
-    # One fetch per symbol and bar size, shared by every alert on it.
+    # One fetch per symbol and bar size, shared by every alert on it, and the
+    # splits since the oldest level on it, for _after_splits: asked for there,
+    # one alert after another, a first round over many took minutes.
     wanted = {(r["symbol"], _bars_for(r)) for r in rows}
+    levels: Dict = {}
+    for r in rows:
+        if r["kind"] in ("price_above", "price_below") and r["threshold"]:
+            key = (r["symbol"], _bars_for(r))
+            levels[key] = min(levels.get(key, now), _level_set(r))
     data, errors = {}, []
 
     def grab(key):
         symbol, interval = key
+        if STOPPING.is_set():
+            return key, None
         try:
-            return key, fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
+            bars = fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
         except (DataError, Exception) as exc:
             return key, exc
+        if key in levels:
+            try:
+                splits_since(symbol, levels[key], bars)
+            except Exception:
+                pass                    # asked again, and said, alert by alert
+        return key, bars
 
     failed: Dict = {}
     with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
@@ -1042,7 +1067,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             if isinstance(result, Exception):
                 failed[key] = _whole(result)
                 errors.append({"symbol": key[0], "error": failed[key]})
-            else:
+            elif result is not None:
                 data[key] = result
                 sessions.note(key[0], result, now)
 
@@ -1060,6 +1085,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         # with no price fails for that below, so its call is not asked for.
         for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
                     if r["kind"] in CALL_KINDS and (r["symbol"], _bars_for(r)) in data}:
+            if STOPPING.is_set():
+                break
             symbol, interval, exact = key
             try:
                 calls[key] = (call_of(symbol, interval, exact=True) if exact
@@ -1067,8 +1094,43 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             except Exception:
                 calls[key] = None
 
-    structure: Dict = {}
-    for row in rows:
+    # Those looked at with nothing to say, written down many at a time.
+    quiet: List[tuple] = []
+    try:
+        _look(conn, rows, data, failed, calls, quiet, fired, errors, now)
+    finally:
+        if quiet:
+            db.alerts_checked(conn, quiet)
+    return {"checked": len(rows), "fired": fired, "errors": errors,
+            "when": int(time.time()), "skipped": skipped}
+
+
+# How many quiet alerts are written down in one go.
+QUIET_AT_ONCE = 200
+
+
+def _side_by_side(rows) -> List:
+    """The alerts as they came, but those that read the structure of the same
+    prices one after another.
+
+    So it is read once for them all and then let go of. Kept to the end of a
+    round over five thousand alerts, what had been read of some two thousand
+    downloads came to two hundred megabytes, on a server of 512.
+    """
+    first: Dict = {}
+    place = [first.setdefault((r["symbol"], _bars_for(r)), n)
+             if r["kind"] in PRICE_ACTION_KINDS else n for n, r in enumerate(rows)]
+    return [rows[n] for n in sorted(range(len(rows)), key=place.__getitem__)]
+
+
+def _look(conn, rows, data, failed, calls, quiet, fired, errors, now) -> None:
+    """Each alert against its prices: check()'s round, once they are in."""
+    from . import database as db
+
+    structure: Dict = {}                # of the prices being looked at
+    for row in _side_by_side(rows):
+        if STOPPING.is_set():
+            return
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
         if bars is None:
@@ -1097,6 +1159,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                 # The structure is read once per download, however many
                 # alerts look at it.
                 if key not in structure:
+                    structure.clear()
                     structure[key] = liquidity.series(bars)
                 hit, seen = _price_action(row, bars, structure[key])
             elif row["kind"] in BAR_KINDS:
@@ -1146,12 +1209,15 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             if hit and was == "met":
                 hit = None
         if hit is None:
-            db.alert_checked(conn, int(row["id"]), state=state, was=was)
+            quiet.append((int(row["id"]), state, was, time.time(), row["threshold"]))
+            if len(quiet) >= QUIET_AT_ONCE:
+                db.alerts_checked(conn, quiet)
+                quiet.clear()
             continue
         # Two checks can overlap (the loop, "Check them all now", a routine).
         # Only the one that moves the alert on from what it read tells anyone.
         if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
-                             state=state, was=was):
+                             state=state, was=was, threshold=row["threshold"]):
             continue
         fired.append(hit)
         if hit.user_id is not None:
@@ -1159,8 +1225,14 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
                                         hit.message, hit.value, hit.as_of,
                                         alert_id=hit.alert_id)
 
-    return {"checked": len(rows), "fired": fired, "errors": errors,
-            "when": int(time.time()), "skipped": skipped}
+
+def _level_set(row) -> int:
+    """When a price alert's level was last known to be in that day's shares."""
+    try:
+        done = int(row["split_ts"] or 0)
+    except (KeyError, IndexError):
+        done = 0
+    return max(int(row["created_ts"] or 0), done)
 
 
 def _after_splits(conn, row, bars):
@@ -1179,12 +1251,7 @@ def _after_splits(conn, row, bars):
 
     if row["kind"] not in ("price_above", "price_below") or not row["threshold"]:
         return row
-    try:
-        done = int(row["split_ts"] or 0)
-    except (KeyError, IndexError):
-        done = 0
-    since = max(int(row["created_ts"] or 0), done)
-    later = splits_since(row["symbol"], since, bars)
+    later = splits_since(row["symbol"], _level_set(row), bars)
     if not later:
         return row
     factor = 1.0
@@ -1270,26 +1337,51 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         return interval if interval in LOOKBACK else "1d"
 
     data, errors = {}, []
-    for key in sorted({(r["symbol"], bar_size(r)) for r in rows}):
+    oldest: Dict = {}
+    for r in rows:
+        key = (r["symbol"], bar_size(r))
+        oldest[key] = min(oldest.get(key, now), int(r["ts_opened"]))
+    wanted = []
+    for key in sorted(oldest):
         tries, asked = missing.get(key, (0, 0.0))
-        if skip_closed and tries >= MISSING_TRIES and now - asked < MISSING_WAIT:
-            continue
+        if not (skip_closed and tries >= MISSING_TRIES and now - asked < MISSING_WAIT):
+            wanted.append(key)
+
+    def grab(key):
+        if STOPPING.is_set():
+            return key, None
         try:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
-            data[key] = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
-            sessions.note(key[0], data[key], now)
-            with _STOPS_LOCK:
-                _STOPS_MISSING.pop(key, None)
+            bars = fetch_bars(key[0], key[1], lookback=LOOKBACK[key[1]])
         except Exception as exc:
-            errors.append({"symbol": key[0], "error": _whole(exc)})
-            if isinstance(exc, SymbolNotFound):
+            return key, exc
+        try:
+            split_factor_since(key[0], oldest[key], bars)
+        except Exception:
+            pass                        # asked again, and said, position by position
+        return key, bars
+
+    # Several at once, as the alerts are: one after another, a thousand
+    # positions were a round of ten minutes.
+    with ThreadPoolExecutor(max_workers=min(8, len(wanted) or 1)) as pool:
+        for key, got in pool.map(grab, wanted):
+            if got is None:
+                continue
+            if not isinstance(got, Exception):
+                data[key] = got
+                sessions.note(key[0], got, now)
                 with _STOPS_LOCK:
-                    _STOPS_MISSING[key] = (tries + 1, now)
+                    _STOPS_MISSING.pop(key, None)
+                continue
+            errors.append({"symbol": key[0], "error": _whole(got)})
+            if isinstance(got, SymbolNotFound):
+                with _STOPS_LOCK:
+                    _STOPS_MISSING[key] = (missing.get(key, (0, 0.0))[0] + 1, now)
 
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))
-        if bars is None:
+        if bars is None or STOPPING.is_set():
             continue
         # The stop is in the shares of the day it opened; after a split the
         # quote is in today's, and read as is a long looked far past its stop.
@@ -1304,9 +1396,6 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             errors.append({"symbol": row["symbol"],
                            "error": "split history: %s" % str(exc)[:100]})
             continue
-        # Read in full from here on, so a closed market can wait for its open.
-        with _STOPS_LOCK:
-            _STOPS_LOOKED[int(row["id"])] = now
         quote = float(bars.last_price)
         side = int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:
@@ -1323,12 +1412,20 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         if crossed is not None:
             db.stop_crossed(conn, int(row["id"]), *crossed)
         if not read.hit:
+            # Read in full, so a closed market can wait for its open. One past
+            # its stop is not looked at again once that is written down: said
+            # before, a database busy just then left it untold until the open.
+            with _STOPS_LOCK:
+                _STOPS_LOOKED[int(row["id"])] = now
             continue
         price, stop = read.price, read.stop
-        said = format_price(price)
+        # Said in one sentence, so each is read against the others.
+        beside = ((price, stop, read.initial if read.moved else None) if read.past
+                  else (price, read.touched, read.touched_stop))
+        said = format_price(price, beside=beside)
         if split != 1.0:
             said = ("%s (%s in the shares you opened with, after a %s split)"
-                    % (format_price(quote), format_price(price), split_words(split)))
+                    % (format_price(quote), said, split_words(split)))
         side_word = "long" if side > 0 else "short"
         kind = "the stop"
         if read.trail is not None:
@@ -1338,26 +1435,27 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             if read.moved:
                 moved = (" It had trailed %s behind the best price, %s from %s."
                          % (read.trail.words(), "up" if side > 0 else "down",
-                            format_price(read.initial)))
+                            format_price(read.initial, beside=beside)))
             message = ("%s is at %s, past %s of %s on your %s position.%s "
                        "The journal does not close it for you: close it there once "
                        "you are out." % (row["symbol"], said, kind,
-                                         format_price(stop), side_word, moved))
+                                         format_price(stop, beside=beside), side_word, moved))
         else:
             when = day_words(crossed_day(bar_size(row), bars, read.touched_at))
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it there once "
                        "you are out." % (row["symbol"],
-                                         format_price(read.touched), when, kind,
-                                         format_price(read.touched_stop),
+                                         format_price(read.touched, beside=beside), when, kind,
+                                         format_price(read.touched_stop, beside=beside),
                                          side_word, said))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
         # Two checks at once (the loop and "Check them all now") both read the
-        # trade before either marked it. Only the one that marks it tells.
+        # trade before either marked it. Only the one that marks it tells, and
+        # neither once it has been closed in the journal meanwhile.
         cur = conn.execute("UPDATE trades SET breach_noticed=? WHERE id=? "
-                           "AND breach_noticed IS NULL",
+                           "AND breach_noticed IS NULL AND status='open'",
                            (int(time.time()), int(row["id"])))
         conn.commit()
         if cur.rowcount == 0:
@@ -1534,7 +1632,21 @@ def _price_action_suggestions(bars) -> List[Dict]:
     """The course's levels worth being told about, for the bars an analysis
     is on: a take of the nearer of yesterday's high and low, a break of the
     last swing the other way, and today's opening gap filling while it is
-    open. Nothing when the bars cannot be read that way."""
+    open. Nothing when the bars cannot be read that way.
+
+    Worked out once for a set of bars: a kept analysis is drawn again for
+    everybody who opens it, and this was two thirds of drawing the page."""
+    kept = getattr(bars, "price_action_suggestions", None)
+    if kept is None:
+        kept = _read_price_action(bars)
+        try:
+            bars.price_action_suggestions = kept
+        except AttributeError:          # a stand-in that takes no more
+            pass
+    return [dict(item) for item in kept]
+
+
+def _read_price_action(bars) -> List[Dict]:
     try:
         n = len(bars.close)
         if n < 30:

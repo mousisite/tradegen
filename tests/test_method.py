@@ -4,6 +4,7 @@ No network: market data is synthetic, and where a real download would happen
 the payload is built by hand. Each section pins one way the method used to
 mislead, and says how.
 """
+import io
 import os as _os
 import re
 import sys as _sys
@@ -22,6 +23,7 @@ from bot import calibrate as cal  # noqa: E402
 import scenarios as sc  # noqa: E402
 from bot import catalysts, clock, config, decision, engine, levels  # noqa: E402
 from bot import market, plain, public  # noqa: E402
+from bot import report as printed  # noqa: E402
 from bot import strategies as S  # noqa: E402
 from bot.calibrate import Calibration, Outcome  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -578,6 +580,12 @@ for miss, want, never in ((-0.52, "lost about 52% of what you put at risk, not a
     out, text = said(avg_loss_r=miss)
     check("a usual miss of %+.2f times the risk is said as that" % miss,
           want in out["sure"] and never not in out["sure"], out["sure"])
+# A pair on 1-minute bars: "made about -1.3 times", "needed to work 79 of those 52 times".
+out, text = said(avg_win_r=-1.3, avg_loss_r=-3.7, breakeven_rate=1.51, prob_samples=52)
+check("costs larger than the target are said as that, not as a win of less than nothing",
+      " Even when it worked, trading costs took more than it made." in out["sure"]
+      and " It would have lost money even if it had worked every time." in out["sure"]
+      and "-1.3" not in out["sure"] and "79 of" not in out["sure"], out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="bearish_no_shorts", odds_direction=-1)
 check("a bearish AVOID says the signals point to a fall",
@@ -1544,6 +1552,54 @@ check("then one request, with its retry, finds out, and having nothing is an ans
       got is None and len(calls) == 2 and not upstream.refusing(sec._HOST), (got, len(calls)))
 upstream.reset()
 
+
+# A large company's filed figures are tens of megabytes once read, and nearly
+# all of it is never looked at. Six companies opened at once were six of those.
+class Unread:
+    here, most = 0, 0
+
+    def __init__(self):
+        Unread.here += 1
+        Unread.most = max(Unread.most, Unread.here)
+
+    def __del__(self):
+        Unread.here -= 1
+
+
+class Figures(Answer):
+    def json(self):
+        time.sleep(0.02)
+        return {"entityName": "Test Co", "facts": {
+            "us-gaap": {LATER: annual({2024: 8.0, 2025: 9.0}), "NobodyReadsThis": Unread()},
+            "ifrs-full": {"Revenue": annual({2025: 9.0})}}}
+
+
+def working_it_out(by_tag):
+    time.sleep(0.15)
+    return real_joined(by_tag)
+
+
+real_joined = sec._joined
+real_six = (sec.requests.get, sec._throttle, sec.cik_for)
+sec.requests.get, sec._throttle = (lambda *a, **k: Figures(200)), (lambda: None)
+sec.cik_for, sec._joined = int, working_it_out
+six, opened = range(980031, 980037), []
+crowd = [threading.Thread(target=lambda n=n: opened.append(sec.company_facts(str(n)))) for n in six]
+try:
+    for t in crowd:
+        t.start()
+    for t in crowd:
+        t.join(20)
+finally:
+    (sec.requests.get, sec._throttle, sec.cik_for), sec._joined = real_six, real_joined
+    for n in six:
+        sec._FACTS_CACHE.pop(n, None)
+check("six companies' filings opened at once are never two whole answers in memory",
+      (Unread.here, Unread.most) == (0, 1), (Unread.here, Unread.most))
+check("and what is read of them is read as before",
+      len(opened) == 6 and all(f.latest("revenue")["value"] == 9.0 and f.international
+                               and f.entity == "Test Co" for f in opened), opened)
+
 kept_contact = _os.environ.pop("STOCKBOT_CONTACT", None)
 try:
     agent = sec._headers()["User-Agent"]
@@ -1891,6 +1947,16 @@ check("one model is called one model",
       and "single agreement" not in page)
 check("the key figures are there once each", page.count("<td>Market capitalisation</td>") == 1
       and "The business" in page)
+for mid, low, high, said in ((17.346, 15.2, 1234567.8, ("17.35", "15.20–1,234,567.80")),
+                             (0.0041, 0.0032, 0.0051, ("0.0041", "0.0032–0.0051"))):
+    for agreement, words in (("single", 'Modelled value</div> <div class="v fig">%s<' % said[0]),
+                             ("wide", 'Modelled range</div> <div class="v fig">%s<' % said[1])):
+        check("a share worth about %s is said to be, %s" % (
+            said[0], "from one model" if agreement == "single" else "from several"),
+            words in drawn(engine.Research(
+                symbol="TEST", price=mid, fundamentals=lone, quality=F.quality_score(lone),
+                valuation=dict(only, midpoint=mid, low=low, high=high, agreement=agreement),
+                thesis=thesis.build("TEST", 100.0, fundamentals=lone, valuation=only))))
 nothing = F.Fundamentals(symbol="BTC-USD")
 page = drawn(engine.Research(symbol="BTC-USD", price=1.0, fundamentals=nothing,
                              quality=F.quality_score(nothing), thesis=coin_case,
@@ -2038,6 +2104,62 @@ p_slow = plan_on(slow)
 check("a price that moves less than the usual tick keeps its levels apart too",
       p_slow.stop < p_slow.entry < p_slow.target1 and "error" not in p_slow.position,
       (p_slow.entry, p_slow.stop, p_slow.position))
+# And says them apart, in a call to wait and in one to act now.
+for p_said in (p_slow, plan_on(slow, c=calib(rate=0.45, lo=0.36, hi=0.54, exp=0.30))):
+    beside_ =[p_said.entry, p_said.stop, p_said.target1, p_said.target2] + (
+        [slow.last_price] if p_said.entry_type == "limit" else [])
+    in_, out_ = (market.format_price(v, beside=beside_) for v in (p_said.entry, p_said.stop))
+    check("its words name a %s's entry and stop as two prices" % p_said.action,
+          in_ != out_ and p_said.headline.endswith(" %s." % in_)
+          and "beyond %s." % out_ in p_said.invalidation
+          and ("Wait for %s." % in_ in p_said.trigger or p_said.action == "BUY"),
+          (in_, out_, p_said.headline, p_said.trigger, p_said.invalidation))
+# The printed report too, its price now not reading as if the entry had come.
+printed_ = io.StringIO()
+dc_ = S.build_context(slow)
+printed.render(printed.Console(file=printed_, width=200), slow, p_slow, [], 0.3,
+               S.classify_regime(dc_, len(slow) - 1), calib(), FLAT, calm)
+at_ = [market.format_price(v, beside=[p_slow.entry, p_slow.stop, p_slow.target1, p_slow.target2,
+                                      slow.last_price])
+       for v in (slow.last_price, p_slow.entry, p_slow.stop)]
+check("the report prints the price now, the entry and the stop as three",
+      len(set(at_)) == 3 and all(" %s " % v in printed_.getvalue() for v in at_),
+      (at_, printed_.getvalue()[:900]))
+# 1.084 and 1.084: kept apart by the plan, and read as one price on the page.
+pair_ =dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
+                            action="BUY")
+levels_ = (pair_.entry, pair_.stop, pair_.target1)
+check("they read apart on the page too, alike in how many decimals they may have",
+      [market.format_price(v, beside=levels_) for v in levels_]
+      == ["1.0841", "1.0839", "1.0849"],
+      [market.format_price(v, beside=levels_) for v in levels_])
+said_ = " ".join(plain.explain_plan(pair_, slow)["points"])
+check("and in its plain words", "buy price is $1.0841." in said_
+      and "fell to $1.0839," in said_ and "around $1.0849." in said_, said_)
+check("at any size of price", [market.format_price(a, beside=(b,)) + " " +
+                               market.format_price(b, beside=(a,)) for a, b in
+                               ((151.2312, 151.2287), (100.031, 100.0295), (0.91, 0.909999),
+                                (2e-11, 1.5e-11), (94731.004, 94731.001))]
+      == ["151.231 151.229", "100.031 100.0295", "0.91 0.909999",
+          "0.00000000002 0.000000000015", "94,731.004 94,731.001"],
+      [market.format_price(a, beside=(b,)) for a, b in ((151.2312, 151.2287),)])
+# The entry and the target read alike (1.085), the stop did not (1.084): to the
+# four decimals those two needed, the entry and the stop both read 1.0845.
+near_ = [(1.08454, 1.08446, 1.08477), (4.534e-08, 4.453e-08, 4.772e-08),
+         (1939.5356, 1939.4913, 1940.148)]
+check("and no two of three do when it is another two that would have read alike",
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      == [["1.08454", "1.08446", "1.08477"], ["0.0000000453", "0.0000000445", "0.0000000477"]]
+      and [plain._money(v, "USD", near_[2]) for v in near_[2]]
+      == ["$1,939.54", "$1,939.49", "$1,940.15"],
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      + [[plain._money(v, "USD", near_[2]) for v in near_[2]]])
+check("ordinary prices, and one price said twice, read as ever beside each other",
+      all(market.format_price(a, beside=(b, None, float("nan"))) == market.format_price(a)
+          and plain._money(a, "USD", (b, None)) == plain._money(a, "USD")
+          for a, b in ((101.27, 99.4), (12.346, 12.31), (5.5, 5.5), (105628.0, 97177.76),
+                       (0.1234567, 0.12), (0.00001234, 0.00001377), (0.0, 1.0),
+                       (1.084, 1.084 + 1e-13))))
 check("ordinary prices are rounded as they were",
       decision._round_price(101.2749, 101.0, 2.3) == 101.27
       and decision._round_price(1543.26, 1500.0, 30.0) == 1543.3
@@ -2118,7 +2240,7 @@ unmeasured = plain.explain_plan(decision.Plan(
     action="AVOID", direction=0, headline="", conviction=-0.3,
     avoid_reason="bearish_no_shorts", odds_direction=-1), base_bars)
 check("and a fall with no record is not said to have one below",
-      not any("record below" in x for x in unmeasured["points"])
+      not any("past record" in x for x in unmeasured["points"])
       and "do not buy" in unmeasured["points"][0], unmeasured)
 check("a company's small sales name their currency once",
       plain._big(450000, "EUR") == "450,000 euros" and plain._big(450000) == "$450,000")

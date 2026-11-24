@@ -81,11 +81,17 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
         pct = (price - bars.prev_close) / bars.prev_close * 100.0
         change = " [%s]%+.2f%%[/]" % ("green" if pct >= 0 else "red", pct)
 
+    # As the page reads them: against each other, and an entry waited for
+    # against the price now as well.
+    waits = plan.entry_type == "limit"
+    levels = [plan.entry, plan.stop, plan.target1, plan.target2] + ([price] if waits else [])
+
     status = "[green]market open[/]" if bars.market_open else "[yellow]market closed[/]"
     console.print()
     console.print(Panel(
         "[bold]%s[/]  %s\n%s %s%s   ·   %s   ·   %s bars, last %s   ·   %s" % (
-            bars.symbol, bars.name, bars.currency, format_price(price), change,
+            bars.symbol, bars.name, bars.currency,
+            format_price(price, beside=levels if waits else ()), change,
             bars.exchange or bars.asset_class, bars.interval,
             bars.last_bar_time, status),
         title="Instrument", border_style="cyan", padding=(0, 1)))
@@ -106,12 +112,13 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
         t.add_column(style="dim", width=16)
         t.add_column()
         t.add_row("Entry", "[bold]%s[/] (%s)  %s" % (
-            format_price(plan.entry), plan.entry_type, plan.entry_rationale))
+            format_price(plan.entry, beside=levels), plan.entry_type, plan.entry_rationale))
         t.add_row("Trigger", plan.trigger)
-        t.add_row("Stop", "[red]%s[/]  %s" % (format_price(plan.stop), plan.stop_rationale))
-        t.add_row("Target 1", "[green]%s[/]  %s" % (format_price(plan.target1),
+        t.add_row("Stop", "[red]%s[/]  %s" % (format_price(plan.stop, beside=levels),
+                                            plan.stop_rationale))
+        t.add_row("Target 1", "[green]%s[/]  %s" % (format_price(plan.target1, beside=levels),
                                                      plan.target_rationale))
-        t.add_row("Target 2", "[green]%s[/]  runner" % format_price(plan.target2))
+        t.add_row("Target 2", "[green]%s[/]  runner" % format_price(plan.target2, beside=levels))
         # The break-even belongs to the trade the odds were measured on; when
         # this plan's own levels give a different reward, say so rather than
         # pairing one trade's break-even with another's reward.

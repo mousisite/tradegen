@@ -229,6 +229,45 @@ def prior_rows(out):
     return {r["name"]: r for r in out["levels"]}
 
 
+prior = liquidity.SOURCES.index("prior_day")
+taken = {"lq_take": [-1, 1, -1], "lq_take_src": [prior] * 3, "ck_day": [5, 6, 6]}
+check("a high taken on an earlier day is that day's yesterday, not the reader's",
+      [liquidity.level_name(taken, i) for i in range(3)]
+      == ["the previous day's high", "yesterday's low", "yesterday's high"],
+      [liquidity.level_name(taken, i) for i in range(3)])
+
+# The same on the page, where the sentence is read on the bars up to the take:
+# on later bars, and on its own day while the market trades the next, it named
+# one high yesterday's and the table beside it another.
+whole = liquidity.series(DAILY)
+for label, ahead, name in (("on an earlier day", 1, "the previous day's"),
+                           ("on the last finished bar, while the next day trades", 0,
+                            "the previous day's"),
+                           ("on the last bar, after the close", None, "yesterday's")):
+    said = []
+    for i in range(100, len(DAILY.close) - 2):
+        if not whole["lq_take"][i] or int(whole["lq_take_src"][i]) != prior or (
+                ahead and whole["lq_take"][i + 1]):
+            continue
+        n = i + 1 + (ahead or 0)
+        bars = clock.head(DAILY, n)
+        if ahead == 0:
+            bars = live(bars, int(DAILY.timestamp[n]) + 5400, float(bars.close[-1]))
+        out = levelview.for_analysis(
+            NS(bars=bars, context=NS(s={k: v[:n] for k, v in whole.items()})), {})
+        side = "low" if whole["lq_take"][i] == 1 else "high"
+        said.append((out["structure"]["last_take"]["words"].startswith(
+            "Took %s %s at " % (name, side)), out["structure"]["last_take"]["words"]))
+        if len(said) == 5:
+            break
+    check("a level taken %s is called %s" % (label, name),
+          len(said) == 5 and all(ok for ok, _ in said), said)
+marked = levelview.for_analysis(analysis(live(
+    clock.head(DAILY, i + 1), int(DAILY.timestamp[i + 1]) + 5400, float(DAILY.close[i]))), {})
+check("and the chart's ring says the same as the sentence", "Took the previous day's" in
+      marked["chart"]["wide"].replace("&#39;", "'")
+      and "Took yesterday's" not in marked["chart"]["wide"].replace("&#39;", "'"))
+
 # The scripted days end on a Tuesday; cut them so a week ends on the last bar too.
 DAYS = [int(x) for x in clock.series(DAILY)["ck_day"]]
 friday = max(i for i in range(len(DAYS) - 1) if (DAYS[i] - 1) % 7 == 4)

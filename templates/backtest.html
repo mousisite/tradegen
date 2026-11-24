@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
+{% set box = lab_box_data(strategy) if course else none %}
 {% set on_how_many = '1 stock or coin' if summary.tested == 1 else summary.tested ~ ' stocks and coins' %}
 {% if summary.tested %}
-  {% set page_blurb = label ~ " (" ~ info.description ~ "), back-tested on up to 5 years of daily prices for " ~ ('1 popular stock or coin' if summary.tested == 1 else summary.tested ~ ' popular stocks and coins') ~ ", after trading costs, with its margin of error and beside simply buying or shorting every day, and holding the index. Not financial advice." %}
+  {% set page_blurb = label ~ ", back-tested on up to 5 years of prices of " ~ ('1 stock or coin' if summary.tested == 1 else summary.tested ~ ' stocks and coins') ~ ", after costs, with its margin of error. Not financial advice." %}
 {% endif %}
-{% block title %}Does {{ asked }} work?{% if not intraday %} Back-tested on {{ on_how_many if summary.tested else 'popular stocks and coins' }}{% endif %} · Orenth{% endblock %}
+{# Whole in a search result, which cuts a title at about sixty letters. #}
+{% block title %}Does {{ asked }} work? · Orenth{% endblock %}
 {% block og_title %}Does {{ asked }} work? · Orenth{% endblock %}
 {% block head_extra %}{% if not summary.tested %}<meta name="robots" content="noindex">{% endif %}{% endblock %}
 {% block content %}
@@ -31,8 +33,8 @@
       shorter{% else %}bars shorter than a day, on futures and coins{% endif %}. These
       tests run on daily prices, so it has no result here. An analysis on such bars still
       {{ 'scores it, with no say in the call' if strategy in trial_names else 'uses it' }}.{% if course %}
-      Its test on 5- and 15-minute prices is shown on this page once it has
-      run.{% endif %}</p>
+      Its test on 5- and 15-minute prices is {{ 'below' if box else
+      'shown on this page once it has run' }}.{% endif %}</p>
   </div>
 {% elif not summary.tested and rare %}
   <div class="plainbox">
@@ -43,8 +45,8 @@
       {{ method.min }} separate trades on any one of them{% else %}it has not come
       up{% endif %}. That is too few to say whether it works.
       {% if strategy not in trial_names %}It still has a say in a call on the days
-      it comes up.{% endif %}{% if course %} Its test on 5- and 15-minute prices is shown on
-      this page once it has run.{% endif %}</p>
+      it comes up.{% endif %}{% if course %} Its test on 5- and 15-minute prices is {{ 'below'
+      if box else 'shown on this page once it has run' }}.{% endif %}</p>
   </div>
 {% elif not summary.tested %}
   <div class="plainbox">

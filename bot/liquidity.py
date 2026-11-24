@@ -281,7 +281,11 @@ def level_name(s: Dict[str, np.ndarray], i: int) -> str:
     src = SOURCES[int(s["lq_take_src"][i])] if d else ""
     side = "low" if d == 1 else "high"
     if src == "prior_day":
-        return "yesterday's %s" % side
+        # For a bar of an earlier day it is that day's yesterday, which is not
+        # the reader's.
+        days = s.get("ck_day")
+        earlier = days is not None and int(days[i]) != int(days[-1])
+        return "%s %s" % ("the previous day's" if earlier else "yesterday's", side)
     if src == "session":
         which = clock.SESS_SOURCES[int(s["ck_sess_src"][i])] or "london"
         return "the %s session's %s" % ("London" if which == "london" else "Asia", side)

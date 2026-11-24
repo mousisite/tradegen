@@ -57,6 +57,7 @@ _ARCHIVE = "https://www.sec.gov/Archives/edgar/data/%d/%s/%s"
 _FILING_PAGE = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=%010d&type=%s"
 
 _RATE_LOCK = threading.Lock()
+_READING = threading.Lock()
 _LAST_CALL = [0.0]
 _MIN_GAP = 0.12          # EDGAR asks for under ~10 requests a second
 
@@ -208,6 +209,25 @@ def _throttle() -> None:
         _LAST_CALL[0] = time.time()
 
 
+_TAGS = {tag for tags in _CONCEPTS.values() for tag in tags}
+
+
+def _what_is_read(data):
+    """An answer as it came, or a company's filed figures without what nothing
+    here reads: most of the hundreds of tags a large company files.
+
+    Let go of before the next answer is read. Held until the rest had been
+    worked out, six companies asked for at once were six whole answers in
+    memory, however the reading of them took turns.
+    """
+    facts = data.get("facts") if isinstance(data, dict) else None
+    if isinstance(facts, dict):
+        gaap = facts.get("us-gaap") or {}
+        data["facts"] = {"us-gaap": {tag: gaap[tag] for tag in _TAGS if tag in gaap},
+                         "ifrs-full": bool(facts.get("ifrs-full"))}
+    return data
+
+
 def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
     """One EDGAR answer, inside about half a minute, or an SECError.
 
@@ -238,7 +258,10 @@ def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
         if r.status_code == 200:
             upstream.note_ok(_HOST)
             try:
-                return r.json()
+                # One at a time: a large company's filed figures are ten
+                # megabytes of JSON and many times that while being read.
+                with _READING:
+                    return _what_is_read(r.json())
             except ValueError:
                 return r.text
         if r.status_code == 404:

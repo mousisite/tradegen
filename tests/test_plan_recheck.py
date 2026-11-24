@@ -401,12 +401,16 @@ said = {}
 try:
     started = serve.main([])
     timed = len(jobs)
+    kept_free = web._slow_in_all()
+    serve.main(["--threads", "4"])
+    fewer = web._slow_in_all()
     for address in ("orenth.example", "http://orenth.example", "HTTPS://orenth.example"):
         _os.environ["STOCKBOT_PUBLIC_URL"] = address
         with contextlib.redirect_stdout(io.StringIO()) as out:
             serve.main([])
         said[address] = "PUBLIC ADDRESS IS NOT HTTPS" in out.getvalue()
 finally:
+    web.app.config.pop("WEB_THREADS", None)
     _os.environ.pop("STOCKBOT_PUBLIC_URL", None)
     if had_public is not None:
         _os.environ["STOCKBOT_PUBLIC_URL"] = had_public
@@ -417,6 +421,8 @@ new = sorted(set(held()) - set(before))
 check("serve.main takes the copy for a new release, and notes the release",
       started == 0 and len(new) == 1 and release_noted() == "ffff6666",
       (started, new, release_noted()))
+check("two of the threads it is started with are kept from slow work",
+      (kept_free, fewer) == (6, 2), (kept_free, fewer))
 check("a public address that is not https is said loudly at the start, and only then",
       said == {"orenth.example": True, "http://orenth.example": True,
                "HTTPS://orenth.example": False}, said)
@@ -703,7 +709,7 @@ class Round:
     """The alert loop, stopped while a round of it is being checked."""
 
     def stop(self, timeout=2.0):
-        told.append(("round", timeout))
+        told.append(("round", timeout, web.alerts_mod.STOPPING.is_set()))
         hit = [types.SimpleNamespace(user_id=1)]
         web.push_mod.deliver_later(DB, hit, "")
         web.alerts_mod.deliver_later(DB, hit, None, lambda conn: None)
@@ -729,6 +735,10 @@ check("and the alerts that had just fired have been told, to phones and by email
       {"notice", "email"} <= set(at_the_end), at_the_end)
 check("a round being checked has longer than two seconds to end",
       told[0][0] == "round" and told[0][1] >= 5, told)
+rounds = [t for t in told if t[0] == "round"]
+check("one that takes longer is told to break off, and has time to hand over what it has",
+      [t[2] for t in rounds] == [False, True] and rounds[1][1] >= 2, told)
+web.alerts_mod.STOPPING.clear()
 
 head("WHO IS ASKING, THROUGH THE REAL SERVER")
 # waitress deletes the proxy's headers unless told otherwise, and every
