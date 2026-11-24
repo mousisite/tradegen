@@ -1543,6 +1543,38 @@ try:
     web._SLOW.clear()
     web._IN_LINE.clear()
 
+    def others():
+        """Everybody else's pages, in every place there is."""
+        web._SLOW.update({80000 + n: 1 for n in range(web._slow_in_all())})
+
+    # One page, one place, and it is not sent away half-way.
+    real_research = web.engine.research
+    web.engine.analyse = lambda *a, **k: SimpleNamespace(
+        run_id=None, bars=fake_result("NVDA").bars)
+    web.engine.research = lambda *a, **k: SimpleNamespace(reasoning=None)
+    web._CACHE.clear()
+    web._RESEARCH_CACHE.clear()
+    cfg = dict(web.config_mod.DEFAULTS)
+    try:
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = guest, False
+            found = web.cached_analysis("NVDA", "1d", cfg, False)
+            others()
+            del web._SLOW[80000]
+            with web._patience(1.0) as wait:
+                pass
+            web._cached_research(found, "1d", cfg, False, False)
+            check("a page that has its place keeps it, for its research too, and has only one",
+                  web._SLOW.get(guest.id) == 1 and wait == 1.0, web._SLOW)
+        check("until it is done", guest.id not in web._SLOW, web._SLOW)
+    except web.Busy:
+        check("a page that has its place keeps it, for its research too, and has only one", False)
+    finally:
+        web.engine.analyse, web.engine.research = real_analyse, real_research
+        web._SLOW.clear()
+        web._CACHE.clear()
+        web._RESEARCH_CACHE.clear()
+
     # How long each kept analysis stays, and how much they may come to.
     def kept(symbol, interval, age, result=None):
         web._CACHE[(symbol, False, interval, True, "house")] = (

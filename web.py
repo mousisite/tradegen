@@ -1062,12 +1062,14 @@ class _SlowSlot:
                 _SLOW.pop(self.mine, None)
             self.mine = None
 
-    def __enter__(self):
-        self.take()
-        return self
 
-    def __exit__(self, *_exc) -> None:
-        self.free()
+def _own_place() -> _SlowSlot:
+    """This request's one place, kept until it ends once it is taken. A page
+    that asked for a second, for its research after its analysis or a thesis
+    after both, could be sent away half-way with the first part done."""
+    if g.get("slow_place") is None:
+        g.slow_place = _SlowSlot()
+    return g.slow_place
 
 
 def _come_back():
@@ -1098,9 +1100,7 @@ def _slow_from_here() -> None:
     it shows or write a file while the person waits. Raises Busy, above, when
     there is none. Asked for only then: a journal with nothing open, or a form
     not sent yet, is drawn at once however busy it is."""
-    slot = _SlowSlot()
-    slot.take()
-    g.slow_place = slot
+    _own_place().take()
 
 
 @app.teardown_request
@@ -1114,7 +1114,8 @@ def _leave_slow_place(_exc):
 def _patience(seconds: float):
     """How long a page that can be drawn without it may wait for something:
     not at all while every place for slow work is taken."""
-    slot = _SlowSlot()
+    slot = _own_place()
+    had = slot.mine is not None
     try:
         slot.take(waits=False)
     except Busy:
@@ -1122,9 +1123,8 @@ def _patience(seconds: float):
     try:
         yield seconds
     finally:
-        slot.free()
-
-
+        if not had:
+            slot.free()
 
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
@@ -1135,12 +1135,8 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
 
     Raises Busy when this account, or everybody, has too many going already.
     """
-    slot = _SlowSlot()
-    try:
-        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
-                                exact)
-    finally:
-        slot.free()
+    return _cached_analysis(_own_place(), symbol, interval, cfg, with_news, record, ttl,
+                            exact)
 
 
 def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
@@ -3342,11 +3338,7 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
 
     Raises Busy as cached_analysis does.
     """
-    slot = _SlowSlot()
-    try:
-        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
-    finally:
-        slot.free()
+    return _research_once(_own_place(), analysis, interval, cfg, with_news, with_options)
 
 
 def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
@@ -3610,10 +3602,10 @@ def save_thesis():
             analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
             price = analysis.bars.last_price
             found = getattr(analysis.bars, "symbol", "")
-            with _SlowSlot():
-                t = engine.research(symbol, price, cfg, analysis=analysis,
-                                    with_options=with_options,
-                                    with_reasoning=False).thesis
+            _slow_from_here()
+            t = engine.research(symbol, price, cfg, analysis=analysis,
+                                with_options=with_options,
+                                with_reasoning=False).thesis
         db_mod.thesis_save(
             # A case too thin to mean anything takes no side, whatever the one
             # or two points it had came to.
