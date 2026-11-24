@@ -1530,6 +1530,18 @@ try:
           asks(30, demo=True, joining=True) is not None)
     web._SLOW.clear()
     web._IN_LINE.clear()
+    # Sixty people with a fifth of a second's work each were twenty seconds
+    # being sent away, all six places empty for pages yet to come back.
+    places = [asks(n) for n in range(1, 7)]
+    waiting = [asks(n) for n in range(40, 48)]
+    time.sleep(0.02)
+    for slot in places[:2]:
+        slot.free()
+    check("of two places free, only the last is kept for those waiting",
+          all(places) and not any(waiting) and asks(50) is not None and asks(51) is None
+          and asks(40) is not None, (web._SLOW, web._IN_LINE))
+    web._SLOW.clear()
+    web._IN_LINE.clear()
 
     # How long each kept analysis stays, and how much they may come to.
     def kept(symbol, interval, age, result=None):

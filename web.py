@@ -985,9 +985,11 @@ SLOW_RETRY = 3
 _SLOW: Dict[int, int] = {}
 _SLOW_LOCK = threading.Lock()
 # The pages sent away to come back in a few seconds: the account, when it was
-# first asked for, and when last. A place that comes free is kept for those
-# that have waited longest: given to whoever asked in that instant, a page
-# could be unlucky for minutes. One not asked for again in this long is gone.
+# first asked for, and when last. The last place free is kept for those that
+# have waited longest: given to whoever asked in that instant, a page could be
+# unlucky for minutes. Not every place, as it was: each stood empty until the
+# page it was kept for came back, and a crowd was sent away again and again by
+# a server with nothing to do. One not asked for again in this long is gone.
 _IN_LINE: Dict[Tuple, List] = {}
 LINE_FOR = 10.0
 
@@ -1040,7 +1042,7 @@ class _SlowSlot:
                 # empties it would not work at all.
                 ahead = 0
             if (mine >= most and not (joining and g.demo)) \
-                    or sum(_SLOW.values()) + ahead >= _slow_in_all():
+                    or sum(_SLOW.values()) + min(1, ahead) >= _slow_in_all():
                 # Only a page that comes back by itself has a place in the line.
                 if waits and request.method == "GET":
                     _IN_LINE[who] = [me, came, now]
