@@ -851,8 +851,15 @@ def split_history(symbol: str) -> List[Tuple[int, float]]:
         raise DataThrottled(str(exc), exc.seconds)
     payload = _fetch(_chart_url(symbol),
                      {"range": "max", "interval": "3mo", "events": "split"})
-    results = (payload.get("chart") or {}).get("result") or []
-    found = _splits(results[0]) if results else []
+    try:
+        results = (payload.get("chart") or {}).get("result") or []
+        found = _splits(results[0]) if results else []
+    except (AttributeError, KeyError, TypeError):
+        # No history at all, and one this cannot read, are not the same: a
+        # split cannot be ruled out. Raised as it came it broke off the whole
+        # round of alerts, everybody else's with it.
+        raise DataUnavailable("The market data source sent a split history for %s that "
+                              "could not be read." % symbol)
     with _SPLIT_HISTORY_LOCK:
         if symbol not in _SPLIT_HISTORY and len(_SPLIT_HISTORY) >= SPLIT_HISTORY_KEPT:
             del _SPLIT_HISTORY[min(_SPLIT_HISTORY, key=lambda k: _SPLIT_HISTORY[k][0])]
