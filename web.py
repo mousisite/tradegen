@@ -1928,8 +1928,13 @@ def analyse():
         finally:
             conn.close()
         if open_rows:
-            overlap = portfolio_mod.overlap(open_rows, result.bars.symbol,
-                                            "1d")
+            # A kept analysis has no place of its own, and the prices of what
+            # is held, from a source that hangs, kept every thread on this
+            # page. Without one, only whether it is held already is said.
+            with _patience(1.0) as wait:
+                overlap = portfolio_mod.overlap(
+                    [t for t in open_rows if wait or t["symbol"] == result.bars.symbol],
+                    result.bars.symbol, "1d")
     except Exception:
         # A correlation check failing must not cost the user their analysis.
         overlap = {"warnings": [], "pairs": []}
@@ -2968,6 +2973,7 @@ def trade_picture(trade_id: int):
             ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
+    _slow_from_here()
     from bot import journal as journal_mod
     return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
@@ -6667,7 +6673,10 @@ def api_search():
     text = (request.args.get("q") or "")[:40]
     if not text.strip() or _rate_limited("search", SEARCHES_PER_HOUR):
         return jsonify([])
-    return jsonify(market_mod.search(text))
+    # Every letter typed is a question of its own: with the source hanging,
+    # one word typed kept all eight threads.
+    with _patience(1.0) as wait:
+        return jsonify(market_mod.search(text) if wait else [])
 
 
 @app.route("/api/analyse")

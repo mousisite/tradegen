@@ -379,6 +379,33 @@ try:
     check("a visitor is not offered JSON the server will not give them",
           "View as JSON" not in page)
 
+    # Every place for slow work taken, as in a crowd.
+    asked = []
+    real_bars = risk_mod.fetch_bars
+    risk_mod.fetch_bars = lambda symbol, *a, **k: asked.append(symbol) or real_bars(symbol)
+    conn = db.connect(DB)
+    try:
+        traded = [r["id"] for r in conn.execute(
+            "SELECT id FROM trades WHERE user_id=?", (web.demo_mod.user(conn).id,))]
+    finally:
+        conn.close()
+    try:
+        quiet = text(visitor.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE))
+        compared = list(asked)
+        web._SLOW.update({80000 + n: 1 for n in range(web._slow_in_all())})
+        r = visitor.get("/analyse?symbol=NVDA&interval=1d", base_url=BASE)
+        picture = visitor.get("/trades/%d/picture" % traded[0], base_url=BASE)
+    finally:
+        risk_mod.fetch_bars = real_bars
+        web._SLOW.clear()
+        web._IN_LINE.clear()
+    check("a kept analysis opens however busy it is, and then asks for no price for it",
+          r.status_code == 200 and compared and asked == compared, (r.status_code, asked))
+    check("saying only whether what it is of is held already",
+          "You already hold NVDA" in flat(text(r)) and "You already hold NVDA" in flat(quiet))
+    check("a trade's picture, which fetches its prices, waits its turn",
+          picture.status_code == 503 and "opens by itself" in text(picture), picture.status_code)
+
     page = SEEN[("visitor", "/research?symbol=NVDA&interval=1d")][1]
     check("research names what it could not get, not how it failed",
           "Company figures" in page and "Filed accounts" in page

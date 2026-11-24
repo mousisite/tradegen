@@ -1622,6 +1622,37 @@ try:
               and "Go back, wait" in page_of(r) and "Try again" not in page_of(r))
         check("an address that is none does not break the page that waits",
               c.get("/screener?go=1", headers={"Referer": "http://["}).status_code == 503)
+        # Typing a ticker: each letter is a question to the source.
+        searched = []
+        real_search = web.market_mod.search
+        web.market_mod.search = lambda q, limit=6: searched.append(q) or [{"symbol": "AAPL"}]
+        try:
+            none = c.get("/api/search?q=aap").json
+            web._SLOW.clear()
+            some = c.get("/api/search?q=aapl").json
+        finally:
+            web.market_mod.search = real_search
+        check("suggestions wait for nobody's answer while every place is taken",
+              none == [] and some == [{"symbol": "AAPL"}] and searched == ["aapl"],
+              (none, some, searched))
+        check("and no place is left behind by any of it", not web._SLOW, web._SLOW)
+        # A company's filings are twenty seconds of waiting, at most.
+        waited = []
+        real_shortlist = ideas_mod._shortlist
+        ideas_mod._shortlist = lambda scan, horizon, risk, partial=False, accounts_wait=None: (
+            waited.append(accounts_wait) or {"passed": [], "watch": []})
+        job = {"running": False, "queued": False, "rows": [], "failed": [], "done": 1, "total": 1,
+               "started": time.time(), "scan": {"finished_at": time.time()}, "previous": None,
+               "attempt": None, "retry_at": 0.0, "error": None, "finished": threading.Event()}
+        real_job, ideas_mod._job = ideas_mod._job, lambda *a, **k: (job, False)
+        try:
+            for wait in (0.0, ideas_mod.PAGE_WAIT):
+                ideas_mod.find("stocks", "long", dict(web.config_mod.DEFAULTS), wait=wait,
+                               join_wait=0)
+        finally:
+            ideas_mod._shortlist, ideas_mod._job = real_shortlist, real_job
+        check("a list of ideas drawn without a place waits for no company's filings",
+              waited == [0, None], waited)
     finally:
         for key in STRIPE:
             _os.environ.pop(key, None)
