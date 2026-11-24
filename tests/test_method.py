@@ -1891,6 +1891,16 @@ check("one model is called one model",
       and "single agreement" not in page)
 check("the key figures are there once each", page.count("<td>Market capitalisation</td>") == 1
       and "The business" in page)
+for mid, low, high, said in ((17.346, 15.2, 1234567.8, ("17.35", "15.20–1,234,567.80")),
+                             (0.0041, 0.0032, 0.0051, ("0.0041", "0.0032–0.0051"))):
+    for agreement, words in (("single", 'Modelled value</div> <div class="v fig">%s<' % said[0]),
+                             ("wide", 'Modelled range</div> <div class="v fig">%s<' % said[1])):
+        check("a share worth about %s is said to be, %s" % (
+            said[0], "from one model" if agreement == "single" else "from several"),
+            words in drawn(engine.Research(
+                symbol="TEST", price=mid, fundamentals=lone, quality=F.quality_score(lone),
+                valuation=dict(only, midpoint=mid, low=low, high=high, agreement=agreement),
+                thesis=thesis.build("TEST", 100.0, fundamentals=lone, valuation=only))))
 nothing = F.Fundamentals(symbol="BTC-USD")
 page = drawn(engine.Research(symbol="BTC-USD", price=1.0, fundamentals=nothing,
                              quality=F.quality_score(nothing), thesis=coin_case,
