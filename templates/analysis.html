@@ -628,7 +628,7 @@
               <tr>
                 <td class="r fig {{ 'gain' if it.score > 0.1 else 'loss' if it.score < -0.1 else 'soft' }}"
                     style="width:56px">{{ it.score|signed }}</td>
-                <td>{{ it.text[:108] }}
+                <td>{{ it.text|truncate(108, False, '…', 0) }}
                   <span class="faint">· {{ "%.1f"|format(it.age_hours) }}h ·
                     {{ it.kind }}</span></td>
               </tr>
@@ -689,7 +689,7 @@
             </table>
           </div>
           <p class="prose" style="margin-top:var(--s2)">
-            Measured over {{ overlap.samples }} shared daily returns. Correlation
+            Measured over {{ "{:,}".format(overlap.samples) }} shared daily returns. Correlation
             rises toward one in a sell-off, so these numbers flatter the account
             on exactly the day it matters most.
           </p>
@@ -799,7 +799,8 @@
      fill the app's one screen with bare text, so it is the website's. #}
   {% if not demo and not in_app %}<a href="{{ url_for('api_analyse', symbol=r.bars.symbol, interval=r.bars.interval,
                                        exact=exact_arg(r.bars.symbol)) }}">View as JSON</a>
-  · {% endif %}Data from Yahoo Finance, Google News and StockTwits
+  · {% endif %}Data from Yahoo Finance
+  {%- for s in r.sentiment.read_from|reject('equalto', 'Yahoo Finance') %}{{ ' and ' if loop.last else ', ' }}{{ s }}{% endfor %}
   {% if r.run_id and not demo %}· saved in your recent analyses{% endif %}
 </p>
 

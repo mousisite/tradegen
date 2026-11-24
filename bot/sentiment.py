@@ -3,7 +3,8 @@
 Three free sources are combined:
 
 * Google News RSS      - broad financial press coverage
-* Yahoo Finance search - ticker-specific business headlines
+* Yahoo Finance        - ticker-specific business headlines, from its search
+                         or, for a coin, its headline feed
 * StockTwits           - retail trader chatter, often with explicit
                          Bullish/Bearish tags from the poster
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import calendar
 import html
+import logging
 import math
 import os
 import re
@@ -36,11 +38,14 @@ import requests
 from . import upstream
 from .market import coin_ticker
 
+log = logging.getLogger(__name__)
+
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"}
 
 _GOOGLE_NEWS = "https://news.google.com/rss/search"
 _YAHOO_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search"
+_YAHOO_FEED = "https://feeds.finance.yahoo.com/rss/2.0/headline"
 _STOCKTWITS = "https://api.stocktwits.com/api/2/streams/symbol/{sym}.json"
 
 # How long an analysis waits for the news and the posts. They are read side by
@@ -97,6 +102,8 @@ _NEGATORS = {"not", "no", "never", "without", "isn't", "wasn't", "doesn't",
              "didn't", "won't", "aren't", "cannot", "can't", "fails", "failed"}
 
 _TOKEN = re.compile(r"[a-z']+")
+_ADDRESS = re.compile(r"(?:https?://|www\.)\S+", re.I)
+_TICKERS = re.compile(r"[$#@][\w.]+")
 
 
 @dataclass
@@ -109,6 +116,7 @@ class Item:
     score: float = 0.0
     tagged: Optional[str] = None
     url: str = ""
+    via: str = ""             # which of the sources it was read from
 
     @property
     def recency_weight(self) -> float:
@@ -142,6 +150,9 @@ class Sentiment:
     # Why there are no posts, when there are none. Not in `notes` either: it
     # says nothing against a trade, and the page shows it with the news.
     social_note: str = ""
+    # The sources that gave something, in words. One that answered nothing is
+    # not named on the page as where the headlines came from.
+    read_from: List[str] = field(default_factory=list)
 
     def label(self) -> str:
         s = self.score
@@ -228,6 +239,20 @@ def lexicon_score(text: str) -> float:
 _YAHOO_HOST = "Yahoo Finance"
 
 
+# When a source that gave no headlines was last said to have, by its name. The
+# page is drawn without it either way, so the log is the only place it shows;
+# once an hour is enough.
+_SAID: Dict[str, float] = {}
+SAID_EVERY = 3600.0
+
+
+def _gave_nothing(source: str, why: str) -> None:
+    now = time.time()
+    if now - _SAID.get(source, 0.0) >= SAID_EVERY:
+        _SAID[source] = now
+        log.warning("%s gave no headlines: %s", source, why)
+
+
 def _google_news(query: str, limit: int) -> List[Item]:
     """Headlines from Google News, or none when it does not answer."""
     items: List[Item] = []
@@ -238,14 +263,25 @@ def _google_news(query: str, limit: int) -> List[Item]:
         # limit at all, inside the request of whoever opened the page.
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         feed = feedparser.parse(r.content if r.status_code == 200 else b"")
+        if not feed.get("version"):
+            # A refusal, or a page in place of the feed: its consent page has
+            # an address of its own. A feed with nothing in it is an answer.
+            _gave_nothing("Google News", "HTTP %s from %s" % (
+                r.status_code, (getattr(r, "url", "") or "").split("?")[0]))
         for e in feed.entries[:limit]:
             items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
                               source=(e.get("source", {}) or {}).get("title", "Google News"),
                               age_hours=_age_hours(e.get("published_parsed")),
-                              url=e.get("link", "")))
-    except Exception:
-        pass
+                              url=e.get("link", ""), via="Google News"))
+    except Exception as exc:
+        _gave_nothing("Google News", type(exc).__name__)
     return items
+
+
+# Yahoo's headline feed keeps a little-written-about coin's for months. One
+# older than this says nothing about now, and with nothing newer beside it, it
+# would have been the whole of the news.
+FEED_HOURS = 7 * 24.0
 
 
 def _yahoo_news(symbol: str) -> List[Item]:
@@ -253,8 +289,10 @@ def _yahoo_news(symbol: str) -> List[Item]:
 
     Asked by Yahoo's own symbol. A coin's bare ticker is often a company's or
     a fund's there (LINK, LTC, BTC), and its headlines were scored as the
-    coin's.
+    coin's. Yahoo's search has none under a coin's symbol, and its headline
+    feed has.
     """
+    coin = coin_ticker(symbol) is not None
     items: List[Item] = []
     try:
         # Yahoo's news search shares the rate limit with its prices. It asks
@@ -264,22 +302,36 @@ def _yahoo_news(symbol: str) -> List[Item]:
     except upstream.Throttled:
         return items
     try:
-        r = requests.get(_YAHOO_SEARCH, params={"q": symbol, "newsCount": 15, "quotesCount": 0},
-                         headers=_HEADERS, timeout=_TIMEOUT)
+        if coin:
+            r = requests.get(_YAHOO_FEED, params={"s": symbol, "region": "US", "lang": "en-US"},
+                             headers=_HEADERS, timeout=_TIMEOUT)
+        else:
+            r = requests.get(_YAHOO_SEARCH,
+                             params={"q": symbol, "newsCount": 15, "quotesCount": 0},
+                             headers=_HEADERS, timeout=_TIMEOUT)
         if upstream.is_throttle(r.status_code):
             upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r),
                                     r.status_code)
         elif r.status_code == 200:
             upstream.note_ok(_YAHOO_HOST)
-            for n in r.json().get("news", []):
+            for e in feedparser.parse(r.content).entries if coin else ():
+                age = _age_hours(e.get("published_parsed"))
+                if age <= FEED_HOURS:
+                    items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
+                                      source="Yahoo Finance", age_hours=age,
+                                      url=e.get("link", ""), via="Yahoo Finance"))
+            for n in () if coin else r.json().get("news", []):
                 pub = n.get("providerPublishTime")
                 age = (time.time() - pub) / 3600.0 if pub else 48.0
                 items.append(Item(text=html.unescape(n.get("title", "")), kind="news",
                                   source=n.get("publisher", "Yahoo Finance"),
-                                  age_hours=max(0.0, age), url=n.get("link", "")))
+                                  age_hours=max(0.0, age), url=n.get("link", ""),
+                                  via="Yahoo Finance"))
         else:
+            _gave_nothing("Yahoo Finance", "HTTP %s" % r.status_code)
             upstream.note_unclear(_YAHOO_HOST)
-    except Exception:
+    except Exception as exc:
+        _gave_nothing("Yahoo Finance", type(exc).__name__)
         upstream.note_unclear(_YAHOO_HOST)
     return items
 
@@ -290,6 +342,10 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
     A source that has not answered in SOURCES_WAIT seconds is left out.
     """
     query = name if name and name.upper() != symbol.upper() else symbol
+    coin = coin_ticker(symbol)
+    if coin:
+        # Yahoo calls a coin by the pair, "Bitcoin USD", and headlines do not.
+        query = re.sub(r"[\s-]+USD$", "", query, flags=re.I) or coin
     give_up = time.monotonic() + SOURCES_WAIT
     pool = ThreadPoolExecutor(max_workers=2)
     items: List[Item] = []
@@ -339,8 +395,12 @@ def gather_social(symbol: str, limit: int = 30) -> List[Item]:
 
     out: List[Item] = []
     for m in messages[:limit]:
-        body = html.unescape((m.get("body") or "").strip())
-        if not body:
+        # Without its web addresses: nobody can open them here, and a post that
+        # is a ticker and a link says nothing.
+        said = html.unescape((m.get("body") or "").strip())
+        body = " ".join(_ADDRESS.sub(" ", said).split())
+        if not body or (_ADDRESS.search(said)
+                        and not _TOKEN.search(_TICKERS.sub(" ", body).lower())):
             continue
         if len(m.get("symbols") or []) >= 4:        # ticker-spam filter
             continue
@@ -357,7 +417,7 @@ def gather_social(symbol: str, limit: int = 30) -> List[Item]:
         tag = ((m.get("entities") or {}).get("sentiment") or {})
         tag = (tag or {}).get("basic")
         out.append(Item(text=body, kind="social", source="StockTwits",
-                        age_hours=age, tagged=tag))
+                        age_hours=age, tagged=tag, via="StockTwits"))
     return out
 
 
@@ -483,9 +543,11 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         # For every reader, in words about the reading rather than about a
         # setting: only whoever runs the server can add a key (setup_hint).
         if all_items:
-            notes.append("Headlines were scored with a list of finance words, "
+            notes.append("%s were scored with a list of finance words, "
                          "which can misread financial phrasing, so treat the "
-                         "news reading as rough.")
+                         "news reading as rough."
+                         % ("Headlines and posts" if news and social else
+                            "Headlines" if news else "Posts"))
         if use_llm and not os.environ.get("ANTHROPIC_API_KEY"):
             setup_hint = ("No ANTHROPIC_API_KEY is set, so headlines were scored "
                           "with the built-in word list. Claude reads financial "
@@ -536,4 +598,6 @@ def analyse(symbol: str, name: str = "", use_llm: bool = True) -> Sentiment:
         items=sorted(all_items, key=lambda i: -abs(i.score) * i.recency_weight)[:12],
         notes=notes, fresh_catalyst=fresh, setup_hint=setup_hint,
         social_note="" if social else social_note,
+        read_from=[s for s in ("Yahoo Finance", "Google News", "StockTwits")
+                   if any(i.via == s for i in all_items)],
     )

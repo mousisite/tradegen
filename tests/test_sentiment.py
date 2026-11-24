@@ -94,8 +94,78 @@ try:
               social(symbol) == [] and posts_asked() == [stream], posts_asked())
     answering(Reply(404))
     sentiment.gather_news("LINK-USD", "Chainlink USD")
-    check("and the headlines by the coin's own id, not a company's ticker",
-          [p["q"] for u, p in asked if u == sentiment._YAHOO_SEARCH] == ["LINK-USD"], asked)
+    check("and the headlines by the coin's own id, not a company's ticker, from the "
+          "feed that has coins",
+          [p for u, p in asked if "yahoo" in u]
+          == [{"s": "LINK-USD", "region": "US", "lang": "en-US"}], asked)
+    check("and by the name headlines use, not the pair's",
+          ["%22Chainlink%22" in u for u, _ in asked if "google" in u] == [True], asked)
+    answering(Reply(404))
+    sentiment.gather_news("AAPL", "Apple Inc.")
+    check("a company is asked for as it was",
+          [p["q"] for u, p in asked if u == sentiment._YAHOO_SEARCH] == ["AAPL"]
+          and any("%22Apple%20Inc.%22" in u for u, _ in asked), asked)
+
+    print()
+    print("A COIN'S HEADLINES, AND WHERE THEY CAME FROM")
+
+    def stamp(hours):
+        return time.strftime("%a, %d %b %Y %H:%M:%S +0000",
+                             time.gmtime(time.time() - hours * 3600))
+
+    feed = ("<rss version='2.0'><channel><title>x</title>%s</channel></rss>" % "".join(
+        "<item><title>%s</title><link>https://news.example/%d</link><pubDate>%s</pubDate></item>"
+        % (t, k, stamp(h)) for k, (t, h) in enumerate((
+            ("Bitcoin surges to a record", 2), ("Bitcoin ETFs see strong growth", 30),
+            ("A headline from three weeks ago", 500))))).encode()
+
+    def from_the_feed(google):
+        def get(url, params=None, headers=None, timeout=None):
+            if "stocktwits" in url:
+                return Reply(200, {"messages": []})
+            if url == sentiment._YAHOO_FEED:
+                return Reply(200, content=feed)
+            return google
+        upstream.reset()
+        sentiment._SAID.clear()
+        sentiment.requests.get = get
+        said = []
+        was, sentiment.log.warning = sentiment.log.warning, lambda m, *a: said.append(m % a)
+        try:
+            return sentiment.analyse("BTC-USD", "Bitcoin USD", use_llm=False), said, \
+                sentiment.analyse("BTC-USD", "Bitcoin USD", use_llm=False)
+        finally:
+            sentiment.log.warning = was
+
+    read, said, _again = from_the_feed(Reply(429))
+    check("the feed's are read, all but the ones too old to matter",
+          read.n_news == 2 and read.news_score > 0.3 and not any(
+              "three weeks" in i.text for i in read.items),
+          [(i.text, i.age_hours) for i in read.items])
+    check("only the source that gave something is named", read.read_from == ["Yahoo Finance"],
+          read.read_from)
+    check("and the log says, once, that the other refused",
+          len(said) == 1 and "Google News" in said[0] and "429" in said[0], said)
+    read, said, _again = from_the_feed(Reply(200, content=b"<html>Before you continue</html>"))
+    check("a page in place of its feed is said too", len(said) == 1, said)
+    read, said, _again = from_the_feed(Reply(200, content=feed.replace(
+        b"<title>Bitcoin surges to a record", b"<title>Miners raise money as it rises")))
+    check("a source that answered is named and nothing is logged",
+          read.read_from == ["Yahoo Finance", "Google News"] and not said,
+          (read.read_from, said))
+    check("the warning names headlines when there were only those",
+          any(n.startswith("Headlines were scored") for n in read.notes), read.notes)
+    answering(Reply(200, {"messages": [
+        post("$BTC.X https://coins.example/currencies/bitcoin/"),
+        post("$BTC.X going up https://coins.example/a"), post("$BTC.X")]}))
+    texts = [i.text for i in sentiment.gather_social("BTC-USD")]
+    check("a post that is a ticker and a link is left out, and no address is shown",
+          texts == ["$BTC.X going up", "$BTC.X"], texts)
+    only = sentiment.analyse("BTC-USD", "Bitcoin USD", use_llm=False)
+    check("with no headlines the warning is about the posts",
+          any(n.startswith("Posts were scored") for n in only.notes)
+          and "No news retrieved for this symbol." in only.notes
+          and only.read_from == ["StockTwits"], (only.notes, only.read_from))
 
     print()
     print("A REFUSAL IS NOT A QUIET SYMBOL, AND IS ASKED ONCE")
