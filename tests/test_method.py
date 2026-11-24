@@ -2038,8 +2038,18 @@ p_slow = plan_on(slow)
 check("a price that moves less than the usual tick keeps its levels apart too",
       p_slow.stop < p_slow.entry < p_slow.target1 and "error" not in p_slow.position,
       (p_slow.entry, p_slow.stop, p_slow.position))
+# And says them apart, in a call to wait and in one to act now.
+for p_said in (p_slow, plan_on(slow, c=calib(rate=0.45, lo=0.36, hi=0.54, exp=0.30))):
+    beside_ =[p_said.entry, p_said.stop, p_said.target1, p_said.target2] + (
+        [slow.last_price] if p_said.entry_type == "limit" else [])
+    in_, out_ = (market.format_price(v, beside=beside_) for v in (p_said.entry, p_said.stop))
+    check("its words name a %s's entry and stop as two prices" % p_said.action,
+          in_ != out_ and p_said.headline.endswith(" %s." % in_)
+          and "beyond %s." % out_ in p_said.invalidation
+          and ("Wait for %s." % in_ in p_said.trigger or p_said.action == "BUY"),
+          (in_, out_, p_said.headline, p_said.trigger, p_said.invalidation))
 # 1.084 and 1.084: kept apart by the plan, and read as one price on the page.
-pair_ = dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
+pair_ =dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
                             action="BUY")
 levels_ = (pair_.entry, pair_.stop, pair_.target1)
 check("they read apart on the page too, alike in how many decimals they may have",

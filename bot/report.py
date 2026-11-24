@@ -105,7 +105,8 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
         t = Table(show_header=False, box=None, padding=(0, 2))
         t.add_column(style="dim", width=16)
         t.add_column()
-        levels = (plan.entry, plan.stop, plan.target1, plan.target2)
+        levels = [plan.entry, plan.stop, plan.target1, plan.target2] + (
+            [price] if plan.entry_type == "limit" else [])
         t.add_row("Entry", "[bold]%s[/] (%s)  %s" % (
             format_price(plan.entry, beside=levels), plan.entry_type, plan.entry_rationale))
         t.add_row("Trigger", plan.trigger)
