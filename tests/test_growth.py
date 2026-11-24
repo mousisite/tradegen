@@ -1457,6 +1457,18 @@ try:
         as_visitor(meanwhile)
         check("a visitor is shown the last one while it is worked out again for another",
               meanwhile == [last_one] and asked_for == ["NVDA"], (meanwhile, asked_for))
+        web._SLOW.update({80000 + n: 1 for n in range(web._slow_in_all())})
+        real_running = dict(web._RUNNING)
+        web._RUNNING.clear()
+        web._IN_LINE.clear()
+        as_visitor(meanwhile)
+        web._RUNNING.update(real_running)
+        web._SLOW.clear()
+        web._SLOW[1] = 1
+        check("and while every place is taken, in no line for one",
+              meanwhile == [last_one] * 2 and asked_for == ["NVDA"] and not web._IN_LINE,
+              (meanwhile, asked_for, web._IN_LINE))
+        del meanwhile[1:]
         web._CACHE[key] = (time.time() - web.DEMO_STALE - 5, last_one, {})
         waits = threading.Thread(target=as_visitor, args=(meanwhile,))
         waits.start()
@@ -1623,6 +1635,14 @@ try:
               and "Go back, wait" in page_of(r) and "Try again" not in page_of(r))
         check("an address that is none does not break the page that waits",
               c.get("/screener?go=1", headers={"Referer": "http://["}).status_code == 503)
+        # A ready-made screen that is kept is worked out for nobody.
+        presets = list(web.screener_mod.PRESETS)
+        web._DEMO_SCREENS[presets[0]] = (time.time(), web.screener_mod.ScreenResult(
+            universe="most actives", scanned=1, passed=[], rejected=1, filters=[], deep=False))
+        visitor = web.app.test_client()
+        answers = [visitor.get("/screener?preset=" + p).status_code for p in presets[:2]]
+        check("a visitor is shown a ready-made screen that is kept, however busy it is",
+              answers == [200, 503], answers)
         # Typing a ticker: each letter is a question to the source.
         searched = []
         real_search = web.market_mod.search

@@ -1180,14 +1180,20 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
             running = _RUNNING.get(key)
-            if (running is not None and hit and g.get("demo")
-                    and time.time() - hit[0] < DEMO_STALE):
-                # A visitor is having it worked out again. The others are shown
-                # the last one meanwhile rather than all waiting every quarter
-                # hour; it says what time its prices are from.
+            # A visitor is having it worked out again, or there is no place
+            # for it to be. The others are shown the last one meanwhile rather
+            # than all waiting every quarter hour; it says what time its
+            # prices are from.
+            last = (hit and g.get("demo") and time.time() - hit[0] < DEMO_STALE)
+            if last and running is not None:
                 break
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    break
+                raise
             hit = None
-            slot.take(joining=running is not None)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
                 break
@@ -5837,6 +5843,12 @@ class _NotKept(Exception):
         self.found = found
 
 
+def _kept_demo_screen(preset_key: str) -> Optional[screener_mod.ScreenResult]:
+    """A ready-made screen run for a visitor a short while ago, or None."""
+    kept = _DEMO_SCREENS.get(preset_key)
+    return kept[1] if kept is not None and time.time() - kept[0] < DEMO_TTL else None
+
+
 def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     """A ready-made screen, the same answer for every visitor.
 
@@ -5846,9 +5858,9 @@ def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     for a quarter of an hour.
     """
     from bot import upstream as upstream_mod
-    kept = _DEMO_SCREENS.get(preset_key)
-    if kept is not None and time.time() - kept[0] < DEMO_TTL:
-        return kept[1]
+    kept = _kept_demo_screen(preset_key)
+    if kept is not None:
+        return kept
 
     def fresh():
         found = screener_mod.run(symbols=None, universe=preset["universe"],
@@ -5912,12 +5924,13 @@ def screener():
              for key, value in filters.items()}
 
     result = None
-    if preset or (request.args.get("go") and not g.demo):
-        _slow_from_here()
     if g.demo and request.args.get("go") and not preset:
         return _locked("Create an account to run your own screen",
                        "The example can run the ready-made screens. With an "
                        "account you can set your own filters.", examples=False)
+    if (preset or request.args.get("go")) and not (
+            g.demo and _kept_demo_screen(preset_key)):
+        _slow_from_here()
     if g.demo and preset:
         try:
             result = _demo_screen(preset_key, preset)
