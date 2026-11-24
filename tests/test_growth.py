@@ -337,6 +337,12 @@ try:
                if said.split()[0] not in ("a", "an", "the", "following", "trading")]
           and len(set(_said.values())) == len(_said),
           [n for n, said in _said.items() if said == public.strategy_label(n)])
+    check("each short enough for a preview to show whole",
+          all(len("Does %s work? · Orenth" % said) < 60 for said in _said.values()),
+          [said for said in _said.values() if len("Does %s work? · Orenth" % said) >= 60])
+    # Higher highs and lower lows at once is a widening range, not what it follows.
+    check("and true: it follows higher highs up or lower lows down, not both at once",
+          _said["market_structure"] == "following higher highs or lower lows")
     page = _html.unescape(c.get("/backtest/pivot-levels").data.decode("utf-8", "replace"))
     check("in its title, its heading, its preview and its links to the others",
           "<title>Does trading from pivot points work?" in page
