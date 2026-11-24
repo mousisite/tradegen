@@ -3387,7 +3387,18 @@ def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < ttl:
                 return hit[1]
             running = _RESEARCH_RUNNING.get(key)
-            slot.take(joining=running is not None)
+            # The example's last one meanwhile, as its analysis is: put
+            # together again every quarter hour, it kept every place for as
+            # long as that takes, with visitors who only waited for it.
+            last = hit and g.demo and time.time() - hit[0] < DEMO_STALE
+            if last and running is not None:
+                return hit[1]
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    return hit[1]
+                raise
             if running is None:
                 owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
                 break

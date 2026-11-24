@@ -1481,6 +1481,45 @@ try:
         web.engine.analyse = real_analyse
         web._CACHE.clear()
 
+    # Its research too, which takes up to three quarters of a minute.
+    def researches(out):
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+            out.append(web._cached_research(fake_result("NVDA"), "1d",
+                                            dict(web.config_mod.DEFAULTS), True, True))
+
+    def slow_research(*a, **k):
+        going.release()
+        let_go.wait(30)
+        return "the new one"
+
+    let_go.clear()
+    real_research, web.engine.research = web.engine.research, slow_research
+    with web.app.test_request_context("/research?symbol=NVDA"):
+        web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+        key = web._research_key("NVDA", "1d", dict(web.config_mod.DEFAULTS), True, True)
+    web._RESEARCH_CACHE[key] = (time.time() - web.DEMO_TTL - 5, "the last one")
+    refreshing, meanwhile = [], []
+    first = threading.Thread(target=researches, args=(refreshing,))
+    try:
+        while going.acquire(blocking=False):
+            pass
+        first.start()
+        going.acquire(timeout=20)
+        seen = threading.Thread(target=researches, args=(meanwhile,), daemon=True)
+        seen.start()
+        seen.join(2)
+        check("nor does a visitor wait for the example's research to be put together again",
+              meanwhile == ["the last one"] and sum(web._SLOW.values()) == 1,
+              (meanwhile, web._SLOW))
+    finally:
+        let_go.set()
+        first.join(20)
+        web.engine.research = real_research
+        web._RESEARCH_CACHE.clear()
+    check("who then has the new one", refreshing == ["the new one"] and not web._SLOW,
+          (refreshing, web._SLOW))
+
     # Pages that found no place come back for one: the one that has waited
     # longest has it first, whoever asks in the instant it comes free.
     class Person(object):
