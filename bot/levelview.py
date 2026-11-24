@@ -224,6 +224,9 @@ def for_analysis(result, cfg: Dict, db_path: Optional[str] = None,
     out["close"] = float(bars.close[last])
     days = clock.day_table(bars) if intraday else []
     live = clock.live_day(bars)
+    if live is not None:
+        # The last finished bar is then yesterday's, and its own yesterday is not.
+        s = dict(s, ck_day=np.append(s["ck_day"], live.toordinal()))
     prior = _prior(bars, s, days, live)
     out["structure"] = _structure(bars, s, kind, live is not None)
     out["levels"] = _levels(bars, s, kind, prior)
@@ -270,6 +273,9 @@ def _event_at(bars, s: Dict[str, np.ndarray], i: int, kinds: Tuple[str, ...]) ->
         return None
     part = clock.head(bars, i + 1)
     cut = {key: arr[:i + 1] for key, arr in s.items()}
+    # Its last is the reader's own day, which is what decides whether a level is
+    # called yesterday's (liquidity.level_name).
+    cut["ck_day"] = s["ck_day"]
     for ev in liquidity.events(part, cut, limit=12):
         if ev["i"] == i and ev["kind"] in kinds:
             return ev
