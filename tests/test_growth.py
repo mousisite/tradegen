@@ -233,11 +233,21 @@ try:
     for other, own in (("/stock/NVDA", "/stock/nvda"), ("/stock/Nvda?utm=x", "/stock/nvda?utm=x"),
                        ("/stock/NVDA/card.png", "/stock/nvda/card.png"),
                        ("/backtest/rsi_reversion", "/backtest/rsi-reversion"),
-                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion")):
+                       ("/backtest/RSI-Reversion", "/backtest/rsi-reversion"),
+                       ("/stock/btc", "/stock/btc-usd"), ("/stock/BTC?utm=x", "/stock/btc-usd?utm=x"),
+                       ("/stock/link", "/stock/link-usd"),
+                       ("/stocks/", "/stocks"), ("/learn/?a=b", "/learn?a=b"),
+                       ("/stock/nvda/", "/stock/nvda")):
         r = c.get(other)
         check("%s is sent to the page's one address" % other,
               r.status_code == 301 and r.headers["Location"].endswith(own),
               (r.status_code, r.headers.get("Location")))
+    # The path as the server is handed it, its %2F and %5C already read.
+    for wrong in ("/no-such-page/", "//elsewhere.example/", "/\\elsewhere.example/",
+                  "/stock/zzzz", "/stock/usd"):
+        r = c.get("/x", environ_overrides={"PATH_INFO": wrong})
+        check("%s is still no page" % wrong, r.status_code == 404
+              and "Location" not in r.headers, (r.status_code, r.headers.get("Location")))
 
     robots = c.get("/robots.txt").data.decode().splitlines()
     check("robots are kept off every page of the example account",
@@ -722,6 +732,59 @@ try:
     finally:
         with web._example_lock:
             web._example_state.update(_was)
+    key = ("NVDA", False, "1d", True, web._settings_key(dict(web.config_mod.DEFAULTS)))
+    kept_before, asked_of, scans = dict(web._CACHE), [], []
+    real_analyse, real_find = web.engine.analyse, web.ideas_mod.find
+
+    def worked_out(symbol, cfg, **how):
+        asked_of.append((symbol, cfg.get("use_llm_sentiment", True), how))
+        return fake_result("NVDA", "WAIT", 60, 33)
+
+    web.engine.analyse = worked_out
+    web.ideas_mod.find = lambda *a, **k: scans.append((a, k))
+    try:
+        web._CACHE.clear()
+        web._CACHE[key] = (time.time() - 60, fake_result("NVDA", "BUY", 70, 41), {})
+        page_now = c.get("/").data.decode("utf-8", "replace")
+        web._example_state.update(at=0.0, data=None, busy=False, failed=0.0)
+        web._refresh_example()
+        check("the front page's check is the one the page behind it was given",
+              asked_of == [] and web._example_state["data"]["action"] == "BUY"
+              and web._example_state["data"]["samples"] == 70, web._example_state)
+        web._CACHE[key] = (time.time(), fake_result("NVDA", "AVOID", 50, 20), {})
+        check("and follows it when a visitor has it worked out again",
+              web._example()["action"] == "AVOID" and web._example()["samples"] == 50)
+        web._CACHE.clear()
+        web._refresh_example()
+        check("with none kept it is worked out the same way, news and all, and kept for that page",
+              len(asked_of) == 1 and asked_of[0][2].get("with_news", True)
+              and not asked_of[0][2]["record"] and key in web._CACHE
+              and web._CACHE[key][1].plan.prob_samples == 60, (asked_of, list(web._CACHE)))
+        check("and the list behind the Find tile is started, without waiting for it",
+              scans and scans[-1][1]["wait"] == 0.0
+              and scans[-1][1]["ttl"] == web.ideas_mod.JOB_KEEP, scans)
+        _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
+        web._CACHE.clear()
+        web._refresh_example()
+        paid = ("NVDA", False, "1d", True, key[4])
+        check("no model is paid to read headlines for it, and a member's own is kept apart",
+              asked_of[-1][1] is False and paid not in web._CACHE and len(web._CACHE) == 1,
+              (asked_of[-1], list(web._CACHE)))
+    finally:
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+        web.engine.analyse, web.ideas_mod.find = real_analyse, real_find
+        web._CACHE.clear()
+        web._CACHE.update(kept_before)
+        with web._example_lock:
+            web._example_state.update(_was)
+    waits = []
+    web.ideas_mod.find = lambda *a, **k: waits.append(k["wait"]) or {}
+    try:
+        web._demo_shortlist("stocks", "medium", "balanced")
+    finally:
+        web.ideas_mod.find = real_find
+    check("a visitor who starts a scan is shown how far it has got, not kept waiting",
+          waits == [web.DEMO_SCAN_WAIT] and web.DEMO_SCAN_WAIT <= 2, waits)
     check("an example from twenty minutes ago is not called live",
           "Live right now" not in page and "Latest check" in page and "20 min ago" in page)
     check("someone with an account is offered a way back in",

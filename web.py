@@ -24,6 +24,7 @@ import json
 import math
 import os
 import random
+import re
 import secrets
 import sqlite3
 import sys
@@ -32,6 +33,7 @@ import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote as url_quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,6 +52,7 @@ from flask import (Flask, Response, abort, g, jsonify, redirect,
                    render_template, request, send_from_directory, session,
                    url_for)
 from flask.json.provider import DefaultJSONProvider
+from werkzeug.exceptions import HTTPException
 from werkzeug.routing import IntegerConverter
 from werkzeug.wsgi import wrap_file
 
@@ -950,6 +953,15 @@ _NOT_IN_ANALYSIS = ("daily_loss_limit_r", "max_trades_per_day", "last_entry_time
                     "calm_candles")
 
 
+def _unpaid(cfg: Dict) -> Tuple[Dict, object]:
+    """The settings for an analysis open to anyone, and what its key in _CACHE
+    says of the news. Having a model score headlines is a paid request, so it
+    is not asked for there, and a member's, which may be, is kept apart."""
+    if os.environ.get("ANTHROPIC_API_KEY") and cfg.get("use_llm_sentiment", True):
+        return dict(cfg, use_llm_sentiment=False), "unpaid"
+    return cfg, True
+
+
 def _settings_key(cfg: Dict) -> str:
     """A short fingerprint of everything that changes what an analysis says."""
     import hashlib
@@ -1149,8 +1161,10 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
     # account was served to the next person who asked for the same ticker.
     # So is exact: LINK exactly is Interlink Electronics, and the bare LINK
     # the Chainlink coin.
-    key = (symbol.upper(), bool(exact), interval, bool(with_news),
-           _settings_key(cfg))
+    reads: object = bool(with_news)
+    if reads and g.get("demo"):
+        cfg, reads = _unpaid(cfg)
+    key = (symbol.upper(), bool(exact), interval, reads, _settings_key(cfg))
     me = uid()
     owned = None
     while True:
@@ -1444,33 +1458,57 @@ _example_state = {"at": 0.0, "data": None, "busy": False, "failed": 0.0}
 _example_lock = threading.Lock()
 
 
+def _shown_example(result, at: float) -> Dict:
+    """What the front page shows of an analysis, and keep it."""
+    from bot import plain as plain_mod
+    said = plain_mod.explain_plan(result.plan, result.bars)
+    plan = result.plan
+    samples = plan.prob_samples or 0
+    data = {"symbol": result.bars.symbol,
+            "samples": samples,
+            "worked": (int(round(plan.probability * samples))
+                       if plan.probability is not None and samples else 0),
+            # The odds are the side the signals lean. Leaning down, the
+            # examples are bets on a fall, and the front page says so.
+            "fall": (getattr(plan, "odds_direction", 0) or 0) < 0,
+            "action": result.plan.action,
+            "headline": said["headline"],
+            "sure": said["sure"],
+            "price": result.bars.last_price,
+            "at": at}
+    with _example_lock:
+        _example_state["data"] = data
+        _example_state["at"] = at
+    return data
+
+
+def _example_kept():
+    """The example account's own analysis of it, as _CACHE keeps it, and the
+    settings and key it is worked out and kept by."""
+    cfg, reads = _unpaid(config_mod.load(app.config.get("CFG_PATH")))
+    key = (EXAMPLE_SYMBOL, False, "1d", reads, _settings_key(cfg))
+    with _CACHE_LOCK:
+        return cfg, key, _CACHE.get(key)
+
+
 def _refresh_example() -> None:
     try:
-        from bot import engine as engine_mod
-        from bot import plain as plain_mod
-        cfg = config_mod.load(app.config.get("CFG_PATH"))
-        result = engine_mod.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
-                                    with_news=False, with_learning=True,
-                                    record=False, resolve_symbol=False,
-                                    with_calendar=False)
-        said = plain_mod.explain_plan(result.plan, result.bars)
-        plan = result.plan
-        samples = plan.prob_samples or 0
-        data = {"symbol": result.bars.symbol,
-                "samples": samples,
-                "worked": (int(round(plan.probability * samples))
-                           if plan.probability is not None and samples else 0),
-                # The odds are the side the signals lean. Leaning down, the
-                # examples are bets on a fall, and the front page says so.
-                "fall": (getattr(plan, "odds_direction", 0) or 0) < 0,
-                "action": result.plan.action,
-                "headline": said["headline"],
-                "sure": said["sure"],
-                "price": result.bars.last_price,
-                "at": time.time()}
-        with _example_lock:
-            _example_state["data"] = data
-            _example_state["at"] = data["at"]
+        # The one the page behind it opens: worked out apart from it, and
+        # without the news, the front page and that page gave two answers.
+        cfg, key, kept = _example_kept()
+        if kept is None or time.time() - kept[0] >= EXAMPLE_TTL:
+            kept = (time.time(), engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
+                                                record=False), {})
+            with _CACHE_LOCK:
+                _CACHE[key] = kept
+        _shown_example(kept[1], kept[0])
+        try:
+            # The list behind the Find tile, so that it opens on a finished
+            # one: started when there is none from the last few hours.
+            _demo_shortlist("stocks", "medium", "balanced", wait=0.0,
+                            ttl=ideas_mod.JOB_KEEP)
+        except ideas_mod.Busy:
+            pass
     except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
         # visitor. The page simply renders without it, and the log says why: a
@@ -1491,6 +1529,14 @@ def _example():
     now = time.time()
     with _example_lock:
         data = _example_state["data"]
+    try:
+        # A visitor may have had it worked out again since.
+        kept = _example_kept()[2]
+        if kept is not None and data is not None and kept[0] > data["at"]:
+            data = _shown_example(kept[1], kept[0])
+    except Exception:
+        app.logger.exception("The front page example could not be read")
+    with _example_lock:
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
         rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
         if stale and rested and not _example_state["busy"]:
@@ -5783,11 +5829,17 @@ def ideas():
 DEMO_SCAN_TTL = 60 * 60.0
 
 
+# A whole list takes minutes, so a visitor who starts one is shown how far it
+# has got at once (the page opens itself again) rather than after a long wait.
+DEMO_SCAN_WAIT = 1.0
+
+
 def _demo_shortlist(market: str, horizon: str, risk: str,
-                    wait: float = ideas_mod.PAGE_WAIT) -> Dict:
+                    wait: float = ideas_mod.PAGE_WAIT,
+                    ttl: float = DEMO_SCAN_TTL) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
-    return ideas_mod.find(market, horizon, cfg, risk, wait=wait,
-                          ttl=DEMO_SCAN_TTL, join_wait=0)
+    return ideas_mod.find(market, horizon, cfg, risk, wait=min(wait, DEMO_SCAN_WAIT),
+                          ttl=ttl, join_wait=0)
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."
@@ -6730,7 +6782,8 @@ def stocks_index():
 @app.route("/stock/<sym>")
 def stock_page(sym):
     """One popular instrument's call, refreshed daily in the background."""
-    symbol = public_mod.from_slug(sym)
+    # A coin is called BTC on every page here, and its own address is btc-usd.
+    symbol = public_mod.from_slug(sym) or public_mod.from_slug(sym + "-USD")
     if symbol is None:
         abort(404)
     if sym != public_mod.slug(symbol):
@@ -7440,10 +7493,31 @@ def refused(exc):
                                    "again and try once more."), exc.code
 
 
+def _without_the_slash() -> Optional[str]:
+    """The page meant by an address with a slash too many at its end, as one
+    typed or pasted into a profile often has, or None."""
+    path = request.path
+    if request.method not in ("GET", "HEAD") or not path.endswith("/"):
+        return None
+    page = path.rstrip("/")
+    # "//elsewhere" is another site's address to a browser, and so is "/\\".
+    if not page or not re.match(r"/[A-Za-z0-9]", page) or "\\" in page:
+        return None
+    try:
+        app.url_map.bind("").match(page, method="GET")
+    except HTTPException:
+        return None
+    query = request.query_string.decode("utf-8", "replace")
+    return url_quote(page) + ("?" + query if query else "")
+
+
 @app.errorhandler(404)
 def not_found(_exc):
     if request.path.startswith("/api/"):
         return jsonify({"error": "No such address."}), 404
+    meant = _without_the_slash()
+    if meant:
+        return redirect(meant, code=301)
     return render_template("notfound.html"), 404
 
 

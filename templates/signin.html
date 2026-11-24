@@ -39,7 +39,29 @@
       button at the edge of the screen, choose to open the page in your
       browser, and sign in there.{% if email_ready or phone_ready %} Or use
       {{ 'email or phone' if email_ready and phone_ready else ('email' if
-      email_ready else 'phone') }} here.{% endif %}</div>
+      email_ready else 'phone') }} here.{% endif %}
+      {# A friend's invite goes along: the other browser has not heard of it. #}
+      <p style="margin:var(--s1) 0 0"><button class="btn quiet" type="button" data-copy-address
+        data-url="{{ site_base }}{{ url_for('join', code=session['ref']) if session.get('ref') else url_for('signin') }}">Copy
+        the link</button> <span class="soft" data-copied role="status" aria-live="polite"></span></p></div>
+  <script>
+  (function () {
+    var button = document.querySelector('[data-copy-address]');
+    if (!button) { return; }
+    var url = button.getAttribute('data-url');
+    var said = document.querySelector('[data-copied]');
+    function done() { said.textContent = 'Copied. Paste it in your browser.'; }
+    function show() { said.textContent = url; }
+    button.addEventListener('click', function () {
+      // Browsers built into other apps often have no clipboard of their own.
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(url).then(done, show);
+      } else {
+        show();
+      }
+    });
+  })();
+  </script>
   {% endif %}
 
   {% if google_ready or email_ready or phone_ready or apple_button %}
