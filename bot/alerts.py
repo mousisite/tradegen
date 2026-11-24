@@ -967,6 +967,13 @@ def _waits(row, now: float) -> bool:
     return not sessions.can_change(row["symbol"], int(row["last_checked"]), now)
 
 
+# Set by serve.py when the server is stopping and a round has not ended in the
+# time it is given. The round then asks for nothing and looks at nothing more:
+# what it has recorded is told while there is time, and the rest is left as it
+# was for the first round after the start.
+STOPPING = threading.Event()
+
+
 def check(conn, only_active: bool = True, user=None, call_of=None,
           limit_of: Optional[Callable[[int], Optional[int]]] = None,
           skip_closed: bool = False, now: Optional[float] = None,
@@ -1038,6 +1045,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
 
     def grab(key):
         symbol, interval = key
+        if STOPPING.is_set():
+            return key, None
         try:
             bars = fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
         except (DataError, Exception) as exc:
@@ -1055,7 +1064,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             if isinstance(result, Exception):
                 failed[key] = _whole(result)
                 errors.append({"symbol": key[0], "error": failed[key]})
-            else:
+            elif result is not None:
                 data[key] = result
                 sessions.note(key[0], result, now)
 
@@ -1073,6 +1082,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         # with no price fails for that below, so its call is not asked for.
         for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
                     if r["kind"] in CALL_KINDS and (r["symbol"], _bars_for(r)) in data}:
+            if STOPPING.is_set():
+                break
             symbol, interval, exact = key
             try:
                 calls[key] = (call_of(symbol, interval, exact=True) if exact
@@ -1115,6 +1126,8 @@ def _look(conn, rows, data, failed, calls, quiet, fired, errors, now) -> None:
 
     structure: Dict = {}                # of the prices being looked at
     for row in _side_by_side(rows):
+        if STOPPING.is_set():
+            return
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
         if bars is None:
@@ -1332,6 +1345,8 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             wanted.append(key)
 
     def grab(key):
+        if STOPPING.is_set():
+            return key, None
         try:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
@@ -1348,6 +1363,8 @@ def check_stops(conn, user=None, skip_closed: bool = False,
     # positions were a round of ten minutes.
     with ThreadPoolExecutor(max_workers=min(8, len(wanted) or 1)) as pool:
         for key, got in pool.map(grab, wanted):
+            if got is None:
+                continue
             if not isinstance(got, Exception):
                 data[key] = got
                 sessions.note(key[0], got, now)
@@ -1361,7 +1378,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
 
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))
-        if bars is None:
+        if bars is None or STOPPING.is_set():
             continue
         # The stop is in the shares of the day it opened; after a split the
         # quote is in today's, and read as is a long looked far past its stop.

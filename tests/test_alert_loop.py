@@ -1648,6 +1648,48 @@ try:
         check("and the other alerts are told in the order they always were, newest first",
               [f.symbol for f in res["fired"]] == ["MM3", "MM2", "MM1", "MM0"],
               [f.symbol for f in res["fired"]])
+
+        # The server is stopping with a round half done. What it went on to
+        # record as told was never told: the process ended first.
+        conn.execute("UPDATE alerts SET active=0")
+        conn.commit()
+        for k in range(16):
+            PRICE["MM%d" % k] = 80.0
+            db.alert_add(conn, "MM%d" % k, "price_above", threshold=50.0, user=busy.id, cap=None)
+        noticed = len(db.event_list(conn, busy.id, limit=500))
+        looked_at = []
+
+        def told_to_stop(k, row, bars):
+            looked_at.append(row["id"])
+            if len(looked_at) == 5:
+                alerts.STOPPING.set()
+            return real_after(k, row, bars)
+
+        alerts._after_splits = told_to_stop
+        try:
+            res = alerts.check(conn)
+            del ASKED[:]
+            crossed = alerts.check_stops(conn)
+            later = len(ASKED)
+            first_look = alerts.check(conn)
+        finally:
+            alerts._after_splits = real_after
+            alerts.STOPPING.clear()
+        left = conn.execute("SELECT COUNT(*) FROM alerts WHERE active=1 AND last_checked IS NULL "
+                            "AND last_error IS NULL").fetchone()[0]
+        check("a round told to stop looks at nothing more, and has in hand all it recorded",
+              len(res["fired"]) == 5 and left == 11 and not res["errors"]
+              and len(db.event_list(conn, busy.id, limit=500)) == noticed + 5,
+              (len(res["fired"]), left, res["errors"]))
+        check("nor does one that had not begun ask for a price or mark a stop as told",
+              later == 0 and not crossed["fired"] and not crossed["errors"]
+              and not first_look["fired"] and not first_look["errors"] and conn.execute(
+                  "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='open' AND "
+                  "breach_noticed IS NULL", (busy.id,)).fetchone()[0] == 16,
+              (later, crossed, first_look))
+        check("and the first round after the start tells the rest, once each",
+              len(alerts.check(conn)["fired"]) == 11 and len(alerts.check_stops(conn)["fired"]) == 16
+              and not alerts.check(conn)["fired"] and not alerts.check_stops(conn)["fired"])
     finally:
         conn.set_trace_callback(None)
         alerts.fetch_bars, web.market_mod.split_history = real_fetch_bars, real_splits

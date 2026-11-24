@@ -709,7 +709,7 @@ class Round:
     """The alert loop, stopped while a round of it is being checked."""
 
     def stop(self, timeout=2.0):
-        told.append(("round", timeout))
+        told.append(("round", timeout, web.alerts_mod.STOPPING.is_set()))
         hit = [types.SimpleNamespace(user_id=1)]
         web.push_mod.deliver_later(DB, hit, "")
         web.alerts_mod.deliver_later(DB, hit, None, lambda conn: None)
@@ -735,6 +735,10 @@ check("and the alerts that had just fired have been told, to phones and by email
       {"notice", "email"} <= set(at_the_end), at_the_end)
 check("a round being checked has longer than two seconds to end",
       told[0][0] == "round" and told[0][1] >= 5, told)
+rounds = [t for t in told if t[0] == "round"]
+check("one that takes longer is told to break off, and has time to hand over what it has",
+      [t[2] for t in rounds] == [False, True] and rounds[1][1] >= 2, told)
+web.alerts_mod.STOPPING.clear()
 
 head("WHO IS ASKING, THROUGH THE REAL SERVER")
 # waitress deletes the proxy's headers unless told otherwise, and every
