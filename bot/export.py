@@ -259,13 +259,13 @@ def watchlist(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict
 ALERT_COLUMNS = [
     "id", "symbol", "condition", "interval", "note", "on", "keeps_watching",
     "created_utc", "last_checked_utc", "last_fired_utc", "value_when_fired",
-    "what_it_said",
+    "what_it_said", "price_set",
 ]
 
 
 def alerts(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
     """Each alert, with its condition in the words the Monitor page uses."""
-    from .alerts import describe
+    from .alerts import KINDS, describe
     return [_owned({
         "id": row["id"],
         "symbol": row["symbol"],
@@ -279,6 +279,10 @@ def alerts(conn: sqlite3.Connection, user: Optional[int] = None) -> List[Dict]:
         "last_fired_utc": _when(row["triggered_ts"]),
         "value_when_fired": row["trigger_value"],
         "what_it_said": row["trigger_note"] or "",
+        # Whole: the condition rounds it as a page does, and two of a currency
+        # pair's, 1.08412 and 1.0839, read the same.
+        "price_set": (row["threshold"] if KINDS.get(row["kind"], {}).get("unit") == "price"
+                      else None),
     }, row, user) for row in db.alert_list(conn, user=user)]
 
 
