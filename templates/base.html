@@ -105,8 +105,9 @@
    script runs and no cookie is set. Signed-in pages are never counted, and
    nothing is counted inside the iPhone app, which declares no tracking.
    Counted only at the site's own address, as the browser sees it: a copy on
-   somebody's machine is not a visit. #}
-{% if (not current_user or demo) and not in_app and visit_host %}
+   somebody's machine is not a visit. Nor is the page that waits its turn
+   (busy.html), which opens itself again every few seconds. #}
+{% if (not current_user or demo) and not in_app and visit_host and not come_back %}
 <script>if (location.hostname.replace(/^www\./, "") === {{ visit_host|tojson }})
   new Image().src = "https://tracker.metricool.com/c3po.jpg?hash=70c36164ea6fa11bf37f04fa93857df0&u="
   + encodeURIComponent(location.origin + location.pathname) + "&bw=" + innerWidth + "&bh=" + innerHeight

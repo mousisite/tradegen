@@ -378,6 +378,7 @@ try:
           and "high-impact headline landed" not in page)
     check("a visitor is not offered JSON the server will not give them",
           "View as JSON" not in page)
+    check("and a visit to it is counted", "tracker.metricool.com" in page)
 
     # Every place for slow work taken, as in a crowd.
     asked = []
@@ -405,6 +406,8 @@ try:
           "You already hold NVDA" in flat(text(r)) and "You already hold NVDA" in flat(quiet))
     check("a trade's picture, which fetches its prices, waits its turn",
           picture.status_code == 503 and "opens by itself" in text(picture), picture.status_code)
+    check("and opening itself again is not counted as visits",
+          "tracker.metricool.com" not in text(picture))
 
     page = SEEN[("visitor", "/research?symbol=NVDA&interval=1d")][1]
     check("research names what it could not get, not how it failed",
