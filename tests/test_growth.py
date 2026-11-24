@@ -376,7 +376,15 @@ try:
     check("Strategies lists every strategy with enough setups",
           page.count('<td class="lead">') == len(_strats.REGISTRY),
           page.count('<td class="lead">'))
-    conn.execute("DELETE FROM strategy_stats WHERE symbol='ALLFORTY'")
+    conn.execute("UPDATE strategy_stats SET symbol='NVDA' WHERE symbol='ALLFORTY'")
+    conn.commit()
+    every, one = (" ".join(c.get("/strategies" + q).data.decode("utf-8", "replace").split())
+                  for q in ("", "?symbol=NVDA"))
+    check("a visitor is told the figures count every instrument, only while they do",
+          "Only popular names can be picked here. The figures count every instrument" in every
+          and "Only popular names can be picked here." in one
+          and "The figures count every instrument" not in one)
+    conn.execute("DELETE FROM strategy_stats WHERE symbol='NVDA'")
     conn.commit()
     conn.close()
     page = c.get("/stock/nvda").data.decode("utf-8", "replace")
