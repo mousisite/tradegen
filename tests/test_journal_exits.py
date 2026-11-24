@@ -753,6 +753,15 @@ try:
     code, said = cli("open", "ZZWRONG", "--entry", 100, "--stop", 90, "--target", 95)
     check("a target on the losing side is refused there too", code == 2
           and "the target must sit above the entry" in said, said)
+    # A currency pair's entry and stop, both 1.084 to the usual decimals.
+    code, said = cli("open", "ZZPAIR", "--entry", 1.08412, "--stop", 1.08386,
+                     "--target", 1.0849, "--interval", "1d")
+    check("a pair's entry, stop and target are said as three prices", code == 0
+          and "entry 1.0841 stop 1.0839 target 1.0849" in said, said)
+    code, said = cli("list")
+    check("and listed as two", "ZZPAIR LONG 1.0841 1.0839" in said, said)
+    db.delete_trade(conn, conn.execute("SELECT id FROM trades WHERE symbol='ZZPAIR'")
+                    .fetchone()[0])
     code, said = cli("take", "ZZP", "--account-size", "nan")
     check("and an account size that is not a number never ends in a traceback", code != 0, said)
     conn.execute("INSERT INTO runs (ts, symbol, interval, action, entry, stop, target1, user_id) "

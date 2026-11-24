@@ -125,12 +125,13 @@ def cmd_open(args, conn) -> int:
         trailing = "\nthe stop trails %s behind the best price, and only tightens" % (
             "%g%%" % args.trail if args.trail is not None
             else "%g ATR (%s)" % (args.trail_atr, format_price(trail["trail_dist"])))
+    levels = (args.entry, args.stop, args.target)
     console.print(Panel(
         "[bold]#%d  %s %s[/]\nentry %s   stop %s   target %s\n"
         "risk %s per unit%s%s" % (
             trade_id, _side(direction), args.symbol.upper(),
-            format_price(args.entry), format_price(args.stop),
-            format_price(args.target) if args.target else "-",
+            format_price(args.entry, beside=levels), format_price(args.stop, beside=levels),
+            format_price(args.target, beside=levels) if args.target else "-",
             format_price(risk),
             "   ·   %s units   ·   %s total risk" % (
                 args.qty, format_price(risk * args.qty)) if args.qty else "",
@@ -238,12 +239,13 @@ def cmd_take(args, conn) -> int:
         console.print("[red]Rejected:[/] %s" % exc)
         return 2
 
+    levels = (run["entry"], run["stop"], run["target1"])
     console.print(Panel(
         "[bold]#%d  %s %s[/]   from analysis #%d, %s old\n"
         "entry %s   stop %s   target %s\n%s units   ·   risking %s" % (
             trade_id, _side(direction), run["symbol"], run["id"], _age(run["ts"]),
-            format_price(run["entry"]), format_price(run["stop"]),
-            format_price(run["target1"]) if run["target1"] else "-",
+            format_price(run["entry"], beside=levels), format_price(run["stop"], beside=levels),
+            format_price(run["target1"], beside=levels) if run["target1"] else "-",
             qty, format_price(risk_amount)),
         title="Opened from plan", border_style="green"))
     return 0
@@ -404,7 +406,8 @@ def cmd_check(args, conn) -> int:
         bars = fetched.get(t["id"])
         if bars is None:
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          format_price(t["entry"], beside=(t["stop"],)),
+                          format_price(t["stop"], beside=(t["entry"],)), "-", "-",
                           _age(t["ts_opened"]), "[yellow]no data[/]")
             continue
 
@@ -416,7 +419,8 @@ def cmd_check(args, conn) -> int:
         except DataError:
             # A split cannot be ruled out just now.
             table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                          format_price(t["entry"]), format_price(t["stop"]), "-", "-",
+                          format_price(t["entry"], beside=(t["stop"],)),
+                          format_price(t["stop"], beside=(t["entry"],)), "-", "-",
                           _age(t["ts_opened"]), "[yellow]no split data[/]")
             continue
         if split != 1.0:
@@ -475,7 +479,8 @@ def cmd_check(args, conn) -> int:
 
         colour = "green" if r_now > 0 else "red"
         table.add_row(str(t["id"]), t["symbol"], _side(direction),
-                      format_price(entry), format_price(read.stop), format_price(price),
+                      format_price(entry, beside=(read.stop,)),
+                      format_price(read.stop, beside=(entry,)), format_price(price),
                       "[%s]%+.2f[/]" % (colour, r_now), _age(t["ts_opened"]), status)
 
     console.print(Panel(table, title="Open positions marked to market",
@@ -518,8 +523,10 @@ def cmd_list(args, conn) -> int:
         r = parts["r"]
         r_txt = "-" if r is None else "[%s]%+.2f[/]" % ("green" if r > 0 else "red", r)
         table.add_row(str(t["id"]), t["symbol"], _side(t["direction"]),
-                      format_price(t["entry"]), format_price(t["stop"]), size,
-                      format_price(parts["avg_exit"]) if parts["avg_exit"] else "-",
+                      format_price(t["entry"], beside=(t["stop"], parts["avg_exit"])),
+                      format_price(t["stop"], beside=(t["entry"], parts["avg_exit"])), size,
+                      format_price(parts["avg_exit"], beside=(t["entry"], t["stop"]))
+                      if parts["avg_exit"] else "-",
                       r_txt, t["status"], _age(t["ts_opened"]))
     console.print(Panel(table, title="Trades", border_style="cyan"))
     if any(exits.get(t["id"]) and t["status"] == "open" for t in trades):
