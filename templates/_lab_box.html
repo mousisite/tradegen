@@ -1,9 +1,8 @@
 {# On a strategy's test page: the Setup lab's result for it, with the course's
    own stop and targets on 5- and 15-minute prices, beside random entries.
-   Expects strategy. Draws nothing for a strategy that is not one of the
-   course's setups, or before the lab has measured it. #}
+   Expects box, from lab_box_data. Draws nothing for a strategy that is not one
+   of the course's setups, or before the lab has measured it. #}
 {% from "_learn.html" import pooled_table with context %}
-{% set box = lab_box_data(strategy) %}
 {% if box %}
 <section class="card pad0" id="intraday" style="margin-top:var(--s3)">
   <div class="cardhead">
