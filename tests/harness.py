@@ -21,6 +21,7 @@ os.environ["STOCKBOT_NO_DOTENV"] = "1"
 # Nor keep one the machine itself has set: a run would call Claude and pay for
 # it, and what a suite finds would depend on whose machine it ran on.
 os.environ.pop("ANTHROPIC_API_KEY", None)
+os.environ.pop("SALES_PAUSED", None)
 
 # Set by isolate(), so a suite can read the paths it was given.
 DB_PATH = ""

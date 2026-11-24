@@ -912,6 +912,78 @@ try:
           and "Pro renews automatically" in words_of(web.app.test_client().get("/pricing")))
 
     print()
+    print("   Selling paused, with everything still set up:")
+    conn = db.connect(DB)
+    payer = A.upsert_email_user(conn, "payer@example.com")
+    looker = A.upsert_email_user(conn, "looker@example.com")
+    billing.set_plan(conn, payer.id, "pro", "active", "cus_payer")
+    payer = A.get_user(conn, payer.id)
+    conn.close()
+    stranger = web.app.test_client()
+    sign_in(looker)
+    check("before it, a free account is told of Pro",
+          "Go Pro" in words_of(c.get("/")) and not billing.is_pro(looker)
+          and not billing.paused())
+    _os.environ["SALES_PAUSED"] = "1"
+    try:
+        check("nothing is on sale and everyone has everything",
+              not billing.ready() and billing.paused() and billing.is_pro(looker)
+              and billing.is_pro(payer) and billing.describe().startswith("PAUSED")
+              and billing.half_set() == "", billing.describe())
+        for who, label in ((c, "a free account"), (stranger, "a visitor")):
+            r = who.get("/pricing")
+            page = words_of(r)
+            check("%s is told on the pricing page that it is free, with no price and "
+                  "nothing to buy" % label, r.status_code == 200
+                  and "Everything is free for now." in page and "noindex" in page
+                  and "$9" not in page and "/billing/checkout" not in page
+                  and "still pay" not in page, r.status_code)
+        check("and it is in no sitemap",
+              "/pricing" not in stranger.get("/sitemap.xml").data.decode())
+        check("nobody can buy", c.post("/billing/checkout", data={"plan": "monthly"}).status_code
+              == 404 and c.post("/billing/code", data={"code": "X"}).status_code == 404)
+        home, front = words_of(c.get("/")), words_of(stranger.get("/"))
+        check("no page offers Pro", "Go Pro" not in home and "/pricing" not in home
+              and "See what Pro adds" not in front and "Everything is free for now." in front)
+        said = words_of(c.get("/account"))
+        check("the account page says so, with nothing to manage for who pays nothing",
+              "free for everyone for now" in said and "Manage subscription" not in said
+              and "Invite friends" not in said)
+        sign_in(payer)
+        said = words_of(c.get("/account"))
+        check("while who pays is told there is nothing to pay for, and can stop it",
+              "nothing to pay for" in said and "Manage subscription" in said
+              and "If you still pay for Pro" in words_of(c.get("/pricing"))
+              and c.post("/billing/portal").status_code == 303)
+        terms = words_of(c.get("/terms"))
+        check("their terms are still there", "Pro is not on sale at the moment" in terms
+              and "You can cancel at any time" in terms)
+        _os.environ["STOCKBOT_ADMIN_EMAIL"] = "payer@example.com"
+        check("the operator's page says selling is paused",
+              "Selling is paused" in words_of(c.get("/usage")))
+        del _os.environ["STOCKBOT_ADMIN_EMAIL"]
+        stopped = json.dumps({"type": "customer.subscription.deleted", "created": now,
+                              "data": {"object": {"customer": "cus_payer",
+                                                  "status": "canceled"}}}).encode()
+        r = c.post("/billing/webhook", data=stopped,
+                   headers={"Stripe-Signature": signed(stopped)})
+        check("a subscription stopped meanwhile is recorded",
+              r.status_code == 200 and r.get_json()["outcome"] == "free", r.status_code)
+        del _os.environ["STRIPE_PRICE_ID"]
+        check("a missing setting is still said to be that, not a pause",
+              not billing.paused() and billing.half_set() == "STRIPE_PRICE_ID is not set")
+        _os.environ["STRIPE_PRICE_ID"] = STRIPE["STRIPE_PRICE_ID"]
+        _os.environ["SALES_PAUSED"] = "0"
+        sign_in(looker)
+        check("and 0 sells again, with the limits back", billing.ready()
+              and not billing.is_pro(looker) and "Go Pro" in words_of(c.get("/"))
+              and "Pro renews automatically" in words_of(c.get("/pricing")))
+    finally:
+        _os.environ.pop("SALES_PAUSED", None)
+        _os.environ["STRIPE_PRICE_ID"] = STRIPE["STRIPE_PRICE_ID"]
+        _os.environ.pop("STOCKBOT_ADMIN_EMAIL", None)
+
+    print()
     print("   One setting missing never traps someone who pays:")
     conn = db.connect(DB)
     stuck = A.upsert_email_user(conn, "stuck@example.com")
