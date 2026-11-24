@@ -2056,6 +2056,17 @@ check("at any size of price", [market.format_price(a, beside=(b,)) + " " +
       == ["151.231 151.229", "100.031 100.0295", "0.91 0.909999",
           "0.00000000002 0.000000000015", "94,731.004 94,731.001"],
       [market.format_price(a, beside=(b,)) for a, b in ((151.2312, 151.2287),)])
+# The entry and the target read alike (1.085), the stop did not (1.084): to the
+# four decimals those two needed, the entry and the stop both read 1.0845.
+near_ = [(1.08454, 1.08446, 1.08477), (4.534e-08, 4.453e-08, 4.772e-08),
+         (1939.5356, 1939.4913, 1940.148)]
+check("and no two of three do when it is another two that would have read alike",
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      == [["1.08454", "1.08446", "1.08477"], ["0.0000000453", "0.0000000445", "0.0000000477"]]
+      and [plain._money(v, "USD", near_[2]) for v in near_[2]]
+      == ["$1,939.54", "$1,939.49", "$1,940.15"],
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      + [[plain._money(v, "USD", near_[2]) for v in near_[2]]])
 check("ordinary prices, and one price said twice, read as ever beside each other",
       all(market.format_price(a, beside=(b, None, float("nan"))) == market.format_price(a)
           and plain._money(a, "USD", (b, None)) == plain._money(a, "USD")
