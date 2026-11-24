@@ -1294,6 +1294,15 @@ try:
                         "/screener?go=1": 503, "/export/trades.csv": 503,
                         "/monitor": 200, "/screener": 200,
                         "/tools/size": 200, "/account": 200, "/": 200}, pages)
+        read = []
+        real_summary = web.db_mod.journal_summary
+        web.db_mod.journal_summary = lambda *a, **k: read.append(1) or real_summary(*a, **k)
+        try:
+            for path in ("/trades", "/portfolio"):
+                another().get(path)
+        finally:
+            web.db_mod.journal_summary = real_summary
+        check("and one sent away to wait has not read the journal for nothing", not read, read)
         other = web.app.test_client()
         conn = db.connect(DB)
         try:

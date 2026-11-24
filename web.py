@@ -2010,6 +2010,9 @@ CLOSED_SHOWN = 100
 def trades():
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        # Before anything is read, so a page sent away to wait costs little.
+        if db_mod.count_open(conn, "paper", user=uid()):
+            _slow_from_here()
         open_trades = db_mod.list_trades(conn, status="open", account="paper", limit=None,
                                          user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
@@ -2023,8 +2026,6 @@ def trades():
         # What each trade's exits add up to: what is left of a position
         # closed in part, and the whole of one closed in parts.
         parts = {t["id"]: db_mod.trade_parts(t, exits.get(t["id"], [])) for t in every}
-        if open_trades:
-            _slow_from_here()
         live = _mark_to_market(open_trades)
         _keep_trail_bests(conn, open_trades, live)
     finally:
@@ -5918,14 +5919,14 @@ def portfolio():
     cfg = _cfg()
     conn = db_mod.connect(app.config.get("DB_PATH"))
     try:
+        if db_mod.count_open(conn, "paper", user=uid()):
+            _slow_from_here()
         # What is held: a position closed in part counts only what is left.
         rows = db_mod.open_positions(conn, "paper", limit=None, user=uid())
         summary = db_mod.journal_summary(conn, user=uid(), costs=_costs())
     finally:
         conn.close()
 
-    if rows:
-        _slow_from_here()
     view = portfolio_mod.build(rows, cfg["account_size"], cost_bps={
         kind: config_mod.cost_bps_for(kind, cfg) for kind in ("equity", "crypto", "other")}
         | {"futures": float(cfg.get("cost_bps_futures", 1.0))})
