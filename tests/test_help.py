@@ -363,11 +363,23 @@ try:
           and "Scored by skipped" not in page)
 
     head("WHAT THE PAGE SAYS ABOUT THE NEWS WITHOUT A CLAUDE KEY")
-    sentiment_mod.gather_news = lambda symbol, name="": [sentiment_mod.Item(
-        text="Test Corp beats estimates", kind="news", source="Test", age_hours=30.0)]
+    looked_up = []
+
+    def headlines(symbol, name=""):
+        looked_up.append(name)
+        return [sentiment_mod.Item(text="Test Corp beats estimates", kind="news",
+                                   source="Test", age_hours=30.0)]
+
+    sentiment_mod.gather_news = headlines
     sentiment_mod.gather_social = lambda symbol: []
     web._CACHE.clear()
     page = c.get("/analyse?symbol=TEST&interval=1d").data.decode("utf-8", "replace")
+    engine.resolve = lambda s: {"symbol": s, "name": s}      # the search did not answer
+    web._CACHE.clear()
+    c.get("/analyse?symbol=TEST&interval=1d")
+    engine.resolve = lambda s: {"symbol": s, "name": "Test Corp"}
+    check("headlines are looked up by name, the prices' own when the search gave none",
+          looked_up == ["Test Corp", "Test Corp"], looked_up)
     worth = page[page.find("Worth knowing"):page.find("Worth knowing") + 2000]
     check("it says the reading is rough, in plain words",
           "Headlines were scored with a list of finance words" in flat(worth), worth[:600])

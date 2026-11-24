@@ -163,7 +163,7 @@ def render(console: Console, bars: Bars, plan: Plan, signals: List[Signal],
             (plan.prob_high or 0) * 100, plan.prob_samples, flag))
         odds.add_row("Expectancy", "%s%+.3fR[/] per trade, net of costs, over %d bars held on average" % (
             "[green]" if (plan.expectancy_r or 0) > 0 else "[red]",
-            plan.expectancy_r or 0, int(calib.avg_bars_held or 0)))
+            plan.expectancy_r or 0, int(round(calib.avg_bars_held or 0))))
         base = getattr(calib, "baseline_expectancy", None)
         if base is not None:
             odds.add_row("Any day", "%+.3fR per trade taking the same side on every "

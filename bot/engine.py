@@ -216,6 +216,11 @@ def analyse(symbol: str, cfg: Dict, interval: Optional[str] = None,
             raise info["search_down"]
         raise
 
+    # The search that names it does not always answer, and headlines are looked
+    # up by name: asked for as "BTC" alone, Bitcoin had one of its nine.
+    if name.upper() == resolved.upper() and bars.name:
+        name = bars.name
+
     # Asked for by a page or a routine; anything else has nobody waiting for it.
     person = source in ("web", "workflow")
     cost_bps = config_mod.cost_bps_for_symbol(bars.symbol, bars.asset_class, cfg)

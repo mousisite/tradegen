@@ -492,6 +492,16 @@ flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c.get("/monitor").data.decode
 said = re.findall(r"EURUSD=X price falls below (\S+)", flat)
 check("and on Monitor the two alerts are two", len(said) == len(set(said)) == 2, said)
 
+from bot import export  # noqa: E402
+
+for kind, value in (("price_above", 1.08412), ("price_above", 1.0839), ("pct_down", 0.05)):
+    db.alert_add(conn, "ZZPAIR", kind, value, user=1)
+rows_ = [r for r in export.alerts(conn, user=1) if r["symbol"] == "ZZPAIR"]
+check("the download keeps the price an alert was set at, whole",
+      sorted(r["price_set"] for r in rows_ if r["price_set"] is not None) == [1.0839, 1.08412]
+      and [r["price_set"] for r in rows_ if "session" in r["condition"] or "%" in r["condition"]]
+      == [None] and list(rows_[0]) == export.ALERT_COLUMNS, rows_)
+
 conn.close()
 print()
 print("%d failed" % len(fails) if fails else "ALL PASSED")
