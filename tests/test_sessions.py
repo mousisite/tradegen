@@ -458,6 +458,30 @@ try:
     check("the loop's own record of a Saturday round says what it left",
           entry["ok"] and entry["skipped"] == 3 and entry["checked"] == 1, entry)
 
+    # A position past its stop, found while the database is busy for too long.
+    import sqlite3
+    conn = db.connect(DB)
+    conn.execute("PRAGMA busy_timeout = 50")
+    past = db.open_trade(conn, "AAPL", "1d", 1, entry=300.0, stop=250.0, quantity=1,
+                         user=alice.id)
+    writer = db.connect(DB)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        alerts.check_stops(conn, skip_closed=True, now=at(2026, 11, 14, 16, 5))
+        broke = False
+    except sqlite3.OperationalError:
+        broke = True
+    finally:
+        writer.rollback()
+        writer.close()
+        conn.rollback()
+    told = [f.trade_id for f in alerts.check_stops(
+        conn, skip_closed=True, now=at(2026, 11, 14, 16, 10))["fired"]]
+    check("a crossing that could not be written down is told at the next round, not left "
+          "until the market opens", broke and told == [past], (broke, told))
+    db.delete_trade(conn, past)
+    conn.close()
+
     DESCRIBED["day"] = date(2026, 11, 16)
     out, asked = round_at(at(2026, 11, 16, 14, 35))
     check("Monday's open asks for the stock again",

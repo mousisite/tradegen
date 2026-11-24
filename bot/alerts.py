@@ -1393,9 +1393,6 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             errors.append({"symbol": row["symbol"],
                            "error": "split history: %s" % str(exc)[:100]})
             continue
-        # Read in full from here on, so a closed market can wait for its open.
-        with _STOPS_LOCK:
-            _STOPS_LOOKED[int(row["id"])] = now
         quote = float(bars.last_price)
         side = int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:
@@ -1412,6 +1409,11 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         if crossed is not None:
             db.stop_crossed(conn, int(row["id"]), *crossed)
         if not read.hit:
+            # Read in full, so a closed market can wait for its open. One past
+            # its stop is not looked at again once that is written down: said
+            # before, a database busy just then left it untold until the open.
+            with _STOPS_LOCK:
+                _STOPS_LOOKED[int(row["id"])] = now
             continue
         price, stop = read.price, read.stop
         said = format_price(price)
