@@ -976,6 +976,38 @@ check("a bar that starts the moment the trade opened is read by the same rule",
 
 
 print()
+print("=" * 72)
+print("WHAT THE SHARED ANSWERS MAY COME TO")
+print("=" * 72)
+upstream.reset()
+
+
+def prices(bars):
+    return {"chart": {"result": [{"timestamp": list(range(bars))}]}}
+
+
+# A page's own two histories, then a round of alerts over four hundred symbols.
+upstream.cached("page-1", lambda: prices(1300))
+upstream.cached("page-2", lambda: prices(1300))
+for n in range(400):
+    upstream.cached("alert-%d" % n, lambda: prices(260))
+check("a round over many small histories leaves what the pages just read",
+      "page-1" in upstream._cache and "page-2" in upstream._cache
+      and upstream.stats()["cached_keys"] == 402, upstream.stats()["cached_keys"])
+for n in range(100):
+    upstream.cached("hours-%d" % n, lambda: prices(17500))
+held = [k for k in upstream._cache if k.startswith("hours-")]
+check("large ones are kept by what they hold, not by their number",
+      sum(upstream._sizes.values()) <= upstream.MAX_BYTES and 8 <= len(held) <= 14
+      and "hours-99" in held and "page-1" not in upstream._cache
+      and set(upstream._sizes) == set(upstream._cache), len(held))
+upstream.MAX_BYTES, most_bytes = 1000, upstream.MAX_BYTES
+upstream.cached("huge", lambda: prices(17500))
+check("and one larger than that is still an answer", list(upstream._cache) == ["huge"])
+upstream.MAX_BYTES = most_bytes
+upstream.reset()
+
+print()
 print("%d failure(s)" % len(fails))
 print("MARKET OK" if not fails else "FAILURES: %s" % fails)
 _sys.exit(1 if fails else 0)

@@ -57,6 +57,7 @@ _ARCHIVE = "https://www.sec.gov/Archives/edgar/data/%d/%s/%s"
 _FILING_PAGE = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=%010d&type=%s"
 
 _RATE_LOCK = threading.Lock()
+_READING = threading.Lock()
 _LAST_CALL = [0.0]
 _MIN_GAP = 0.12          # EDGAR asks for under ~10 requests a second
 
@@ -238,7 +239,10 @@ def _get(url: str, params: Optional[Dict] = None, tries: int = 2):
         if r.status_code == 200:
             upstream.note_ok(_HOST)
             try:
-                return r.json()
+                # One at a time: a large company's filed figures are ten
+                # megabytes of JSON and many times that while being read.
+                with _READING:
+                    return r.json()
             except ValueError:
                 return r.text
         if r.status_code == 404:

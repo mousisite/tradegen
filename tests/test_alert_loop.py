@@ -1476,6 +1476,87 @@ try:
 
     print()
     print("=" * 72)
+    print("A ROUND OVER MANY")
+    print("=" * 72)
+    busy = person("busy@example.com")
+    conn = db.connect(DB)
+    conn.execute("UPDATE alerts SET active=0")
+    conn.execute("UPDATE trades SET status='closed' WHERE status='open'")
+    conn.commit()
+    old = int(time.time()) - 400 * 86400
+    for k in range(16):
+        PRICE["MM%d" % k] = 100.0
+        db.open_trade(conn, "MM%d" % k, "1d", 1, entry=100.0, stop=90.0, target1=120.0,
+                      quantity=1, user=busy.id)
+        for n in range(20):
+            db.alert_add(conn, "MM%d" % k, "price_above", threshold=500.0 + n,
+                         user=busy.id, cap=None)
+    conn.execute("UPDATE alerts SET created_ts=? WHERE user_id=?", (old, busy.id))
+    conn.execute("UPDATE trades SET ts_opened=? WHERE user_id=?", (old, busy.id))
+    conn.commit()
+    real_fetch_bars, real_splits = alerts.fetch_bars, web.market_mod.split_history
+    asked_splits = []
+
+    def waits(symbol, interval="1d", lookback=None):
+        time.sleep(0.15)
+        return bars_for(symbol, interval, lookback)
+
+    kept_splits = {}
+
+    def history(symbol):
+        if symbol not in kept_splits:
+            time.sleep(0.15)
+            asked_splits.append(threading.current_thread().name)
+            kept_splits[symbol] = []
+        return kept_splits[symbol]
+
+    alerts.fetch_bars, web.market_mod.split_history = waits, history
+    commits = []
+    conn.set_trace_callback(lambda sql: commits.append(sql) if sql == "COMMIT" else None)
+    try:
+        began = time.monotonic()
+        res = alerts.check(conn)
+        took = time.monotonic() - began
+        check("the splits behind many alerts are asked for several at once",
+              res["checked"] == 320 and not res["errors"] and took < 2.4, (res, took))
+        check("and a round with nothing to tell is a few writes to the disk, not one an alert",
+              len(commits) <= 6 and conn.execute(
+                  "SELECT COUNT(*) FROM alerts WHERE user_id=? AND last_checked>0 AND "
+                  "state LIKE 'clear%'", (busy.id,)).fetchone()[0] == 320, len(commits))
+        kept_splits.clear()
+        began = time.monotonic()
+        res = alerts.check_stops(conn)
+        took = time.monotonic() - began
+        check("the prices behind many open positions are asked for several at once too",
+              res["checked"] == 16 and not res["errors"] and took < 2.4, (res, took))
+        # Broken off part-way, what it did look at is still written down.
+        conn.execute("UPDATE alerts SET last_checked=NULL WHERE user_id=?", (busy.id,))
+        conn.commit()
+        real_after, seen = alerts._after_splits, []
+
+        def breaks(k, row, bars):
+            seen.append(row["id"])
+            if len(seen) == 50:
+                raise RuntimeError("the round broke off")
+            return real_after(k, row, bars)
+
+        alerts._after_splits = breaks
+        try:
+            alerts.check(conn)
+        except RuntimeError:
+            pass
+        finally:
+            alerts._after_splits = real_after
+        check("a round that breaks off has still looked at those before",
+              conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=? AND last_checked>0",
+                           (busy.id,)).fetchone()[0] == 49)
+    finally:
+        conn.set_trace_callback(None)
+        alerts.fetch_bars, web.market_mod.split_history = real_fetch_bars, real_splits
+        conn.close()
+
+    print()
+    print("=" * 72)
     print("THE PAGE")
     print("=" * 72)
     sign_in(alice)

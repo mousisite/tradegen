@@ -430,6 +430,8 @@ def main(argv=None) -> int:
     print()
     sys.stdout.flush()
 
+    # So that web.py keeps some of them free of slow work.
+    web.app.config["WEB_THREADS"] = args.threads
     try:
         _stop_when_told()
         serve(web.app, host=args.host, port=args.port, threads=args.threads,

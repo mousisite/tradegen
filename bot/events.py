@@ -84,8 +84,12 @@ def bump(conn: sqlite3.Connection, name: str, n: int = 1) -> None:
                 raise
             conn.execute(_TABLE)
             _add(conn, name, n)
-    except Exception:
-        log.exception("Could not count %s", name)
+    except Exception as exc:
+        if "locked" in str(exc):
+            # Expected now and then: the count gives way to a longer write.
+            log.warning("%s was not counted: the database was busy", name)
+        else:
+            log.exception("Could not count %s", name)
         try:
             conn.rollback()
         except Exception:
