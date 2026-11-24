@@ -1144,6 +1144,7 @@ try:
     print("=" * 72)
     print("WHAT A STRANGER, OR ONE ACCOUNT, CAN SEND")
     print("=" * 72)
+    import io
     import json
     import threading
     from bot import export as export_mod
@@ -1601,8 +1602,26 @@ try:
               and r.headers["Retry-After"] == str(web.SLOW_RETRY), r.data)
         r = c.post("/thesis/save", data={"symbol": "TSLA", "interval": "1d", "note": "my <own> words"},
                    headers={"Referer": "http://localhost/research?symbol=TSLA"})
+        page = page_of(r)
         check("and neither it nor a thesis is counted in the hour's", r.status_code == 503
               and not any(web._RATE.values()), web._RATE)
+        check("what was typed can be sent again from the page that says so",
+              'name="note" value="my &lt;own&gt; words"' in page
+              and '<form method="post" action="/thesis/save"' in page
+              and 'href="/research?symbol=TSLA">Go back' in page, page[-2500:])
+        page = page_of(c.post("/thesis/save", data={
+            "symbol": "TSLA", "interval": "1d", "note": "n",
+            "busy_back": "/research?symbol=TSLA"},
+            headers={"Referer": "http://localhost/thesis/save"}))
+        check("and going back still leads to where it was typed",
+              'href="/research?symbol=TSLA">Go back' in page
+              and page.count('name="busy_back"') == 1, page[-2500:])
+        r = c.post("/analyse/image", data={"chart": (io.BytesIO(b"x"), "chart.png")},
+                   content_type="multipart/form-data")
+        check("a picture is chosen again", r.status_code == 503
+              and "Go back, wait" in page_of(r) and "Try again" not in page_of(r))
+        check("an address that is none does not break the page that waits",
+              c.get("/screener?go=1", headers={"Referer": "http://["}).status_code == 503)
     finally:
         for key in STRIPE:
             _os.environ.pop(key, None)

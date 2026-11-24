@@ -11,6 +11,15 @@
 
 <div class="card">
   <p class="prose" role="status">{{ message }}</p>
+  {% if again %}
+  <form method="post" action="{{ request.path }}" style="margin:var(--s3) 0 0">
+    {% for name, values in request.form.lists() if name != 'busy_back' %}{% for value in values %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}{% endfor %}
+    <input type="hidden" name="busy_back" value="{{ back }}">
+    <button class="btn" type="submit">Try again</button>
+  </form>
+  {% endif %}
   <p style="margin:var(--s3) 0 0">
     {% if come_back %}
       <a class="btn quiet" href="{{ request.full_path.rstrip('?') }}">Try now</a>

@@ -448,7 +448,10 @@ def _sent_from_elsewhere():
 def _referrer_path() -> str:
     """The page a request came from, as a safe path on this site, or "/"."""
     from urllib.parse import urlparse
-    ref = urlparse(request.referrer or "")
+    try:
+        ref = urlparse(request.referrer or "")
+    except ValueError:              # "http://[" is no address of anywhere
+        return "/"
     if ref.netloc and ref.netloc != request.host:
         return "/"
     path = ref.path or "/"
@@ -1088,15 +1091,24 @@ def _come_back():
     everybody's pages are drawn by. A button is never pressed again by itself."""
     _uncount()
     waits = request.method in ("GET", "HEAD")
+    # What was typed, to send again: the page it was typed on is drawn anew by
+    # going back. A picture, or more than any form here holds, is not read.
+    again = (not waits and request.mimetype == "application/x-www-form-urlencoded"
+             and (request.content_length or 0) <= app.config["MAX_FORM_MEMORY_SIZE"])
+    back = _referrer_path()
+    if again:
+        # Sent again from the page saying this, which is nowhere to go back to.
+        back = _safe_back(request.form.get("busy_back"), back)
     page = app.make_response((render_template(
         "busy.html",
         # Not all in the same second.
         come_back=SLOW_RETRY + random.randint(-1, 2) if waits else None,
-        back=_referrer_path(),
+        back=back, again=again,
         message=("A lot of people are asking for pages at once, so this one is waiting "
                  "its turn. It opens by itself in a few seconds." if waits else
                  "A lot of people are asking for pages at once, so nothing was done. "
-                 "Go back, wait a few seconds and press the button again.")), 503))
+                 "%s a few seconds and press the button again."
+                 % ("Wait" if again else "Go back, wait"))), 503))
     page.headers["Retry-After"] = str(SLOW_RETRY)
     return page
 
