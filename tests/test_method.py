@@ -4,6 +4,7 @@ No network: market data is synthetic, and where a real download would happen
 the payload is built by hand. Each section pins one way the method used to
 mislead, and says how.
 """
+import io
 import os as _os
 import re
 import sys as _sys
@@ -22,6 +23,7 @@ from bot import calibrate as cal  # noqa: E402
 import scenarios as sc  # noqa: E402
 from bot import catalysts, clock, config, decision, engine, levels  # noqa: E402
 from bot import market, plain, public  # noqa: E402
+from bot import report as printed  # noqa: E402
 from bot import strategies as S  # noqa: E402
 from bot.calibrate import Calibration, Outcome  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -2048,6 +2050,17 @@ for p_said in (p_slow, plan_on(slow, c=calib(rate=0.45, lo=0.36, hi=0.54, exp=0.
           and "beyond %s." % out_ in p_said.invalidation
           and ("Wait for %s." % in_ in p_said.trigger or p_said.action == "BUY"),
           (in_, out_, p_said.headline, p_said.trigger, p_said.invalidation))
+# The printed report too, its price now not reading as if the entry had come.
+printed_ = io.StringIO()
+dc_ = S.build_context(slow)
+printed.render(printed.Console(file=printed_, width=200), slow, p_slow, [], 0.3,
+               S.classify_regime(dc_, len(slow) - 1), calib(), FLAT, calm)
+at_ = [market.format_price(v, beside=[p_slow.entry, p_slow.stop, p_slow.target1, p_slow.target2,
+                                      slow.last_price])
+       for v in (slow.last_price, p_slow.entry, p_slow.stop)]
+check("the report prints the price now, the entry and the stop as three",
+      len(set(at_)) == 3 and all(" %s " % v in printed_.getvalue() for v in at_),
+      (at_, printed_.getvalue()[:900]))
 # 1.084 and 1.084: kept apart by the plan, and read as one price on the page.
 pair_ =dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
                             action="BUY")
