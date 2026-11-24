@@ -119,6 +119,10 @@ broken = list(closes)
 broken[50] = float("nan")
 check("a broken bar is skipped, not drawn as a spike",
       charts.trade_chart(times, opens, highs, lows, broken, levels={}).count("<title>") == 90 - 1 + 0)
+# An AVOID draws no plan: a quarter of a phone's chart was kept for its names.
+bare = charts.trade_chart(times, opens, highs, lows, closes, vols, width=340, height=260, bars=40)
+check("a chart with no levels to name runs to its right edge",
+      'x2="326"' in bare and 'x2="254"' in narrow and 'x2="326"' not in narrow)
 check("a level of None or zero is left out",
       "Stop" not in charts.trade_chart(times, opens, highs, lows, closes, levels={"Stop": None, "Target": 0}))
 check("text is escaped", "&lt;b&gt;" in charts.trade_chart(

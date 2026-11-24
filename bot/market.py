@@ -7,6 +7,7 @@ class without the user telling it what they pasted in.
 """
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -99,12 +100,37 @@ class DataUnavailable(DataError):
     """
 
 
-def format_price(value, currency: str = "") -> str:
+def decimals_apart(values, shown) -> int:
+    """The decimals that keep prices standing beside each other apart.
+
+    0 when every two that differ read differently already, as shown(value)
+    writes them: then nothing changes. A currency pair or a cash fund on short
+    bars can have an entry and a stop that both read 1.084; then the decimals
+    that write the smallest difference between them to within a half.
+    """
+    real = []
+    for value in values:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v):
+            real.append(v)
+    gaps = [abs(a - b) for i, a in enumerate(real) for b in real[:i]
+            if shown(a) == shown(b) and abs(a - b) > 1e-9 * max(abs(a), abs(b))]
+    if not gaps:
+        return 0
+    return min(16, max(0, math.ceil(-math.log10(min(gaps) / 2.0) - 1e-9)))
+
+
+def format_price(value, currency: str = "", beside=()) -> str:
     """Render a price readably across the full range of instrument prices.
 
     A generic significant-figure format turns 78230.4 into '7.823e+04', which
     is useless on a trading screen. Precision has to follow magnitude: index
     levels want thousands separators, small-cap tokens want six decimals.
+    `beside` is the other prices shown with this one, as a plan's stop beside
+    its entry: when two of them would read the same, all get more decimals.
     """
     if value is None:
         return "-"
@@ -114,16 +140,10 @@ def format_price(value, currency: str = "") -> str:
         return str(value)
 
     av = abs(v)
-    if av >= 1000:
-        out = "{:,.2f}".format(v)
-    elif av >= 100:
-        out = "{:,.2f}".format(v)
-    elif av >= 1:
-        out = "{:.3f}".format(v)
-    elif av >= 0.01:
-        out = "{:.5f}".format(v)
-    else:
-        out = "{:.8f}".format(v)
+    digits = 2 if av >= 100 else 3 if av >= 1 else 5 if av >= 0.01 else 8
+    if beside:
+        digits = max(digits, decimals_apart([v, *beside], format_price))
+    out = "{:,.{d}f}".format(v, d=digits)
 
     if "." in out:
         out = out.rstrip("0").rstrip(".")

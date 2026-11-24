@@ -435,7 +435,7 @@ MEASURE = r"""
     };
     const out = {wide: document.scrollingElement.scrollWidth, sticking: [], small: [],
                  fonts: [], keys: [], cards: [], away: [], unnamed: [], tiny: [],
-                 bar: null};
+                 lone: [], bar: null};
     if (out.wide > width) {
       for (const el of document.body.querySelectorAll('*')) {
         if (out.sticking.length >= 4 || hidden(el) || held(el)) { continue; }
@@ -524,6 +524,24 @@ MEASURE = r"""
         }
       }
     }
+    // The "?" of a help note stays on the line of the word before it.
+    for (const d of document.querySelectorAll('details.help:not(.list)')) {
+      if (hidden(d.querySelector('.q'))) { continue; }
+      const walk = document.createTreeWalker(d.parentElement, NodeFilter.SHOW_TEXT);
+      let said = null;
+      for (let t = walk.nextNode(); t && !d.contains(t) &&
+           t.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING; t = walk.nextNode()) {
+        if (t.textContent.trim() && !t.parentElement.closest('.sr, .help')) { said = t; }
+      }
+      if (!said) { continue; }
+      const words = document.createRange();
+      words.selectNodeContents(said);
+      const lines = [...words.getClientRects()].filter(r => r.width > 1);
+      if (lines.length && d.querySelector('.q').getBoundingClientRect().top >
+                          lines[lines.length - 1].bottom - 2) {
+        out.lone.push('after "' + said.textContent.trim().slice(-30) + '"');
+      }
+    }
     const bar = document.querySelector('nav.tabbar');
     if (bar && getComputedStyle(bar).display !== 'none') {
       const items = [...bar.querySelectorAll(':scope > a, :scope > details > summary')];
@@ -552,7 +570,7 @@ MEASURE = r"""
 WIDE_MEASURE = r"""
 () => {
   const W = document.documentElement.clientWidth;
-  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [],
+  const out = {wide: document.scrollingElement.scrollWidth - W, heads: [], away: [], slide: [],
                stretched: [], long: []};
   const name = (el) => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
     (typeof el.className === 'string' && el.className.trim()
@@ -579,6 +597,10 @@ WIDE_MEASURE = r"""
   }
   for (const wrap of document.querySelectorAll('.tablewrap')) {
     if (!wrap.offsetParent) { continue; }
+    if (wrap.querySelector('table.stack') && wrap.scrollWidth > wrap.clientWidth + 1) {
+      out.slide.push(name(wrap.querySelector('table')) + ' ' + wrap.scrollWidth + ' wide in ' +
+                     wrap.clientWidth);
+    }
     const edge = wrap.getBoundingClientRect().right;
     for (const el of wrap.querySelectorAll('button, a, input, select, summary')) {
       const r = el.getBoundingClientRect();
@@ -1058,7 +1080,7 @@ def run(browser, site, base, check, head):
     head("EVERY PAGE AT 360 AND 430 WIDE, LIGHT AND DARK")
     # -----------------------------------------------------------------------
     wide, small, fonts, tabs, moved = [], [], [], [], []
-    keys, cards, away, unnamed, tiny, faint = [], [], [], [], [], []
+    keys, cards, away, unnamed, tiny, faint, lone = [], [], [], [], [], [], []
     views, longest = 0, 0
     for who, ua in (("visitor", None), ("free account", None), ("app", APP_UA)):
         member = who != "visitor"
@@ -1095,6 +1117,7 @@ def run(browser, site, base, check, head):
                 away += ["%s: %s" % (where, a) for a in m["away"]]
                 unnamed += ["%s: %s" % (where, u) for u in m["unnamed"]]
                 tiny += ["%s: %s" % (where, t) for t in m["tiny"]]
+                lone += ["%s: %s" % (where, t) for t in m["lone"]]
                 # The colours do not change with the width, only the theme.
                 if width == 360:
                     faint += ["%s: %s" % (where, f) for f in page.evaluate(CONTRAST)]
@@ -1125,6 +1148,7 @@ def run(browser, site, base, check, head):
     check("every ticker box asks for capitals, no corrections and a Go key, and every "
           "price and size box for the decimal keypad", not keys, keys[:5])
     check("no chart is shrunk until its labels are under 8 pixels", not tiny, tiny[:5])
+    check("no help note's ? falls onto a line of its own", not lone, lone[:5])
     check("no text is fainter than 4.5 to 1 against its background (3 to 1 if large), "
           "light or dark", not faint, faint[:5])
     check("the tab bar is there with its five places, 44 or more each, the right one "
@@ -1133,7 +1157,7 @@ def run(browser, site, base, check, head):
     # -----------------------------------------------------------------------
     head("EVERY PAGE ON A COMPUTER AND A TABLET")
     # -----------------------------------------------------------------------
-    broad, heads, hidden, stretched, long_ = [], [], [], [], []
+    broad, heads, hidden, stretched, long_, slide = [], [], [], [], [], []
     for who in ("visitor", "free account"):
         member = who != "visitor"
         ctx = browser.new_context(viewport={"width": 1366, "height": 768},
@@ -1157,6 +1181,7 @@ def run(browser, site, base, check, head):
                     broad.append("%s is %d too wide" % (where, m["wide"]))
                 heads += ["%s: %s" % (where, x) for x in m["heads"]]
                 hidden += ["%s: %s" % (where, x) for x in m["away"]]
+                slide += ["%s: %s" % (where, x) for x in m["slide"]]
                 stretched += ["%s: %s" % (where, x) for x in m["stretched"]]
                 long_ += ["%s: %s" % (where, x) for x in m["long"]]
         ctx.close()
@@ -1165,6 +1190,8 @@ def run(browser, site, base, check, head):
           not heads, heads[:5])
     check("no button or link in a table is a sideways scroll away on a tablet or a "
           "computer", not hidden, hidden[:5])
+    check("no list of rows that is cards on a phone scrolls sideways there, the "
+          "portfolio's eleven columns included", not slide, slide[:5])
     check("no chart's words are stretched", not stretched, stretched[:5])
     check("no point of a list runs past a hundred letters to the line", not long_, long_[:5])
 

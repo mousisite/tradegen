@@ -563,6 +563,11 @@ select.field { cursor: pointer; font-size: var(--t-sm); padding-right: 34px;
    closes with no script and its summary is a real button with a name.
    Inline, so the words open on the line below what they explain. */
 .help { display: inline; }
+/* The ring stays on the line of the word before it, however full that line
+   is: a word joiner (no line may break on either side of it) and no wrapping
+   up to the ring. The words it opens wrap as ever. */
+.help:not(.list) { white-space: nowrap; }
+.help:not(.list)::before { content: "\2060"; }
 .help > summary {
   display: inline-flex; align-items: center; justify-content: center;
   vertical-align: middle; margin-left: 5px; cursor: pointer; list-style: none;
@@ -706,7 +711,8 @@ th.r, td.r { text-align: right; }
   thead th { white-space: normal; vertical-align: bottom; }
 }
 /* The journal's ten columns need more than a tablet has, so there too each
-   trade is a card: its figures four to a line, then the form that closes it. */
+   trade is a card: its figures four to a line, then the form that closes it.
+   The portfolio's eleven as well. */
 @media (min-width: 761px) and (max-width: 1140px) {
   table.tight, table.tight > tbody { display: block; }
   table.tight > thead {
@@ -718,6 +724,8 @@ th.r, td.r { text-align: right; }
     gap: 12px var(--s2); padding: var(--s2) var(--s3);
     border-bottom: 1px solid var(--hairline);
   }
+  /* The portfolio's holdings have ten figures: two lines of five. */
+  .card.pad0 table.tight.five > tbody > tr { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   table.tight > tbody > tr:last-child { border-bottom: 0; }
   .card.pad0 table.tight > tbody > tr > td { display: block; min-width: 0; padding: 0;
                                              border: 0; text-align: left; }

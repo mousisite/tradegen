@@ -77,7 +77,8 @@
     </div>
   </div>
   <div class="factline">
-    <span><b>{{ r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
+    {# The source's "exchange" for a coin is a code of its own, CCC. #}
+    <span><b>{{ 'Crypto' if r.bars.asset_class == 'crypto' else r.bars.exchange or r.bars.asset_class|capitalize }}</b></span>
     <span>{{ r.bars.interval|bar_words }} bars</span>
     {# A daily bar is its day; a shorter one's time is the exchange's own. #}
     <span>last bar <b>{{ r.bars.last_bar_time[:10] if r.bars.interval == '1d' else r.bars.last_bar_time }}</b>{% if r.bars.interval != '1d' %}
@@ -144,11 +145,11 @@
     <span class="eyebrow">The plan</span>
     <dl class="pairs">
       <dt>Entry</dt>
-      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price }}</b>
+      <dd><b class="fig" style="font-size:var(--t-base)">{{ plan.entry|price(plan.stop, plan.target1, plan.target2) }}</b>
           <span class="faint">{{ plan.entry_type }}</span>{{ help('entry') }}</dd>
-      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price }}{{ help('stop') }}</dd>
-      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price }}{{ help('target') }}</dd>
-      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price }}{{ help('runner') }}</dd>
+      <dt>Stop</dt><dd class="fig loss">{{ plan.stop|price(plan.entry, plan.target1, plan.target2) }}{{ help('stop') }}</dd>
+      <dt>First target</dt><dd class="fig gain">{{ plan.target1|price(plan.entry, plan.stop, plan.target2) }}{{ help('target') }}</dd>
+      <dt>Runner</dt><dd class="fig gain">{{ plan.target2|price(plan.entry, plan.stop, plan.target1) }}{{ help('runner') }}</dd>
       <dt>Reward to risk</dt>
       {# The break-even belongs to the trade the odds were measured on. When
          this plan's own levels give a different reward, pairing the two
@@ -205,7 +206,7 @@
     {% elif r.run_id and a == 'WAIT' %}
       <p class="prose faint" style="margin-top:var(--s3);font-size:var(--t-xs)">
         A wait is not a trade yet, so there is nothing to log. To hear when the
-        price reaches {{ plan.entry|price }}, set the entry alert further down.</p>
+        price reaches {{ plan.entry|price(plan.stop, plan.target1, plan.target2) }}, set the entry alert further down.</p>
     {% endif %}
   </div>
 </div>
@@ -286,7 +287,7 @@
         {% endif %}
         {% if b.flip_words %}<div class="prose">{{ b.flip_words }}{{ help('flip_level') }}</div>{% endif %}
         <div class="prose"><b>How this read did before.</b>
-          {% for w in b.record_words %}{{ w }} {% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
+          {% for w in b.record_words %}{{ w }}{{ ' ' if not loop.last }}{% endfor %}{% if b.record %}{{ help('range') }}{% endif %}</div>
         <p class="prose faint" style="font-size:var(--t-xs)">The rules are Orenth's own
           reading of the course's method, not a forecast, and the lean does not change the
           call above.</p>

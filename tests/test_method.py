@@ -2038,6 +2038,30 @@ p_slow = plan_on(slow)
 check("a price that moves less than the usual tick keeps its levels apart too",
       p_slow.stop < p_slow.entry < p_slow.target1 and "error" not in p_slow.position,
       (p_slow.entry, p_slow.stop, p_slow.position))
+# 1.084 and 1.084: kept apart by the plan, and read as one price on the page.
+pair_ = dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
+                            action="BUY")
+levels_ = (pair_.entry, pair_.stop, pair_.target1)
+check("they read apart on the page too, alike in how many decimals they may have",
+      [market.format_price(v, beside=levels_) for v in levels_]
+      == ["1.0841", "1.0839", "1.0849"],
+      [market.format_price(v, beside=levels_) for v in levels_])
+said_ = " ".join(plain.explain_plan(pair_, slow)["points"])
+check("and in its plain words", "buy price is $1.0841." in said_
+      and "fell to $1.0839," in said_ and "around $1.0849." in said_, said_)
+check("at any size of price", [market.format_price(a, beside=(b,)) + " " +
+                               market.format_price(b, beside=(a,)) for a, b in
+                               ((151.2312, 151.2287), (100.031, 100.0295), (0.91, 0.909999),
+                                (2e-11, 1.5e-11), (94731.004, 94731.001))]
+      == ["151.231 151.229", "100.031 100.0295", "0.91 0.909999",
+          "0.00000000002 0.000000000015", "94,731.004 94,731.001"],
+      [market.format_price(a, beside=(b,)) for a, b in ((151.2312, 151.2287),)])
+check("ordinary prices, and one price said twice, read as ever beside each other",
+      all(market.format_price(a, beside=(b, None, float("nan"))) == market.format_price(a)
+          and plain._money(a, "USD", (b, None)) == plain._money(a, "USD")
+          for a, b in ((101.27, 99.4), (12.346, 12.31), (5.5, 5.5), (105628.0, 97177.76),
+                       (0.1234567, 0.12), (0.00001234, 0.00001377), (0.0, 1.0),
+                       (1.084, 1.084 + 1e-13))))
 check("ordinary prices are rounded as they were",
       decision._round_price(101.2749, 101.0, 2.3) == 101.27
       and decision._round_price(1543.26, 1500.0, 30.0) == 1543.3

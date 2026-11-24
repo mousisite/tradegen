@@ -867,6 +867,8 @@ try:
     if links:
         r = visitor.get(links[0])
         check("which opens", r.status_code == 200 and "See the trade" in text(r))
+        check("and says what the example is there to show, which no page did",
+              '<p class="prose">Example: ' in text(r))
     check("and the example's breakdown opens",
           visitor.get("/trades/breakdown").status_code == 200)
     conn.close()

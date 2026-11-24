@@ -259,6 +259,63 @@ check("a request gives up before the callers waiting on it would",
 
 
 # ---------------------------------------------------------------------------
+head("WHAT IS KEPT FOR A MOMENT IS LIMITED BY WHAT IT WEIGHS")
+# ---------------------------------------------------------------------------
+
+import gc  # noqa: E402
+import json  # noqa: E402
+import tracemalloc  # noqa: E402
+
+
+def history(n, start=0):
+    """A source's answer of n bars, as it is sent."""
+    base = [100.0 + (k + start) * 0.0137 for k in range(n)]
+    return json.dumps({"chart": {"result": [{
+        "meta": {"symbol": "X", "currency": "USD"},
+        "timestamp": [1_600_000_000 + k * 300 for k in range(n)],
+        "indicators": {"quote": [{"open": [None] + base[1:], "high": base, "low": base,
+                                  "close": base, "volume": [10 ** 6 + k for k in range(n)]}],
+                       "adjclose": [{"adjclose": base}]}}], "error": None}})
+
+
+off = []
+for bars_n in (252, 1258, 8640):
+    text = history(bars_n)
+    gc.collect()
+    tracemalloc.start()
+    kept_one = json.loads(text)
+    real = tracemalloc.get_traced_memory()[0]
+    tracemalloc.stop()
+    off.append(upstream.weight(kept_one) / real)
+check("an answer's weight is read off its shape to within a quarter",
+      all(0.75 < r < 1.25 for r in off), off)
+
+upstream.reset()
+for n in range(300):
+    upstream.cached("year%d" % n, lambda: json.loads(history(252, n)), ttl=600)
+check("three hundred instruments looked at within the minute are each asked for once",
+      upstream.stats()["cached_keys"] == 300, upstream.stats()["cached_keys"])
+upstream.reset()
+was_bytes = upstream.MAX_BYTES
+upstream.MAX_BYTES = 3 * 1024 * 1024
+try:
+    for n in range(8):
+        upstream.cached("heavy%d" % n, lambda: json.loads(history(3000, n)), ttl=600)
+    held = upstream.stats()
+    check("together they weigh no more than the limit, the oldest let go first",
+          held["cached_bytes"] <= upstream.MAX_BYTES and 2 <= held["cached_keys"] < 8
+          and "heavy7" in upstream._cache and "heavy0" not in upstream._cache, held)
+    upstream.cached("alone", lambda: json.loads(history(17000)), ttl=600)
+    check("one heavier than all of it is still answered, and kept by itself",
+          list(upstream._cache) == ["alone"], list(upstream._cache))
+finally:
+    upstream.MAX_BYTES = was_bytes
+    upstream.reset()
+check("the limit leaves the server most of its half gigabyte",
+      upstream.MAX_BYTES <= 64 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
 head("EIGHT PEOPLE ASKING DURING A RATE LIMIT ARE ONE REQUEST")
 # ---------------------------------------------------------------------------
 # Callers waiting on a refused request each sent their own, outside the
@@ -982,27 +1039,24 @@ print("=" * 72)
 upstream.reset()
 
 
-def prices(bars):
-    return {"chart": {"result": [{"timestamp": list(range(bars))}]}}
-
-
 # A page's own two histories, then a round of alerts over four hundred symbols.
-upstream.cached("page-1", lambda: prices(1300))
-upstream.cached("page-2", lambda: prices(1300))
+five_years, one_year, hours = history(1300), history(260), history(17500)
+upstream.cached("page-1", lambda: json.loads(five_years))
+upstream.cached("page-2", lambda: json.loads(five_years))
 for n in range(400):
-    upstream.cached("alert-%d" % n, lambda: prices(260))
+    upstream.cached("alert-%d" % n, lambda: json.loads(one_year))
 check("a round over many small histories leaves what the pages just read",
       "page-1" in upstream._cache and "page-2" in upstream._cache
       and upstream.stats()["cached_keys"] == 402, upstream.stats()["cached_keys"])
-for n in range(100):
-    upstream.cached("hours-%d" % n, lambda: prices(17500))
+for n in range(30):
+    upstream.cached("hours-%d" % n, lambda: json.loads(hours))
 held = [k for k in upstream._cache if k.startswith("hours-")]
 check("large ones are kept by what they hold, not by their number",
-      sum(upstream._sizes.values()) <= upstream.MAX_BYTES and 8 <= len(held) <= 14
-      and "hours-99" in held and "page-1" not in upstream._cache
-      and set(upstream._sizes) == set(upstream._cache), len(held))
+      upstream.stats()["cached_bytes"] <= upstream.MAX_BYTES and 8 <= len(held) <= 14
+      and "hours-29" in held and "page-1" not in upstream._cache
+      and set(upstream._weights) == set(upstream._cache), len(held))
 upstream.MAX_BYTES, most_bytes = 1000, upstream.MAX_BYTES
-upstream.cached("huge", lambda: prices(17500))
+upstream.cached("huge", lambda: json.loads(hours))
 check("and one larger than that is still an answer", list(upstream._cache) == ["huge"])
 upstream.MAX_BYTES = most_bytes
 upstream.reset()

@@ -425,9 +425,9 @@
             <td><b>{{ t['symbol'] }}</b></td>
             <td data-label="Side"><span class="chip {{ 'long' if t['direction'] > 0 else 'short' }}">
               {{ 'Long' if t['direction'] > 0 else 'Short' }}</span></td>
-            <td class="r fig" data-label="Entry">{{ t['entry']|price }}</td>
-            <td class="r fig loss" data-label="Stop">{{ t['stop_now']|price }}</td>
-            <td class="r fig gain" data-label="Target">{{ t['target1']|price }}</td>
+            <td class="r fig" data-label="Entry">{{ t['entry']|price(t['stop_now'], t['target1']) }}</td>
+            <td class="r fig loss" data-label="Stop">{{ t['stop_now']|price(t['entry'], t['target1']) }}</td>
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price(t['entry'], t['stop_now']) }}</td>
             <td class="r fig soft" data-label="At risk">{{ t['at_risk']|money }}</td>
           </tr>
         {% endfor %}

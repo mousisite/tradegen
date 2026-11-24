@@ -30,7 +30,7 @@
 {% elif stale %}
   <div class="notice" style="margin-top:var(--s3)">
     This plan was made {{ run['ts']|ago }}. The journal records its entry of
-    {{ size.entry|price }}, not the price now, so if the price has moved since,
+    {{ size.entry|price(size.stop, size.target) }}, not the price now, so if the price has moved since,
     this trade will not match one you could make today. Run the analysis
     again for a fresh plan.
   </div>
@@ -49,10 +49,10 @@
       <dl class="pairs">
         <dt>Side</dt>
         <dd>{{ 'Long: it gains if the price rises' if long else 'Short: it gains if the price falls' }}</dd>
-        <dt>Entry</dt><dd class="fig">{{ size.entry|price }}</dd>
-        <dt>Stop</dt><dd class="fig loss">{{ size.stop|price }}</dd>
+        <dt>Entry</dt><dd class="fig">{{ size.entry|price(size.stop, size.target) }}</dd>
+        <dt>Stop</dt><dd class="fig loss">{{ size.stop|price(size.entry, size.target) }}</dd>
         <dt>Target</dt>
-        <dd class="fig gain">{{ size.target|price if size.target else 'none set' }}</dd>
+        <dd class="fig gain">{{ size.target|price(size.entry, size.stop) if size.target else 'none set' }}</dd>
         {% if size.reward_risk %}
         <dt>Reward to risk</dt>
         <dd class="fig">{{ "%.2f"|format(size.reward_risk) }}&thinsp;:&thinsp;1</dd>
@@ -114,9 +114,9 @@
       </select>
     </div>
     <p class="prose" style="margin-top:var(--s2)">Leave it empty to keep the stop
-      at {{ size.stop|price }}. With a trail, the stop follows the
+      at {{ size.stop|price(size.entry, size.target) }}. With a trail, the stop follows the
       {{ 'high' if long else 'low' }} since the trade opened, this far behind
-      it, and only ever tightens from {{ size.stop|price }}. The ATR is
+      it, and only ever tightens from {{ size.stop|price(size.entry, size.target) }}. The ATR is
       measured on {{ words }} bars when you confirm.</p>
   </div>
 

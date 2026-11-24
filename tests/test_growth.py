@@ -1,5 +1,6 @@
 """Popular pages, sharing, invites and the weekly email."""
 import calendar
+import html as _html
 import json
 import os as _os
 import re
@@ -281,7 +282,7 @@ try:
     r = c.get("/backtest/rsi-reversion")
     page = r.data.decode("utf-8", "replace")
     check("then shows each stock it was tested on",
-          r.status_code == 200 and "Does RSI reversion work?" in page
+          r.status_code == 200 and "Does trading against an extreme RSI work?" in page
           and "/stock/nvda" in page and "/stock/amd" in page, r.status_code)
     check("and how many it kept money on", "kept money on 1 of the" in page)
     check("open to search engines once tested", "noindex" not in page)
@@ -318,9 +319,20 @@ try:
     check("and one that never fired says that", "it has not come up" in page
           and "Being tested" not in page)
     check("its heading reads as English", "Does a break of structure work?" in page)
-    check("so does every price-action setup's",
-          all(public.strategy_asked(s.name)[0].islower() for s in _strats.REGISTRY
-              if s.family == _strats.LIQUIDITY))
+    # Each of the 44 has words of its own: an article or a doing word first, and
+    # never the bare label ("Does Pivot levels work?").
+    _said = {s.name: public.strategy_asked(s.name) for s in _strats.REGISTRY}
+    check("so does every other strategy's",
+          not [n for n, said in _said.items()
+               if said.split()[0] not in ("a", "an", "the", "following", "trading")]
+          and len(set(_said.values())) == len(_said),
+          [n for n, said in _said.items() if said == public.strategy_label(n)])
+    page = _html.unescape(c.get("/backtest/pivot-levels").data.decode("utf-8", "replace"))
+    check("in its title, its heading, its preview and its links to the others",
+          "<title>Does trading from pivot points work?" in page
+          and "<h1>Does trading from pivot points work?</h1>" in page
+          and 'content="Does trading from pivot points work? · Orenth"' in page
+          and "Does trading an opening gap work?" in page and "Does Gap" not in page)
     check("on a phone each row of the tests and of Strategies is a card of named figures",
           all('<table class="stack">' in c.get(p).data.decode("utf-8", "replace")
               for p in ("/backtests", "/backtest/rsi-reversion"))
@@ -730,6 +742,30 @@ try:
     check("the sign-in page says it signs in too",
           "<title>Sign in or create your free account" in page
           and "<h1>Sign in or create your free account</h1>" in page)
+    # Seven pages had one search description and one preview title ("Orenth").
+    _os.environ.update(STRIPE)
+    real_offers, billing.offers = billing.offers, lambda: {}
+    try:
+        heads = {}
+        for path in ("/", "/pricing", "/terms", "/privacy", "/signin", "/learn/practice",
+                     "/tools/size", "/tools/survival"):
+            page = c.get(path).data.decode("utf-8", "replace")
+            heads[path] = [_html.unescape(re.search(p, page).group(1)) for p in (
+                r"<title>(.*?)</title>", r'name="description" content="(.*?)"',
+                r'property="og:title" content="(.*?)"',
+                r'name="twitter:title" content="(.*?)"')]
+    finally:
+        billing.offers = real_offers
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+    check("each page a search finds has a title and a description of its own",
+          len({h[0] for h in heads.values()}) == len({h[1] for h in heads.values()})
+          == len(heads), heads)
+    check("and its preview carries that title", all(h[0] == h[2] == h[3] and h[2] != "Orenth"
+                                                    for h in heads.values()), heads)
+    check("short enough to be shown whole", all(
+        len(h[0]) < 60 and len(h[1]) < 155 for p, h in heads.items() if p != "/"),
+        {p: (len(h[0]), len(h[1])) for p, h in heads.items()})
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("asking someone to analyse a stock says analyse, like the button",
           "Analyse any stock or coin" in page and "Check any stock" not in page)

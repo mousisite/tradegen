@@ -741,8 +741,9 @@ def example_view(ex: Optional[Dict], symbol: str, interval: str, name: str) -> O
             "setup": setups.setup(name).label if name in setups.BY_NAME else name,
             "interval_words": interval_words(interval),
             "side": "buy" if direction == 1 else "short",
-            "entry": format_price(entry), "stop": format_price(stop),
-            "target": format_price(target), "r": r,
+            "entry": format_price(entry, beside=(stop, target)),
+            "stop": format_price(stop, beside=(entry, target)),
+            "target": format_price(target, beside=(entry, stop)), "r": r,
             "entry_at": clock.label_ny(t[entry_i]), "exit_at": clock.label_ny(t[exit_i])}
 
 
