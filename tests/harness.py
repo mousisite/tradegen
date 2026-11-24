@@ -18,6 +18,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # web.py and serve.py read .env as they are imported. A suite that has removed
 # the real keys must not be given them back: it would call Claude or Stripe.
 os.environ["STOCKBOT_NO_DOTENV"] = "1"
+# Nor keep one the machine itself has set: a run would call Claude and pay for
+# it, and what a suite finds would depend on whose machine it ran on.
+os.environ.pop("ANTHROPIC_API_KEY", None)
 
 # Set by isolate(), so a suite can read the paths it was given.
 DB_PATH = ""
