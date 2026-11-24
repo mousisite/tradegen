@@ -1698,6 +1698,25 @@ try:
         web._DEMO_SCREENS.clear()
         web._RATE.clear()
 
+    # "Check them all now" is pressed by somebody who waits for it.
+    asked_as = []
+
+    def call_for(symbol, *a, source="engine", **k):
+        asked_as.append(source)
+        return SimpleNamespace(plan=SimpleNamespace(action="WAIT"))
+
+    web.engine.analyse = call_for
+    try:
+        web._call_now("ZZCALL")
+        web._CALLS.clear()
+        with web.app.test_request_context("/monitor/alerts/check", method="POST"):
+            web._call_now("ZZCALL")
+    finally:
+        web.engine.analyse = real_analyse
+        web._CALLS.clear()
+    check("a call worked out for a button gives way to nobody, as the loop's does",
+          asked_as == ["engine", "web"], asked_as)
+
     # How long each kept analysis stays, and how much they may come to.
     def kept(symbol, interval, age, result=None):
         web._CACHE[(symbol, False, interval, True, "house")] = (

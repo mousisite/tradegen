@@ -46,9 +46,9 @@ try:
 except ImportError:
     pass
 
-from flask import (Flask, Response, abort, g, jsonify, redirect,
-                   render_template, request, send_from_directory, session,
-                   url_for)
+from flask import (Flask, Response, abort, g, has_request_context, jsonify,
+                   redirect, render_template, request, send_from_directory,
+                   session, url_for)
 from flask.json.provider import DefaultJSONProvider
 from werkzeug.routing import IntegerConverter
 from werkzeug.wsgi import wrap_file
@@ -7586,9 +7586,12 @@ def _call_now(symbol: str, interval: str = "1d",
             action = snap.get("action") or None
     if action is None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
+        # Asked for by a button, somebody is waiting for it: as the loop's it
+        # gave way to everybody else's, ten seconds for each call.
         result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
                                 with_learning=True, record=False,
-                                db_path=app.config.get("DB_PATH"), exact=exact)
+                                db_path=app.config.get("DB_PATH"), exact=exact,
+                                source="web" if has_request_context() else "engine")
         action = (result.plan.action or "").upper() or None
     with _CALLS_LOCK:
         _CALLS[key] = (now, action)
