@@ -98,13 +98,30 @@ try:
           "feed that has coins",
           [p for u, p in asked if "yahoo" in u]
           == [{"s": "LINK-USD", "region": "US", "lang": "en-US"}], asked)
-    check("and by the name headlines use, not the pair's",
-          ["%22Chainlink%22" in u for u, _ in asked if "google" in u] == [True], asked)
+    def asked_of_google(symbol, name):
+        answering(Reply(404))
+        sentiment.gather_news(symbol, name)
+        return [sentiment.requests.utils.unquote(u.split("?q=")[1].split("&")[0])
+                for u, _ in asked if "google" in u]
+
+    # "Optimism" beside "stock" is Intel's headlines, and any other company's.
+    for symbol, name, words in (
+            ("LINK-USD", "Chainlink USD", '"Chainlink" LINK crypto'),
+            ("OP-USD", "Optimism USD", '"Optimism" OP crypto'),
+            ("USDC-USD", "USD Coin USD", '"USD Coin" USDC crypto'),
+            ("SUI20947-USD", "Sui USD", '"Sui" SUI crypto'),
+            # The search was down, so there is no name.
+            ("SUI20947-USD", "SUI20947-USD", '"SUI" SUI crypto'),
+            ("GRAM-USD", "", '"TON" TON crypto')):
+        check("%s, %r: by the name headlines use and its ticker, and nothing about stocks"
+              % (symbol, name), asked_of_google(symbol, name) == [words],
+              asked_of_google(symbol, name))
     answering(Reply(404))
     sentiment.gather_news("AAPL", "Apple Inc.")
     check("a company is asked for as it was",
           [p["q"] for u, p in asked if u == sentiment._YAHOO_SEARCH] == ["AAPL"]
-          and any("%22Apple%20Inc.%22" in u for u, _ in asked), asked)
+          and asked_of_google("AAPL", "Apple Inc.") == ['"Apple Inc." stock OR crypto']
+          and asked_of_google("AAPL", "AAPL") == ['"AAPL" stock OR crypto'], asked)
 
     print()
     print("A COIN'S HEADLINES, AND WHERE THEY CAME FROM")
@@ -155,6 +172,17 @@ try:
           (read.read_from, said))
     check("the warning names headlines when there were only those",
           any(n.startswith("Headlines were scored") for n in read.notes), read.notes)
+    # A stablecoin's price pages of years ago were nineteen headlines about it.
+    read, said, _again = from_the_feed(Reply(200, content=feed.replace(
+        b"<title>A headline from", b"<title>Another from").replace(
+        b"<title>Bitcoin", b"<title>Coins")))
+    check("nor are Google's that old, for a coin",
+          read.n_news == 4 and not any(i.age_hours > sentiment.FEED_HOURS for i in read.items),
+          [(i.text, i.age_hours) for i in read.items])
+    answering(Reply(404))
+    sentiment.requests.get = lambda url, **k: Reply(200, {"news": []}, content=feed)
+    check("a company's are kept as they were", any(
+        i.age_hours > sentiment.FEED_HOURS for i in sentiment.gather_news("AAPL", "Apple Inc.")))
     answering(Reply(200, {"messages": [
         post("$BTC.X https://coins.example/currencies/bitcoin/"),
         post("$BTC.X going up https://coins.example/a"), post("$BTC.X")]}))

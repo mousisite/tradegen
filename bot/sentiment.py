@@ -253,12 +253,13 @@ def _gave_nothing(source: str, why: str) -> None:
         log.warning("%s gave no headlines: %s", source, why)
 
 
-def _google_news(query: str, limit: int) -> List[Item]:
-    """Headlines from Google News, or none when it does not answer."""
+def _google_news(query: str, limit: int, within: float = math.inf) -> List[Item]:
+    """Headlines from Google News no more than so many hours old, or none when
+    it does not answer."""
     items: List[Item] = []
     try:
         url = "%s?q=%s&hl=en-US&gl=US&ceid=US:en" % (
-            _GOOGLE_NEWS, requests.utils.quote('"%s" stock OR crypto' % query))
+            _GOOGLE_NEWS, requests.utils.quote(query))
         # Fetched here rather than by feedparser, which waits with no time
         # limit at all, inside the request of whoever opened the page.
         r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
@@ -268,19 +269,20 @@ def _google_news(query: str, limit: int) -> List[Item]:
             # an address of its own. A feed with nothing in it is an answer.
             _gave_nothing("Google News", "HTTP %s from %s" % (
                 r.status_code, (getattr(r, "url", "") or "").split("?")[0]))
-        for e in feed.entries[:limit]:
-            items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
-                              source=(e.get("source", {}) or {}).get("title", "Google News"),
-                              age_hours=_age_hours(e.get("published_parsed")),
-                              url=e.get("link", ""), via="Google News"))
+        for e in feed.entries:
+            age = _age_hours(e.get("published_parsed"))
+            if age <= within and len(items) < limit:
+                items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
+                                  source=(e.get("source", {}) or {}).get("title", "Google News"),
+                                  age_hours=age, url=e.get("link", ""), via="Google News"))
     except Exception as exc:
         _gave_nothing("Google News", type(exc).__name__)
     return items
 
 
-# Yahoo's headline feed keeps a little-written-about coin's for months. One
-# older than this says nothing about now, and with nothing newer beside it, it
-# would have been the whole of the news.
+# Yahoo's headline feed keeps a little-written-about coin's for months, and
+# Google its price pages for years. One older than this says nothing about now,
+# and with nothing newer beside it, it would have been the whole of the news.
 FEED_HOURS = 7 * 24.0
 
 
@@ -341,16 +343,21 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
 
     A source that has not answered in SOURCES_WAIT seconds is left out.
     """
-    query = name if name and name.upper() != symbol.upper() else symbol
+    known = name if name and name.upper() != symbol.upper() else ""
     coin = coin_ticker(symbol)
     if coin:
         # Yahoo calls a coin by the pair, "Bitcoin USD", and headlines do not.
-        query = re.sub(r"[\s-]+USD$", "", query, flags=re.I) or coin
+        # Its ticker is asked for as well, and nothing about stocks: many are
+        # named by an ordinary word, and the headlines of every stock that rose
+        # on optimism were scored as the Optimism coin's.
+        query = '"%s" %s crypto' % (re.sub(r"[\s-]+USD$", "", known, flags=re.I) or coin, coin)
+    else:
+        query = '"%s" stock OR crypto' % (known or symbol)
     give_up = time.monotonic() + SOURCES_WAIT
     pool = ThreadPoolExecutor(max_workers=2)
     items: List[Item] = []
     try:
-        for job in (pool.submit(_google_news, query, limit),
+        for job in (pool.submit(_google_news, query, limit, FEED_HOURS if coin else math.inf),
                     pool.submit(_yahoo_news, symbol)):
             try:
                 items += job.result(timeout=max(0.0, give_up - time.monotonic()))
