@@ -7837,6 +7837,7 @@ def start_alert_loop(cfg):
     minutes = cfg.get("alert_check_minutes", 5)
     if not minutes:
         return None
+    alerts_mod.STOPPING.clear()
     ALERTS = scheduler_mod.Scheduler(_check_alerts_job,
                                      interval_seconds=float(minutes) * 60.0,
                                      name="stockbot-alerts")

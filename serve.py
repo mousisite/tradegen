@@ -449,6 +449,11 @@ def main(argv=None) -> int:
         # still to go are seen out: no later round would say them.
         if loop is not None:
             loop.stop(timeout=up_to(8.0))
+            # A longer one breaks off here. Going on, it recorded alerts and
+            # stops as told that the process then ended without telling, and
+            # kept the process until the last price it had asked for was in.
+            web.alerts_mod.STOPPING.set()
+            loop.stop(timeout=up_to(3.0))
         web.push_mod.wait_idle(up_to(4.0))
         web.alerts_mod.mail_idle(up_to(4.0))
         if backups is not None:

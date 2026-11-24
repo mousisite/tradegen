@@ -968,6 +968,13 @@ def _waits(row, now: float) -> bool:
     return not sessions.can_change(row["symbol"], int(row["last_checked"]), now)
 
 
+# Set by serve.py when the server is stopping and a round has not ended in the
+# time it is given. The round then asks for nothing and looks at nothing more:
+# what it has recorded is told while there is time, and the rest is left as it
+# was for the first round after the start.
+STOPPING = threading.Event()
+
+
 def check(conn, only_active: bool = True, user=None, call_of=None,
           limit_of: Optional[Callable[[int], Optional[int]]] = None,
           skip_closed: bool = False, now: Optional[float] = None,
@@ -1039,6 +1046,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
 
     def grab(key):
         symbol, interval = key
+        if STOPPING.is_set():
+            return key, None
         try:
             bars = fetch_bars(symbol, interval, lookback=LOOKBACK.get(interval))
         except (DataError, Exception) as exc:
@@ -1056,7 +1065,7 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             if isinstance(result, Exception):
                 failed[key] = _whole(result)
                 errors.append({"symbol": key[0], "error": failed[key]})
-            else:
+            elif result is not None:
                 data[key] = result
                 sessions.note(key[0], result, now)
 
@@ -1074,6 +1083,8 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
         # with no price fails for that below, so its call is not asked for.
         for key in {(r["symbol"], _bars_for(r), _exact(r)) for r in rows
                     if r["kind"] in CALL_KINDS and (r["symbol"], _bars_for(r)) in data}:
+            if STOPPING.is_set():
+                break
             symbol, interval, exact = key
             try:
                 calls[key] = (call_of(symbol, interval, exact=True) if exact
@@ -1081,11 +1092,10 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
             except Exception:
                 calls[key] = None
 
-    structure: Dict = {}
     # Those looked at with nothing to say, written down many at a time.
     quiet: List[tuple] = []
     try:
-        _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
+        _look(conn, rows, data, failed, calls, quiet, fired, errors, now)
     finally:
         if quiet:
             db.alerts_checked(conn, quiet)
@@ -1097,11 +1107,28 @@ def check(conn, only_active: bool = True, user=None, call_of=None,
 QUIET_AT_ONCE = 200
 
 
-def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now) -> None:
+def _side_by_side(rows) -> List:
+    """The alerts as they came, but those that read the structure of the same
+    prices one after another.
+
+    So it is read once for them all and then let go of. Kept to the end of a
+    round over five thousand alerts, what had been read of some two thousand
+    downloads came to two hundred megabytes, on a server of 512.
+    """
+    first: Dict = {}
+    place = [first.setdefault((r["symbol"], _bars_for(r)), n)
+             if r["kind"] in PRICE_ACTION_KINDS else n for n, r in enumerate(rows)]
+    return [rows[n] for n in sorted(range(len(rows)), key=place.__getitem__)]
+
+
+def _look(conn, rows, data, failed, calls, quiet, fired, errors, now) -> None:
     """Each alert against its prices: check()'s round, once they are in."""
     from . import database as db
 
-    for row in rows:
+    structure: Dict = {}                # of the prices being looked at
+    for row in _side_by_side(rows):
+        if STOPPING.is_set():
+            return
         key = (row["symbol"], _bars_for(row))
         bars = data.get(key)
         if bars is None:
@@ -1130,6 +1157,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
                 # The structure is read once per download, however many
                 # alerts look at it.
                 if key not in structure:
+                    structure.clear()
                     structure[key] = liquidity.series(bars)
                 hit, seen = _price_action(row, bars, structure[key])
             elif row["kind"] in BAR_KINDS:
@@ -1179,7 +1207,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
             if hit and was == "met":
                 hit = None
         if hit is None:
-            quiet.append((int(row["id"]), state, was, time.time()))
+            quiet.append((int(row["id"]), state, was, time.time(), row["threshold"]))
             if len(quiet) >= QUIET_AT_ONCE:
                 db.alerts_checked(conn, quiet)
                 quiet.clear()
@@ -1187,7 +1215,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
         # Two checks can overlap (the loop, "Check them all now", a routine).
         # Only the one that moves the alert on from what it read tells anyone.
         if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
-                             state=state, was=was):
+                             state=state, was=was, threshold=row["threshold"]):
             continue
         fired.append(hit)
         if hit.user_id is not None:
@@ -1318,6 +1346,8 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             wanted.append(key)
 
     def grab(key):
+        if STOPPING.is_set():
+            return key, None
         try:
             # The same history as an alert's on that bar size, so a symbol
             # with both an alert and a position is one request, not two.
@@ -1334,6 +1364,8 @@ def check_stops(conn, user=None, skip_closed: bool = False,
     # positions were a round of ten minutes.
     with ThreadPoolExecutor(max_workers=min(8, len(wanted) or 1)) as pool:
         for key, got in pool.map(grab, wanted):
+            if got is None:
+                continue
             if not isinstance(got, Exception):
                 data[key] = got
                 sessions.note(key[0], got, now)
@@ -1347,7 +1379,7 @@ def check_stops(conn, user=None, skip_closed: bool = False,
 
     for row in rows:
         bars = data.get((row["symbol"], bar_size(row)))
-        if bars is None:
+        if bars is None or STOPPING.is_set():
             continue
         # The stop is in the shares of the day it opened; after a split the
         # quote is in today's, and read as is a long looked far past its stop.
@@ -1362,9 +1394,6 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             errors.append({"symbol": row["symbol"],
                            "error": "split history: %s" % str(exc)[:100]})
             continue
-        # Read in full from here on, so a closed market can wait for its open.
-        with _STOPS_LOCK:
-            _STOPS_LOOKED[int(row["id"])] = now
         quote = float(bars.last_price)
         side = int(row["direction"])
         # Past the stop now, or traded through it since opening and come back:
@@ -1381,6 +1410,11 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         if crossed is not None:
             db.stop_crossed(conn, int(row["id"]), *crossed)
         if not read.hit:
+            # Read in full, so a closed market can wait for its open. One past
+            # its stop is not looked at again once that is written down: said
+            # before, a database busy just then left it untold until the open.
+            with _STOPS_LOCK:
+                _STOPS_LOOKED[int(row["id"])] = now
             continue
         price, stop = read.price, read.stop
         said = format_price(price)
@@ -1413,9 +1447,10 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
         # Two checks at once (the loop and "Check them all now") both read the
-        # trade before either marked it. Only the one that marks it tells.
+        # trade before either marked it. Only the one that marks it tells, and
+        # neither once it has been closed in the journal meanwhile.
         cur = conn.execute("UPDATE trades SET breach_noticed=? WHERE id=? "
-                           "AND breach_noticed IS NULL",
+                           "AND breach_noticed IS NULL AND status='open'",
                            (int(time.time()), int(row["id"])))
         conn.commit()
         if cur.rowcount == 0:

@@ -736,6 +736,21 @@ try:
           one == two == [(1000, 4.0)] and len(asked_for) == 1, (one, asked_for))
     check("in a store of its own, so the shared one's charts still go after 45 seconds",
           upstream._max_ttl == longest, upstream._max_ttl)
+    # One answer it could not read broke off the whole round of alerts.
+    said = []
+    for shape in ({"chart": [1]}, {"chart": {"result": [None]}},
+                  {"chart": {"result": [{"events": [1]}]}},
+                  {"chart": {"result": [{"events": {"splits": 5}}]}}):
+        market._fetch = lambda url, params, tries=2: shape
+        try:
+            said.append(market.splits_since("ODD", t_now - 30 * DAYS, recent))
+        except Exception as exc:
+            said.append(type(exc).__name__)
+    check("a history in a shape not known is one not to be had, not a fault",
+          said == ["DataUnavailable"] * 4, said)
+    market._fetch = lambda url, params, tries=2: {"chart": {"result": [{"meta": {}}]}}
+    check("while one that lists no splits is read as that",
+          market.splits_since("ODD", t_now - 30 * DAYS, recent) == [(t_now - 2 * DAYS, 10.0)])
 finally:
     market._fetch = real_fetch
     market._SPLIT_HISTORY.clear()

@@ -948,6 +948,65 @@ try:
 
     print()
     print("=" * 72)
+    print("CHANGED WHILE A CHECK HAS IT")
+    print("=" * 72)
+    fay = person("fay@example.com")
+    conn = db.connect(DB)
+
+    def meanwhile(change, checks=alerts.check):
+        """One check, with something done on a page while it waits for prices."""
+        def prices(symbol, interval="1d", lookback=None):
+            page = db.connect(DB)
+            try:
+                change(page)
+            finally:
+                page.close()
+            return bars_for(symbol, interval, lookback)
+
+        alerts.fetch_bars = prices
+        try:
+            return [f.message for f in checks(conn, user=fay.id)["fired"]]
+        finally:
+            alerts.fetch_bars = bars_for
+
+    def kept(alert_id):
+        return tuple(conn.execute("SELECT active, threshold, state, last_checked FROM alerts "
+                                  "WHERE id=?", (alert_id,)).fetchone())
+
+    PRICE["HHH"] = 205.0
+    typo = db.alert_add(conn, "HHH", "price_above", threshold=200.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, typo, 250.0, "", user=fay.id))
+    check("an alert is not told of, nor switched off by, a level changed while it was checked",
+          said_then == [] and kept(typo) == (1, 250.0, None, None), (said_then, kept(typo)))
+    db.alert_delete(conn, typo)
+    lower = db.alert_add(conn, "HHH", "price_above", threshold=300.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, lower, 204.0, "", user=fay.id))
+    check("nor marked as looked at with the new one, which the next check tells of",
+          said_then == [] and kept(lower) == (1, 204.0, None, None)
+          and ["HHH is 205, above the 204 you set."]
+          == [f.message for f in alerts.check(conn, user=fay.id)["fired"]], kept(lower))
+    db.alert_delete(conn, lower)
+    noted = db.alert_add(conn, "HHH", "price_above", threshold=200.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, noted, 200.0, "a note", user=fay.id))
+    check("a note changed is no other question, so it is told",
+          said_then == ["HHH is 205, above the 200 you set."] and kept(noted)[0] == 0, said_then)
+    db.alert_delete(conn, noted)
+    call = db.alert_add(conn, "HHH", "near_52w_low", threshold=0.01, user=fay.id)
+    alerts.check(conn, user=fay.id)
+    check("and one changed by nobody is kept as looked at", kept(call)[3] is not None, kept(call))
+    db.alert_delete(conn, call)
+
+    PRICE["HHH"] = 90.0
+    out_now = db.open_trade(conn, "HHH", "1d", 1, entry=100.0, stop=95.0, quantity=1, user=fay.id)
+    said_then = meanwhile(lambda page: db.exit_trade(page, out_now, 94.9, user=fay.id),
+                          alerts.check_stops)
+    check("a position closed while its stop was read is not told to be closed",
+          said_then == [] and not [e for e in db.event_list(conn, fay.id)
+                                   if e["kind"] == "stop_breach"], said_then)
+    conn.close()
+
+    print()
+    print("=" * 72)
     print("VALUES THAT CANNOT WORK")
     print("=" * 72)
     sign_in(carol)
@@ -1550,6 +1609,87 @@ try:
         check("a round that breaks off has still looked at those before",
               conn.execute("SELECT COUNT(*) FROM alerts WHERE user_id=? AND last_checked>0",
                            (busy.id,)).fetchone()[0] == 49)
+
+        # What is read of one download for the price-action kinds is a hundred
+        # kilobytes and more, and a round over many read thousands.
+        conn.execute("UPDATE alerts SET active=0")
+        conn.commit()
+        for n in range(48):
+            at_ = db.alert_add(conn, "MM%d" % (n % 16), "structure_breaks", user=busy.id, cap=None)
+            conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (old + n, at_))
+        for k in range(4):
+            at_ = db.alert_add(conn, "MM%d" % k, "price_above", threshold=50.0, user=busy.id,
+                               cap=None)
+            conn.execute("UPDATE alerts SET created_ts=? WHERE id=?", (old + 5 * k, at_))
+        conn.commit()
+
+        class Structure(dict):
+            here, most, read = 0, 0, 0
+
+            def __init__(self):
+                Structure.read += 1
+                Structure.here += 1
+                Structure.most = max(Structure.most, Structure.here)
+
+            def __del__(self):
+                Structure.here -= 1
+
+        alerts.fetch_bars = bars_for
+        real_series, real_action = alerts.liquidity.series, alerts._price_action
+        alerts.liquidity.series = lambda bars: Structure()
+        alerts._price_action = lambda row, bars, series: (None, "bar:1")
+        try:
+            res = alerts.check(conn)
+        finally:
+            alerts.liquidity.series, alerts._price_action = real_series, real_action
+        check("the structure of each download is read once, and one is held at a time",
+              res["checked"] == 52 and (Structure.read, Structure.most) == (16, 1),
+              (res["checked"], Structure.read, Structure.most))
+        check("and the other alerts are told in the order they always were, newest first",
+              [f.symbol for f in res["fired"]] == ["MM3", "MM2", "MM1", "MM0"],
+              [f.symbol for f in res["fired"]])
+
+        # The server is stopping with a round half done. What it went on to
+        # record as told was never told: the process ended first.
+        conn.execute("UPDATE alerts SET active=0")
+        conn.commit()
+        for k in range(16):
+            PRICE["MM%d" % k] = 80.0
+            db.alert_add(conn, "MM%d" % k, "price_above", threshold=50.0, user=busy.id, cap=None)
+        noticed = len(db.event_list(conn, busy.id, limit=500))
+        looked_at = []
+
+        def told_to_stop(k, row, bars):
+            looked_at.append(row["id"])
+            if len(looked_at) == 5:
+                alerts.STOPPING.set()
+            return real_after(k, row, bars)
+
+        alerts._after_splits = told_to_stop
+        try:
+            res = alerts.check(conn)
+            del ASKED[:]
+            crossed = alerts.check_stops(conn)
+            later = len(ASKED)
+            first_look = alerts.check(conn)
+        finally:
+            alerts._after_splits = real_after
+            alerts.STOPPING.clear()
+        left = conn.execute("SELECT COUNT(*) FROM alerts WHERE active=1 AND last_checked IS NULL "
+                            "AND last_error IS NULL").fetchone()[0]
+        check("a round told to stop looks at nothing more, and has in hand all it recorded",
+              len(res["fired"]) == 5 and left == 11 and not res["errors"]
+              and len(db.event_list(conn, busy.id, limit=500)) == noticed + 5,
+              (len(res["fired"]), left, res["errors"]))
+        check("nor does one that had not begun ask for a price or mark a stop as told",
+              later == 0 and not crossed["fired"] and not crossed["errors"]
+              and not first_look["fired"] and not first_look["errors"] and conn.execute(
+                  "SELECT COUNT(*) FROM trades WHERE user_id=? AND status='open' AND "
+                  "breach_noticed IS NULL", (busy.id,)).fetchone()[0] == 16,
+              (later, crossed, first_look))
+        check("and the first round after the start tells the rest, once each",
+              len(alerts.check(conn)["fired"]) == 11 and len(alerts.check_stops(conn)["fired"]) == 16
+              and not alerts.check(conn)["fired"] and not alerts.check_stops(conn)["fired"])
     finally:
         conn.set_trace_callback(None)
         alerts.fetch_bars, web.market_mod.split_history = real_fetch_bars, real_splits

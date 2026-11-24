@@ -1578,15 +1578,21 @@ def alert_list(conn: sqlite3.Connection, active_only: bool = False,
     return list(conn.execute(sql, args))
 
 
+_ANY = object()
+
+
 def alert_fire(conn: sqlite3.Connection, alert_id: int, value: float,
                note: str, user: Optional[int] = None,
-               state: Optional[str] = None, was: Optional[str] = None) -> bool:
+               state: Optional[str] = None, was: Optional[str] = None,
+               threshold=_ANY) -> bool:
     """Record that an alert's condition was met. True if this call recorded it.
 
     A one-off alert switches itself off; one set to keep watching stays on.
     Given a state, the update goes through only while the alert is still on
     and still in the state the caller read (was), so when two checks overlap
-    one fire is recorded and told once, not twice.
+    one fire is recorded and told once, not twice. Given a threshold, only
+    while that is still the alert's: one not looked at before has no state,
+    and edited while a check had it, was told of the value it no longer has.
     """
     now = int(time.time())
     sql = ("UPDATE alerts SET triggered_ts=?, trigger_value=?, trigger_note=?, "
@@ -1597,6 +1603,9 @@ def alert_fire(conn: sqlite3.Connection, alert_id: int, value: float,
     if state is not None:
         sql += " AND COALESCE(state, '') = ?"
         args.append(was or "")
+    if threshold is not _ANY:
+        sql += " AND threshold IS ?"
+        args.append(threshold)
     sql, args = _own(sql, args, user)
     fired = conn.execute(sql, args).rowcount == 1
     conn.commit()
@@ -1623,17 +1632,19 @@ def alert_checked(conn: sqlite3.Connection, alert_id: int,
 
 
 def alerts_checked(conn: sqlite3.Connection, rows) -> None:
-    """alert_checked for many at once: (id, state, was, when it was looked at).
+    """alert_checked for many at once: (id, state, was, when it was looked at,
+    the threshold it was looked at with).
 
     One write to the disk for all of them. A round over five thousand alerts
-    was five thousand, each waited for.
+    was five thousand, each waited for. One whose value was changed meanwhile
+    asks something else now, which has not been looked at: it is left alone.
     """
     conn.executemany(
         "UPDATE alerts SET last_checked=?, last_error=NULL, last_error_ts=NULL, "
         "state=CASE WHEN ? IS NOT NULL AND COALESCE(state, '') = ? THEN ? "
-        "ELSE state END WHERE id=?",
-        [(int(when), state, was or "", state, int(alert_id))
-         for alert_id, state, was, when in rows])
+        "ELSE state END WHERE id=? AND threshold IS ?",
+        [(int(when), state, was or "", state, int(alert_id), threshold)
+         for alert_id, state, was, when, threshold in rows])
     conn.commit()
 
 
