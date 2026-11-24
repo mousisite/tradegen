@@ -28,8 +28,8 @@
       <div class="wide">{{ pic.wide|safe }}</div>
       <div class="narrow">{{ pic.narrow|safe }}</div>
     </div>
-    <p class="prose" style="margin-top:var(--s2)">The dashed lines are the entry,
-      stop{% if t['target1'] %}, target{% endif %}{% if pic.left %} and exit{% endif %}.
+    {% set lines = ['entry', 'stop'] + (['target'] if t['target1'] else []) + (['exit'] if pic.left else []) %}
+    <p class="prose" style="margin-top:var(--s2)">The dashed lines are the {{ lines[:-1]|join(', ') }} and {{ lines[-1] }}.
       {% if pic.used != '1d' %}Candle times are New York time.{% endif %}</p>
   {% endif %}
   {% if pic.note %}<p class="prose" style="margin-top:var(--s2)">{{ pic.note }}</p>{% endif %}
@@ -54,7 +54,7 @@
       {% endif %}
     </dl>
   </div>
-  <div class="card">
+  <div class="card" style="overflow-wrap:anywhere">
     <span class="eyebrow">Your notes on it</span>
     {% if t['notes'] %}<p class="prose">{{ t['notes'] }}</p>{% endif %}
     <dl class="pairs">

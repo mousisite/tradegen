@@ -516,8 +516,9 @@ def strategy_label(name: str) -> str:
 
 # Each of the others as it reads in a question, as bot/setups.py ASKED says the
 # course's setups. The label alone ("Pivot levels") is not an English subject.
-# "Trading against" is what the mean-reversion ones do: sell a stretch up, buy a
-# stretch down.
+# "Trading against" and "reversal" are what the mean-reversion ones do: sell a
+# stretch up, buy a stretch down. Each is short enough for its question to be
+# shown whole where a page's title is cut at sixty letters.
 _ASKED = {
     "trend_stack": "following lined-up moving averages",
     "macd_momentum": "following MACD momentum",
@@ -530,13 +531,13 @@ _ASKED = {
     "tsi_trend": "following TSI momentum",
     "roc_momentum": "following rate-of-change momentum",
     "rsi_reversion": "trading against an extreme RSI",
-    "bollinger_fade": "trading against a touch of the Bollinger Bands",
-    "keltner_reversion": "trading against a move outside the Keltner channel",
+    "bollinger_fade": "a Bollinger Band reversal",
+    "keltner_reversion": "a Keltner channel reversal",
     "zscore_reversion": "trading against an extreme z-score",
     "stochastic_reversal": "a stochastic reversal",
     "williams_reversal": "a Williams %R reversal",
     "cci_reversion": "trading against an extreme CCI",
-    "vwap_band_fade": "trading against a stretch to the VWAP bands",
+    "vwap_band_fade": "a VWAP band reversal",
     "squeeze_breakout": "a Bollinger squeeze breakout",
     "donchian_breakout": "a Donchian channel breakout",
     "opening_range_break": "an opening range breakout",
@@ -545,9 +546,9 @@ _ASKED = {
     "volume_confirmation": "following a move that volume backs",
     "obv_divergence": "an OBV divergence",
     "mfi_extremes": "trading against an extreme MFI",
-    "accumulation_trend": "following the accumulation/distribution line",
-    "vwap_position": "following which side of VWAP price is on",
-    "market_structure": "following higher highs and lower lows",
+    "accumulation_trend": "following accumulation/distribution",
+    "vwap_position": "following price above or below VWAP",
+    "market_structure": "following higher highs or lower lows",
     "pivot_levels": "trading from pivot points",
     "gap_behaviour": "trading an opening gap",
     "engulfing_pattern": "an engulfing candle",

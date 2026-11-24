@@ -1116,9 +1116,11 @@ def _come_back():
         # Not all in the same second.
         come_back=SLOW_RETRY + random.randint(-1, 2) if waits else None,
         back=back, again=again,
-        message=("A lot of people are asking for pages at once, so this one is waiting "
-                 "its turn. It opens by itself in a few seconds." if waits else
-                 "A lot of people are asking for pages at once, so nothing was done. "
+        # A crowd's pages, or four of this account's own.
+        message=("A lot of pages are being worked out at once, so this one is waiting "
+                 "its turn. It tries again every few seconds, and opens by itself."
+                 if waits else
+                 "A lot of pages are being worked out at once, so nothing was done. "
                  "%s a few seconds and press the button again."
                  % ("Wait" if again else "Go back, wait"))), 503))
     page.headers["Retry-After"] = str(SLOW_RETRY)
@@ -2005,13 +2007,16 @@ def analyse():
                  if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
+    plan = result.plan
+    # The plan's prices are read against each other, and those of a plan that
+    # waits against the price now as well, as its own words are (decision.py).
+    beside = [plan.entry, plan.stop, plan.target1, plan.target2] + (
+        [result.bars.last_price] if plan.entry_type == "limit" else [])
     suggestions = [dict(spec) for spec in alerts_mod.suggest_for(
-        result.bars.symbol, result.plan, result.bars)]
-    prices = [spec["threshold"] for spec in suggestions
-              if alerts_mod.KINDS[spec["kind"]].get("unit") == "price"]
+        result.bars.symbol, plan, result.bars)]
     for spec in suggestions:
         spec["label"] = alerts_mod.describe(spec["kind"], spec["threshold"],
-                                            result.bars.symbol, beside=prices)
+                                            result.bars.symbol, beside=beside)
 
     calendar_rows = (catalysts_mod.describe(result.calendar)
                      if result.calendar else [])
@@ -2040,7 +2045,7 @@ def analyse():
 
     return render_template("analysis.html", r=result, cfg=cfg,
                            families=families, ranked=ranked, hold_text=hold_text,
-                           plan=result.plan, calib=result.calibration,
+                           plan=plan, beside=beside, calib=result.calibration,
                            suggestions=suggestions, calendar_rows=calendar_rows,
                            overlap=overlap,
                            chart=_trade_chart(result, calm=bool(cfg.get("calm_candles"))),
@@ -6120,7 +6125,14 @@ def monitor():
     finally:
         conn.close()
 
-    described = [(r, alerts_mod.describe(r["kind"], r["threshold"], r["symbol"]))
+    # One instrument's price alerts are read against each other: an entry's and
+    # a stop's, set from one analysis, must not read as the same alert twice.
+    levels: Dict[str, List] = {}
+    for r in alert_rows:
+        if alerts_mod.KINDS.get(r["kind"], {}).get("unit") == "price":
+            levels.setdefault(r["symbol"], []).append(r["threshold"])
+    described = [(r, alerts_mod.describe(r["kind"], r["threshold"], r["symbol"],
+                                         levels.get(r["symbol"], ())))
                  for r in alert_rows]
 
     # Price each open thesis so the page can say how it is doing, and propose

@@ -4,6 +4,7 @@ No network: market data is synthetic, and where a real download would happen
 the payload is built by hand. Each section pins one way the method used to
 mislead, and says how.
 """
+import io
 import os as _os
 import re
 import sys as _sys
@@ -22,6 +23,7 @@ from bot import calibrate as cal  # noqa: E402
 import scenarios as sc  # noqa: E402
 from bot import catalysts, clock, config, decision, engine, levels  # noqa: E402
 from bot import market, plain, public  # noqa: E402
+from bot import report as printed  # noqa: E402
 from bot import strategies as S  # noqa: E402
 from bot.calibrate import Calibration, Outcome  # noqa: E402
 from bot.market import Bars  # noqa: E402
@@ -578,6 +580,12 @@ for miss, want, never in ((-0.52, "lost about 52% of what you put at risk, not a
     out, text = said(avg_loss_r=miss)
     check("a usual miss of %+.2f times the risk is said as that" % miss,
           want in out["sure"] and never not in out["sure"], out["sure"])
+# A pair on 1-minute bars: "made about -1.3 times", "needed to work 79 of those 52 times".
+out, text = said(avg_win_r=-1.3, avg_loss_r=-3.7, breakeven_rate=1.51, prob_samples=52)
+check("costs larger than the target are said as that, not as a win of less than nothing",
+      " Even when it worked, trading costs took more than it made." in out["sure"]
+      and " It would have lost money even if it had worked every time." in out["sure"]
+      and "-1.3" not in out["sure"] and "79 of" not in out["sure"], out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="bearish_no_shorts", odds_direction=-1)
 check("a bearish AVOID says the signals point to a fall",
@@ -2096,8 +2104,29 @@ p_slow = plan_on(slow)
 check("a price that moves less than the usual tick keeps its levels apart too",
       p_slow.stop < p_slow.entry < p_slow.target1 and "error" not in p_slow.position,
       (p_slow.entry, p_slow.stop, p_slow.position))
+# And says them apart, in a call to wait and in one to act now.
+for p_said in (p_slow, plan_on(slow, c=calib(rate=0.45, lo=0.36, hi=0.54, exp=0.30))):
+    beside_ =[p_said.entry, p_said.stop, p_said.target1, p_said.target2] + (
+        [slow.last_price] if p_said.entry_type == "limit" else [])
+    in_, out_ = (market.format_price(v, beside=beside_) for v in (p_said.entry, p_said.stop))
+    check("its words name a %s's entry and stop as two prices" % p_said.action,
+          in_ != out_ and p_said.headline.endswith(" %s." % in_)
+          and "beyond %s." % out_ in p_said.invalidation
+          and ("Wait for %s." % in_ in p_said.trigger or p_said.action == "BUY"),
+          (in_, out_, p_said.headline, p_said.trigger, p_said.invalidation))
+# The printed report too, its price now not reading as if the entry had come.
+printed_ = io.StringIO()
+dc_ = S.build_context(slow)
+printed.render(printed.Console(file=printed_, width=200), slow, p_slow, [], 0.3,
+               S.classify_regime(dc_, len(slow) - 1), calib(), FLAT, calm)
+at_ = [market.format_price(v, beside=[p_slow.entry, p_slow.stop, p_slow.target1, p_slow.target2,
+                                      slow.last_price])
+       for v in (slow.last_price, p_slow.entry, p_slow.stop)]
+check("the report prints the price now, the entry and the stop as three",
+      len(set(at_)) == 3 and all(" %s " % v in printed_.getvalue() for v in at_),
+      (at_, printed_.getvalue()[:900]))
 # 1.084 and 1.084: kept apart by the plan, and read as one price on the page.
-pair_ = dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
+pair_ =dataclasses.replace(p_slow, entry=1.08412, stop=1.08386, target1=1.0849,
                             action="BUY")
 levels_ = (pair_.entry, pair_.stop, pair_.target1)
 check("they read apart on the page too, alike in how many decimals they may have",
@@ -2114,6 +2143,17 @@ check("at any size of price", [market.format_price(a, beside=(b,)) + " " +
       == ["151.231 151.229", "100.031 100.0295", "0.91 0.909999",
           "0.00000000002 0.000000000015", "94,731.004 94,731.001"],
       [market.format_price(a, beside=(b,)) for a, b in ((151.2312, 151.2287),)])
+# The entry and the target read alike (1.085), the stop did not (1.084): to the
+# four decimals those two needed, the entry and the stop both read 1.0845.
+near_ = [(1.08454, 1.08446, 1.08477), (4.534e-08, 4.453e-08, 4.772e-08),
+         (1939.5356, 1939.4913, 1940.148)]
+check("and no two of three do when it is another two that would have read alike",
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      == [["1.08454", "1.08446", "1.08477"], ["0.0000000453", "0.0000000445", "0.0000000477"]]
+      and [plain._money(v, "USD", near_[2]) for v in near_[2]]
+      == ["$1,939.54", "$1,939.49", "$1,940.15"],
+      [[market.format_price(v, beside=three) for v in three] for three in near_[:2]]
+      + [[plain._money(v, "USD", near_[2]) for v in near_[2]]])
 check("ordinary prices, and one price said twice, read as ever beside each other",
       all(market.format_price(a, beside=(b, None, float("nan"))) == market.format_price(a)
           and plain._money(a, "USD", (b, None)) == plain._money(a, "USD")

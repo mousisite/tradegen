@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% set active = 'stocks' %}
-{% if rec.scored %}
-  {% set page_blurb = "A forward test, scored in public: each trading day Orenth makes a call on " ~ popular_count ~ " popular stocks and coins, and scores it when the price reaches its stop or target, or after " ~ method.days ~ " trading days. " ~ rec.scored ~ (" call" if rec.scored == 1 else " calls") ~ " scored so far, each kind against what chance would score. Not financial advice." %}
-{% endif %}
+{% set page_blurb = "A forward test, scored in public: each trading day Orenth makes a call on " ~ popular_count ~ " popular stocks and coins, and scores it when the price reaches its stop or target, or after " ~ method.days ~ " trading days. " ~ (rec.scored ~ (" call" if rec.scored == 1 else " calls") ~ " scored so far, each kind against what chance would score." if rec.scored else "None is scored yet.") ~ " Not financial advice." %}
 {% block title %}Orenth's track record: how its calls turned out · Orenth{% endblock %}
 {% block og_title %}How Orenth's calls turned out · Orenth{% endblock %}
 {% block head_extra %}{% if not rec.scored and not rec.latest %}<meta name="robots" content="noindex">{% endif %}{% endblock %}

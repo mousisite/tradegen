@@ -116,11 +116,13 @@ def decimals_apart(values, shown) -> int:
             continue
         if math.isfinite(v):
             real.append(v)
-    gaps = [abs(a - b) for i, a in enumerate(real) for b in real[:i]
-            if shown(a) == shown(b) and abs(a - b) > 1e-9 * max(abs(a), abs(b))]
-    if not gaps:
+    pairs = [(abs(a - b), shown(a) == shown(b)) for i, a in enumerate(real) for b in real[:i]
+             if abs(a - b) > 1e-9 * max(abs(a), abs(b))]
+    if not any(alike for _, alike in pairs):
         return 0
-    return min(16, max(0, math.ceil(-math.log10(min(gaps) / 2.0) - 1e-9)))
+    # The smallest of them all: to the decimals that part an entry and a target
+    # only, a stop nearer the entry can round onto it.
+    return min(16, max(0, math.ceil(-math.log10(min(gap for gap, _ in pairs) / 2.0) - 1e-9)))
 
 
 def format_price(value, currency: str = "", beside=()) -> str:

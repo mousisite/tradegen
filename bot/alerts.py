@@ -401,11 +401,13 @@ def _evaluate(row, bars, call: Optional[str] = None) -> Optional[Fired]:
 
     if kind == "price_above" and price > threshold:
         return fire(price, "%s is %s, above the %s you set."
-                    % (symbol, format_price(price), format_price(threshold)))
+                    % (symbol, format_price(price, beside=(threshold,)),
+                       format_price(threshold, beside=(price,))))
 
     if kind == "price_below" and price < threshold:
         return fire(price, "%s is %s, below the %s you set."
-                    % (symbol, format_price(price), format_price(threshold)))
+                    % (symbol, format_price(price, beside=(threshold,)),
+                       format_price(threshold, beside=(price,))))
 
     if kind in ("pct_up", "pct_down"):
         # Measured against the previous session close, which is what "up today"
@@ -585,8 +587,8 @@ def _traded_past(row, bars, now: float) -> Optional[Fired]:
     extreme = float(reach[j])
     return Fired(int(row["id"]), row["symbol"], row["kind"], row["threshold"], extreme,
                  "%s traded at %s %s, %s the %s you set, and was last at %s."
-                 % (row["symbol"], format_price(extreme), _bar(bars, j=j),
-                    "above" if up else "below", format_price(level),
+                 % (row["symbol"], format_price(extreme, beside=(level,)), _bar(bars, j=j),
+                    "above" if up else "below", format_price(level, beside=(extreme,)),
                     format_price(bars.last_price)),
                  row["note"] or "", _owner(row), as_of(bars))
 
@@ -1417,10 +1419,13 @@ def check_stops(conn, user=None, skip_closed: bool = False,
                 _STOPS_LOOKED[int(row["id"])] = now
             continue
         price, stop = read.price, read.stop
-        said = format_price(price)
+        # Said in one sentence, so each is read against the others.
+        beside = ((price, stop, read.initial if read.moved else None) if read.past
+                  else (price, read.touched, read.touched_stop))
+        said = format_price(price, beside=beside)
         if split != 1.0:
             said = ("%s (%s in the shares you opened with, after a %s split)"
-                    % (format_price(quote), format_price(price), split_words(split)))
+                    % (format_price(quote), said, split_words(split)))
         side_word = "long" if side > 0 else "short"
         kind = "the stop"
         if read.trail is not None:
@@ -1430,19 +1435,19 @@ def check_stops(conn, user=None, skip_closed: bool = False,
             if read.moved:
                 moved = (" It had trailed %s behind the best price, %s from %s."
                          % (read.trail.words(), "up" if side > 0 else "down",
-                            format_price(read.initial)))
+                            format_price(read.initial, beside=beside)))
             message = ("%s is at %s, past %s of %s on your %s position.%s "
                        "The journal does not close it for you: close it there once "
                        "you are out." % (row["symbol"], said, kind,
-                                         format_price(stop), side_word, moved))
+                                         format_price(stop, beside=beside), side_word, moved))
         else:
             when = day_words(crossed_day(bar_size(row), bars, read.touched_at))
             message = ("%s traded at %s on %s, past %s of %s on your %s "
                        "position, and is at %s now. The journal counts the stop "
                        "as hit and does not close it for you: close it there once "
                        "you are out." % (row["symbol"],
-                                         format_price(read.touched), when, kind,
-                                         format_price(read.touched_stop),
+                                         format_price(read.touched, beside=beside), when, kind,
+                                         format_price(read.touched_stop, beside=beside),
                                          side_word, said))
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))

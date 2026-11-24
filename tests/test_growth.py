@@ -338,6 +338,12 @@ try:
                if said.split()[0] not in ("a", "an", "the", "following", "trading")]
           and len(set(_said.values())) == len(_said),
           [n for n, said in _said.items() if said == public.strategy_label(n)])
+    check("each short enough for a preview to show whole",
+          all(len("Does %s work? · Orenth" % said) < 60 for said in _said.values()),
+          [said for said in _said.values() if len("Does %s work? · Orenth" % said) >= 60])
+    # Higher highs and lower lows at once is a widening range, not what it follows.
+    check("and true: it follows higher highs up or lower lows down, not both at once",
+          _said["market_structure"] == "following higher highs or lower lows")
     page = _html.unescape(c.get("/backtest/pivot-levels").data.decode("utf-8", "replace"))
     check("in its title, its heading, its preview and its links to the others",
           "<title>Does trading from pivot points work?" in page
@@ -472,6 +478,10 @@ try:
     page = c.get("/record").data.decode("utf-8", "replace")
     check("while waiting, it says how many calls it is holding",
           "5 calls written down since 5 Jan 2026" in page)
+    # It opens to search when the first few settle, weeks before any is scored.
+    check("with a description of its own, not the front page's",
+          "None is scored yet. Not financial advice." in re.search(
+              r'name="description" content="(.*?)"', page).group(1), page[:600])
 
     # NVDA, BUY at 100 with target 104.5: reaches it on the third day.
     check("a buy that reached its target was right",
@@ -957,6 +967,9 @@ try:
     check("short enough to be shown whole", all(
         len(h[0]) < 60 and len(h[1]) < 155 for p, h in heads.items() if p != "/"),
         {p: (len(h[0]), len(h[1])) for p, h in heads.items()})
+    # A price that opens past the stop loses more, as the page itself says.
+    check("and the size calculator's promises no more than its page does",
+          "loses no more than that at the stop" in heads["/tools/size"][1], heads["/tools/size"])
     page = c.get("/stocks").data.decode("utf-8", "replace")
     check("asking someone to analyse a stock says analyse, like the button",
           "Analyse any stock or coin" in page and "Check any stock" not in page)
@@ -1511,6 +1524,9 @@ try:
                   r'<meta http-equiv="refresh" content="[2-5]">', said)
               and r.headers.get("Retry-After") and "opens by itself" in said
               and "didn't work" not in said, said[:300])
+        check("told what is so, though all four at work are its own and it may wait a while",
+              "tries again every few seconds" in said and "A lot of people" not in said
+              and "in a few seconds." not in said, said[:300])
         r = another().post("/monitor/alerts/check")
         check("a button is not pressed again by itself",
               r.status_code == 503 and "refresh" not in page_of(r)

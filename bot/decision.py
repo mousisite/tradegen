@@ -394,9 +394,11 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     price = bars.last_price
     atr_value = float(ctx.atr[i])
 
+    beside: List[float] = []            # the plan's own prices, once it has them
+
     def fp(value) -> str:
         """Round to the instrument's tick, then render it readably."""
-        return format_price(_round_price(float(value), price, atr_value))
+        return format_price(_round_price(float(value), price, atr_value), beside=beside)
 
     conviction, conflict = blend_conviction(composite, sentiment,
                                             float(cfg["sentiment_weight"]))
@@ -542,21 +544,10 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
 
     if mode in ("BUY", "SHORT"):
         entry, entry_rationale, entry_type = price, "current price", "market"
-        if direction > 0:
-            trigger = ("Enter now, while price holds above %s."
-                       % fp(price - 0.4 * atr_value))
-        else:
-            trigger = ("Enter now, while price holds below %s."
-                       % fp(price + 0.4 * atr_value))
     else:
         entry, entry_rationale = choose_pullback_entry(ctx, bars, levels,
                                                        direction, atr_value)
         entry_type = "limit"
-        trigger = ("Wait for %s. Only take it if %s candle closes back in your "
-                   "favour there, on volume that backs the move. A level the "
-                   "price goes straight through is not %s." % (
-                       fp(entry), _a_bar(bars.interval),
-                       "support" if direction > 0 else "resistance"))
 
     # Rounded before anything is worked out from them, so the size, the money
     # at risk and the reward to risk are those of the prices shown, which are
@@ -572,6 +563,23 @@ def decide(ctx: Context, bars: Bars, signals: List[Signal], composite: float,
     stop = _round_price(stop, price, atr_value)
     target1 = _round_price(target1, price, atr_value)
     target2 = _round_price(target2, price, atr_value)
+    # The words say them as the page shows them, read against each other. A
+    # market entry is the price now, rounded; one waited for is read against
+    # the price now as well.
+    beside += [entry, stop, target1, target2] + ([price] if entry_type == "limit" else [])
+
+    if entry_type == "limit":
+        trigger = ("Wait for %s. Only take it if %s candle closes back in your "
+                   "favour there, on volume that backs the move. A level the "
+                   "price goes straight through is not %s." % (
+                       fp(entry), _a_bar(bars.interval),
+                       "support" if direction > 0 else "resistance"))
+    elif direction > 0:
+        trigger = ("Enter now, while price holds above %s."
+                   % fp(price - 0.4 * atr_value))
+    else:
+        trigger = ("Enter now, while price holds below %s."
+                   % fp(price + 0.4 * atr_value))
 
     risk_per_unit = abs(entry - stop)
     reward = abs(target1 - entry)

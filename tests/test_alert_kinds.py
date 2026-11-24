@@ -27,7 +27,7 @@ import numpy as np  # noqa: E402
 
 import scenarios as sc  # noqa: E402
 import web  # noqa: E402
-from bot import alerts, catalysts, clock, engine, liquidity  # noqa: E402
+from bot import alerts, catalysts, clock, engine, liquidity, market  # noqa: E402
 from bot import database as db  # noqa: E402
 
 fails = []
@@ -454,6 +454,43 @@ check("two suggested prices that differ never read the same, and others are as t
       == alerts.describe("price_below", 180.5, "X"),
       alerts.describe("price_below", 1.08412, "EURUSD=X", beside=[1.08412, 1.08386]))
 check("the Liquidity row is among the families", re.search(r"<td>Liquidity</td>", page))
+
+# A currency pair on 5-minute bars: the price, the entry waited for and the stop
+# are all 1.084 to the usual three decimals. The plan's figures had more, and its
+# call, its words and its two alerts still said one price for all three.
+plans = []
+real = (engine.resolve, engine.fetch_bars, catalysts.fetch, engine.decide)
+engine.resolve = lambda s: {"symbol": s, "name": "EUR/USD"}
+engine.fetch_bars = lambda s, iv: dataclasses.replace(
+    sc.walk(sc.futures_times(1500), seed=5, vol=0.00008, price=1.084, symbol=s), live_price=None)
+catalysts.fetch = lambda s: (_ for _ in ()).throw(RuntimeError("no calendar in tests"))
+engine.decide = lambda ctx, bars, signals, composite, regime, calib, sentiment, levels, cfg: (
+    plans.append((real[3](ctx, bars, signals, 0.5, regime, calib, sentiment, levels,
+                          dict(cfg, min_conviction=0.0, require_positive_expectancy=False)),
+                  bars.last_price)) or plans[-1][0])
+try:
+    page = c.get("/analyse?symbol=EURUSD%3DX&interval=5m&news=0").data.decode("utf-8", "replace")
+finally:
+    engine.resolve, engine.fetch_bars, catalysts.fetch, engine.decide = real
+plan, now_ = plans[-1]
+levels_ = [plan.entry, plan.stop, plan.target1, plan.target2, now_]
+in_, out_, now_ = (market.format_price(v, beside=levels_) for v in (plan.entry, plan.stop, now_))
+flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", page))
+wanted = ["Buy only if price reaches %s." % in_, "Wait for %s." % in_, "close beyond %s." % out_,
+          "EURUSD=X price falls below %s " % in_, "EURUSD=X price falls below %s " % out_,
+          "price reaches %s, set the entry alert" % in_]
+check("a pair's entry, stop and price now read apart in the call, the words and the alerts",
+      plan.action == "WAIT" and len({in_, out_, now_}) == 3
+      and len({market.format_price(v) for v in (plan.entry, plan.stop)}) == 1
+      and '<span class="now">%s</span>' % now_ in page and all(w in flat for w in wanted),
+      (in_, out_, now_, [w for w in wanted if w not in flat]))
+check("while the form is sent the whole number",
+      all('name="threshold" value="%s"' % v in page for v in (plan.entry, plan.stop)))
+for v in (plan.entry, plan.stop):
+    db.alert_add(conn, "EURUSD=X", "price_below", v, interval="5m")
+flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c.get("/monitor").data.decode("utf-8", "replace")))
+said = re.findall(r"EURUSD=X price falls below (\S+)", flat)
+check("and on Monitor the two alerts are two", len(said) == len(set(said)) == 2, said)
 
 conn.close()
 print()

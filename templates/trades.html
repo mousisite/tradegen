@@ -137,17 +137,18 @@
             <td data-label="Side"><span class="chip {{ 'long' if long else 'short' }}">
               {{ 'Long' if long else 'Short' }}</span></td>
             {% set stop_now = m.stop if m.stop is defined else t['stop'] %}
-            <td class="r fig" data-label="Entry">{{ t['entry']|price(stop_now, t['target1']) }}</td>
+            {% set beside = [t['entry'], stop_now, t['target1']] + ([t['stop']] if m.moved else []) %}
+            <td class="r fig" data-label="Entry">{{ t['entry']|price(*beside) }}</td>
             {# The stop in force now. A trail moves it with the best price
                since opening, and only ever tighter; the plan's R stays
                measured from the stop it was opened with. #}
-            <td class="r fig loss" data-label="Stop">{{ stop_now|price(t['entry'], t['target1']) }}
+            <td class="r fig loss" data-label="Stop">{{ stop_now|price(*beside) }}
               {% if m.trail %}<div class="faint" style="font-size:var(--t-xs)">{{ m.trail.words() }}
                 {{ 'under' if long else 'over' }} {{ m.best|price }}</div>
               <div class="faint" style="font-size:var(--t-xs)">{% if m.moved %}{{ 'up' if long else 'down' }}
-                from {{ t['stop']|price }}{% else %}not moved yet{% endif %}</div>
+                from {{ t['stop']|price(*beside) }}{% else %}not moved yet{% endif %}</div>
               {% elif t['trail_pct'] or t['trail_dist'] %}<div class="faint" style="font-size:var(--t-xs)">trailing</div>{% endif %}</td>
-            <td class="r fig gain" data-label="Target">{{ t['target1']|price(t['entry'], stop_now) }}
+            <td class="r fig gain" data-label="Target">{{ t['target1']|price(*beside) }}
               {% if rr is not none %}<div class="faint" style="font-size:var(--t-xs)">plans {{ "%.2f"|format(rr) }}&thinsp;:&thinsp;1</div>{% endif %}</td>
             <td class="r fig" data-label="Now">{{ m.price|price if m.price else '—' }}
               {% if m.split_words %}<div class="faint" style="font-size:var(--t-xs)">quoted {{ m.quoted|price }}
@@ -363,7 +364,7 @@
               <div class="faint" style="font-size:var(--t-xs)">from your {{ from_call }} call</div>{% endif %}
               {{ tag_chips(t) }}
               {% if t['followed_plan'] or t['lesson'] %}
-                <div class="faint" style="font-size:var(--t-xs);margin-top:4px">{% if t['followed_plan'] %}Followed the plan:
+                <div class="faint" style="font-size:var(--t-xs);margin-top:4px;overflow-wrap:anywhere">{% if t['followed_plan'] %}Followed the plan:
                   {{ tags.followed_labels.get(t['followed_plan'], '')|lower }}.{% endif %}
                   {% if t['lesson'] %}{{ t['lesson'] }}{% endif %}</div>
               {% endif %}

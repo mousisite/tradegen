@@ -182,6 +182,13 @@ try:
     check("and a check that works clears it",
           conn.execute("SELECT last_error FROM alerts WHERE id=?", (gone,)).fetchone()[0] is None)
 
+    # "EURUSD=X is 1.084, above the 1.084 you set."
+    PRICE["EURUSD=X"] = 1.08396
+    pair = db.alert_add(conn, "EURUSD=X", "price_above", 1.08381, user=alice.id)
+    said = [f.message for f in alerts.check(conn, call_of=call_of)["fired"] if f.alert_id == pair]
+    check("a price past a level of the same three decimals is told as another price",
+          said == ["EURUSD=X is 1.08396, above the 1.08381 you set."], said)
+
     print()
     print("=" * 72)
     print("A POSITION THAT CROSSES ITS STOP")
