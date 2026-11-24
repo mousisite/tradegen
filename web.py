@@ -1517,6 +1517,28 @@ def _work_out_example(cfg: Dict, key: Tuple):
         owned["done"].set()
 
 
+# How old the list behind the Find tile may be before another is started. A
+# finished one is dropped at JOB_KEEP, so well before it, or there is none to
+# show for the minutes the next one takes.
+FIND_BEHIND = ideas_mod.JOB_KEEP - 2 * EXAMPLE_TTL
+
+
+def _start_find() -> None:
+    """Have the list behind the Find tile made, so that it opens on a finished
+    one. Nobody has asked for it yet: only where the server's own jobs run, and
+    not while a scan somebody asked for is going or waiting its turn."""
+    if not BACKGROUND:
+        return
+    try:
+        _demo_shortlist("stocks", "medium", "balanced", wait=0.0, ttl=FIND_BEHIND,
+                        may_start=lambda: not any(
+                            j["running"] for j in ideas_mod._JOBS.values()))
+    except ideas_mod.Busy:
+        pass
+    except Exception as exc:
+        app.logger.warning("The list behind the Find tile could not be started: %s", exc)
+
+
 def _refresh_example() -> None:
     try:
         # The one the page behind it opens: worked out apart from it, and
@@ -1526,13 +1548,7 @@ def _refresh_example() -> None:
             kept = _work_out_example(cfg, key)
         if kept is not None:
             _shown_example(kept[1], kept[0])
-        try:
-            # The list behind the Find tile, so that it opens on a finished
-            # one: started when there is none from the last few hours.
-            _demo_shortlist("stocks", "medium", "balanced", wait=0.0,
-                            ttl=ideas_mod.JOB_KEEP)
-        except ideas_mod.Busy:
-            pass
+        _start_find()
     except Exception as exc:
         # A missing example costs nothing; a front door that errors costs the
         # visitor. The page simply renders without it, and the log says why: a
@@ -5867,10 +5883,10 @@ DEMO_SCAN_WAIT = 1.0
 
 def _demo_shortlist(market: str, horizon: str, risk: str,
                     wait: float = ideas_mod.PAGE_WAIT,
-                    ttl: float = DEMO_SCAN_TTL) -> Dict:
+                    ttl: float = DEMO_SCAN_TTL, may_start=None) -> Dict:
     cfg = config_mod.load(app.config.get("CFG_PATH"))
     return ideas_mod.find(market, horizon, cfg, risk, wait=min(wait, DEMO_SCAN_WAIT),
-                          ttl=ttl, join_wait=0)
+                          ttl=ttl, join_wait=0, may_start=may_start)
 
 
 SCREEN_FAILED = "The screen could not be finished. Try again in a minute."

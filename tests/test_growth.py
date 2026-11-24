@@ -761,9 +761,53 @@ try:
               len(asked_of) == 1 and asked_of[0][2].get("with_news", True)
               and not asked_of[0][2]["record"] and key in web._CACHE
               and web._CACHE[key][1].plan.prob_samples == 60, (asked_of, list(web._CACHE)))
+        check("no scan is started where the server's own jobs do not run", scans == [], scans)
+        web.BACKGROUND["stand-in"] = None
+        web._refresh_example()
         check("and the list behind the Find tile is started, without waiting for it",
-              scans and scans[-1][1]["wait"] == 0.0
-              and scans[-1][1]["ttl"] == web.ideas_mod.JOB_KEEP, scans)
+              len(scans) == 1 and scans[0][1]["wait"] == 0.0, scans)
+        jobs = web.ideas_mod._JOBS
+        jobs.clear()
+        idle = scans[0][1]["may_start"]()
+        jobs["a member's"] = {"running": True}
+        check("but never takes a place while a scan somebody asked for is going",
+              idle and not scans[0][1]["may_start"]())
+        jobs.clear()
+
+        def no_scan(*_a, **_k):
+            raise RuntimeError("The scan stopped without an answer.")
+
+        web.ideas_mod.find, shown = no_scan, web._example_state["at"]
+        web._refresh_example()
+        check("a scan that cannot be started is not the example's failure",
+              web._example_state["failed"] == 0.0 and web._example_state["at"] == shown)
+
+        # A finished list is kept for JOB_KEEP and then dropped. Another is
+        # started while there is still that one to show.
+        web.ideas_mod.find = real_find
+        real_run, web.ideas_mod._run = web.ideas_mod._run, lambda *a: None
+        try:
+            for age in (web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL - 60,
+                        web.ideas_mod.JOB_KEEP - web.EXAMPLE_TTL - 60):
+                jobs.clear()
+                then = time.time() - age
+                web._demo_shortlist("stocks", "medium", "balanced", wait=0.0)
+                (asked, job), = jobs.items()
+                job.update(running=False, started=then, scan={
+                    "market": "stocks", "interval": "1d", "rows": [], "failed": [],
+                    "asked_for": 1, "cut_short": False, "throttled": False, "complete": True,
+                    "seconds": 1.0, "scanned_at": then, "finished_at": then})
+                web._refresh_example()
+                check("a list %d minutes old %s" % (age // 60, "is left" if job is jobs[asked]
+                                                    else "is made again, and shown meanwhile"),
+                      (jobs[asked] is job) == (age < web.ideas_mod.JOB_KEEP - 2 * web.EXAMPLE_TTL)
+                      and (jobs[asked]["scan"] or jobs[asked]["previous"]) is job["scan"],
+                      jobs[asked])
+        finally:
+            web.ideas_mod._run = real_run
+            web.BACKGROUND.clear()
+            jobs.clear()
+        web.ideas_mod.find = lambda *a, **k: scans.append((a, k))
         _os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
         web._CACHE.clear()
         web._refresh_example()
