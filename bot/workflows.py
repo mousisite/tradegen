@@ -278,9 +278,9 @@ def _check_positions(conn, cfg, report: RunReport, step, user=1) -> None:
             report.steps.append(Step(
                 "Position: %s" % p.symbol,
                 "%s is at %s and has crossed its %sstop of %s. Close it in the "
-                "journal once you are out." % (p.symbol, format_price(p.price),
+                "journal once you are out." % (p.symbol, format_price(p.price, beside=(crossed,)),
                                                "trailing " if p.trail is not None else "",
-                                               format_price(crossed)),
+                                               format_price(crossed, beside=(p.price,))),
                 "attention", {"trade_id": p.trade_id}))
         elif at_target:
             report.steps.append(Step(

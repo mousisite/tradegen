@@ -35,11 +35,12 @@
               {% set stop = m.stop if m.stop is defined else t['stop'] %}
               {% set beyond = (m.price <= stop) if t['direction'] > 0 else (m.price >= stop) %}
               {% if m.touched_at and not beyond %}
+                {% set beside = [m.touched_stop or stop, m.touched, m.price] %}
                 traded through its {{ 'trailing ' if m.trail }}stop of
-                {{ (m.touched_stop or stop)|price }} at {{ m.touched|price }}
-                on {{ m.touched_day }}, and is at {{ m.price|price }} now.
+                {{ beside[0]|price(*beside) }} at {{ m.touched|price(*beside) }}
+                on {{ m.touched_day }}, and is at {{ m.price|price(*beside) }} now.
               {% else %}
-                at {{ m.price|price }}, past its {{ 'trailing ' if m.trail }}stop of {{ stop|price }}.
+                at {{ m.price|price(stop) }}, past its {{ 'trailing ' if m.trail }}stop of {{ stop|price(m.price) }}.
               {% endif %}
               The journal does not close it for you.
             {% else %}

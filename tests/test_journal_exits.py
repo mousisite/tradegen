@@ -1111,6 +1111,35 @@ try:
           and "Stop breached on ZZQ5: it traded through its stop of 95" in page,
           [body[body.find("<b>ZZQ5</b>") - 20:][:200]])
 
+    # A currency pair's price, its stop and where its trail began, all three
+    # 1.084 to the usual decimals: "at 1.084, past its trailing stop of 1.084".
+    fx = db.open_trade(conn, "ZZFX", "1d", 1, 1.0852, 1.08361, quantity=1000,
+                       trail_dist=0.00188, trail_atr=1.0, user=alice.id)
+    conn.execute("UPDATE trades SET ts_opened=?, trail_ts=?, trail_best_ts=? WHERE id=?",
+                 (start - DAY + 3600, start - DAY + 3600, start - DAY + 3600, fx))
+    conn.commit()
+    BARS["ZZFX"] = bars_of([1.0855, 1.0860], [1.0850, 1.0852], live=1.08396, start=start)
+    routine = workflows.RunReport(name="positions", started=0, finished=0)
+    workflows._check_positions(conn, web.config_mod.load(harness.CFG_PATH), routine,
+                               lambda _label: None, user=alice.id)
+    cell = flat(text(c.get("/trades")))
+    cell = cell[cell.index("<b>ZZFX</b>"):]
+    said = [f.message for f in alerts.check_stops(conn)["fired"] if f.trade_id == fx]
+    for where, has, words in (
+            ("the front page", flat(text(c.get("/"))),
+             ["at 1.08396, past its trailing stop of 1.08412."]),
+            ("the portfolio", flat(text(c.get("/portfolio"))),
+             ["is at 1.08396, past its trailing stop of 1.08412:"]),
+            ("the journal", cell[:cell.index("</tr>")],
+             [">1.0852</td>", ">1.0841 ", "up from 1.0836<"]),
+            ("the notice", " ".join(said), ["is at 1.08396, past the trailing stop of 1.08412 on",
+                                            "up from 1.08361."]),
+            ("the routine", " ".join(s.detail for s in routine.steps
+                                     if s.label == "Position: ZZFX"),
+             ["is at 1.08396 and has crossed its trailing stop of 1.08412."])):
+        check("%s says a price and the stop it passed as two prices" % where,
+              all(w in has for w in words), [w for w in words if w not in has])
+
     # The front page, /portfolio and the positions routine read positions as
     # well, and keep what they see as the journal does. A round of the
     # background check at the high trails the stop up to 114; the dip to 113

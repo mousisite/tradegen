@@ -27,10 +27,10 @@
         <li><b>{{ p.symbol }}</b>
           {% if (p.price - p.stop) * p.direction > 0 and p.touched is not none -%}
           traded through its {{ 'trailing ' if p.trail }}stop of
-          {{ (p.touched_stop or p.stop)|price }} and is at {{ p.price|price }}
+          {{ (p.touched_stop or p.stop)|price(p.price) }} and is at {{ p.price|price(p.touched_stop or p.stop) }}
           {%- else -%}
-          is at {{ p.price|price }}, past its {{ 'trailing ' if p.trail }}stop
-          of {{ p.stop|price }}{%- endif %}: {{ p.open_pnl|money if p.sized else 'size not logged' }}{% if p.open_r is not none %}
+          is at {{ p.price|price(p.stop) }}, past its {{ 'trailing ' if p.trail }}stop
+          of {{ p.stop|price(p.price) }}{%- endif %}: {{ p.open_pnl|money if p.sized else 'size not logged' }}{% if p.open_r is not none %}
           ({{ p.open_r|signed }}R){% endif %}.</li>
       {% endfor %}
     </ul>
