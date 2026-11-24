@@ -242,6 +242,9 @@ def lexicon_score(text: str) -> float:
 
 # The breaker's name for Yahoo, the same one bot/market.py and bot/yahoo.py use.
 _YAHOO_HOST = "Yahoo Finance"
+# And for the headline feed, which is on a host of its own: whether it refuses
+# says nothing about the prices, and stopped everybody's.
+_FEED_HOST = "Yahoo Finance headline feed"
 
 
 # When a source that gave no headlines was last said to have, by its name. The
@@ -305,12 +308,13 @@ def _yahoo_news(symbol: str, named=None) -> List[Item]:
     of that feed, and the rest are left out.
     """
     coin = coin_ticker(symbol) is not None
+    host = _FEED_HOST if coin else _YAHOO_HOST
     items: List[Item] = []
     try:
         # Yahoo's news search shares the rate limit with its prices. It asks
         # nothing while the source is refusing, and a refusal here is told to
         # the shared breaker so the price requests stand back too.
-        upstream.check(_YAHOO_HOST)
+        upstream.check(host)
     except upstream.Throttled:
         return items
     try:
@@ -323,10 +327,9 @@ def _yahoo_news(symbol: str, named=None) -> List[Item]:
                              headers=_HEADERS, timeout=_TIMEOUT)
         if upstream.is_throttle(r.status_code):
             _gave_nothing("Yahoo Finance", "HTTP %s" % r.status_code)
-            upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r),
-                                    r.status_code)
+            upstream.note_throttled(host, upstream.retry_after_seconds(r), r.status_code)
         elif r.status_code == 200:
-            upstream.note_ok(_YAHOO_HOST)
+            upstream.note_ok(host)
             feed = feedparser.parse(r.content) if coin else {}
             if coin and not feed.get("version"):
                 _gave_nothing("Yahoo Finance", "HTTP 200, and not a feed")
@@ -347,10 +350,10 @@ def _yahoo_news(symbol: str, named=None) -> List[Item]:
                                   via="Yahoo Finance"))
         else:
             _gave_nothing("Yahoo Finance", "HTTP %s" % r.status_code)
-            upstream.note_unclear(_YAHOO_HOST)
+            upstream.note_unclear(host)
     except Exception as exc:
         _gave_nothing("Yahoo Finance", type(exc).__name__)
-        upstream.note_unclear(_YAHOO_HOST)
+        upstream.note_unclear(host)
     return items
 
 

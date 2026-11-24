@@ -197,6 +197,42 @@ try:
     check("and they are the newest",
           max(i.age_hours for i in sentiment._yahoo_news("BTC-USD")) < 15)
 
+    # The feed is on a host of its own. Three refusals there stopped everybody's
+    # prices for as long as it said, up to a quarter of an hour.
+    tried = []
+
+    def feed_refuses(url, **k):
+        tried.append(url)
+        refusal = Reply(429)
+        refusal.headers = {"Retry-After": "900"}
+        return refusal if url == sentiment._YAHOO_FEED else Reply(200, {"news": []})
+
+    def refused(host):
+        try:
+            upstream.check(host)
+        except upstream.Throttled:
+            return True
+        return False
+
+    upstream.reset()
+    sentiment.requests.get = feed_refuses
+    for symbol in ("BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD"):
+        sentiment._yahoo_news(symbol)
+    check("a coin's headlines refused are left alone, and prices are still asked for",
+          tried == [sentiment._YAHOO_FEED] * 3 and not refused(sentiment._YAHOO_HOST),
+          (tried, refused(sentiment._YAHOO_HOST)))
+    upstream.reset()
+    sentiment.requests.get = lambda url, **k: Reply(429)
+    for _ in range(3):
+        sentiment._yahoo_news("AAPL")
+    check("a company's, from the host prices come from, still stop both",
+          refused(sentiment._YAHOO_HOST))
+    sentiment.requests.get = lambda url, **k: Reply(200, content=many)
+    upstream._breakers[sentiment._YAHOO_HOST]["open_until"] = 0.0
+    sentiment._yahoo_news("BTC-USD")
+    check("and a coin's answering says nothing about whether prices are back",
+          upstream._breakers[sentiment._YAHOO_HOST]["tripped"])
+
     # Yahoo's feed goes by the letters. What it really gave for Dai, the dollar
     # coin, was a Japanese builder's buyback, which read as bullish; the rupee
     # was in every coin's.
