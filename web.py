@@ -48,9 +48,9 @@ try:
 except ImportError:
     pass
 
-from flask import (Flask, Response, abort, g, jsonify, redirect,
-                   render_template, request, send_from_directory, session,
-                   url_for)
+from flask import (Flask, Response, abort, g, has_request_context, jsonify,
+                   redirect, render_template, request, send_from_directory,
+                   session, url_for)
 from flask.json.provider import DefaultJSONProvider
 from werkzeug.exceptions import HTTPException
 from werkzeug.routing import IntegerConverter
@@ -451,7 +451,10 @@ def _sent_from_elsewhere():
 def _referrer_path() -> str:
     """The page a request came from, as a safe path on this site, or "/"."""
     from urllib.parse import urlparse
-    ref = urlparse(request.referrer or "")
+    try:
+        ref = urlparse(request.referrer or "")
+    except ValueError:              # "http://[" is no address of anywhere
+        return "/"
     if ref.netloc and ref.netloc != request.host:
         return "/"
     path = ref.path or "/"
@@ -737,7 +740,17 @@ def _rate_limited(action: str, per_hour: int) -> bool:
                 return True
         for who, _most in budgets:
             _RATE[(action, who)].append(now)
+    g.setdefault("counted", []).extend(((action, who), now) for who, _most in budgets)
     return False
+
+
+def _uncount() -> None:
+    """Take back what this request was counted for. It is being sent away to
+    come back, so nothing was done for it, and it will be counted then."""
+    with _RATE_LOCK:
+        for key, at in g.pop("counted", ()):
+            if at in _RATE.get(key, ()):
+                _RATE[key].remove(at)
 
 
 def _too_often(what: str):
@@ -997,9 +1010,11 @@ SLOW_RETRY = 3
 _SLOW: Dict[int, int] = {}
 _SLOW_LOCK = threading.Lock()
 # The pages sent away to come back in a few seconds: the account, when it was
-# first asked for, and when last. A place that comes free is kept for those
-# that have waited longest: given to whoever asked in that instant, a page
-# could be unlucky for minutes. One not asked for again in this long is gone.
+# first asked for, and when last. The last place free is kept for those that
+# have waited longest: given to whoever asked in that instant, a page could be
+# unlucky for minutes. Not every place, as it was: each stood empty until the
+# page it was kept for came back, and a crowd was sent away again and again by
+# a server with nothing to do. One not asked for again in this long is gone.
 _IN_LINE: Dict[Tuple, List] = {}
 LINE_FOR = 10.0
 
@@ -1052,7 +1067,7 @@ class _SlowSlot:
                 # empties it would not work at all.
                 ahead = 0
             if (mine >= most and not (joining and g.demo)) \
-                    or sum(_SLOW.values()) + ahead >= _slow_in_all():
+                    or sum(_SLOW.values()) + min(1, ahead) >= _slow_in_all():
                 # Only a page that comes back by itself has a place in the line.
                 if waits and request.method == "GET":
                     _IN_LINE[who] = [me, came, now]
@@ -1072,28 +1087,40 @@ class _SlowSlot:
                 _SLOW.pop(self.mine, None)
             self.mine = None
 
-    def __enter__(self):
-        self.take()
-        return self
 
-    def __exit__(self, *_exc) -> None:
-        self.free()
+def _own_place() -> _SlowSlot:
+    """This request's one place, kept until it ends once it is taken. A page
+    that asked for a second, for its research after its analysis or a thesis
+    after both, could be sent away half-way with the first part done."""
+    if g.get("slow_place") is None:
+        g.slow_place = _SlowSlot()
+    return g.slow_place
 
 
 def _come_back():
     """The page for a place that was not to be had: it opens itself again in a
     few seconds, so that a crowd waits its turn without holding the threads
     everybody's pages are drawn by. A button is never pressed again by itself."""
+    _uncount()
     waits = request.method in ("GET", "HEAD")
+    # What was typed, to send again: the page it was typed on is drawn anew by
+    # going back. A picture, or more than any form here holds, is not read.
+    again = (not waits and request.mimetype == "application/x-www-form-urlencoded"
+             and (request.content_length or 0) <= app.config["MAX_FORM_MEMORY_SIZE"])
+    back = _referrer_path()
+    if again:
+        # Sent again from the page saying this, which is nowhere to go back to.
+        back = _safe_back(request.form.get("busy_back"), back)
     page = app.make_response((render_template(
         "busy.html",
         # Not all in the same second.
         come_back=SLOW_RETRY + random.randint(-1, 2) if waits else None,
-        back=_referrer_path(),
+        back=back, again=again,
         message=("A lot of people are asking for pages at once, so this one is waiting "
                  "its turn. It opens by itself in a few seconds." if waits else
                  "A lot of people are asking for pages at once, so nothing was done. "
-                 "Go back, wait a few seconds and press the button again.")), 503))
+                 "%s a few seconds and press the button again."
+                 % ("Wait" if again else "Go back, wait"))), 503))
     page.headers["Retry-After"] = str(SLOW_RETRY)
     return page
 
@@ -1108,9 +1135,7 @@ def _slow_from_here() -> None:
     it shows or write a file while the person waits. Raises Busy, above, when
     there is none. Asked for only then: a journal with nothing open, or a form
     not sent yet, is drawn at once however busy it is."""
-    slot = _SlowSlot()
-    slot.take()
-    g.slow_place = slot
+    _own_place().take()
 
 
 @app.teardown_request
@@ -1124,7 +1149,8 @@ def _leave_slow_place(_exc):
 def _patience(seconds: float):
     """How long a page that can be drawn without it may wait for something:
     not at all while every place for slow work is taken."""
-    slot = _SlowSlot()
+    slot = _own_place()
+    had = slot.mine is not None
     try:
         slot.take(waits=False)
     except Busy:
@@ -1132,9 +1158,8 @@ def _patience(seconds: float):
     try:
         yield seconds
     finally:
-        slot.free()
-
-
+        if not had:
+            slot.free()
 
 
 def cached_analysis(symbol: str, interval: str, cfg: Dict,
@@ -1145,12 +1170,8 @@ def cached_analysis(symbol: str, interval: str, cfg: Dict,
 
     Raises Busy when this account, or everybody, has too many going already.
     """
-    slot = _SlowSlot()
-    try:
-        return _cached_analysis(slot, symbol, interval, cfg, with_news, record, ttl,
-                                exact)
-    finally:
-        slot.free()
+    return _cached_analysis(_own_place(), symbol, interval, cfg, with_news, record, ttl,
+                            exact)
 
 
 def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
@@ -1173,14 +1194,20 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
             running = _RUNNING.get(key)
-            if (running is not None and hit and g.get("demo")
-                    and time.time() - hit[0] < DEMO_STALE):
-                # A visitor is having it worked out again. The others are shown
-                # the last one meanwhile rather than all waiting every quarter
-                # hour; it says what time its prices are from.
+            # A visitor is having it worked out again, or there is no place
+            # for it to be. The others are shown the last one meanwhile rather
+            # than all waiting every quarter hour; it says what time its
+            # prices are from.
+            last = (hit and g.get("demo") and time.time() - hit[0] < DEMO_STALE)
+            if last and running is not None:
                 break
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    break
+                raise
             hit = None
-            slot.take(joining=running is not None)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
                 break
@@ -2000,8 +2027,13 @@ def analyse():
         finally:
             conn.close()
         if open_rows:
-            overlap = portfolio_mod.overlap(open_rows, result.bars.symbol,
-                                            "1d")
+            # A kept analysis has no place of its own, and the prices of what
+            # is held, from a source that hangs, kept every thread on this
+            # page. Without one, only whether it is held already is said.
+            with _patience(1.0) as wait:
+                overlap = portfolio_mod.overlap(
+                    [t for t in open_rows if wait or t["symbol"] == result.bars.symbol],
+                    result.bars.symbol, "1d")
     except Exception:
         # A correlation check failing must not cost the user their analysis.
         overlap = {"warnings": [], "pairs": []}
@@ -3040,6 +3072,7 @@ def trade_picture(trade_id: int):
             ).fetchone()[0] // CLOSED_SHOWN
     finally:
         conn.close()
+    _slow_from_here()
     from bot import journal as journal_mod
     return render_template("trade_picture.html", t=row, parts=parts, page=page,
                            pic=_trade_picture(row), tags=journal_mod.tags_of(row),
@@ -3433,11 +3466,7 @@ def _cached_research(analysis, interval: str, cfg: Dict, with_news: bool,
 
     Raises Busy as cached_analysis does.
     """
-    slot = _SlowSlot()
-    try:
-        return _research_once(slot, analysis, interval, cfg, with_news, with_options)
-    finally:
-        slot.free()
+    return _research_once(_own_place(), analysis, interval, cfg, with_news, with_options)
 
 
 def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
@@ -3451,7 +3480,18 @@ def _research_once(slot: _SlowSlot, analysis, interval: str, cfg: Dict,
             if hit and (time.time() - hit[0]) < ttl:
                 return hit[1]
             running = _RESEARCH_RUNNING.get(key)
-            slot.take(joining=running is not None)
+            # The example's last one meanwhile, as its analysis is: put
+            # together again every quarter hour, it kept every place for as
+            # long as that takes, with visitors who only waited for it.
+            last = hit and g.demo and time.time() - hit[0] < DEMO_STALE
+            if last and running is not None:
+                return hit[1]
+            try:
+                slot.take(joining=running is not None, waits=not last)
+            except Busy:
+                if last:
+                    return hit[1]
+                raise
             if running is None:
                 owned = _RESEARCH_RUNNING[key] = {"done": threading.Event(), "error": None}
                 break
@@ -3554,12 +3594,14 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, exact, analysis)
 
     try:
         found = _cached_research(analysis, interval, cfg, with_news, with_options)
     except market_mod.DataThrottled as exc:
         return _no_prices(exc, symbol, 404)
+    # Only now: an analysis somebody else had worked out needs no place, and
+    # the research of it may still be sent away to wait, with nothing shown.
+    _spend_view(symbol, exact, analysis)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
@@ -3701,10 +3743,10 @@ def save_thesis():
             analysis = cached_analysis(symbol, interval, cfg, with_news, exact=exact)
             price = analysis.bars.last_price
             found = getattr(analysis.bars, "symbol", "")
-            with _SlowSlot():
-                t = engine.research(symbol, price, cfg, analysis=analysis,
-                                    with_options=with_options,
-                                    with_reasoning=False).thesis
+            _slow_from_here()
+            t = engine.research(symbol, price, cfg, analysis=analysis,
+                                with_options=with_options,
+                                with_reasoning=False).thesis
         db_mod.thesis_save(
             # A case too thin to mean anything takes no side, whatever the one
             # or two points it had came to.
@@ -5760,13 +5802,13 @@ def export_data(dataset, fmt):
     _slow_from_here()
     if not _EXPORTING.acquire(timeout=5):
         return _come_back()
-    if _rate_limited("export", EXPORTS_PER_HOUR):
-        _EXPORTING.release()
-        return _too_often("downloaded files")
-    # On disk rather than in memory, and gone once it has been sent.
-    made = tempfile.TemporaryFile()
-    conn = db_mod.connect(app.config.get("DB_PATH"))
+    made = conn = None
     try:
+        if _rate_limited("export", EXPORTS_PER_HOUR):
+            return _too_often("downloaded files")
+        # On disk rather than in memory, and gone once it has been sent.
+        made = tempfile.TemporaryFile()
+        conn = db_mod.connect(app.config.get("DB_PATH"))
         # A CSV is marked as UTF-8, or Excel opens it as something older and an
         # accent or a currency sign in a note comes out as two or three others.
         text = io.TextIOWrapper(made, encoding="utf-8-sig" if fmt == "csv" else "utf-8",
@@ -5777,11 +5819,15 @@ def export_data(dataset, fmt):
         made.close()
         return render_template("error.html", message=str(exc), symbol=""), 404
     except BaseException:
-        made.close()
+        if made is not None:
+            made.close()
         raise
     finally:
-        conn.close()
+        # Whatever happened, a disk with no room included: kept, every later
+        # download by anybody waited for it until the server was restarted.
         _EXPORTING.release()
+        if conn is not None:
+            conn.close()
     size = made.tell()
     made.seek(0)
     return Response(
@@ -5907,6 +5953,12 @@ class _NotKept(Exception):
         self.found = found
 
 
+def _kept_demo_screen(preset_key: str) -> Optional[screener_mod.ScreenResult]:
+    """A ready-made screen run for a visitor a short while ago, or None."""
+    kept = _DEMO_SCREENS.get(preset_key)
+    return kept[1] if kept is not None and time.time() - kept[0] < DEMO_TTL else None
+
+
 def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     """A ready-made screen, the same answer for every visitor.
 
@@ -5916,9 +5968,9 @@ def _demo_screen(preset_key: str, preset: Dict) -> screener_mod.ScreenResult:
     for a quarter of an hour.
     """
     from bot import upstream as upstream_mod
-    kept = _DEMO_SCREENS.get(preset_key)
-    if kept is not None and time.time() - kept[0] < DEMO_TTL:
-        return kept[1]
+    kept = _kept_demo_screen(preset_key)
+    if kept is not None:
+        return kept
 
     def fresh():
         found = screener_mod.run(symbols=None, universe=preset["universe"],
@@ -5982,12 +6034,13 @@ def screener():
              for key, value in filters.items()}
 
     result = None
-    if preset or (request.args.get("go") and not g.demo):
-        _slow_from_here()
     if g.demo and request.args.get("go") and not preset:
         return _locked("Create an account to run your own screen",
                        "The example can run the ready-made screens. With an "
                        "account you can set your own filters.", examples=False)
+    if (preset or request.args.get("go")) and not (
+            g.demo and _kept_demo_screen(preset_key)):
+        _slow_from_here()
     if g.demo and preset:
         try:
             result = _demo_screen(preset_key, preset)
@@ -6747,7 +6800,10 @@ def api_search():
     text = (request.args.get("q") or "")[:40]
     if not text.strip() or _rate_limited("search", SEARCHES_PER_HOUR):
         return jsonify([])
-    return jsonify(market_mod.search(text))
+    # Every letter typed is a question of its own: with the source hanging,
+    # one word typed kept all eight threads.
+    with _patience(1.0) as wait:
+        return jsonify(market_mod.search(text) if wait else [])
 
 
 @app.route("/api/analyse")
@@ -6776,6 +6832,8 @@ def api_analyse():
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0", exact=exact)
     except DataError as exc:
+        if isinstance(exc, Busy):
+            _uncount()
         wait = _source_wait(exc)
         if wait is not None:
             answer = jsonify({"error": str(exc), "retry_after": wait})
@@ -7660,9 +7718,12 @@ def _call_now(symbol: str, interval: str = "1d",
             action = snap.get("action") or None
     if action is None:
         cfg = config_mod.load(app.config.get("CFG_PATH"))
+        # Asked for by a button, somebody is waiting for it: as the loop's it
+        # gave way to everybody else's, ten seconds for each call.
         result = engine.analyse(symbol, cfg, interval=interval, with_news=False,
                                 with_learning=True, record=False,
-                                db_path=app.config.get("DB_PATH"), exact=exact)
+                                db_path=app.config.get("DB_PATH"), exact=exact,
+                                source="web" if has_request_context() else "engine")
         action = (result.plan.action or "").upper() or None
     with _CALLS_LOCK:
         _CALLS[key] = (now, action)
