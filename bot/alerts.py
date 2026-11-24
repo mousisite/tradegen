@@ -1178,7 +1178,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
             if hit and was == "met":
                 hit = None
         if hit is None:
-            quiet.append((int(row["id"]), state, was, time.time()))
+            quiet.append((int(row["id"]), state, was, time.time(), row["threshold"]))
             if len(quiet) >= QUIET_AT_ONCE:
                 db.alerts_checked(conn, quiet)
                 quiet.clear()
@@ -1186,7 +1186,7 @@ def _look(conn, rows, data, failed, calls, structure, quiet, fired, errors, now)
         # Two checks can overlap (the loop, "Check them all now", a routine).
         # Only the one that moves the alert on from what it read tells anyone.
         if not db.alert_fire(conn, hit.alert_id, hit.value, hit.message,
-                             state=state, was=was):
+                             state=state, was=was, threshold=row["threshold"]):
             continue
         fired.append(hit)
         if hit.user_id is not None:
@@ -1412,9 +1412,10 @@ def check_stops(conn, user=None, skip_closed: bool = False,
         hit = Fired(0, row["symbol"], "stop_breach", stop, price, message, "",
                     _owner(row), as_of(bars), int(row["id"]))
         # Two checks at once (the loop and "Check them all now") both read the
-        # trade before either marked it. Only the one that marks it tells.
+        # trade before either marked it. Only the one that marks it tells, and
+        # neither once it has been closed in the journal meanwhile.
         cur = conn.execute("UPDATE trades SET breach_noticed=? WHERE id=? "
-                           "AND breach_noticed IS NULL",
+                           "AND breach_noticed IS NULL AND status='open'",
                            (int(time.time()), int(row["id"])))
         conn.commit()
         if cur.rowcount == 0:

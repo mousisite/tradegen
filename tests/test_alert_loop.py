@@ -948,6 +948,65 @@ try:
 
     print()
     print("=" * 72)
+    print("CHANGED WHILE A CHECK HAS IT")
+    print("=" * 72)
+    fay = person("fay@example.com")
+    conn = db.connect(DB)
+
+    def meanwhile(change, checks=alerts.check):
+        """One check, with something done on a page while it waits for prices."""
+        def prices(symbol, interval="1d", lookback=None):
+            page = db.connect(DB)
+            try:
+                change(page)
+            finally:
+                page.close()
+            return bars_for(symbol, interval, lookback)
+
+        alerts.fetch_bars = prices
+        try:
+            return [f.message for f in checks(conn, user=fay.id)["fired"]]
+        finally:
+            alerts.fetch_bars = bars_for
+
+    def kept(alert_id):
+        return tuple(conn.execute("SELECT active, threshold, state, last_checked FROM alerts "
+                                  "WHERE id=?", (alert_id,)).fetchone())
+
+    PRICE["HHH"] = 205.0
+    typo = db.alert_add(conn, "HHH", "price_above", threshold=200.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, typo, 250.0, "", user=fay.id))
+    check("an alert is not told of, nor switched off by, a level changed while it was checked",
+          said_then == [] and kept(typo) == (1, 250.0, None, None), (said_then, kept(typo)))
+    db.alert_delete(conn, typo)
+    lower = db.alert_add(conn, "HHH", "price_above", threshold=300.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, lower, 204.0, "", user=fay.id))
+    check("nor marked as looked at with the new one, which the next check tells of",
+          said_then == [] and kept(lower) == (1, 204.0, None, None)
+          and ["HHH is 205, above the 204 you set."]
+          == [f.message for f in alerts.check(conn, user=fay.id)["fired"]], kept(lower))
+    db.alert_delete(conn, lower)
+    noted = db.alert_add(conn, "HHH", "price_above", threshold=200.0, user=fay.id)
+    said_then = meanwhile(lambda page: db.alert_edit(page, noted, 200.0, "a note", user=fay.id))
+    check("a note changed is no other question, so it is told",
+          said_then == ["HHH is 205, above the 200 you set."] and kept(noted)[0] == 0, said_then)
+    db.alert_delete(conn, noted)
+    call = db.alert_add(conn, "HHH", "near_52w_low", threshold=0.01, user=fay.id)
+    alerts.check(conn, user=fay.id)
+    check("and one changed by nobody is kept as looked at", kept(call)[3] is not None, kept(call))
+    db.alert_delete(conn, call)
+
+    PRICE["HHH"] = 90.0
+    out_now = db.open_trade(conn, "HHH", "1d", 1, entry=100.0, stop=95.0, quantity=1, user=fay.id)
+    said_then = meanwhile(lambda page: db.exit_trade(page, out_now, 94.9, user=fay.id),
+                          alerts.check_stops)
+    check("a position closed while its stop was read is not told to be closed",
+          said_then == [] and not [e for e in db.event_list(conn, fay.id)
+                                   if e["kind"] == "stop_breach"], said_then)
+    conn.close()
+
+    print()
+    print("=" * 72)
     print("VALUES THAT CANNOT WORK")
     print("=" * 72)
     sign_in(carol)
