@@ -1544,6 +1544,54 @@ check("then one request, with its retry, finds out, and having nothing is an ans
       got is None and len(calls) == 2 and not upstream.refusing(sec._HOST), (got, len(calls)))
 upstream.reset()
 
+
+# A large company's filed figures are tens of megabytes once read, and nearly
+# all of it is never looked at. Six companies opened at once were six of those.
+class Unread:
+    here, most = 0, 0
+
+    def __init__(self):
+        Unread.here += 1
+        Unread.most = max(Unread.most, Unread.here)
+
+    def __del__(self):
+        Unread.here -= 1
+
+
+class Figures(Answer):
+    def json(self):
+        time.sleep(0.02)
+        return {"entityName": "Test Co", "facts": {
+            "us-gaap": {LATER: annual({2024: 8.0, 2025: 9.0}), "NobodyReadsThis": Unread()},
+            "ifrs-full": {"Revenue": annual({2025: 9.0})}}}
+
+
+def working_it_out(by_tag):
+    time.sleep(0.15)
+    return real_joined(by_tag)
+
+
+real_joined = sec._joined
+real_six = (sec.requests.get, sec._throttle, sec.cik_for)
+sec.requests.get, sec._throttle = (lambda *a, **k: Figures(200)), (lambda: None)
+sec.cik_for, sec._joined = int, working_it_out
+six, opened = range(980031, 980037), []
+crowd = [threading.Thread(target=lambda n=n: opened.append(sec.company_facts(str(n)))) for n in six]
+try:
+    for t in crowd:
+        t.start()
+    for t in crowd:
+        t.join(20)
+finally:
+    (sec.requests.get, sec._throttle, sec.cik_for), sec._joined = real_six, real_joined
+    for n in six:
+        sec._FACTS_CACHE.pop(n, None)
+check("six companies' filings opened at once are never two whole answers in memory",
+      (Unread.here, Unread.most) == (0, 1), (Unread.here, Unread.most))
+check("and what is read of them is read as before",
+      len(opened) == 6 and all(f.latest("revenue")["value"] == 9.0 and f.international
+                               and f.entity == "Test Co" for f in opened), opened)
+
 kept_contact = _os.environ.pop("STOCKBOT_CONTACT", None)
 try:
     agent = sec._headers()["User-Agent"]
