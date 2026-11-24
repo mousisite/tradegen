@@ -220,6 +220,29 @@ try:
     texts = [i.text for i in sentiment.gather_social("BTC-USD")]
     check("a post that is a ticker and a link is left out, and no address is shown",
           texts == ["$BTC.X going up", "$BTC.X"], texts)
+    # Only the address goes: not the end of "Awww", a post in another language,
+    # the words after an address in one written without spaces, or a view.
+    bullish = dict(post("$BTC.X https://coins.example/a"),
+                   entities={"sentiment": {"basic": "Bullish"}})
+    for said, left in ((post("Awww...poor bears"), "Awww...poor bears"),
+                       (post("$BTC.X see www.coins.example/a now"), "$BTC.X see now"),
+                       (post("Big news (https://coins.example/a) today"), "Big news today"),
+                       (post("急騰 https://coins.example/a"), "急騰"),
+                       (post("$BTC.X растёт https://coins.example/a"),
+                        "$BTC.X растёт"),
+                       (post("見てhttps://coins.example/a急騰"),
+                        "見て 急騰"),
+                       (post("$BTC.X \U0001F680\U0001F680 https://coins.example/a"),
+                        "$BTC.X \U0001F680\U0001F680"),
+                       (post("$BTC.X 100,000 https://coins.example/a"), "$BTC.X 100,000"),
+                       (bullish, "$BTC.X"),
+                       (post("$BTC.X - https://coins.example/a"), None),
+                       (post("$BTC.X #btc @x https://coins.example/a"), None)):
+        answering(Reply(200, {"messages": [said]}))
+        got = [i.text for i in sentiment.gather_social("BTC-USD")]
+        check("a post of %s is %s" % (ascii(said["body"]), ascii(left) if left else "left out"),
+              got == ([left] if left else []), ascii(got))
+    answering(Reply(200, {"messages": [post("$BTC.X going up"), post("$BTC.X")]}))
     only = sentiment.analyse("BTC-USD", "Bitcoin USD", use_llm=False)
     check("with no headlines the warning is about the posts",
           any(n.startswith("Posts were scored") for n in only.notes)

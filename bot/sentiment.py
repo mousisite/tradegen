@@ -102,8 +102,13 @@ _NEGATORS = {"not", "no", "never", "without", "isn't", "wasn't", "doesn't",
              "didn't", "won't", "aren't", "cannot", "can't", "fails", "failed"}
 
 _TOKEN = re.compile(r"[a-z']+")
-_ADDRESS = re.compile(r"(?:https?://|www\.)\S+", re.I)
+# As far as an address can go: in a language written without spaces the words
+# follow straight on. "Awww..." is none.
+_ADDRESS = re.compile(r"[(\[]?(?:https?://|\bwww\.(?=\w))[!-~]+", re.I)
 _TICKERS = re.compile(r"[$#@][\w.]+")
+# A letter or a figure in any language, or an emoji.
+_SAYS = re.compile(r"[^\W_]|[%s-%s%s-%s]" % tuple(
+    map(chr, (0x2600, 0x27BF, 0x1F000, 0x1FAFF))))
 
 
 @dataclass
@@ -410,11 +415,13 @@ def gather_social(symbol: str, limit: int = 30) -> List[Item]:
     out: List[Item] = []
     for m in messages[:limit]:
         # Without its web addresses: nobody can open them here, and a post that
-        # is a ticker and a link says nothing.
+        # is a ticker and a link says nothing, unless its writer tagged it.
         said = html.unescape((m.get("body") or "").strip())
         body = " ".join(_ADDRESS.sub(" ", said).split())
-        if not body or (_ADDRESS.search(said)
-                        and not _TOKEN.search(_TICKERS.sub(" ", body).lower())):
+        tag = ((m.get("entities") or {}).get("sentiment") or {})
+        tag = (tag or {}).get("basic")
+        if not body or (not tag and _ADDRESS.search(said)
+                        and not _SAYS.search(_TICKERS.sub(" ", body))):
             continue
         if len(m.get("symbols") or []) >= 4:        # ticker-spam filter
             continue
@@ -428,8 +435,6 @@ def gather_social(symbol: str, limit: int = 30) -> List[Item]:
             age = max(0.0, (time.time() - ts) / 3600.0)
         except Exception:
             age = 12.0
-        tag = ((m.get("entities") or {}).get("sentiment") or {})
-        tag = (tag or {}).get("basic")
         out.append(Item(text=body, kind="social", source="StockTwits",
                         age_hours=age, tagged=tag, via="StockTwits"))
     return out
