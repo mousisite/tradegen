@@ -1491,17 +1491,41 @@ def _example_kept():
         return cfg, key, _CACHE.get(key)
 
 
+def _work_out_example(cfg: Dict, key: Tuple):
+    """The example worked out again and kept, or None while somebody's own
+    asking for it is running. Marked as running itself: whoever opens the page
+    behind it meanwhile is shown the last one, as the front page shows it, or
+    waits for this one, and has no second worked out that says something else."""
+    with _CACHE_LOCK:
+        if key in _RUNNING:
+            return None
+        owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
+    try:
+        # As a page's own, since one may be waiting for it.
+        result = engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d", source="web",
+                                record=False)
+        with _CACHE_LOCK:
+            kept = _CACHE[key] = (time.time(), result, {})
+        return kept
+    except Exception as exc:
+        owned["error"] = exc
+        raise
+    finally:
+        with _CACHE_LOCK:
+            if _RUNNING.get(key) is owned:
+                _RUNNING.pop(key, None)
+        owned["done"].set()
+
+
 def _refresh_example() -> None:
     try:
         # The one the page behind it opens: worked out apart from it, and
         # without the news, the front page and that page gave two answers.
         cfg, key, kept = _example_kept()
         if kept is None or time.time() - kept[0] >= EXAMPLE_TTL:
-            kept = (time.time(), engine.analyse(EXAMPLE_SYMBOL, cfg, interval="1d",
-                                                record=False), {})
-            with _CACHE_LOCK:
-                _CACHE[key] = kept
-        _shown_example(kept[1], kept[0])
+            kept = _work_out_example(cfg, key)
+        if kept is not None:
+            _shown_example(kept[1], kept[0])
         try:
             # The list behind the Find tile, so that it opens on a finished
             # one: started when there is none from the last few hours.
@@ -1529,12 +1553,17 @@ def _example():
     now = time.time()
     with _example_lock:
         data = _example_state["data"]
+        rested = now - _example_state.get("failed", 0.0) >= EXAMPLE_RETRY
     try:
         # A visitor may have had it worked out again since.
-        kept = _example_kept()[2]
+        kept = _example_kept()[2] if rested else None
         if kept is not None and data is not None and kept[0] > data["at"]:
             data = _shown_example(kept[1], kept[0])
     except Exception:
+        # Left a while, as a refresh that failed is, or it is in the log for
+        # every visit.
+        with _example_lock:
+            _example_state["failed"] = now
         app.logger.exception("The front page example could not be read")
     with _example_lock:
         stale = data is None or now - _example_state["at"] >= EXAMPLE_TTL
@@ -1545,7 +1574,8 @@ def _example():
     if data is None:
         return None
     # Say how old it is rather than presenting a quarter-hour-old call as live.
-    return dict(data, age_min=int((now - data["at"]) // 60))
+    # One kept since this began is not from the future.
+    return dict(data, age_min=max(0, int((now - data["at"]) // 60)))
 
 
 @app.route("/")

@@ -5,6 +5,7 @@ import json
 import os as _os
 import re
 import sys as _sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -770,9 +771,81 @@ try:
         check("no model is paid to read headlines for it, and a member's own is kept apart",
               asked_of[-1][1] is False and paid not in web._CACHE and len(web._CACHE) == 1,
               (asked_of[-1], list(web._CACHE)))
+        _os.environ.pop("ANTHROPIC_API_KEY", None)
+
+        # The first visitor of a quarter hour sees the last one here, and has it
+        # worked out again: the page behind must not answer something else.
+        begun, finish = threading.Event(), threading.Event()
+
+        def takes_a_while(symbol, cfg, **how):
+            asked_of.append((symbol, None, how))
+            begun.set()
+            finish.wait(20)
+            return fake_result("NVDA", "AVOID", 50, 20)
+
+        last_one, behind = fake_result("NVDA", "WAIT", 60, 30), []
+        web._CACHE.clear()
+        web._CACHE[key] = (time.time() - web.EXAMPLE_TTL - 5, last_one, {})
+        del asked_of[:]
+        web.engine.analyse = takes_a_while
+        refresh = threading.Thread(target=web._refresh_example)
+        refresh.start()
+        begun.wait(20)
+
+        def opens_it():
+            with web.app.test_request_context("/analyse?symbol=NVDA"):
+                web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+                behind.append(web.cached_analysis("NVDA", "1d", dict(
+                    web.config_mod.DEFAULTS), True, record=False, ttl=web.DEMO_TTL))
+
+        opens = threading.Thread(target=opens_it)
+        opens.start()
+        opens.join(5)
+        at_once = list(behind)
+        finish.set()
+        refresh.join(20)
+        opens.join(20)
+        check("opened while it is worked out again, the page behind shows the last one too, "
+              "and no second is worked out beside it",
+              at_once == [last_one] and len(asked_of) == 1 and not web._RUNNING,
+              (at_once, len(asked_of), web._RUNNING))
+        web._CACHE.clear()
+        del asked_of[:]
+        web._RUNNING[key] = {"done": threading.Event(), "error": None}
+        web._refresh_example()
+        check("and while somebody's own asking for it runs, it is left to that one",
+              asked_of == [] and not web._CACHE and list(web._RUNNING) == [key], asked_of)
+        web._RUNNING.clear()
+
+        def no_prices(*_a, **_k):
+            raise web.DataError("nothing just now")
+
+        web.engine.analyse = no_prices
+        web._refresh_example()
+        check("one that fails is not left marked as running",
+              not web._RUNNING and web._example_state["failed"] > 0, web._RUNNING)
+        web.engine.analyse = worked_out
+
+        # Kept in the moment after this look began.
+        web._example_state.update(failed=0.0)
+        web._CACHE[key] = (time.time() + 0.5, fake_result("NVDA", "AVOID", 50, 20), {})
+        check("the age said is never less than nothing", web._example()["age_min"] == 0,
+              web._example())
+        # Words that cannot be put together, at every look.
+        real_words, web.plain_mod.explain_plan = web.plain_mod.explain_plan, no_prices
+        told, real_log = [], web.app.logger.exception
+        web.app.logger.exception = lambda *a, **k: told.append(a)
+        try:
+            web._CACHE[key] = (time.time() + 1, fake_result("NVDA", "BUY", 50, 40), {})
+            looks = [web._example()["action"] for _ in range(5)]
+        finally:
+            web.plain_mod.explain_plan, web.app.logger.exception = real_words, real_log
+        check("words that cannot be put together are said in the log once, not at every visit",
+              len(told) == 1 and looks == ["AVOID"] * 5, (told, looks))
     finally:
         _os.environ.pop("ANTHROPIC_API_KEY", None)
         web.engine.analyse, web.ideas_mod.find = real_analyse, real_find
+        web._RUNNING.clear()
         web._CACHE.clear()
         web._CACHE.update(kept_before)
         with web._example_lock:
