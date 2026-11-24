@@ -165,6 +165,37 @@ try:
           len(said) == 1 and "Google News" in said[0] and "429" in said[0], said)
     read, said, _again = from_the_feed(Reply(200, content=b"<html>Before you continue</html>"))
     check("a page in place of its feed is said too", len(said) == 1, said)
+
+    def yahoo_said(reply, symbol="BTC-USD"):
+        upstream.reset()
+        sentiment._SAID.clear()
+        sentiment.requests.get = lambda url, **k: reply
+        said = []
+        was, sentiment.log.warning = sentiment.log.warning, lambda m, *a: said.append(m % a)
+        try:
+            return len(sentiment._yahoo_news(symbol)), said
+        finally:
+            sentiment.log.warning = was
+
+    for what, reply in (("a page in place of it", Reply(200, content=b"<html>Back soon</html>")),
+                        ("a rate limit", Reply(429)), ("an error", Reply(500))):
+        got, said = yahoo_said(reply)
+        check("so is %s, from Yahoo's" % what,
+              got == 0 and len(said) == 1 and said[0].startswith("Yahoo Finance gave no"),
+              (got, said))
+    check("but not a feed with nothing in it", yahoo_said(Reply(200, content=(
+        b"<rss version='2.0'><channel><title>x</title></channel></rss>"))) == (0, []))
+    check("nor a company with no news", yahoo_said(Reply(200, {"news": []}), "AAPL") == (0, []))
+    # Each headline is paid for where the model reads them. Yahoo is asked for
+    # fifteen of a company's, and its feed gives as many as it has.
+    many = ("<rss version='2.0'><channel><title>x</title>%s</channel></rss>" % "".join(
+        "<item><title>Story %s</title><pubDate>%s</pubDate></item>" % ("abcdefghij"[k % 10] * (
+            k // 10 + 1), stamp(k)) for k in range(40))).encode()
+    check("no more of a coin's are read than of a company's",
+          yahoo_said(Reply(200, content=many)) == (15, []),
+          yahoo_said(Reply(200, content=many)))
+    check("and they are the newest",
+          max(i.age_hours for i in sentiment._yahoo_news("BTC-USD")) < 15)
     read, said, _again = from_the_feed(Reply(200, content=feed.replace(
         b"<title>Bitcoin surges to a record", b"<title>Miners raise money as it rises")))
     check("a source that answered is named and nothing is logged",

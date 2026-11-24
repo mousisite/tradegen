@@ -284,6 +284,9 @@ def _google_news(query: str, limit: int, within: float = math.inf) -> List[Item]
 # Google its price pages for years. One older than this says nothing about now,
 # and with nothing newer beside it, it would have been the whole of the news.
 FEED_HOURS = 7 * 24.0
+# The headlines asked of Yahoo. Its feed gives as many as it has, the newest
+# first, and each is one more for the model to score, which is paid for.
+YAHOO_MOST = 15
 
 
 def _yahoo_news(symbol: str) -> List[Item]:
@@ -309,16 +312,20 @@ def _yahoo_news(symbol: str) -> List[Item]:
                              headers=_HEADERS, timeout=_TIMEOUT)
         else:
             r = requests.get(_YAHOO_SEARCH,
-                             params={"q": symbol, "newsCount": 15, "quotesCount": 0},
+                             params={"q": symbol, "newsCount": YAHOO_MOST, "quotesCount": 0},
                              headers=_HEADERS, timeout=_TIMEOUT)
         if upstream.is_throttle(r.status_code):
+            _gave_nothing("Yahoo Finance", "HTTP %s" % r.status_code)
             upstream.note_throttled(_YAHOO_HOST, upstream.retry_after_seconds(r),
                                     r.status_code)
         elif r.status_code == 200:
             upstream.note_ok(_YAHOO_HOST)
-            for e in feedparser.parse(r.content).entries if coin else ():
+            feed = feedparser.parse(r.content) if coin else {}
+            if coin and not feed.get("version"):
+                _gave_nothing("Yahoo Finance", "HTTP 200, and not a feed")
+            for e in feed.get("entries", ()):
                 age = _age_hours(e.get("published_parsed"))
-                if age <= FEED_HOURS:
+                if age <= FEED_HOURS and len(items) < YAHOO_MOST:
                     items.append(Item(text=html.unescape(e.get("title", "")), kind="news",
                                       source="Yahoo Finance", age_hours=age,
                                       url=e.get("link", ""), via="Yahoo Finance"))
