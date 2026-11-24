@@ -911,6 +911,7 @@ _CACHE_TTL = 90.0
 # looking around should cost the server one analysis per instrument per
 # quarter hour, however many of them there are.
 DEMO_TTL = 15 * 60.0
+DEMO_STALE = 2 * DEMO_TTL
 _CACHE_LOCK = threading.Lock()
 # Analyses running right now, by cache key, so a second request for the same
 # one waits for it instead of starting its own.
@@ -1157,8 +1158,14 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
             hit = _CACHE.get(key)
             if hit and (time.time() - hit[0]) < (ttl or _CACHE_TTL):
                 break
-            hit = None
             running = _RUNNING.get(key)
+            if (running is not None and hit and g.get("demo")
+                    and time.time() - hit[0] < DEMO_STALE):
+                # A visitor is having it worked out again. The others are shown
+                # the last one meanwhile rather than all waiting every quarter
+                # hour; it says what time its prices are from.
+                break
+            hit = None
             slot.take(joining=running is not None)
             if running is None:
                 owned = _RUNNING[key] = {"done": threading.Event(), "error": None}
@@ -1203,7 +1210,7 @@ def _cached_analysis(slot: _SlowSlot, symbol: str, interval: str, cfg: Dict,
             # coin's takes some 16 MB: forty left lying fill the server. Only
             # the example's are opened for longer than a minute and a half.
             for old in [k for k, v in _CACHE.items()
-                        if now - v[0] >= (DEMO_TTL if k[0] in demo_mod.SYMBOLS
+                        if now - v[0] >= (DEMO_STALE if k[0] in demo_mod.SYMBOLS
                                           and k[2] == "1d" else _CACHE_TTL)]:
                 _CACHE.pop(old)
             _CACHE[key] = (now, result,

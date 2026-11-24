@@ -1382,6 +1382,46 @@ try:
         web.engine.analyse = real_analyse
     check("and every place is given back", not web._SLOW, web._SLOW)
 
+    # The quarter hour up, with people looking: one has it worked out again,
+    # and the rest see the last one meanwhile.
+    def as_visitor(out):
+        with web.app.test_request_context("/analyse?symbol=NVDA"):
+            web.g.user, web.g.demo = SimpleNamespace(id=1, is_local=False), True
+            try:
+                out.append(web.cached_analysis("NVDA", "1d", dict(web.config_mod.DEFAULTS),
+                                               True, record=False, ttl=web.DEMO_TTL))
+            except web.DataError:
+                out.append("failed")
+
+    let_go.clear()
+    del asked_for[:]
+    web.engine.analyse = slow_example
+    last_one = SimpleNamespace(run_id=None)
+    key = ("NVDA", False, "1d", True, web._settings_key(dict(web.config_mod.DEFAULTS)))
+    web._CACHE.clear()
+    web._CACHE[key] = (time.time() - web.DEMO_TTL - 5, last_one, {})
+    refreshing, meanwhile = [], []
+    first = threading.Thread(target=as_visitor, args=(refreshing,))
+    try:
+        first.start()
+        until = time.time() + 20
+        while not asked_for and time.time() < until:
+            time.sleep(0.02)
+        as_visitor(meanwhile)
+        check("a visitor is shown the last one while it is worked out again for another",
+              meanwhile == [last_one] and asked_for == ["NVDA"], (meanwhile, asked_for))
+        web._CACHE[key] = (time.time() - web.DEMO_STALE - 5, last_one, {})
+        waits = threading.Thread(target=as_visitor, args=(meanwhile,))
+        waits.start()
+        waits.join(0.5)
+        check("but not one half an hour old", len(meanwhile) == 1 and waits.is_alive())
+    finally:
+        let_go.set()
+        first.join(20)
+        waits.join(20)
+        web.engine.analyse = real_analyse
+        web._CACHE.clear()
+
     # Pages that found no place come back for one: the one that has waited
     # longest has it first, whoever asks in the instant it comes free.
     class Person(object):
@@ -1462,14 +1502,14 @@ try:
         return {(k[0], k[2]) for k in web._CACHE}
 
     web._CACHE.clear()
-    kept("NVDA", "1d", web.DEMO_TTL + 1)
+    kept("NVDA", "1d", web.DEMO_STALE + 1)
     kept("AAPL", "1d", web.DEMO_TTL - 60)
     kept("AAPL", "5m", web.DEMO_TTL - 60)
     kept("OWNS", "1d", web._CACHE_TTL + 1)
     kept("SOON", "1d", web._CACHE_TTL - 30)
     left = another_kept()
     check("a kept analysis goes once its minute and a half is up, the example's once its "
-          "quarter hour is, and not before",
+          "half hour is, and not before",
           left == {("AAPL", "1d"), ("SOON", "1d"), ("FRESH", "1d")}, left)
 
     # Sixty days of a coin's five-minute bars is sixteen megabytes of series,
