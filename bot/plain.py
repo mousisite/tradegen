@@ -205,8 +205,10 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         if avg_win and avg_loss:
             win_x = avg_win
             lose_x = abs(avg_loss)
+            # On very short bars the costs can be larger than the target is.
             sure += (" When it worked it made about %.1f times what you put at "
-                     "risk." % win_x)
+                     "risk." % win_x if win_x > 0 else
+                     " Even when it worked, trading costs took more than it made.")
             # Trading costs can make the usual miss cost the whole stop or
             # more, and misses closed part-way can come out ahead.
             if avg_loss <= -0.995:
@@ -236,7 +238,9 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
 
         if plan.breakeven_rate and plan.prob_samples > 1:
             needed = int(round(plan.breakeven_rate * plan.prob_samples))
-            if fall_odds:
+            if needed > plan.prob_samples:
+                sure += " It would have lost money even if it had worked every time."
+            elif fall_odds:
                 sure += (" A bet on a fall needed to work %d of those %d times "
                          "to come out even. That is the record for a fall, not "
                          "a reason to buy." % (needed, plan.prob_samples))

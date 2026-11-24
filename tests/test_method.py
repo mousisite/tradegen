@@ -580,6 +580,12 @@ for miss, want, never in ((-0.52, "lost about 52% of what you put at risk, not a
     out, text = said(avg_loss_r=miss)
     check("a usual miss of %+.2f times the risk is said as that" % miss,
           want in out["sure"] and never not in out["sure"], out["sure"])
+# A pair on 1-minute bars: "made about -1.3 times", "needed to work 79 of those 52 times".
+out, text = said(avg_win_r=-1.3, avg_loss_r=-3.7, breakeven_rate=1.51, prob_samples=52)
+check("costs larger than the target are said as that, not as a win of less than nothing",
+      " Even when it worked, trading costs took more than it made." in out["sure"]
+      and " It would have lost money even if it had worked every time." in out["sure"]
+      and "-1.3" not in out["sure"] and "79 of" not in out["sure"], out["sure"])
 out, text = said(action="AVOID", direction=0, entry=None, stop=None, target1=None,
                  avoid_reason="bearish_no_shorts", odds_direction=-1)
 check("a bearish AVOID says the signals point to a fall",
