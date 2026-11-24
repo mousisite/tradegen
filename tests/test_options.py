@@ -57,6 +57,22 @@ print("   OK   every volatility and strike recovered to within 0.001")
 check("IV rejects price below intrinsic", O.implied_vol(1.0, 120, 100, 0.5, 0.04, True) is None)
 check("IV rejects zero price", O.implied_vol(0, 100, 100, 0.5, 0.04, True) is None)
 
+# One volatility was called unremarkable in one line and cheap in the next.
+from types import SimpleNamespace as NS
+leg = lambda strike, delta: NS(strike=strike, delta=delta, priced=True, mid=3.0, theta=-0.05)
+chain = NS(spot=100.0, calls=[leg(100, 0.5), leg(106, 0.25)],
+           puts=[leg(100, -0.5), leg(95, -0.25)], expiry_date="18 Dec")
+real_stats = O.analyse
+try:
+    for iv, word in ((0.15, "cheap"), (0.24, "middling"), (0.44, "middling"), (0.47, "expensive")):
+        O.analyse = lambda _chain, iv=iv: {"atm_iv": iv}
+        read = O._reading(iv, None, 0, 0, None)[0]
+        ideas = " ".join(i["why"] for i in O.suggest(chain, "bullish"))
+        check("at %.0f%% the reading and the structures agree" % (iv * 100),
+              word in ideas and ("unremarkable" in read) == (word == "middling"), read + " / " + ideas)
+finally:
+    O.analyse = real_stats
+
 print()
 print("=" * 72)
 print("LIVE CHAIN")

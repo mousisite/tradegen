@@ -109,7 +109,8 @@
   <p class="prose" style="margin-bottom:var(--s2)">What the course says happens,
     in Orenth's words: what was measured, what it is compared with, and how the
     two came out. Each topic says exactly how. R is the amount risked on a
-    trade.</p>
+    trade.{% if page.measured_claims and page.claims|rejectattr('measured')|rejectattr('no_cases')|list %}
+    Those that say Being tested fill in after the next nightly run.{% endif %}</p>
   <div class="card pad0">
     <div class="tablewrap">
       <table class="stack">

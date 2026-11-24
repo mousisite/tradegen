@@ -2142,7 +2142,7 @@ unmeasured = plain.explain_plan(decision.Plan(
     action="AVOID", direction=0, headline="", conviction=-0.3,
     avoid_reason="bearish_no_shorts", odds_direction=-1), base_bars)
 check("and a fall with no record is not said to have one below",
-      not any("record below" in x for x in unmeasured["points"])
+      not any("past record" in x for x in unmeasured["points"])
       and "do not buy" in unmeasured["points"][0], unmeasured)
 check("a company's small sales name their currency once",
       plain._big(450000, "EUR") == "450,000 euros" and plain._big(450000) == "$450,000")

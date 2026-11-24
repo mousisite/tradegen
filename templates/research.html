@@ -613,12 +613,12 @@
     <div class="figs" style="margin-bottom:var(--s3)">
       {% if v.agreement == 'single' %}
       <div class="f"><div class="k">Modelled value</div>
-        <div class="v fig">{{ v.midpoint|price }}</div></div>
+        <div class="v fig">{{ v.midpoint|money }}</div></div>
       {% else %}
       <div class="f"><div class="k">Modelled range</div>
-        <div class="v fig">{{ v.low|price }}–{{ v.high|price }}</div></div>
+        <div class="v fig">{{ v.low|money }}–{{ v.high|money }}</div></div>
       <div class="f"><div class="k">Midpoint</div>
-        <div class="v fig">{{ v.midpoint|price }}</div></div>
+        <div class="v fig">{{ v.midpoint|money }}</div></div>
       {% endif %}
       <div class="f"><div class="k">Price today</div>
         <div class="v fig">{{ r.price|price }}</div></div>

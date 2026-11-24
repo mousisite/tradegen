@@ -160,7 +160,7 @@ def explain_plan(plan, bars, hold_text: str = "") -> Dict:
         points.append(
             "The signals point down. %sBuying is the opposite bet, and "
             "shorting is switched off, so the answer is: do not buy."
-            % ("The record below is how often a bet on the price falling worked "
+            % ("The past record shown is how often a bet on the price falling worked "
                "here. " if plan.probability is not None and plan.prob_samples else ""))
     elif action == "AVOID" and why_avoid == "negative_record":
         points.append(

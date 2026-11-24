@@ -393,7 +393,7 @@
     <div class="tablewrap">
       <table class="stack">
         <thead><tr><th>Instrument</th><th>Saved</th><th class="r">Price then</th>
-          <th class="r">Now</th><th class="r">Move</th><th>Called</th>
+          <th class="r">Now, or at close</th><th class="r">Move</th><th>Called</th>
           <th>How it turned out</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody>
         {% for t in theses %}
@@ -405,9 +405,10 @@
               {% endif %}</td>
             <td class="soft" data-label="Saved">{{ row['created_ts']|ago }}</td>
             <td class="r fig" data-label="Price then">{{ row['price']|price }}</td>
-            <td class="r fig" data-label="Now">
+            <td class="r fig" data-label="{{ 'At close' if row['closed_price'] else 'Now' }}">
               {{ (row['closed_price'] if row['closed_price'] else t.now)|price
                  if (row['closed_price'] or t.now) else '—' }}
+              {% if row['closed_price'] %}<div class="faint" style="font-size:var(--t-xs)">when closed</div>{% endif %}
               {% if t.split_words and not row['closed_price'] %}<div class="faint" style="font-size:var(--t-xs)">quoted
                 {{ t.quoted|price }} today, after a {{ t.split_words }} split</div>{% endif %}</td>
             <td class="r fig {{ 'gain' if (t.review.move or 0) > 0 else 'loss' if (t.review.move or 0) < 0 else '' }}" data-label="Move">

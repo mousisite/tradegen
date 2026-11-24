@@ -230,6 +230,21 @@ try:
     check("and gone in the app", "youtu" not in get("/learn/sweep-break-retest",
                                                     headers=APP_UA)[1])
 
+    def with_example(symbol, direction):
+        res = labstore.sample_result(symbol)
+        cell = res["setups"].pop("liquidity_model")
+        res["setups"]["crowd_breakout"] = dict(cell, example=dict(
+            cell["example"], direction=direction))
+        return res
+
+    from bot import learn as learn_mod
+    pair = [with_example("ES=F", -1), with_example("NQ=F", 1)]
+    shown = learn_mod._example(pair, ("crowd_breakout",))
+    check("the example of buying a breakout is a buy, when there is one",
+          (shown["side"], shown["symbol"]) == ("buy", "NQ=F"), shown and shown["side"])
+    check("and otherwise the one there is",
+          learn_mod._example(pair[:1], ("crowd_breakout",))["side"] == "short")
+
     # What a claim is compared with, its unit, and the figures by earlier times.
     conn = db.connect(DB)
     gaps = labstore.sample_claim("ndog_fills")

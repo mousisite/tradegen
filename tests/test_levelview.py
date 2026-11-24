@@ -229,6 +229,13 @@ def prior_rows(out):
     return {r["name"]: r for r in out["levels"]}
 
 
+prior = liquidity.SOURCES.index("prior_day")
+taken = {"lq_take": [-1, 1, -1], "lq_take_src": [prior] * 3, "ck_day": [5, 6, 6]}
+check("a high taken on an earlier day is that day's yesterday, not the reader's",
+      [liquidity.level_name(taken, i) for i in range(3)]
+      == ["the previous day's high", "yesterday's low", "yesterday's high"],
+      [liquidity.level_name(taken, i) for i in range(3)])
+
 # The scripted days end on a Tuesday; cut them so a week ends on the last bar too.
 DAYS = [int(x) for x in clock.series(DAILY)["ck_day"]]
 friday = max(i for i in range(len(DAYS) - 1) if (DAYS[i] - 1) % 7 == 4)

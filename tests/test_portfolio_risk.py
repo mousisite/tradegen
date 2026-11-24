@@ -151,6 +151,18 @@ check("three journal rows in one stock are one position for concentration",
       abs(v.concentration - (0.9 ** 2 + 0.1 ** 2)) < 1e-9, v.concentration)
 check("and the one-stock warning names it",
       any("AAA alone is 90%" in w for w in v.warnings), v.warnings)
+PRICES.update({"TWO1": 10.2, "TWO2": 10.0})
+P._enrich = fake_enrich
+try:
+    two = P.build([{"id": i, "symbol": s, "direction": 1, "quantity": 100, "entry": 10,
+                    "stop": 9, "target1": None, "ts_opened": 0}
+                   for i, s in ((1, "TWO1"), (2, "TWO2"))], account=10000,
+                  with_correlation=False)
+finally:
+    P._enrich = real_enrich
+check("two holdings of about the same size are not called one",
+      two.concentration > 0.5 and not any("single-position" in w or "alone is" in w
+                                          for w in two.warnings), two.warnings)
 check("a position with no size is left out of the money, and said so",
       close(v.invested, 10000) and any("No size is logged for NOSIZE" in w for w in v.warnings))
 check("an unpriced holding's cost stays out of cash",

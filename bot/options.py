@@ -414,6 +414,13 @@ def _nearest(contracts: List[Contract], target: float) -> Optional[Contract]:
     return min(pool, key=lambda c: abs(c.strike - target)) if pool else None
 
 
+# Below the first, implied volatility is called low and options cheap; above
+# the second, elevated and options expensive. One pair for the reading and for
+# the structures, which used to call one figure unremarkable and cheap.
+CHEAP_IV = 0.20
+DEAR_IV = 0.45
+
+
 def _reading(atm_iv, skew, put_oi, call_oi, expected_move) -> List[str]:
     """Plain sentences describing what the numbers mean."""
     out = []
@@ -421,10 +428,10 @@ def _reading(atm_iv, skew, put_oi, call_oi, expected_move) -> List[str]:
         if atm_iv > 0.8:
             out.append("Implied volatility is very high at %.0f%%. Something is "
                        "expected to happen, and options are expensive." % (atm_iv * 100))
-        elif atm_iv > 0.45:
+        elif atm_iv > DEAR_IV:
             out.append("Implied volatility of %.0f%% is elevated. Buying premium "
                        "here needs a big move just to break even." % (atm_iv * 100))
-        elif atm_iv < 0.2:
+        elif atm_iv < CHEAP_IV:
             out.append("Implied volatility of %.0f%% is low. Options are cheap, "
                        "and the market expects a quiet period." % (atm_iv * 100))
         else:
@@ -473,8 +480,8 @@ def suggest(chain: Chain, view: str, conviction: float = 0.5) -> List[Dict]:
                         "quotes, so no structure can be priced honestly.",
                  "risk": ""}]
 
-    expensive = iv > 0.5
-    cheap = iv < 0.25
+    expensive = iv > DEAR_IV
+    cheap = iv < CHEAP_IV
 
     if view == "bullish":
         if cheap:

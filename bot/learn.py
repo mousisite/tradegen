@@ -700,14 +700,17 @@ def setup_lab(results: Sequence[Dict], name: str) -> Dict:
 def _example(results: Sequence[Dict], names: Sequence[str]) -> Optional[Dict]:
     """The first stored example trade of these setups, drawn as a chart."""
     for name in names:
-        for interval in setups.LAB_INTERVALS:
-            for res in results:
-                if res.get("interval") != interval:
-                    continue
-                ex = ((res.get("setups") or {}).get(name) or {}).get("example")
-                drawn = example_view(ex, res.get("symbol", ""), interval, name)
-                if drawn:
-                    return drawn
+        # "Buying the breakout" is measured both ways, and a short under those
+        # words reads as a mistake: a buy first, when there is one.
+        for side in (("buy", "short") if name == "crowd_breakout" else (None,)):
+            for interval in setups.LAB_INTERVALS:
+                for res in results:
+                    if res.get("interval") != interval:
+                        continue
+                    ex = ((res.get("setups") or {}).get(name) or {}).get("example")
+                    drawn = example_view(ex, res.get("symbol", ""), interval, name)
+                    if drawn and side in (None, drawn["side"]):
+                        return drawn
     return None
 
 

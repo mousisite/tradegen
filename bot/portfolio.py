@@ -726,17 +726,19 @@ def _assess(view: PortfolioView, priced: List[Position]) -> None:
         view.observations.append(
             "Concentration is equivalent to %.1f equally sized positions."
             % effective)
-        if view.concentration > 0.5:
-            weights = _name_weights(sized, view.gross_exposure)
-            biggest = max(weights, key=weights.get)
+        weights = _name_weights(sized, view.gross_exposure)
+        biggest = max(weights, key=weights.get) if weights else ""
+        # Two holdings of about the same size are just over half each.
+        if biggest and weights[biggest] >= 0.6:
             view.warnings.append(
-                "This is effectively a single-position portfolio. %s alone is "
-                "%.0f%% of the exposure." % (biggest, weights[biggest] * 100))
+                "%s%s alone is %.0f%% of the exposure."
+                % ("This is effectively a single-position portfolio. "
+                   if effective < 1.5 else "", biggest, weights[biggest] * 100))
 
     if view.by_sector:
         top_sector, amount = max(view.by_sector.items(), key=lambda kv: kv[1])
         share = amount / view.gross_exposure * 100 if view.gross_exposure else 0
-        if share > 50 and top_sector != "Unclassified":
+        if share >= 60 and top_sector != "Unclassified":
             view.warnings.append(
                 "%.0f%% of the exposure is in %s. A sector-wide move decides "
                 "the whole result." % (share, top_sector))
