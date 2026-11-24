@@ -1932,12 +1932,13 @@ def analyse():
                  if held else "")
     # Alerts worth setting for this specific setup, so the levels the plan
     # depends on can be watched without retyping them.
-    suggestions = []
-    for spec in alerts_mod.suggest_for(result.bars.symbol, result.plan, result.bars):
-        spec = dict(spec)
+    suggestions = [dict(spec) for spec in alerts_mod.suggest_for(
+        result.bars.symbol, result.plan, result.bars)]
+    prices = [spec["threshold"] for spec in suggestions
+              if alerts_mod.KINDS[spec["kind"]].get("unit") == "price"]
+    for spec in suggestions:
         spec["label"] = alerts_mod.describe(spec["kind"], spec["threshold"],
-                                            result.bars.symbol)
-        suggestions.append(spec)
+                                            result.bars.symbol, beside=prices)
 
     calendar_rows = (catalysts_mod.describe(result.calendar)
                      if result.calendar else [])

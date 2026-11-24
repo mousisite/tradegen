@@ -251,8 +251,9 @@ class Fired:
     event_id: Optional[int] = None
 
 
-def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
-    """Plain sentence for an alert, used everywhere it is displayed."""
+def describe(kind: str, threshold: Optional[float], symbol: str, beside=()) -> str:
+    """Plain sentence for an alert, used everywhere it is displayed. beside is
+    the other prices listed with this one, so that two never read the same."""
     spec = KINDS.get(kind)
     if not spec:
         return "%s: unknown condition" % symbol
@@ -267,7 +268,7 @@ def describe(kind: str, threshold: Optional[float], symbol: str) -> str:
     elif unit == "multiple":
         shown = "%.1fx" % (threshold or 0)
     elif unit == "price":
-        shown = format_price(threshold)
+        shown = format_price(threshold, beside=beside)
     else:
         shown = "%.0f" % (threshold or 0)
     text = "%s %s %s" % (symbol, spec["label"].lower(), shown)

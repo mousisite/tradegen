@@ -446,6 +446,13 @@ rows = re.findall(r"<tr>\s*<td>([^<]+)</td>", detail)
 check("the strategy table has its twelve rows, and nothing on the page speaks of a trial",
       len(rows) == 12 and not web.strategies_mod.TRIAL
       and "on trial" not in page.lower(), rows[:3])
+check("two suggested prices that differ never read the same, and others are as they were",
+      alerts.describe("price_below", 1.08412, "EURUSD=X", beside=[1.08412, 1.08386]).endswith(" 1.0841")
+      and alerts.describe("price_below", 1.08386, "EURUSD=X", beside=[1.08412, 1.08386])
+      .endswith(" 1.0839")
+      and alerts.describe("price_below", 180.5, "X", beside=[180.5, 171.25])
+      == alerts.describe("price_below", 180.5, "X"),
+      alerts.describe("price_below", 1.08412, "EURUSD=X", beside=[1.08412, 1.08386]))
 check("the Liquidity row is among the families", re.search(r"<td>Liquidity</td>", page))
 
 conn.close()
