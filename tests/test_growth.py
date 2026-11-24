@@ -1394,6 +1394,9 @@ try:
                   r'<meta http-equiv="refresh" content="[2-5]">', said)
               and r.headers.get("Retry-After") and "opens by itself" in said
               and "didn't work" not in said, said[:300])
+        check("told what is so, though all four at work are its own and it may wait a while",
+              "tries again every few seconds" in said and "A lot of people" not in said
+              and "in a few seconds." not in said, said[:300])
         r = another().post("/monitor/alerts/check")
         check("a button is not pressed again by itself",
               r.status_code == 503 and "refresh" not in page_of(r)

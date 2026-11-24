@@ -1090,9 +1090,11 @@ def _come_back():
         # Not all in the same second.
         come_back=SLOW_RETRY + random.randint(-1, 2) if waits else None,
         back=_referrer_path(),
-        message=("A lot of people are asking for pages at once, so this one is waiting "
-                 "its turn. It opens by itself in a few seconds." if waits else
-                 "A lot of people are asking for pages at once, so nothing was done. "
+        # A crowd's pages, or four of this account's own.
+        message=("A lot of pages are being worked out at once, so this one is waiting "
+                 "its turn. It tries again every few seconds, and opens by itself."
+                 if waits else
+                 "A lot of pages are being worked out at once, so nothing was done. "
                  "Go back, wait a few seconds and press the button again.")), 503))
     page.headers["Retry-After"] = str(SLOW_RETRY)
     return page
