@@ -1355,6 +1355,7 @@ try:
         raise web.DataError("enough")
 
     web.engine.analyse = slow_example
+    web._IN_LINE.clear()           # the pages refused above do not come back
     web._CACHE.clear()
     out = []
     looking = [threading.Thread(target=lambda: out.append(web.app.test_client().get(
@@ -1380,6 +1381,70 @@ try:
             t.join(20)
         web.engine.analyse = real_analyse
     check("and every place is given back", not web._SLOW, web._SLOW)
+
+    # Pages that found no place come back for one: the one that has waited
+    # longest has it first, whoever asks in the instant it comes free.
+    class Person(object):
+        is_local = False
+
+        def __init__(self, n):
+            self.id = 90000 + n
+
+    def asks(n, path="/analyse?symbol=X", method="GET", demo=False, **k):
+        with web.app.test_request_context(path, method=method, headers={
+                "CF-Connecting-IP": "203.0.113.%d" % n}):
+            web.g.user, web.g.demo = Person(0 if demo else n), demo
+            slot = web._SlowSlot()
+            try:
+                slot.take(**k)
+            except web.Busy:
+                return None
+            return slot
+
+    def drawn(n, path):
+        with web.app.test_request_context(path):
+            web.g.user, web.g.demo = Person(n), False
+            with web._patience(4.0) as wait:
+                return wait
+
+    web._IN_LINE.clear()
+    places = [asks(n) for n in range(1, 7)]
+    check("six accounts have the six places", all(places) and asks(10) is None)
+    time.sleep(0.02)
+    check("the next is after it in the line", asks(11) is None)
+    check("a page drawn without the wait, and a button, are in no line",
+          drawn(12, "/") == 0.0 and asks(13, method="POST") is None
+          and {k[0] for k in web._IN_LINE} == {90010, 90011}, web._IN_LINE)
+    places.pop().free()
+    check("a place that comes free is kept for whoever has waited longest",
+          asks(14) is None and asks(11) is None)
+    pressed = asks(13, method="POST")
+    check("save from a button, which has no way to wait for one", pressed is not None)
+    pressed.free()
+    first = asks(10)
+    check("who has it on coming back", first is not None and (90010, "/analyse?symbol=X")
+          not in web._IN_LINE, web._IN_LINE)
+    first.free()
+    second = asks(11)
+    check("and then the next", second is not None and asks(10) is None)
+    second.free()
+    # Somebody who went away holds it up for seconds, not for good.
+    for entry in web._IN_LINE.values():
+        entry[2] -= web.LINE_FOR + 1
+    late = asks(15)
+    check("one that does not come back loses its place in the line",
+          late is not None and not web._IN_LINE, web._IN_LINE)
+    for slot in places + [late]:
+        slot.free()
+    # Visitors in line past what the example may have keep nothing from members.
+    example = [asks(n, demo=True) for n in range(1, 5)]
+    check("visitors past the example's own places wait, and a member does not wait behind them",
+          all(example) and all(asks(n, path="/portfolio?%d" % n, demo=True) is None
+                               for n in range(20, 30)) and asks(16) is not None, web._IN_LINE)
+    check("but one asking for what is already being worked out joins it",
+          asks(30, demo=True, joining=True) is not None)
+    web._SLOW.clear()
+    web._IN_LINE.clear()
 
     # How long each kept analysis stays, and how much they may come to.
     def kept(symbol, interval, age, result=None):

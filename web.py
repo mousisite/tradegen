@@ -971,7 +971,8 @@ def _costs(cfg: Optional[Dict] = None) -> Dict[str, float]:
 # threads for seconds, or up to a minute of research, so one account asking for
 # eight at once (a different account size in each address is a different
 # analysis) kept every page from everybody. The example account is everybody
-# looking around, so it may have more.
+# looking around; its own are held to as many, and visitors waiting for one of
+# them may take the places nobody else wants.
 SLOW_AT_ONCE = 4
 DEMO_SLOW_AT_ONCE = 4
 # And all accounts together: this many of the threads are always left for the
@@ -982,6 +983,12 @@ KEPT_FREE = 2
 SLOW_RETRY = 3
 _SLOW: Dict[int, int] = {}
 _SLOW_LOCK = threading.Lock()
+# The pages sent away to come back in a few seconds: the account, when it was
+# first asked for, and when last. A place that comes free is kept for those
+# that have waited longest: given to whoever asked in that instant, a page
+# could be unlucky for minutes. One not asked for again in this long is gone.
+_IN_LINE: Dict[Tuple, List] = {}
+LINE_FOR = 10.0
 
 
 def _slow_in_all() -> int:
@@ -1004,20 +1011,42 @@ class _SlowSlot:
     def __init__(self):
         self.mine = None
 
-    def take(self, joining: bool = False) -> None:
+    def take(self, joining: bool = False, waits: bool = True) -> None:
         """Take it, or raise Busy. joining is for what is being worked out for
         somebody else already: a visitor then only waits, which the limit on
-        the example's own work is not about."""
+        the example's own work is not about. waits is off for a page that is
+        drawn without it, and so does not come back for it."""
         if self.mine is not None or g.user.is_local:
             return
+        me = g.user.id
+        who = (_client_ip() if g.demo else me, request.full_path)
         with _SLOW_LOCK:
-            mine = _SLOW.get(g.user.id, 0)
+            now = time.monotonic()
+            for gone in [k for k, v in _IN_LINE.items() if now - v[2] > LINE_FOR]:
+                del _IN_LINE[gone]
+            came = _IN_LINE.get(who, [me, now])[1]
+            # Those before this one, as many of each account as it may have.
+            before: Dict[int, int] = {}
+            for key, (account, first, _last) in _IN_LINE.items():
+                if first < came and key != who:
+                    before[account] = before.get(account, 0) + 1
             most = DEMO_SLOW_AT_ONCE if g.demo else SLOW_AT_ONCE
+            mine = _SLOW.get(me, 0)
+            ahead = sum(min(n, max(0, SLOW_AT_ONCE - _SLOW.get(account, 0)))
+                        for account, n in before.items())
+            if request.method not in ("GET", "HEAD"):
+                # A button cannot wait in the line, and behind one that never
+                # empties it would not work at all.
+                ahead = 0
             if (mine >= most and not (joining and g.demo)) \
-                    or sum(_SLOW.values()) >= _slow_in_all():
+                    or sum(_SLOW.values()) + ahead >= _slow_in_all():
+                # Only a page that comes back by itself has a place in the line.
+                if waits and request.method == "GET":
+                    _IN_LINE[who] = [me, came, now]
                 raise Busy()
-            _SLOW[g.user.id] = mine + 1
-            self.mine = g.user.id
+            _IN_LINE.pop(who, None)
+            _SLOW[me] = mine + 1
+            self.mine = me
 
     def free(self) -> None:
         if self.mine is None:
@@ -1084,7 +1113,7 @@ def _patience(seconds: float):
     not at all while every place for slow work is taken."""
     slot = _SlowSlot()
     try:
-        slot.take()
+        slot.take(waits=False)
     except Busy:
         seconds = 0.0
     try:
