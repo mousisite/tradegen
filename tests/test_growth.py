@@ -1575,6 +1575,43 @@ try:
         web._CACHE.clear()
         web._RESEARCH_CACHE.clear()
 
+    # Nothing is counted against somebody who was sent away.
+    _os.environ.update(STRIPE)
+    try:
+        sign_in(guest)
+        web._RATE.clear()
+        others()
+        with web.app.test_request_context("/research?symbol=NVDA"):
+            web.g.user, web.g.demo = guest, False
+            key = ("NVDA", False, "1d", True, web._settings_key(web._cfg()))
+        # Opened by somebody else a moment ago, so it needs no place.
+        web._CACHE[key] = (time.time(), fake_result("NVDA"), {guest.id: 1})
+        conn = db.connect(DB)
+        try:
+            before = billing.views_today(conn, guest.id)
+            r = c.get("/research?symbol=NVDA&interval=1d")
+            check("a free look is not spent on research that is sent away to wait",
+                  r.status_code == 503 and billing.views_today(conn, guest.id) == before,
+                  (r.status_code, before, billing.views_today(conn, guest.id)))
+        finally:
+            conn.close()
+        r = c.get("/api/analyse?symbol=TSLA")
+        check("a program is told in JSON to come back",
+              r.status_code == 503 and r.json["retry_after"] == web.SLOW_RETRY
+              and r.headers["Retry-After"] == str(web.SLOW_RETRY), r.data)
+        r = c.post("/thesis/save", data={"symbol": "TSLA", "interval": "1d", "note": "my <own> words"},
+                   headers={"Referer": "http://localhost/research?symbol=TSLA"})
+        check("and neither it nor a thesis is counted in the hour's", r.status_code == 503
+              and not any(web._RATE.values()), web._RATE)
+    finally:
+        for key in STRIPE:
+            _os.environ.pop(key, None)
+        web._SLOW.clear()
+        web._IN_LINE.clear()
+        web._CACHE.clear()
+        web._DEMO_SCREENS.clear()
+        web._RATE.clear()
+
     # How long each kept analysis stays, and how much they may come to.
     def kept(symbol, interval, age, result=None):
         web._CACHE[(symbol, False, interval, True, "house")] = (

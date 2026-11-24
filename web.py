@@ -734,7 +734,17 @@ def _rate_limited(action: str, per_hour: int) -> bool:
                 return True
         for who, _most in budgets:
             _RATE[(action, who)].append(now)
+    g.setdefault("counted", []).extend(((action, who), now) for who, _most in budgets)
     return False
+
+
+def _uncount() -> None:
+    """Take back what this request was counted for. It is being sent away to
+    come back, so nothing was done for it, and it will be counted then."""
+    with _RATE_LOCK:
+        for key, at in g.pop("counted", ()):
+            if at in _RATE.get(key, ()):
+                _RATE[key].remove(at)
 
 
 def _too_often(what: str):
@@ -1076,6 +1086,7 @@ def _come_back():
     """The page for a place that was not to be had: it opens itself again in a
     few seconds, so that a crowd waits its turn without holding the threads
     everybody's pages are drawn by. A button is never pressed again by itself."""
+    _uncount()
     waits = request.method in ("GET", "HEAD")
     page = app.make_response((render_template(
         "busy.html",
@@ -3455,12 +3466,14 @@ def research():
                                    ttl=DEMO_TTL if g.demo else None, exact=exact)
     except DataError as exc:
         return _no_prices(exc, symbol, 404)
-    _spend_view(symbol, exact, analysis)
 
     try:
         found = _cached_research(analysis, interval, cfg, with_news, with_options)
     except market_mod.DataThrottled as exc:
         return _no_prices(exc, symbol, 404)
+    # Only now: an analysis somebody else had worked out needs no place, and
+    # the research of it may still be sent away to wait, with nothing shown.
+    _spend_view(symbol, exact, analysis)
 
     # Drawn from the bars and filings already in hand, so no extra request.
     # The year's prices are drawn twice, wide and narrow, as the analysis
@@ -6671,6 +6684,8 @@ def api_analyse():
         result = cached_analysis(symbol, interval, cfg,
                                  request.args.get("news", "1") != "0", exact=exact)
     except DataError as exc:
+        if isinstance(exc, Busy):
+            _uncount()
         wait = _source_wait(exc)
         if wait is not None:
             answer = jsonify({"error": str(exc), "retry_after": wait})
