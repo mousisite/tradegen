@@ -371,9 +371,14 @@ def gather_news(symbol: str, name: str, limit: int = 25) -> List[Item]:
         # on optimism were scored as the Optimism coin's.
         called = re.sub(r"[\s-]+USD$", "", known, flags=re.I) or coin
         query = '"%s" %s crypto' % (called, coin)
-        # The ticker, and a name short enough to be a word ("gram"), as written.
-        named = re.compile(r"(?<![\w-])(?:%s|%s)(?![\w-])" % (
-            re.escape(coin), ("(?i:%s)" if len(called) > 4 else "%s") % re.escape(called)))
+        # The ways a headline writes it. In small letters only where that is no
+        # other word, as "optimism" is.
+        ways = {coin, called, called.title(), called.upper()}
+        if "coin" in called.lower():
+            ways.add(called.lower())
+        if coin == "ETH":
+            ways |= {"ethereum", "Ether", "ether", "ETHER"}
+        named = re.compile(r"(?<![\w-])(?:%s)(?![\w-])" % "|".join(map(re.escape, sorted(ways))))
     else:
         query = '"%s" stock OR crypto' % (known or symbol)
     give_up = time.monotonic() + SOURCES_WAIT

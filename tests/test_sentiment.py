@@ -258,9 +258,17 @@ try:
                      "Is $BTC cheap?", "These (BTC) miners rose", "BTCS sells its ether")
           == ["BITCOIN falls", "What bitcoin's fall means", "Is $BTC cheap?",
               "These (BTC) miners rose"])
-    check("but not a word that only has the ticker's letters",
+    check("Ethereum's go by its coin's own name too, and TRON's by either way of writing it",
+          from_yahoo("ETH-USD", "Ethereum USD", "$72B in Ether sits exposed", "ether rises",
+                     "Ripple News: XRP falls", "Is ethereum cheap?")
+          == ["$72B in Ether sits exposed", "ether rises", "Is ethereum cheap?"]
+          and from_yahoo("TRX-USD", "TRON USD", "Tron joins a task force", "Solana to rebound")
+          == ["Tron joins a task force"])
+    check("but not a word that only has the ticker's letters, or the name's in small ones",
           from_yahoo("NEAR-USD", "NEAR Protocol USD", "Gold near a record",
-                     "NEAR gains 5%") == ["NEAR gains 5%"])
+                     "NEAR gains 5%") == ["NEAR gains 5%"]
+          and from_yahoo("OP-USD", "Optimism USD", "Stocks rise on AI optimism",
+                         "Optimism pays out") == ["Optimism pays out"])
     check("and a company's are as Yahoo gives them",
           from_yahoo("AAPL", "Apple Inc.", *others) == list(others))
     read, said, _again = from_the_feed(Reply(200, content=feed.replace(
